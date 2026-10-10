@@ -11,6 +11,13 @@ Apache-2.0 ternary MoE runtime for SGLang. Packs store Hadamard-rotated ternary 
 
 The DeepSeek Hub repo is a **ternary expert overlay** (not an NVFP4 weight dump).
 
+## NVFP4 on a single RTX 5090
+
+[`nvfp4-kernels/`](nvfp4-kernels/) runs Qwen3.8-27B NVFP4 with MTP or DFlash2 speculative decoding on the
+[NInfer](https://github.com/Neroued/ninfer) engine, with a pinned build, a checksummed model download, serve
+profiles and the agent-replay benchmark. About 240 tok/s for one stream and 570 to 690 tok/s aggregate at 3 to 4
+streams, mean context 28k. It is separate from the ternary runtime below. See [`nvfp4-kernels/README.md`](nvfp4-kernels/README.md).
+
 ## Install
 
 Not on PyPI. Clone and install:
@@ -63,6 +70,7 @@ Example TOML templates: [`examples/`](examples/).
 | Path | Role |
 |------|------|
 | [`ternary-kernels/ternary_runtime/`](ternary-kernels/ternary_runtime/) | Loader, Hub fetch, SGLang patches, CUDA kernels |
+| [`nvfp4-kernels/`](nvfp4-kernels/) | NInfer NVFP4 serve profiles, pinned install, agent-replay benchmark |
 | [`docs/`](docs/) | Install, pack contract, architecture |
 | [`examples/`](examples/) | Placeholder serve configs |
 

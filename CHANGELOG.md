@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `nvfp4-kernels/`: pinned NInfer build, checksummed Qwen3.8-27B NVFP4 download, serve profiles
+  (DFlash2 K=7, MTP K=4), agent-replay benchmark and measured results for one RTX 5090.
+
 ## 0.1.0
 
 - Public Goethe runtime: `ternary_runtime` under Apache-2.0.
