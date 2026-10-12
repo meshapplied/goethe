@@ -1,16 +1,8 @@
 # ternary-kernels
 
-Installable Goethe runtime (`pip install -e .` → import `ternary_runtime`).
+Installable `ternary_runtime` package for the two MoE ternary models in the [catalog](../README.md#catalog). Per-model install, serve and Hub links:
 
-| Profile | Kind | Specialized K | Pack layout | Hugging Face pack |
-|---------|------|---------------|-------------|-------------------|
-| `flash_next` | MoE | 2560, 640 | `gate_up_down` | [qwen3.8-flash-next-ternary-latest](https://huggingface.co/meshapplied/qwen3.8-flash-next-ternary-latest) |
-| `deepseek_v41` | MoE | 5120, 2304 | `w123` | [DeepSeek-V4.1-Flash-NVFP4](https://huggingface.co/meshapplied/DeepSeek-V4.1-Flash-NVFP4) (ternary overlay) |
+- [Qwen3.8-Flash-Next](../docs/models/qwen38-flash-next.md)
+- [DeepSeek-V4.1-Flash](../docs/models/deepseek-v41-flash.md)
 
-```python
-import ternary_runtime
-m = ternary_runtime.fetch("meshapplied/qwen3.8-flash-next-ternary-latest")
-ternary_runtime.bootstrap()
-```
-
-See repository root [`docs/`](../docs/) for install and pack format.
+Pack format and architecture: [docs/](../docs/).

@@ -1,4 +1,0 @@
-n  requests  tokens  per-stream tok/s  aggregate tok/s  tau   mean_ctx
-1      56    21980     236.3       236.3    4.28     32176
-2      49    25039     197.9       395.7    4.25     24844
-3       5     1778     176.1       528.3    4.31     32743

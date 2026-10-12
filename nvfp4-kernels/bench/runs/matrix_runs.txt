@@ -1,0 +1,71 @@
+# dflash2_k12.txt
+n  requests  tokens  per-stream tok/s  aggregate tok/s  tau   mean_ctx
+1      55    22816     236.2       236.2    4.37     31871
+2      38    16926     202.5       404.9    4.37     27614
+3      16     6894     175.0       524.9    4.42     22395
+
+
+# dflash2_k5.txt
+n  requests  tokens  per-stream tok/s  aggregate tok/s  tau   mean_ctx
+1      55    23425     208.9       208.9    3.75     30640
+2      36    19753     196.6       393.2    3.65     28858
+3      15     6102     182.0       546.0    3.75     23464
+4       5     2144     153.8       615.4    3.23     22729
+
+
+# dflash2_k7.txt
+n  requests  tokens  per-stream tok/s  aggregate tok/s  tau   mean_ctx
+1      56    20747     238.8       238.8    4.15     30944
+2      36    16664     202.1       404.2    3.88     29211
+3      12     6892     189.8       569.3    4.05     18399
+4       7     1792     171.4       685.6    3.85     26344
+
+
+# dflash2_k9.txt
+n  requests  tokens  per-stream tok/s  aggregate tok/s  tau   mean_ctx
+1      56    21980     236.3       236.3    4.28     32176
+2      49    25039     197.9       395.7    4.25     24844
+3       5     1778     176.1       528.3    4.31     32743
+
+
+# live_agent_run_mtp3.txt
+requests 253
+prompt tokens              mean    26859 p10    4364 p50   22718 p90   55171 max   70289
+prefix-cache hit tokens    mean    26355 p10    3557 p50   22260 p90   54165 max   69214
+computed prefill tokens    mean      503 p10      62 p50     299 p90    1281 max    5257
+completion tokens          mean      858 p10     113 p50     317 p90    2203 max    8192
+prefix hit fraction of prompt tokens: 0.981
+turns with tool calls: 0.976
+token-weighted decode rate per request 149.6 tok/s (decode phase only, includes batching effects)
+tokens/round tau = 2.869  (accepted 141420, rounds 75670)
+per-position survival (accepted at depth i / rounds): [0.775, 0.606, 0.488]
+time split (sum over requests): prefill 26s  decode 1451s  total 1604s
+ctx      0-  8000: n=  46 out/turn    489 dec  164.0 tok/s tau 3.03 new/turn    785 ttft 0.30s
+ctx   8000- 16000: n=  42 out/turn    807 dec  157.3 tok/s tau 2.96 new/turn    454 ttft 0.17s
+ctx  16000- 32000: n=  80 out/turn   1266 dec  146.3 tok/s tau 2.81 new/turn    502 ttft 0.20s
+ctx  32000- 64000: n=  79 out/turn    706 dec  145.8 tok/s tau 2.85 new/turn    386 ttft 0.24s
+ctx  64000-200000: n=   6 out/turn    618 dec  156.2 tok/s tau 3.20 new/turn    254 ttft 0.27s
+out    30-   100: n=  13 share_of_tokens 0.01 dec  171.9 tok/s tau 3.17
+out   100-   300: n= 109 share_of_tokens 0.09 dec  157.7 tok/s tau 2.99
+out   300-  1000: n=  80 share_of_tokens 0.20 dec  152.4 tok/s tau 2.93
+out  1000-100000: n=  51 share_of_tokens 0.70 dec  147.8 tok/s tau 2.83
+
+
+# mtp3.txt
+n  requests  tokens  per-stream tok/s  aggregate tok/s  tau   mean_ctx
+1      82    34493     173.5       173.5    2.86     32468
+2      41    19551     155.5       311.0    2.82     30421
+3      23     9461     142.6       427.8    2.86     23164
+4      19     6338     141.4       565.4    2.92     26902
+5       7     4960     129.6       647.9    2.79     16283
+
+
+# mtp4.txt
+n  requests  tokens  per-stream tok/s  aggregate tok/s  tau   mean_ctx
+1      53    23109     180.5       180.5    3.13     31429
+2      41    19233     169.4       338.8    3.17     32381
+3      21     7782     150.1       450.3    3.18     26568
+4      20     8380     144.2       576.9    3.18     24775
+5      10     5740     139.3       696.6    3.12     14982
+6       3      524     156.4       938.2    3.56     18774
+

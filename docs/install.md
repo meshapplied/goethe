@@ -1,13 +1,14 @@
 # Install
 
-## Requirements
+Goethe ships four model entries (see [catalog](../README.md#catalog)). Install steps depend on the engine.
 
-- Linux x86_64, NVIDIA GPU with a recent CUDA toolkit
+## Ternary MoE models (Qwen3.8-Flash-Next, DeepSeek-V4.1-Flash)
+
+Requirements:
+
+- Linux x86_64, NVIDIA GPU, CUDA toolkit matching PyTorch
 - Python ≥ 3.10
-- PyTorch with CUDA matching your driver
-- Optional: [SGLang](https://github.com/sgl-project/sglang) for the patched MoE serve path
-
-## Framework
+- Optional: [SGLang](https://github.com/sgl-project/sglang) for serve
 
 ```bash
 git clone https://github.com/meshapplied/Goethe.git
@@ -15,48 +16,24 @@ cd Goethe
 pip install -e ./ternary-kernels
 ```
 
-Optional extras:
+JIT CUDA extensions cache under `$TERNARY_BUILD_DIR`, else `~/.cache/ternary-flash/build`. Set `TORCH_CUDA_ARCH_LIST` if autodetection is wrong.
+
+Fetch and serve: [qwen38-flash-next.md](models/qwen38-flash-next.md), [deepseek-v41-flash.md](models/deepseek-v41-flash.md).
+
+## Qwen3.8-27B NVFP4 (NInfer)
+
+Requirements: Blackwell GPU (sm_120a), 32 GiB VRAM, CUDA 13.x with `nvcc`, `cmake`, `ninja`, C++20, Python 3 with `httpx` and `huggingface_hub` for fetch and benchmark.
 
 ```bash
-pip install -e "./ternary-kernels[dev]"   # pytest
+git clone https://github.com/meshapplied/Goethe.git
+cd Goethe/nvfp4-kernels
+./install.sh && ./fetch_model.sh
 ```
 
-First kernel use JIT-compiles CUDA extensions into:
+Serve and measurement: [qwen38-27b-recipe.md](models/qwen38-27b-recipe.md). Artifact pins: [qwen38-27b-artifact.md](models/qwen38-27b-artifact.md).
 
-- `$TERNARY_BUILD_DIR` if set, else
-- `$XDG_CACHE_HOME/ternary-flash/build`, else
-- `~/.cache/ternary-flash/build`
+## Development
 
-Set `TORCH_CUDA_ARCH_LIST` for your GPU if the default is wrong for your machine.
-
-## Models
-
-```python
-import ternary_runtime
-
-m = ternary_runtime.fetch("meshapplied/qwen3.8-flash-next-ternary-latest")
-# or: meshapplied/DeepSeek-V4.1-Flash-NVFP4
-```
-
-This downloads:
-
-1. The ternary pack from the Goethe/meshapplied Hugging Face repo
-2. The **base** model from `base_model` in `ternary_config.json` (original publisher)
-
-| Pack | Hugging Face |
-|------|----------------|
-| Qwen3.8-Flash-Next ternary | [meshapplied/qwen3.8-flash-next-ternary-latest](https://huggingface.co/meshapplied/qwen3.8-flash-next-ternary-latest) |
-| DeepSeek-V4.1-Flash ternary | [meshapplied/DeepSeek-V4.1-Flash-NVFP4](https://huggingface.co/meshapplied/DeepSeek-V4.1-Flash-NVFP4) |
-
-Cache root: `$TERNARY_HF_CACHE` or `~/.cache/ternary-flash/hub`.
-
-## SGLang
-
-Install SGLang in the same environment (or a sibling venv), then:
-
-```python
-import ternary_runtime
-ternary_runtime.fetch("meshapplied/qwen3.8-flash-next-ternary-latest")
-ternary_runtime.bootstrap()
-# launch_server with --model-path = resolved base_dir
+```bash
+pip install -e "./ternary-kernels[dev]"
 ```

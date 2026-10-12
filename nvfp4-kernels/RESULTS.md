@@ -21,7 +21,7 @@ concurrently decoding streams.
 
 "-" means fewer than 5 requests landed in that bin, or the config cannot run that many lanes (see below).
 Bins with n >= 4 hold fewer than 10 requests each and are noisy. Raw per-bin tables with request counts,
-token counts and tok/round are in `bench/runs/`.
+token counts and tok/round are in `bench/runs/matrix_runs.txt`.
 
 How to read it:
 
@@ -82,7 +82,7 @@ The GPU was shared: a second user's job held about 1 GiB and a few percent of co
 ## Live agent run (MTP K=3, 4 workers)
 
 `bench/run_agent.sh` against a running server: mini-swe-agent on SWE-bench Lite, 4 sessions in parallel,
-7 of 8 tasks ran to submission (one container error). 253 requests (`bench/runs/live_agent_run_mtp3.txt`):
+7 of 8 tasks ran to submission (one container error). 253 requests (section `live_agent_run_mtp3.txt` in `bench/runs/matrix_runs.txt`):
 
 | metric                          | value |
 |---------------------------------|-------|
