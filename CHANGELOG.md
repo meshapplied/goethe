@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-- Catalog: three models; Flash-Next documents ternary and NVFP4 variants; Qwen3.8-27B is one doc (weights + recipe). Parallel pages under `docs/models/`, slim recipe READMEs, merged benchmark run logs.
+- Flat docs: root README + `docs/pack.md` + `nvfp4-kernels/{README,RESULTS}.md`. Hub cards are not duplicated in git.
+- Catalog: canonical Hugging Face ids; Flash-Next documentation on Hub only.
 
 ## 0.1.0
 
-- `ternary_runtime` and two MoE ternary packs on Hugging Face.
-- `nvfp4-kernels/`: pinned NInfer build, Qwen3.8-27B NVFP4 fetch, serve profiles and agent-replay benchmark on one RTX 5090.
+- `ternary_runtime` and MoE ternary packs on Hugging Face.
+- `nvfp4-kernels/`: pinned NInfer, Qwen3.8-27B NVFP4 fetch and benchmark on one RTX 5090.
