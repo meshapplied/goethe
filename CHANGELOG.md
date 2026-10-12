@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Unified catalog: four model entries with parallel docs under `docs/models/`, Hugging Face card sources under `hub/`, slim recipe READMEs, merged benchmark run logs.
+- Catalog: three models; Flash-Next documents ternary and NVFP4 variants; Qwen3.8-27B is one doc (weights + recipe). Parallel pages under `docs/models/`, slim recipe READMEs, merged benchmark run logs.
 
 ## 0.1.0
 

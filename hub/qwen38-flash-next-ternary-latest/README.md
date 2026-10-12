@@ -27,7 +27,7 @@ ternary_runtime.fetch("meshapplied/qwen3.8-flash-next-ternary-latest")
 ternary_runtime.bootstrap()
 ```
 
-Reference (hardware, serve flags, license): [docs/models/qwen38-flash-next.md](https://github.com/meshapplied/Goethe/blob/main/docs/models/qwen38-flash-next.md).
+This pack is the **ternary** variant. NVFP4 serving for the same base model is documented on the same page: [docs/models/qwen38-flash-next.md](https://github.com/meshapplied/Goethe/blob/main/docs/models/qwen38-flash-next.md).
 
 ## License
 

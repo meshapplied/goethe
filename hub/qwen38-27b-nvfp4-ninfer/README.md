@@ -9,9 +9,9 @@ tags:
 base_model: neroued/Qwen3.8-27B-nvfp4-NInfer
 ---
 
-# Qwen3.8-27B NVFP4 serve recipe
+# Qwen3.8-27B NVFP4 on NInfer
 
-This Hub repository holds no weights. It documents pins and scripts for Qwen3.8-27B NVFP4 with MTP or DFlash2 on one RTX 5090 class GPU, using [NInfer](https://github.com/Neroued/ninfer).
+Pins and scripts for Qwen3.8-27B NVFP4 with MTP or DFlash2 on one RTX 5090 class GPU. Weights are not stored in this repository.
 
 | item | value |
 |------|-------|
@@ -29,8 +29,8 @@ cd Goethe/nvfp4-kernels
 ./install.sh && ./fetch_model.sh && ./serve.sh
 ```
 
-Profiles, measured throughput, benchmark protocol and limits: [docs/models/qwen38-27b-recipe.md](https://github.com/meshapplied/Goethe/blob/main/docs/models/qwen38-27b-recipe.md) and [nvfp4-kernels/RESULTS.md](https://github.com/meshapplied/Goethe/blob/main/nvfp4-kernels/RESULTS.md).
+Full reference: [docs/models/qwen38-27b-nvfp4.md](https://github.com/meshapplied/Goethe/blob/main/docs/models/qwen38-27b-nvfp4.md). Benchmark appendix: [nvfp4-kernels/RESULTS.md](https://github.com/meshapplied/Goethe/blob/main/nvfp4-kernels/RESULTS.md).
 
 ## License
 
-Apache-2.0 for Goethe scripts and this card. NInfer, the artifact and upstream Qwen, Unsloth and z-lab components carry their own Apache-2.0 terms; see NOTICE in the repository.
+Apache-2.0 for Goethe scripts and this card. Third-party licenses: see NOTICE in the repository.

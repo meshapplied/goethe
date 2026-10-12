@@ -1,8 +1,8 @@
 # ternary-kernels
 
-Installable `ternary_runtime` package for the two MoE ternary models in the [catalog](../README.md#catalog). Per-model install, serve and Hub links:
+`ternary_runtime` for the MoE ternary packs in the [catalog](../README.md#catalog):
 
-- [Qwen3.8-Flash-Next](../docs/models/qwen38-flash-next.md)
+- [Qwen3.8-Flash-Next](../docs/models/qwen38-flash-next.md) (ternary variant)
 - [DeepSeek-V4.1-Flash](../docs/models/deepseek-v41-flash.md)
 
-Pack format and architecture: [docs/](../docs/).
+Pack format: [docs/](../docs/).

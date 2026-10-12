@@ -1,24 +1,27 @@
-# Qwen3.8-27B NVFP4 serve recipe
+# Qwen3.8-27B NVFP4
+
+Dense hybrid (Gated DeltaNet) in NVFP4 with bundled MTP and DFlash2 tensors. Goethe pins a third-party NInfer artifact, builds a fixed engine revision and ships serve profiles plus an agent-replay benchmark on one Blackwell GPU.
 
 ## Hub
 
-| Field | Value |
-|-------|-------|
-| Repository | [`meshapplied/Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer) |
-| Kind | Model card and pins (no weights in this Hub repo) |
-| Weights | [qwen38-27b-artifact.md](qwen38-27b-artifact.md) |
+| Role | Repository |
+|------|------------|
+| Weights | [`neroued/Qwen3.8-27B-nvfp4-NInfer`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) (23.7 GB `qwen3_8_27b_nvfp4.ninfer`) |
+| Recipe card | [`meshapplied/Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer) (pins and scripts, no weights in that repo) |
+
+Pinned file revision and sha256: [`nvfp4-kernels/NINFER_PIN`](../../nvfp4-kernels/NINFER_PIN). Provenance on the artifact: Qwen base, Unsloth NVFP4 quant, z-lab DFlash2.
 
 ## Upstream base
 
-Same as the NInfer artifact: Qwen3.8-27B NVFP4 hybrid with MTP and DFlash2 tensors in the downloaded file.
+[`Qwen/Qwen3.8-27B`](https://huggingface.co/Qwen/Qwen3.8-27B). The NInfer file is a single prebuilt runtime artifact, not a Hugging Face safetensors tree.
 
 ## Engine
 
-[NInfer](https://github.com/Neroued/ninfer), commit pinned in [`nvfp4-kernels/NINFER_PIN`](../../nvfp4-kernels/NINFER_PIN). Goethe builds that commit unmodified and starts `ninfer-serve` with fixed profiles.
+[NInfer](https://github.com/Neroued/ninfer), commit pinned in `NINFER_PIN`. Goethe builds that commit unmodified and starts `ninfer-serve`.
 
 ## Hardware
 
-NVIDIA Blackwell, compute capability 12.0, 32 GiB VRAM. About 26 GB disk for the artifact and a 1.3 GB build tree. Linux, CUDA toolkit 13.x with `nvcc`, `cmake` 3.28+, `ninja`, C++20.
+NVIDIA Blackwell, compute capability 12.0 (RTX 5090 or RTX PRO 6000), 32 GiB VRAM for the measured profiles. About 26 GB disk for the artifact and a 1.3 GB build tree. Linux, CUDA toolkit 13.x with `nvcc`, `cmake` 3.28+, `ninja`, C++20. NInfer builds for sm_120a only.
 
 ## Install
 
@@ -28,6 +31,8 @@ cd Goethe/nvfp4-kernels
 ./install.sh
 ./fetch_model.sh
 ```
+
+`fetch_model.sh` downloads the Neroued artifact and verifies the checksum in `NINFER_PIN`.
 
 ## Serve
 
@@ -70,9 +75,9 @@ bench/run_matrix.sh "mtp:3:8:131072 mtp:4:8:131072 dflash2:7:4:100000" "1 2 4"
 | Path | Role |
 |------|------|
 | [`nvfp4-kernels/`](../../nvfp4-kernels/) | `install.sh`, `fetch_model.sh`, `serve.sh`, benchmark |
-| [`hub/qwen38-27b-nvfp4-ninfer/README.md`](../../hub/qwen38-27b-nvfp4-ninfer/README.md) | Hugging Face model card source |
+| [`hub/qwen38-27b-nvfp4-ninfer/README.md`](../../hub/qwen38-27b-nvfp4-ninfer/README.md) | Hugging Face recipe card source |
 | [`nvfp4-kernels/NOTICE`](../../nvfp4-kernels/NOTICE) | Third-party attribution |
 
 ## License
 
-Apache-2.0 for Goethe scripts and documentation. Engine and artifact licenses are listed in NOTICE.
+Apache-2.0 for Goethe scripts and documentation. NInfer, the artifact and upstream Qwen, Unsloth and z-lab components carry their own Apache-2.0 terms; see NOTICE.
