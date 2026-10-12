@@ -1,79 +1,47 @@
 # Goethe
 
-Apache-2.0 ternary MoE runtime for SGLang. Packs store Hadamard-rotated ternary (`{-1,0,+1}`) routed experts; attention, router, shared experts, and MTP stay in the upstream base checkpoint. `ternary_runtime.fetch()` downloads a pack and its base automatically.
+Apache-2.0: ternary MoE packs for SGLang (`ternary_runtime`), and a pinned NInfer recipe for Qwen3.8-27B NVFP4 on Blackwell.
 
-## Supported models
+## Catalog
 
-| Pack (Hugging Face) | Base | Profile |
-|---------------------|------|---------|
-| [`meshapplied/qwen3.8-flash-next-ternary-latest`](https://huggingface.co/meshapplied/qwen3.8-flash-next-ternary-latest) | [`Qwen/Qwen3.8-Flash-Next`](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) | `flash_next` |
-| [`meshapplied/DeepSeek-V4.1-Flash-NVFP4`](https://huggingface.co/meshapplied/DeepSeek-V4.1-Flash-NVFP4) | [`deepseek-ai/DeepSeek-V4.1-Flash`](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) | `deepseek_v41` |
+| Model | Hugging Face | Run from this repo |
+|-------|--------------|-------------------|
+| Qwen3.8-Flash-Next | Ternary: [`Qwen3.8-Flash-Next-Ternary-Latest`](https://huggingface.co/meshapplied/Qwen3.8-Flash-Next-Ternary-Latest). NVFP4: [`Qwen3.8-Flash-Next-NVFP4-Latest`](https://huggingface.co/meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest). | Hub cards only (not maintained here). |
+| DeepSeek-V4.1-Flash | [`DeepSeek-V4.1-Flash-Ternary-Latest`](https://huggingface.co/meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest) (same pack as the `…-NVFP4` repo name). | `ternary_runtime` below; full serve flags on the Hub card. |
+| Qwen3.8-27B NVFP4 | Weights: [`neroued/Qwen3.8-27B-nvfp4-NInfer`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer). Recipe card: [`meshapplied/Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer). | [`nvfp4-kernels/`](nvfp4-kernels/) |
 
-The DeepSeek Hub repo is a **ternary expert overlay** (not an NVFP4 weight dump).
+Pack on-disk format: [docs/pack.md](docs/pack.md).
 
-## NVFP4 on a single RTX 5090
-
-[`nvfp4-kernels/`](nvfp4-kernels/) runs Qwen3.8-27B NVFP4 with MTP or DFlash2 speculative decoding on the
-[NInfer](https://github.com/Neroued/ninfer) engine, with a pinned build, a checksummed model download, serve
-profiles and the agent-replay benchmark. About 240 tok/s for one stream and 570 to 690 tok/s aggregate at 3 to 4
-streams, mean context 28k. It is separate from the ternary runtime below. See [`nvfp4-kernels/README.md`](nvfp4-kernels/README.md).
-
-## Install
-
-Not on PyPI. Clone and install:
+## Ternary packs (DeepSeek; Flash-Next uses the same runtime)
 
 ```bash
-git clone https://github.com/meshapplied/Goethe.git
-cd Goethe
+git clone https://github.com/meshapplied/goethe.git
+cd goethe
 pip install -e ./ternary-kernels
-python -c "import ternary_runtime; print(ternary_runtime.__version__)"
 ```
-
-Requires Linux, CUDA-capable NVIDIA GPU, Python ≥ 3.10, and a matching PyTorch build. Optional: [SGLang](https://github.com/sgl-project/sglang) for the patched MoE serve path.
-
-JIT CUDA kernels cache under `~/.cache/ternary-flash/build` (or `$TERNARY_BUILD_DIR`).
-
-## Quick start
 
 ```python
 import ternary_runtime
 
-m = ternary_runtime.fetch("meshapplied/qwen3.8-flash-next-ternary-latest")
-# or: meshapplied/DeepSeek-V4.1-Flash-NVFP4
+# DeepSeek (id matches the published Hub card)
+ternary_runtime.fetch("meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest")
 ternary_runtime.bootstrap()
-print(m.profile, m.pack_dir, m.base_dir)
+# launch SGLang with --model-path "$TERNARY_MODEL_DIR"; see the Hub README for flags
 ```
 
-Serve with SGLang (`--model-path` = `$TERNARY_MODEL_DIR`, set EP=TP as needed for the pack):
+Flash-Next ternary: `fetch("meshapplied/Qwen3.8-Flash-Next-Ternary-Latest")`. Serve and benchmarks for Flash-Next variants live on Hugging Face, not in this tree.
+
+Requires Linux, NVIDIA GPU, Python ≥ 3.10, PyTorch with CUDA, SGLang for serve. JIT build cache: `~/.cache/ternary-flash/build` unless `TERNARY_BUILD_DIR` is set.
+
+## Qwen3.8-27B NVFP4
 
 ```bash
-python -m sglang.launch_server \
-  --model-path "$TERNARY_MODEL_DIR" \
-  --host 127.0.0.1 --port 8003 \
-  --tp-size 1 \
-  --trust-remote-code \
-  --served-model-name qwen38-flash-next
+cd nvfp4-kernels
+./install.sh && ./fetch_model.sh && ./serve.sh
 ```
 
-Example TOML templates: [`examples/`](examples/).
-
-## Documentation
-
-- [Install](docs/install.md)
-- [Quickstart](docs/quickstart.md)
-- [Architecture](docs/architecture.md)
-- [Pack format](docs/pack.md)
-- [Changelog](CHANGELOG.md)
-
-## Layout
-
-| Path | Role |
-|------|------|
-| [`ternary-kernels/ternary_runtime/`](ternary-kernels/ternary_runtime/) | Loader, Hub fetch, SGLang patches, CUDA kernels |
-| [`nvfp4-kernels/`](nvfp4-kernels/) | NInfer NVFP4 serve profiles, pinned install, agent-replay benchmark |
-| [`docs/`](docs/) | Install, pack contract, architecture |
-| [`examples/`](examples/) | Placeholder serve configs |
+Pins, profiles, benchmark protocol and numbers: [nvfp4-kernels/README.md](nvfp4-kernels/README.md) and [nvfp4-kernels/RESULTS.md](nvfp4-kernels/RESULTS.md).
 
 ## License
 
-Apache-2.0 for this repository. Base model licenses on Hugging Face still apply when you download and run with a base checkpoint.
+Apache-2.0 for this repository. Base checkpoints and third-party weights keep their licenses on Hugging Face.
