@@ -11,7 +11,7 @@ Apache-2.0 inference distribution for four published model entries: pinned weigh
 | Qwen3.8-27B NVFP4 artifact | [`neroued/Qwen3.8-27B-nvfp4-NInfer`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) | NInfer (download only) | [docs/models/qwen38-27b-artifact.md](docs/models/qwen38-27b-artifact.md) |
 | Qwen3.8-27B NVFP4 recipe | [`meshapplied/Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer) | NInfer (pinned build) | [docs/models/qwen38-27b-recipe.md](docs/models/qwen38-27b-recipe.md) |
 
-Each model page uses the same section order: Hub, upstream base, engine, hardware, install, serve, measurement, repository paths, license. Hugging Face README sources live under [`hub/`](hub/).
+Each model page uses the same section order: Hub, upstream base, engine, hardware, install, serve, measurement, repository paths, license.
 
 ## Repository layout
 
@@ -20,7 +20,6 @@ Each model page uses the same section order: Hub, upstream base, engine, hardwar
 | [`docs/models/`](docs/models/) | Per-model reference |
 | [`ternary-kernels/`](ternary-kernels/) | Ternary pack loader and CUDA kernels |
 | [`nvfp4-kernels/`](nvfp4-kernels/) | NInfer install, fetch, serve and benchmark for Qwen3.8-27B |
-| [`hub/`](hub/) | Model card sources for Hugging Face |
 | [`docs/`](docs/) | Install, pack format, architecture |
 | [`examples/`](examples/) | SGLang config templates |
 
