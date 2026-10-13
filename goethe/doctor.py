@@ -41,7 +41,11 @@ class System:
         return hw.run(cmd)
 
     def which(self, name: str) -> str | None:
-        return shutil.which(name)
+        """Like install.sh: CUDA_HOME/bin is searched first."""
+        path = os.environ.get("PATH", "")
+        if os.environ.get("CUDA_HOME"):
+            path = f"{os.environ['CUDA_HOME']}/bin:{path}"
+        return shutil.which(name, path=path)
 
     def read(self, path: Path) -> str | None:
         try:

@@ -1,7 +1,9 @@
+import os
 import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from goethe import doctor, registry
 from goethe.engine import Install
@@ -80,6 +82,19 @@ class DoctorTest(unittest.TestCase):
 
     def run_checks(self, machine, **installed):
         return {c.name: c for c in doctor.run_checks(MODEL, self.install(**installed), PIN, 8080, machine)}
+
+
+class SystemWhich(unittest.TestCase):
+    def test_cuda_home_bin_is_searched_first(self):
+        with tempfile.TemporaryDirectory() as cuda:
+            nvcc = Path(cuda) / "bin" / "nvcc"
+            nvcc.parent.mkdir()
+            nvcc.write_text("")
+            nvcc.chmod(0o755)
+            with mock.patch.dict(os.environ, {"CUDA_HOME": cuda, "PATH": "/nonexistent"}):
+                self.assertEqual(doctor.System().which("nvcc"), str(nvcc))
+            with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}, clear=True):
+                self.assertIsNone(doctor.System().which("nvcc"))
 
 
 class Machines(DoctorTest):
