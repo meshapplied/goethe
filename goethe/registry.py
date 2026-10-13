@@ -35,10 +35,10 @@ class Model:
     intents: dict[str, Intent]
 
 
-def _table(data: object, where: str, required: set[str], optional: set[str] = frozenset()) -> dict:
+def _table(data: object, where: str, required: set[str]) -> dict:
     if not isinstance(data, dict):
         raise RegistryError(f"{where}: expected a table")
-    missing, unknown = required - data.keys(), data.keys() - required - optional
+    missing, unknown = required - data.keys(), data.keys() - required
     if missing or unknown:
         raise RegistryError(f"{where}: missing {sorted(missing)}, unknown {sorted(unknown)}")
     return data

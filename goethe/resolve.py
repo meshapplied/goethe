@@ -181,11 +181,11 @@ def resolve(model: Model, gpus: list[Gpu], intent: str, *, flags: Mapping[str, s
 
 
 def _api_key(path: Path) -> str:
-    if path.is_file():
+    if path.is_file() and path.read_text().strip():
         return path.read_text().strip()
     path.parent.mkdir(parents=True, exist_ok=True)
     key = "gk-" + secrets.token_urlsafe(24)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(key + "\n")
     return key

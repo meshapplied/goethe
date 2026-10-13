@@ -111,6 +111,15 @@ class ApiKey(unittest.TestCase):
             redacted = resolve.server_argv(first, BIN, FILE, redact=True)
             self.assertEqual(redacted[argv.index("--api-key") + 1], "<hidden>")
 
+    def test_an_empty_key_file_is_replaced(self):
+        with tempfile.TemporaryDirectory() as d:
+            key_file = Path(d) / "goethe" / "api_key"
+            key_file.parent.mkdir()
+            key_file.write_text("\n")
+            p = plan(flags={"host": "0.0.0.0"}, env={"XDG_STATE_HOME": d})
+            self.assertTrue(p.value("api_key").startswith("gk-"))
+            self.assertEqual(key_file.read_text().strip(), p.value("api_key"))
+
     def test_configured_key_wins_over_generation(self):
         with tempfile.TemporaryDirectory() as d:
             p = plan(flags={"host": "0.0.0.0"}, config={"serve": {"api_key": "mine"}}, env={"XDG_STATE_HOME": d})

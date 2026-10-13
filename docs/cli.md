@@ -39,7 +39,10 @@ numbers for your machine.
 
 - `agent` (default): 4 lanes, 100000 tokens. The configuration that was benchmarked.
 - `chat`: 1 lane, 32768 tokens.
-- `long`: 1 lane, 131072 tokens. Boots on a 32 GiB card, not benchmarked, not yet fitted to free memory.
+- `long`: 1 lane, 131072 tokens. Boots on a 32 GiB card (checked), not benchmarked, not yet fitted to free memory.
+
+Speed does not depend on the lane count, but the exact tokens at temperature 0 do: the same replay gives different output with
+1 and with 4 lanes (269.9 tok/s both), so compare runs with the same `lanes`.
 
 ## Configure
 
