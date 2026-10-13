@@ -11,7 +11,7 @@ from goethe import cli, engine, hw
 from tests.fixtures import PRO_6000, RTX_3090, RTX_5090
 
 
-def run(*argv, gpus=(RTX_5090,), env=None, config=None):
+def run(*argv, gpus=(RTX_5090,), env=None, config=None, busy=False):
     """(exit code, stdout, stderr) of goethe with a fake GPU list and an empty home."""
     out, err = io.StringIO(), io.StringIO()
     with tempfile.TemporaryDirectory() as home:
@@ -21,6 +21,7 @@ def run(*argv, gpus=(RTX_5090,), env=None, config=None):
             (Path(home) / ".config" / "goethe" / "config.toml").write_text(config)
         probe = (list(gpus), None) if gpus else ([], "nvidia-smi not found")
         with mock.patch.dict(os.environ, environ, clear=True), mock.patch.object(hw, "probe", lambda *a: probe), \
+                mock.patch.object(engine, "port_in_use", lambda *a: busy), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main(list(argv))
     return code, out.getvalue(), err.getvalue()
@@ -55,7 +56,7 @@ class Serve(unittest.TestCase):
         self.assertIn("--max-concurrency 4", out)
 
     def test_explain_says_where_each_value_came_from(self):
-        _, out, _ = run("serve", "--explain", "--for", "chat", "--port", "9001", env={"GOETHE_LANES": "2"},
+        _, out, _ = run("serve", "--explain", "--profile", "chat", "--port", "9001", env={"GOETHE_LANES": "2"},
                         config='[serve]\nport = 7\n[profiles.chat]\ncontext = 8192\n')
         self.assertRegex(out, r"port\s+9001\s+flag")
         self.assertRegex(out, r"lanes\s+2\s+env")
@@ -100,10 +101,19 @@ class Serve(unittest.TestCase):
         self.assertIn("already serving on http://127.0.0.1:8080", out)
         ex.assert_not_called()
 
+    def test_busy_port_without_a_healthy_server_is_an_error(self):
+        with mock.patch.object(engine, "healthy", return_value=False), \
+                mock.patch("subprocess.run") as sub, mock.patch("os.execv") as ex:
+            code, _, err = run("serve", busy=True)
+        self.assertEqual(code, 1)
+        self.assertIn("port 8080 is in use", err)
+        sub.assert_not_called()
+        ex.assert_not_called()
+
     def test_serve_installs_then_replaces_itself_with_the_engine(self):
         with mock.patch.object(engine, "healthy", return_value=False), mock.patch("subprocess.run") as sub, \
                 mock.patch("os.execv") as ex:
-            code, out, _ = run("serve", "--for", "long")
+            code, out, _ = run("serve", "--profile", "long")
         self.assertFalse(code)  # os.execv never returns for real
         self.assertEqual(sub.call_count, 2)  # install.sh, fetch_model.sh
         self.assertTrue(all(c.kwargs["env"]["NVFP4_HOME"] for c in sub.call_args_list))

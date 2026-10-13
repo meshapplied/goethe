@@ -24,7 +24,7 @@ def _parser() -> argparse.ArgumentParser:
                                        "Everything after -- goes to the engine unchanged.",
                            usage="goethe serve [options] [model] [-- engine args]")
     serve.add_argument("model", nargs="?", help="model id, default the first one in `goethe list`")
-    serve.add_argument("--for", dest="intent", choices=resolve.INTENTS, default="agent",
+    serve.add_argument("--profile", choices=resolve.PROFILES, default="agent",
                        help="agent (default), chat or long; --explain shows what each one sets")
     serve.add_argument("--host", help="default 127.0.0.1; any other address makes goethe use an API key")
     serve.add_argument("--port", help="default 8080")
@@ -61,7 +61,7 @@ def _explain(plan: resolve.Plan) -> str:
     lines = [f"gpu      {g.name}, {g.total_gib:.1f} GiB, sm_{g.compute_cap.replace('.', '')}, driver {g.driver}: "
              f"{plan.tier.name} ({plan.tier.reason})",
              f"model    {plan.model.id} ({plan.model.title}), engine {plan.model.engine}",
-             f"intent   {plan.intent}"]
+             f"profile  {plan.profile}"]
     for key, s in plan.settings.items():
         shown = "<hidden>" if key == "api_key" else s.value
         lines.append(f"{key:<13}{shown!s:<12} {s.source}" + (f": {s.why}" if s.why else ""))
@@ -77,7 +77,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         print(f"error: {err}. Run `{PROG} doctor` for details.", file=sys.stderr)
         return 1
     config = resolve.load_config(store.config_path())
-    plan = resolve.resolve(model, gpus, args.intent, flags=_flags(args), config=config, extra_args=args.engine_args)
+    plan = resolve.resolve(model, gpus, args.profile, flags=_flags(args), config=config, extra_args=args.engine_args)
     inst = engine.locate(model)
     if args.explain or args.dry_run:
         print(_explain(plan))
@@ -91,11 +91,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if engine.healthy(host, port):
         print(f"already serving on http://{host}:{port}")
         return 0
+    if engine.port_in_use(host, port):
+        print(f"error: port {port} is in use but nothing answers on /health yet; "
+              "a server may still be starting, or pick another port with --port", file=sys.stderr)
+        return 1
     engine.ensure(inst)
     if plan.settings.get("api_key", resolve.Setting("", "")).source == "generated":
         print(f"API key: {store.state_dir() / 'api_key'}")
     print(f"serving {plan.model.served_name} on http://{host}:{port} "
-          f"({plan.value('lanes')} lanes, {plan.value('context')} context, {plan.intent})", flush=True)
+          f"({plan.value('lanes')} lanes, {plan.value('context')} context, {plan.profile})", flush=True)
     argv = resolve.server_argv(plan, inst.binary, inst.model_file)
     os.execv(argv[0], argv)
 

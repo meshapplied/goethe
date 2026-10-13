@@ -14,7 +14,7 @@ class RegistryError(ValueError):
 
 
 @dataclass(frozen=True)
-class Intent:
+class Profile:
     name: str
     lanes: int
     context: int
@@ -32,7 +32,7 @@ class Model:
     min_vram_gib: float
     tested: tuple[str, ...]
     base: dict[str, object]
-    intents: dict[str, Intent]
+    profiles: dict[str, Profile]
 
 
 def _table(data: object, where: str, required: set[str]) -> dict:
@@ -47,16 +47,16 @@ def _table(data: object, where: str, required: set[str]) -> dict:
 def _model(model_id: str, raw: object) -> Model:
     where = f"models.{model_id}"
     t = _table(raw, where, {"title", "engine", "served_name", "native_context", "recipe",
-                            "min_vram_gib", "tested", "base", "intents"})
+                            "min_vram_gib", "tested", "base", "profiles"})
     if t["engine"] not in ENGINES:
         raise RegistryError(f"{where}: engine must be one of {sorted(ENGINES)}")
     base = _table(t["base"], f"{where}.base", {"kv_dtype", "spec", "draft_tokens", "prefill_chunk"})
-    intents = {}
-    for name, body in _table(t["intents"], f"{where}.intents", {"agent", "chat", "long"}).items():
-        i = _table(body, f"{where}.intents.{name}", {"lanes", "context", "why"})
-        intents[name] = Intent(name, i["lanes"], i["context"], i["why"])
+    profiles = {}
+    for name, body in _table(t["profiles"], f"{where}.profiles", {"agent", "chat", "long"}).items():
+        i = _table(body, f"{where}.profiles.{name}", {"lanes", "context", "why"})
+        profiles[name] = Profile(name, i["lanes"], i["context"], i["why"])
     return Model(model_id, t["title"], t["engine"], t["served_name"], t["native_context"], t["recipe"],
-                 t["min_vram_gib"], tuple(t["tested"]), base, intents)
+                 t["min_vram_gib"], tuple(t["tested"]), base, profiles)
 
 
 def load(path: Path = MODELS_TOML) -> dict[str, Model]:

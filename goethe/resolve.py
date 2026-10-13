@@ -1,4 +1,4 @@
-"""Hardware x model x intent -> the exact server settings, each with where it came from and why."""
+"""Hardware x model x profile -> the exact server settings, each with where it came from and why."""
 from __future__ import annotations
 
 import os
@@ -12,7 +12,7 @@ from goethe import store
 from goethe.hw import Gpu
 from goethe.registry import Model
 
-INTENTS = ("agent", "chat", "long")
+PROFILES = ("agent", "chat", "long")
 KV_DTYPES = ("fp8", "bf16", "int8", "nvfp4", "k8v4")
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 DRAFT_TOKENS = {"dflash2": (1, 15), "mtp": (1, 5)}
@@ -79,7 +79,7 @@ class Tier:
 @dataclass
 class Plan:
     model: Model
-    intent: str
+    profile: str
     gpu: Gpu
     tier: Tier
     settings: dict[str, Setting]
@@ -113,7 +113,7 @@ def pick_gpu(model: Model, gpus: list[Gpu]) -> tuple[Gpu, Tier]:
 
 
 def load_config(path: Path) -> dict:
-    """config.toml: [serve] host/port/api_key and [profiles.<intent>] overrides. Anything else is an error."""
+    """config.toml: [serve] host/port/api_key and [profiles.<name>] overrides. Anything else is an error."""
     if not path.is_file():
         return {}
     with open(path, "rb") as f:
@@ -122,10 +122,10 @@ def load_config(path: Path) -> dict:
     if raw:
         raise ResolveError(f"{path}: unknown top-level keys {sorted(raw)}")
     tables = {"serve": (serve, CONFIG_SERVE_KEYS)}
-    for intent, body in profiles.items():
-        if intent not in INTENTS:
-            raise ResolveError(f"{path}: unknown profile [profiles.{intent}]; profiles: {', '.join(INTENTS)}")
-        tables[f"profiles.{intent}"] = (body, CONFIG_PROFILE_KEYS)
+    for name, body in profiles.items():
+        if name not in PROFILES:
+            raise ResolveError(f"{path}: unknown profile [profiles.{name}]; profiles: {', '.join(PROFILES)}")
+        tables[f"profiles.{name}"] = (body, CONFIG_PROFILE_KEYS)
     for name, (body, allowed) in tables.items():
         if set(body) - allowed:
             raise ResolveError(f"{path}: [{name}] has unknown keys {sorted(set(body) - allowed)}; "
@@ -137,23 +137,23 @@ def env_overrides(env: Mapping[str, str]) -> dict[str, str]:
     return {k: env[f"GOETHE_{k.upper()}"] for k in VALIDATORS if f"GOETHE_{k.upper()}" in env}
 
 
-def resolve(model: Model, gpus: list[Gpu], intent: str, *, flags: Mapping[str, str] | None = None,
+def resolve(model: Model, gpus: list[Gpu], profile: str, *, flags: Mapping[str, str] | None = None,
             env: Mapping[str, str] = os.environ, config: dict | None = None,
             extra_args: list[str] | None = None) -> Plan:
-    """Layers, lowest first: model base, intent profile, config.toml, environment, command-line flags."""
+    """Layers, lowest first: model base, profile, config.toml, environment, command-line flags."""
     gpu, tier = pick_gpu(model, gpus)
-    profile = model.intents[intent]
+    chosen = model.profiles[profile]
     merged: dict[str, Setting] = {
         "host": Setting("127.0.0.1", "default", "loopback only"),
         "port": Setting(8080, "default"),
-        "lanes": Setting(profile.lanes, "profile", profile.why),
-        "context": Setting(profile.context, "profile", profile.why),
+        "lanes": Setting(chosen.lanes, "profile", chosen.why),
+        "context": Setting(chosen.context, "profile", chosen.why),
         "kv_dtype": Setting(model.base["kv_dtype"], "default"),
         "spec": Setting(model.base["spec"], "default"),
         "draft_tokens": Setting(model.base["draft_tokens"], "default"),
     }
     config = config or {}
-    layers = [("config", {**config.get("serve", {}), **config.get(f"profiles.{intent}", {})}),
+    layers = [("config", {**config.get("serve", {}), **config.get(f"profiles.{profile}", {})}),
               ("env", env_overrides(env)), ("flag", dict(flags or {}))]
     for source, values in layers:
         for key, raw in values.items():
@@ -171,7 +171,7 @@ def resolve(model: Model, gpus: list[Gpu], intent: str, *, flags: Mapping[str, s
     if merged["context"].value > model.native_context:
         raise ResolveError(f"context {merged['context'].value} is above the model's {model.native_context}")
 
-    plan = Plan(model, intent, gpu, tier, merged, list(extra_args or []))
+    plan = Plan(model, profile, gpu, tier, merged, list(extra_args or []))
     if merged["kv_dtype"].value != "fp8":
         plan.warnings.append(f"kv_dtype {merged['kv_dtype'].value} changes numerics; only fp8 is measured")
     if merged["host"].value not in LOOPBACK and "api_key" not in merged:
