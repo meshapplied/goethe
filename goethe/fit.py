@@ -22,7 +22,7 @@ FATAL = re.compile(r"minimum Engine runtime reservation requires (\d+) bytes in 
                    r"automatic headroom, but only (\d+) bytes are available")
 CAPACITY = re.compile(r"capacity \| KV ([\d,]+) tokens")
 ATTEMPTS = 4
-ALIGN = 256
+STEP = 16384  # the reservation grows steeply with context, so a fixed step converges faster than a ratio
 PROBE_PORT = 18099  # the probe must not take the port the real server will bind
 
 
@@ -60,13 +60,12 @@ def fit(plan: Plan, argv: list[str], log: Path, *, boot: Callable[[list[str], Pa
         text = boot(engine_argv(argv, context, lanes, port=PROBE_PORT), log)
         if (got := CAPACITY.search(text)):
             return Fit(context, lanes, int(got[1].replace(",", "")), attempt)
-        if not (fail := FATAL.search(text)):
+        if not FATAL.search(text):
             raise ProbeError(f"boot {attempt} neither started nor gave the reservation error")
-        need, headroom, have = (int(x) for x in fail.groups())
-        smaller = max(ALIGN, int(context * have / (need + headroom)) // ALIGN * ALIGN)
-        if smaller >= context:
-            raise ProbeError(f"boot {attempt} is short {-have + need + headroom} bytes and the context cannot shrink")
-        context = smaller
+        context -= STEP
+        if context < STEP:
+            raise ProbeError(f"boot {attempt} does not fit even at the smallest context")
+        time.sleep(2)  # GPU memory from the failed boot is freed within a second; don't boot on top of it
     raise ProbeError(f"still does not fit after {ATTEMPTS} boots")
 
 

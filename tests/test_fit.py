@@ -73,14 +73,13 @@ class FitLoop(unittest.TestCase):
             fit.fit(plan(), ["b", "--port", "8080"], Path(d) / "t.log", boot=boot)
         self.assertEqual(boot.seen[0][boot.seen[0].index("--port") + 1], str(fit.PROBE_PORT))
 
-    def test_failure_shrinks_context_and_never_retries_a_size(self):
-        # need + headroom = 20, have = 10 -> context halves
+    def test_failure_steps_the_context_down(self):
         boot = boots(FATAL.format(need=19, head=1, have=10), started(65_536))
         with tempfile.TemporaryDirectory() as d:
-            got = fit.fit(plan(), [], Path(d) / "t.log", boot=boot)
-        self.assertEqual((got.context, got.attempts), (65536, 2))
+            got = fit.fit(plan("long"), [], Path(d) / "t.log", boot=boot)
+        self.assertEqual(got.attempts, 2)
         sizes = [int(a[a.index("--max-context") + 1]) for a in boot.seen]
-        self.assertEqual(sizes, [131072, 65536])
+        self.assertEqual(sizes, [131072, 131072 - fit.STEP])
 
     def test_lanes_never_change(self):
         # fewer lanes reserve more KV, not less, so shrinking them cannot help
