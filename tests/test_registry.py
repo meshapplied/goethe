@@ -42,7 +42,7 @@ def load_text(text):
 
 
 class Load(unittest.TestCase):
-    def test_shipped_registry_loads(self):
+    def test_registry_in_the_repo_loads(self):
         models = registry.load()
         m = models["qwen3-8-27b"]
         self.assertEqual((m.engine, m.served_name, m.native_context), ("ninfer", "qwen3.8-27b", 262144))
