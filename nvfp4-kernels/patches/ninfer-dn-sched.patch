@@ -1,0 +1,43 @@
+diff --git a/src/ops/linear/nvfp4/shapes/n5120_k17408.cu b/src/ops/linear/nvfp4/shapes/n5120_k17408.cu
+index 0b86268..a0c3ba1 100644
+--- a/src/ops/linear/nvfp4/shapes/n5120_k17408.cu
++++ b/src/ops/linear/nvfp4/shapes/n5120_k17408.cu
+@@ -17,6 +17,7 @@ using C5      = Nvfp4A16SimtSchedule<4, 1, 2, 16, 5, 1, Nvfp4SimtActivationAcces
+                                      Nvfp4ScaleAccess::Direct, Nvfp4CodeCache::Default, 1,
+                                      Nvfp4SimtBlockOrder::RowsContiguous, 1>;
+ using T32R64  = Nvfp4A4MmaSchedule<32, 64, 256, 2, 4, 2, 2>;
++using T32R32  = Nvfp4A4MmaSchedule<32, 32, 256, 2, 2, 4, 2>;
+ using T32R128 = Nvfp4A4MmaSchedule<32, 128, 256, 2, 4, 2, 1>;
+ using T64R128 = Nvfp4A4MmaSchedule<64, 128, 256, 4, 2, 2, 1>;
+ using T128R128Pipelined = Nvfp4A4MmaSchedule<128, 128, 256, 4, 2, 2, 1>;
+@@ -44,6 +45,7 @@ void launch_a16(const Tensor& x, const Weight& w, Tensor& y, cudaStream_t stream
+ 
+ Nvfp4A4Route select_a4(std::int32_t tokens) {
+     if (tokens >= 1024) return nvfp4_a4_tma_route<Nvfp4GeometryId::N5120K17408>();
++    if (tokens <= 16) return nvfp4_a4_mma_route<Geometry, T32R32>();
+     if (tokens <= 64) return nvfp4_a4_mma_route<Geometry, T32R64>();
+     if (tokens <= 128) return nvfp4_a4_mma_route<Geometry, T32R128>();
+     if (tokens <= 192) return nvfp4_a4_mma_route<Geometry, T64R128>();
+diff --git a/src/ops/linear_add/nvfp4/nvfp4_linear_add_a4.cu b/src/ops/linear_add/nvfp4/nvfp4_linear_add_a4.cu
+index 038bac2..8b96686 100644
+--- a/src/ops/linear_add/nvfp4/nvfp4_linear_add_a4.cu
++++ b/src/ops/linear_add/nvfp4/nvfp4_linear_add_a4.cu
+@@ -13,6 +13,7 @@ namespace ninfer::ops::detail {
+ namespace {
+ 
+ using M32N64            = Nvfp4A4MmaSchedule<32, 64, 256, 2, 4, 2, 2>;
++using M32N32            = Nvfp4A4MmaSchedule<32, 32, 256, 2, 2, 4, 2>;
+ using M32N128           = Nvfp4A4MmaSchedule<32, 128, 256, 2, 4, 2, 1>;
+ using M64N128           = Nvfp4A4MmaSchedule<64, 128, 256, 4, 2, 2, 1>;
+ using M128N128Pipelined = Nvfp4A4MmaSchedule<128, 128, 256, 4, 2, 2, 1>;
+@@ -34,7 +35,9 @@ void launch_gemm(const Weight& weight, Tensor& residual, Nvfp4A4Workspace worksp
+ template <class Geometry>
+ void launch_problem(const Weight& weight, Tensor& residual, Nvfp4A4Workspace workspace,
+                     std::int32_t tokens, cudaStream_t stream) {
+-    if (tokens <= 64) {
++    if (tokens <= 16) {
++        launch_gemm<Geometry, M32N32>(weight, residual, workspace, tokens, stream);
++    } else if (tokens <= 64) {
+         launch_gemm<Geometry, M32N64>(weight, residual, workspace, tokens, stream);
+     } else if (tokens <= 128) {
+         launch_gemm<Geometry, M32N128>(weight, residual, workspace, tokens, stream);

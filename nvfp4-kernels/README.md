@@ -2,7 +2,7 @@
 
 Dense hybrid in NVFP4 with MTP and DFlash2 in one artifact. Recipe card: [`meshapplied/Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer). Weights: [`neroued/Qwen3.8-27B-nvfp4-NInfer`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) file `qwen3_8_27b_nvfp4.ninfer` (23.7 GB). Pins in [NINFER_PIN](NINFER_PIN).
 
-Engine: [NInfer](https://github.com/Neroued/ninfer) at the commit in `NINFER_PIN`, built unmodified. Hardware: Blackwell sm_120a, 32 GiB VRAM (RTX 5090 or RTX PRO 6000). CUDA 13.x with `nvcc`, `cmake`, `ninja`, C++20.
+Engine: [NInfer](https://github.com/Neroued/ninfer) at the commit in `NINFER_PIN`, built with one small patch (below). Hardware: Blackwell sm_120a, 32 GiB VRAM (RTX 5090 or RTX PRO 6000). CUDA 13.x with `nvcc`, `cmake`, `ninja`, C++20.
 
 ```bash
 ./install.sh && ./fetch_model.sh && ./serve.sh
@@ -19,5 +19,14 @@ Engine: [NInfer](https://github.com/Neroued/ninfer) at the commit in `NINFER_PIN
 DFlash2 does not start at 8 lanes and 131072 context on 32 GiB. Use MTP for 8 lanes.
 
 Throughput (one RTX 5090, replayed agent turns, mean context ~28k, thinking on): see [RESULTS.md](RESULTS.md). Reproduce: `pip install httpx` then `bench/run_matrix.sh "mtp:3:8:131072 mtp:4:8:131072 dflash2:7:4:100000" "1 2 4"`.
+
+## Patches
+
+`install.sh` and `fetch_model.sh` apply two changes by default. Speculative decoding stays exact, so the output distribution does not change.
+
+- `patches/ninfer-dn-sched.patch`: a better tile for the MLP down projection at 16 tokens or fewer. Same output bit for bit, about 1.4 % faster.
+- `patches/apply_head.py`: the draft-token shortlist behind `--lm-head-draft` never contained `<tool_call>` and `</tool_call>`, so every tool call cost rejected drafts. This swaps 677 rows of it in the model file, about 3.5 % faster on agent traffic. The original rows are kept in `<model>.head-orig`. Needs python3 with torch and numpy.
+
+Together about 5 % faster decode, see [RESULTS.md](RESULTS.md#patches). The throughput table above was measured without them. `NVFP4_PATCHES=0 ./install.sh` builds NInfer unpatched, `NVFP4_HEAD=0 ./fetch_model.sh` keeps or restores the original head.
 
 Third-party attribution: [NOTICE](NOTICE).
