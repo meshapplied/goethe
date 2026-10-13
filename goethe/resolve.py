@@ -63,7 +63,7 @@ CONFIG_SERVE_KEYS = {"host", "port", "api_key"}
 CONFIG_PROFILE_KEYS = {"lanes", "context", "spec", "draft_tokens", "kv_dtype"}
 
 
-@dataclass(frozen=True)
+@dataclass
 class Setting:
     value: int | str
     source: str  # default, profile, config, env, flag, generated
