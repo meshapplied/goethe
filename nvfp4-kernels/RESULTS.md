@@ -98,6 +98,21 @@ The GPU was shared: a second user's job held about 1 GiB and a few percent of co
 Decode dominates agent traffic once the context cache is warm, so the speculative decoder, not prefill,
 decides the user-visible speed.
 
+## Patches
+
+Baseline is unpatched NInfer with the original model file. Same 37 replayed requests as above, one stream, T=1, thinking on, four seeds (139 request pairs), baseline and patched runs
+alternating per seed. Paired per-request bootstrap, 95 % interval.
+
+| change | tok/s | 95 % CI |
+|--------|-------|---------|
+| down-projection tile | +1.40 % | [+1.0, +1.7] |
+| draft shortlist | +3.47 % | [+0.2, +7.0] |
+| both | 241.8 to 254.3, +5.14 % | [+1.9, +8.6] |
+
+The tile change produced identical tokens in 139 of 139 requests. The shortlist raises tokens per round by about 3.6 % (4.10 to 4.25 with both changes) and leaves the round time alone; the tile lowers it by about 1.4 %. A shortlist built without
+the repository it is tested on still gains +2.1 % (django), +3.6 % (sympy) and +6.9 % (scikit-learn) at temperature 0, so the gain is not specific to the repos in `bench/traj`.
+Decode speed only: the model weights and the verified output distribution are untouched.
+
 ## Limits
 
 - DFlash2 at 8 lanes and 131k context fails at startup:

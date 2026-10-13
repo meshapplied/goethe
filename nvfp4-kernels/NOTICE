@@ -1,13 +1,13 @@
 nvfp4-kernels
 Copyright 2026 meshapplied. Licensed under the Apache License 2.0 (see ../LICENSE).
 
-This directory contains only build, launch and benchmark scripts and documentation. It downloads and runs
+This directory contains only build, launch and benchmark scripts, two small patches and documentation. It downloads and runs
 the following third-party works at install time. None of their source or weights is included here.
 
 NInfer
   https://github.com/Neroued/ninfer
   Apache License 2.0, Copyright Neroued and contributors.
-  Pinned commit: see NINFER_PIN. Built unmodified.
+  Pinned commit: see NINFER_PIN. Built with patches/ninfer-dn-sched.patch (Apache-2.0).
 
 Qwen3.8-27B-nvfp4-NInfer (weight artifact)
   https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer
