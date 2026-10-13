@@ -2,7 +2,7 @@
 """Swap 677 rows of the draft-token shortlist (`--lm-head-draft`) in the model file, or put the original back with --revert.
 
 The original shortlist never proposes <tool_call> and </tool_call>, so every tool call costs rejected drafts. head_swap.json lists the
-rows to drop and the tokens to add, head_rows.bin holds the new rows. Nothing is written unless the result matches the hashes in
+rows to drop and the tokens to add, head_rows.dat holds the new rows. Nothing is written unless the result matches the hashes in
 NINFER_PIN; the original bytes are kept in <model>.head-orig. Standard library only.
 
 usage: apply_head.py MODEL [--revert]
@@ -46,7 +46,7 @@ swap = json.load(open(os.path.join(here, "head_swap.json")))
 drop, add = set(swap["drop"]), swap["add"]
 old_ids = array.array("i"); old_ids.frombytes(ids)
 keep = [r for r in range(ROWS) if old_ids[r] not in drop]
-fresh = open(os.path.join(here, "head_rows.bin"), "rb").read()
+fresh = open(os.path.join(here, "head_rows.dat"), "rb").read()
 n = len(add)
 assert len(keep) + n == ROWS and len(fresh) == n * (BASE + SCALE)
 codes = b"".join(head[r * BASE:(r + 1) * BASE] for r in keep) + fresh[:n * BASE]
