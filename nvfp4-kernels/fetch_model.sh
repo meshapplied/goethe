@@ -20,4 +20,8 @@ elif [ "${VERIFY:-0}" != 0 ]; then
   check
 fi
 
-python3 "$HERE/patches/apply_head.py" "$FILE" $([ "${NVFP4_HEAD:-1}" = 0 ] && echo --revert)
+if [ "${NVFP4_HEAD:-1}" = 0 ]; then
+  python3 "$HERE/patches/apply_head.py" "$FILE" --revert
+else
+  python3 "$HERE/patches/apply_head.py" "$FILE"
+fi

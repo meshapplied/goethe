@@ -20,6 +20,16 @@ python -c "import ternary_runtime; print(ternary_runtime.__version__)"
 
 Linux, a CUDA GPU, Python ≥ 3.10, and a matching PyTorch build are required. JIT kernels cache under `~/.cache/ternary-flash/build` (or `$TERNARY_BUILD_DIR`).
 
+## The goethe command
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/meshapplied/Goethe/main/install.sh | bash
+goethe doctor    # check this machine
+goethe serve     # install what is missing and start the Qwen3.8-27B NVFP4 server
+```
+
+See [docs/cli.md](docs/cli.md). It covers the NInfer models for now; the ternary packs below are still used from Python.
+
 ## Fetch a ternary pack
 
 ```python

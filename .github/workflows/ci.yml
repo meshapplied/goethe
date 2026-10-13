@@ -1,0 +1,36 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -s tests -t .
+
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: pipx run ruff check goethe tests
+      - run: shellcheck -S warning install.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
+
+  ninfer-patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: patch applies to the pinned NInfer commit
+        run: |
+          . nvfp4-kernels/NINFER_PIN
+          git clone --quiet --filter=blob:none --no-checkout "$NINFER_REPO" ninfer
+          git -C ninfer checkout --quiet "$NINFER_REV"
+          git -C ninfer apply --check "$GITHUB_WORKSPACE/nvfp4-kernels/patches/ninfer-dn-sched.patch"
