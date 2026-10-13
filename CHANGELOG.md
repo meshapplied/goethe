@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-- Flat docs: root README + `docs/pack.md` + `nvfp4-kernels/{README,RESULTS}.md`. Hub cards are not duplicated in git.
-- Catalog: canonical Hugging Face ids; Flash-Next documentation on Hub only.
+- Passive lineup README; serve via [`examples/`](examples/) (ternary + Flash-Next NVFP4).
+- SGLang patch: skip ternary for DSpark/NEXTN draft stages and mismatched expert counts.
+- Current Hub ids in docs and examples.
 
 ## 0.1.0
 

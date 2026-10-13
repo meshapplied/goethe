@@ -1,0 +1,39 @@
+# Example NVFP4 Flash-Next serve config; set NVFP4_MODEL_DIR to the Hub tree.
+
+[model]
+path = "${NVFP4_MODEL_DIR}"
+name = "qwen38-flash-next-nvfp4"
+
+[serve]
+engine = "sglang"
+host = "127.0.0.1"
+port = 31003
+tp_size = 1
+dtype = "auto"
+max_model_len = 262144
+trust_remote_code = true
+mem_fraction_static = 0.92
+extra_args = [
+  "--quantization", "modelopt_fp4",
+  "--fp4-gemm-backend", "flashinfer_cutlass",
+  "--ple-offload-embedding",
+  "--ple-offload-backend", "pinned",
+  "--kv-cache-dtype", "fp8_e4m3",
+  "--speculative-algorithm", "NEXTN",
+  "--speculative-num-steps", "3",
+  "--speculative-eagle-topk", "1",
+  "--speculative-num-draft-tokens", "4",
+  "--speculative-token-map", "${SPEC_HOT_VOCAB:-${NVFP4_MODEL_DIR}/spec/hot_self_32k.pt}",
+  "--mamba-full-memory-ratio", "0.98",
+  "--max-mamba-cache-size", "16",
+  "--max-running-requests", "2",
+  "--max-prefill-tokens", "65536",
+  "--chunked-prefill-size", "8192",
+  "--page-size", "64",
+  "--cuda-graph-backend-decode", "full",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--cuda-graph-max-bs-decode", "2",
+  "--reasoning-parser", "qwen3",
+  "--tool-call-parser", "qwen3_coder",
+  "--served-model-name", "qwen38-flash-next-nvfp4",
+]

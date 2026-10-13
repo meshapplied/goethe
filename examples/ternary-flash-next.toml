@@ -1,5 +1,4 @@
-# Example serve config (paths are placeholders — copy and fill locally).
-# Prefer: ternary_runtime.fetch(...); then point model path at the resolved base_dir.
+# Example Qwen Flash-Next ternary serve config.
 
 [model]
 path = "${TERNARY_MODEL_DIR}"
@@ -12,14 +11,21 @@ pack_dir = "${TERNARY_PACK_DIR}"
 engine = "sglang"
 host = "127.0.0.1"
 port = 30000
-tp_size = 1
+tp_size = 2
 dtype = "bfloat16"
-max_model_len = 131072
+max_model_len = 16384
 trust_remote_code = true
-mem_fraction_static = 0.90
+mem_fraction_static = 0.85
 extra_args = [
+  "--ep-size", "2",
   "--served-model-name", "qwen38-flash-next",
-  "--kv-cache-dtype", "fp8_e4m3",
-  "--max-running-requests", "16",
+  "--reasoning-parser", "qwen3",
+  "--tool-call-parser", "qwen",
+  "--max-running-requests", "8",
   "--chunked-prefill-size", "4096",
+  "--cuda-graph-max-bs-decode", "8",
+  "--speculative-algorithm", "NEXTN",
+  "--speculative-num-steps", "3",
+  "--speculative-eagle-topk", "1",
+  "--speculative-num-draft-tokens", "4",
 ]

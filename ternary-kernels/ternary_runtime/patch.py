@@ -178,11 +178,19 @@ def _patch_moe_class(profile: PackProfile) -> None:
         class MoESelector:
             def __call__(self, *args, **kwargs):
                 layer_id = kwargs.get("layer_id", -1)
-                prefix = str(kwargs.get("prefix", ""))
-                # MTP / nextn keep published experts when profile requests it.
+                prefix = str(kwargs.get("prefix", "")).lower()
+                # MTP / NEXTN / DSpark draft stages keep published experts.
                 if profile.has("mtp_skip_ternary") and (
-                    "mtp" in prefix or "nextn" in prefix or "is_nextn" in kwargs
+                    "mtp" in prefix
+                    or "nextn" in prefix
+                    or "stages." in prefix
+                    or "dspark" in prefix
+                    or kwargs.get("is_nextn")
                 ):
+                    return stock_cls(*args, **kwargs)
+                # DSpark draft MoE uses fewer routed experts than the backbone pack.
+                ne = kwargs.get("num_experts")
+                if ne is not None and int(ne) != int(profile.num_experts):
                     return stock_cls(*args, **kwargs)
                 if 0 <= layer_id < n_layers:
                     from ternary_runtime.experts import TernaryExperts

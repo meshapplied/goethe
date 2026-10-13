@@ -90,7 +90,7 @@ def fetch(
     ----------
     repo_id:
         HF repo containing layer-*.safetensors + ternary_config.json
-        (e.g. ``org/qwen38-flash-next-ternary-latest``).
+        (e.g. ``meshapplied/Qwen3.8-Flash-Next-Ternary-Latest``).
     base_local:
         Optional existing local base checkpoint; skips base download when set.
     """
