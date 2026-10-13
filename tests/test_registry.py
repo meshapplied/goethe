@@ -19,15 +19,15 @@ kv_dtype = "fp8"
 spec = "mtp"
 draft_tokens = 3
 prefill_chunk = 1024
-[models.m.intents.agent]
+[models.m.profiles.agent]
 lanes = 1
 context = 4096
 why = "w"
-[models.m.intents.chat]
+[models.m.profiles.chat]
 lanes = 1
 context = 4096
 why = "w"
-[models.m.intents.long]
+[models.m.profiles.long]
 lanes = 1
 context = 4096
 why = "w"
@@ -46,7 +46,7 @@ class Load(unittest.TestCase):
         models = registry.load()
         m = models["qwen3-8-27b"]
         self.assertEqual((m.engine, m.served_name, m.native_context), ("ninfer", "qwen3.8-27b", 262144))
-        self.assertEqual(set(m.intents), {"agent", "chat", "long"})
+        self.assertEqual(set(m.profiles), {"agent", "chat", "long"})
 
     def test_minimal_valid_file(self):
         self.assertEqual(load_text(GOOD)["m"].served_name, "m-1")
@@ -57,7 +57,7 @@ class Load(unittest.TestCase):
         with self.assertRaisesRegex(registry.RegistryError, "unknown.*extra"):
             load_text(GOOD.replace('tested = []', 'tested = []\nextra = 1'))
         with self.assertRaisesRegex(registry.RegistryError, "missing.*long"):
-            load_text(GOOD.split("[models.m.intents.long]")[0])
+            load_text(GOOD.split("[models.m.profiles.long]")[0])
 
     def test_unknown_engine(self):
         with self.assertRaisesRegex(registry.RegistryError, "engine"):

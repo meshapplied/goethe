@@ -13,7 +13,7 @@ launcher to `~/.local/bin/goethe`. Everything else is standard library. Run the 
 
 ## Commands
 
-- `goethe serve [model] [--for agent|chat|long]` installs what is missing (NInfer build, model download, head patch from
+- `goethe serve [model] [--profile agent|chat|long]` installs what is missing (NInfer build, model download, head patch from
   `nvfp4-kernels/`), then starts an OpenAI, Responses and Anthropic compatible server on `127.0.0.1:8080`.
   `--explain` prints every setting with where it came from and why; `--dry-run` also prints the commands and runs nothing.
   Arguments after `--` go to `ninfer-serve` unchanged. If a healthy server already answers on the port, it says so and stops.
@@ -31,9 +31,9 @@ NInfer builds only for Blackwell (compute capability 12.0) and the 27B NVFP4 mod
 - Everything else, including 24 GB Blackwell cards and all Ampere and Ada cards: `unsupported`, with the reason. Community
   forks of NInfer exist for 3090 and 4090; goethe does not build them.
 
-## Intents
+## Profiles
 
-`--for` picks lanes (concurrent requests) and context length. Everything else is the measured configuration from
+`--profile` picks lanes (concurrent requests) and context length. Everything else is the measured configuration from
 `nvfp4-kernels/RESULTS.md`: DFlash2 with 7 draft tokens, fp8 KV cache, prefill chunk 1024. `goethe serve --explain` shows the
 numbers for your machine.
 
@@ -46,7 +46,7 @@ Speed does not depend on the lane count, but the exact tokens at temperature 0 d
 
 ## Configure
 
-Precedence, highest first: command-line flag, environment variable `GOETHE_<KEY>`, `config.toml`, the intent's profile.
+Precedence, highest first: command-line flag, environment variable `GOETHE_<KEY>`, `config.toml`, the profile.
 Keys: `host`, `port`, `lanes`, `context`, `spec` (`dflash2` or `mtp`), `draft_tokens`, `kv_dtype`, `api_key`.
 `--set KEY=VALUE` is a flag for any of them; `--host` and `--port` are shortcuts.
 

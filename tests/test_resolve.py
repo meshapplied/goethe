@@ -12,9 +12,9 @@ MODEL = registry.load()["qwen3-8-27b"]
 BIN, FILE = Path("/b/ninfer-serve"), Path("/m/model.ninfer")
 
 
-def plan(gpus=(RTX_5090,), intent="agent", **kw):
+def plan(gpus=(RTX_5090,), profile="agent", **kw):
     kw.setdefault("env", {})
-    return resolve.resolve(MODEL, list(gpus), intent, **kw)
+    return resolve.resolve(MODEL, list(gpus), profile, **kw)
 
 
 class Profiles(unittest.TestCase):
@@ -28,7 +28,7 @@ class Profiles(unittest.TestCase):
             "--lm-head-draft", "--prefill-chunk", "1024"])
 
     def test_chat_and_long(self):
-        c, long = plan(intent="chat"), plan(intent="long")
+        c, long = plan(profile="chat"), plan(profile="long")
         self.assertEqual((c.value("lanes"), c.value("context")), (1, 32768))
         self.assertEqual((long.value("lanes"), long.value("context")), (1, 131072))
         self.assertTrue(all(p.value("spec") == "dflash2" and p.value("draft_tokens") == 7 for p in (c, long)))
@@ -43,12 +43,12 @@ class Profiles(unittest.TestCase):
             stub.write_text('#!/bin/sh\nfor a in "$@"; do echo "$a"; done\n')
             stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
             model.write_bytes(b"")
-            for intent, shell_env in (("agent", {"PROFILE": "default"}), ("long", {"PROFILE": "long"}),
+            for profile, shell_env in (("agent", {"PROFILE": "default"}), ("long", {"PROFILE": "long"}),
                                       ("chat", {"PROFILE": "default", "MAX_CONCURRENCY": "1", "MAX_CONTEXT": "32768"})):
                 env = {**os.environ, "NINFER_SERVE": str(stub), "MODEL": str(model), "HOME": d, **shell_env}
                 out = subprocess.run(["bash", str(REPO / "nvfp4-kernels" / "serve.sh")], env=env, check=True,
                                      capture_output=True, text=True).stdout.split("\n")[:-1]
-                self.assertEqual(resolve.server_argv(plan(intent=intent), stub, model)[1:], out, intent)
+                self.assertEqual(resolve.server_argv(plan(profile=profile), stub, model)[1:], out, profile)
 
 
 class Layers(unittest.TestCase):

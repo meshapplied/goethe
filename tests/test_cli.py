@@ -55,7 +55,7 @@ class Serve(unittest.TestCase):
         self.assertIn("--max-concurrency 4", out)
 
     def test_explain_says_where_each_value_came_from(self):
-        _, out, _ = run("serve", "--explain", "--for", "chat", "--port", "9001", env={"GOETHE_LANES": "2"},
+        _, out, _ = run("serve", "--explain", "--profile", "chat", "--port", "9001", env={"GOETHE_LANES": "2"},
                         config='[serve]\nport = 7\n[profiles.chat]\ncontext = 8192\n')
         self.assertRegex(out, r"port\s+9001\s+flag")
         self.assertRegex(out, r"lanes\s+2\s+env")
@@ -103,7 +103,7 @@ class Serve(unittest.TestCase):
     def test_serve_installs_then_replaces_itself_with_the_engine(self):
         with mock.patch.object(engine, "healthy", return_value=False), mock.patch("subprocess.run") as sub, \
                 mock.patch("os.execv") as ex:
-            code, out, _ = run("serve", "--for", "long")
+            code, out, _ = run("serve", "--profile", "long")
         self.assertFalse(code)  # os.execv never returns for real
         self.assertEqual(sub.call_count, 2)  # install.sh, fetch_model.sh
         self.assertTrue(all(c.kwargs["env"]["NVFP4_HOME"] for c in sub.call_args_list))

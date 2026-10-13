@@ -15,17 +15,17 @@ spec = "dflash2"
 draft_tokens = 7
 prefill_chunk = 1024
 
-[models.qwen3-8-27b.intents.agent]
+[models.qwen3-8-27b.profiles.agent]
 lanes = 4
 context = 100000
 why = "the configuration measured in nvfp4-kernels/RESULTS.md: aggregate 239, 404, 569, 686 tok/s at 1 to 4 streams"
 
-[models.qwen3-8-27b.intents.chat]
+[models.qwen3-8-27b.profiles.chat]
 lanes = 1
 context = 32768
 why = "one user, short history, smallest KV and runtime reservation"
 
-[models.qwen3-8-27b.intents.long]
+[models.qwen3-8-27b.profiles.long]
 lanes = 1
 context = 131072
 why = "one lane with a long window; boots on a 32 GiB card, not benchmarked and not yet fitted to free memory"
