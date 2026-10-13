@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import urllib.error
 import urllib.request
@@ -48,6 +49,13 @@ def ensure(inst: Install, env: Mapping[str, str] = os.environ) -> None:
     child_env = {**env, "NVFP4_HOME": str(inst.home)}
     for cmd in commands(inst):
         subprocess.run(cmd, env=child_env, check=True)
+
+
+def port_in_use(host: str, port: int) -> bool:
+    host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET) as s:
+        s.settimeout(1.0)
+        return s.connect_ex((host, port)) == 0
 
 
 def healthy(host: str, port: int, timeout: float = 1.0) -> bool:

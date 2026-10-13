@@ -91,6 +91,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if engine.healthy(host, port):
         print(f"already serving on http://{host}:{port}")
         return 0
+    if engine.port_in_use(host, port):
+        print(f"error: port {port} is in use but nothing answers on /health yet; "
+              "a server may still be starting, or pick another port with --port", file=sys.stderr)
+        return 1
     engine.ensure(inst)
     if plan.settings.get("api_key", resolve.Setting("", "")).source == "generated":
         print(f"API key: {store.state_dir() / 'api_key'}")

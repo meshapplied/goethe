@@ -11,7 +11,7 @@ from goethe import cli, engine, hw
 from tests.fixtures import PRO_6000, RTX_3090, RTX_5090
 
 
-def run(*argv, gpus=(RTX_5090,), env=None, config=None):
+def run(*argv, gpus=(RTX_5090,), env=None, config=None, busy=False):
     """(exit code, stdout, stderr) of goethe with a fake GPU list and an empty home."""
     out, err = io.StringIO(), io.StringIO()
     with tempfile.TemporaryDirectory() as home:
@@ -21,6 +21,7 @@ def run(*argv, gpus=(RTX_5090,), env=None, config=None):
             (Path(home) / ".config" / "goethe" / "config.toml").write_text(config)
         probe = (list(gpus), None) if gpus else ([], "nvidia-smi not found")
         with mock.patch.dict(os.environ, environ, clear=True), mock.patch.object(hw, "probe", lambda *a: probe), \
+                mock.patch.object(engine, "port_in_use", lambda *a: busy), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main(list(argv))
     return code, out.getvalue(), err.getvalue()
@@ -98,6 +99,15 @@ class Serve(unittest.TestCase):
             code, out, _ = run("serve")
         self.assertEqual(code, 0)
         self.assertIn("already serving on http://127.0.0.1:8080", out)
+        ex.assert_not_called()
+
+    def test_busy_port_without_a_healthy_server_is_an_error(self):
+        with mock.patch.object(engine, "healthy", return_value=False), \
+                mock.patch("subprocess.run") as sub, mock.patch("os.execv") as ex:
+            code, _, err = run("serve", busy=True)
+        self.assertEqual(code, 1)
+        self.assertIn("port 8080 is in use", err)
+        sub.assert_not_called()
         ex.assert_not_called()
 
     def test_serve_installs_then_replaces_itself_with_the_engine(self):
