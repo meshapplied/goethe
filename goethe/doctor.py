@@ -64,14 +64,15 @@ class System:
         with socket.socket() as s:
             return s.connect_ex(("127.0.0.1", port)) != 0
 
-    def reachable(self, url: str) -> bool:
+    def network_error(self, url: str) -> str | None:
+        """None when the server answers (any HTTP status counts), else why it does not."""
         try:
-            urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=5).close()
+            urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=10).close()
         except urllib.error.HTTPError:
-            return True  # the server answered
-        except OSError:
-            return False
-        return True
+            return None
+        except OSError as e:
+            return str(getattr(e, "reason", e))
+        return None
 
     def direct_io(self, path: Path) -> bool:
         """Whether files under `path` open with O_DIRECT, which the engine uses to load weights."""
@@ -229,11 +230,12 @@ def check_install(sys_: System, inst: Install, port: int) -> list[Check]:
 
 
 def check_network(sys_: System, inst: Install, repo: str) -> Check:
-    if sys_.reachable(f"https://huggingface.co/{repo}"):
+    error = sys_.network_error(f"https://huggingface.co/{repo}")
+    if error is None:
         return Check("network", "ok", "huggingface.co reachable")
     if inst.has_model:
-        return Check("network", "info", "huggingface.co not reachable, not needed, the model is present")
-    return Check("network", "fail", "huggingface.co not reachable", "check the connection or proxy settings")
+        return Check("network", "info", f"huggingface.co not reachable ({error}), not needed, the model is present")
+    return Check("network", "fail", f"huggingface.co not reachable ({error})", "check the connection or proxy settings")
 
 
 def run_checks(model: Model, inst: Install, pin: dict[str, str], port: int = 8080,

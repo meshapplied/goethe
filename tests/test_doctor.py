@@ -55,8 +55,8 @@ class Fake(doctor.System):
     def port_free(self, port):
         return self.port_open
 
-    def reachable(self, url):
-        return self.net
+    def network_error(self, url):
+        return None if self.net else "timed out"
 
     def direct_io(self, path):
         return self.direct
@@ -153,7 +153,9 @@ class Machines(DoctorTest):
 
     def test_port_and_network(self):
         self.assertEqual(self.run_checks(Fake(port_open=False))["port"].status, "warn")
-        self.assertEqual(self.run_checks(Fake(net=False))["network"].status, "fail")
+        down = self.run_checks(Fake(net=False))["network"]
+        self.assertEqual(down.status, "fail")
+        self.assertIn("timed out", down.detail)
         self.assertEqual(self.run_checks(Fake(net=False), binary=True, model=True)["network"].status, "info")
 
     def test_json_shape(self):
