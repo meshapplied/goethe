@@ -54,7 +54,7 @@ def _parser() -> argparse.ArgumentParser:
 
     bn = sub.add_parser("bench", help="replay the bundled agent traces against a running server")
     bn.add_argument("--port", type=int, default=8080)
-    bn.add_argument("--log", help="engine log, for decode tok/s and acceptance")
+    bn.add_argument("--log", help="engine log, for decode tok/s, cache hit, time to first token and acceptance")
 
     sub.add_parser("rollback", help="point the engine link back at the previous one")
     return p

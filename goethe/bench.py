@@ -1,7 +1,8 @@
 """Replay the bundled agent traces against a running server and score what came back.
 
 One stream. Temperature 1. The first two requests are reported separately and are not in the mean.
-Decode tok/s is taken from the engine log when it is passed in. Wall tok/s includes prefill.
+Decode tok/s is the token-weighted rate from the engine log, which also supplies cache hit and time to first token.
+Wall tok/s includes prefill.
 """
 from __future__ import annotations
 
@@ -15,7 +16,9 @@ from pathlib import Path
 BASH = {"type": "function", "function": {
     "name": "bash", "description": "Execute a bash command",
     "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}}
-DONE = re.compile(r"req#\d+ done.*decode ([\d.]+) tok/s.*accepted ([\d,]+)/([\d,]+)")
+DONE = re.compile(
+    r"req#\d+ done.*prompt ([\d,]+) \|.*cache ([\d,]+) \([\d.]+%\).*TTFT ([\d.]+)s"
+    r".*decode ([\d.]+) tok/s.*accepted ([\d,]+)/([\d,]+)")
 POWER = re.compile(r"([\d.]+)\s*W")
 
 
@@ -72,14 +75,18 @@ def score(rows: list[dict], powers: list[float]) -> dict:
     def mean(key):
         vals = [r[key] for r in kept if r.get(key) is not None]
         return round(sum(vals) / len(vals), 2) if vals else None
-    decode = [r["decode_tok_s"] for r in kept if r.get("decode_tok_s")]
     watts = [p for p in powers if p > 50]
+    cached = sum(r["cache_tokens"] for r in kept if r.get("prompt_logged"))
+    prompted = sum(r["prompt_logged"] for r in kept if r.get("prompt_logged"))
+    ttft = [r["ttft_s"] for r in kept if r.get("ttft_s") is not None]
     out = {
         "requests": len(rows),
         "scored": len(kept),
         "warmup_dropped": min(2, len(rows)),
         "mean_prompt_tokens": mean("prompt_tokens"),
-        "decode_tok_s": round(sum(decode) / len(decode), 1) if decode else None,
+        "decode_tok_s": _weighted_decode(kept),
+        "cache_hit": f"{100 * cached / prompted:.1f}%" if prompted else None,
+        "ttft_s": round(sum(ttft) / len(ttft), 2) if ttft else None,
         "wall_tok_s": round(sum(r["completion_tokens"] for r in kept) / sum(r["wall_s"] for r in kept), 1)
         if kept else None,
         "tool_calls_valid": sum(r["tool_valid"] for r in kept),
@@ -90,6 +97,30 @@ def score(rows: list[dict], powers: list[float]) -> dict:
     if out["decode_tok_s"] and out["mean_power_w"]:
         out["tok_s_per_watt"] = round(out["decode_tok_s"] / out["mean_power_w"], 3)
     return out
+
+
+def _weighted_decode(rows: list[dict]) -> float | None:
+    num = den = 0.0
+    for r in rows:
+        rate, n = r.get("decode_tok_s"), r.get("completion_tokens") or 0
+        if rate and n:
+            num += n
+            den += n / rate
+    return round(num / den, 1) if den else None
+
+
+def parse_done(text: str) -> list[dict]:
+    rows = []
+    for prompt, cache, ttft, decode, acc_n, acc_d in DONE.findall(text):
+        rows.append({
+            "prompt_logged": int(prompt.replace(",", "")),
+            "cache_tokens": int(cache.replace(",", "")),
+            "ttft_s": float(ttft),
+            "decode_tok_s": float(decode),
+            "acc_n": int(acc_n.replace(",", "")),
+            "acc_d": int(acc_d.replace(",", "")),
+        })
+    return rows
 
 
 def _acceptance(rows: list[dict]) -> str | None:
@@ -150,10 +181,6 @@ def run(traj_dir: Path, port: int = 8080, log: Path | None = None) -> dict:
         stop.set()
     if log and log.is_file():
         text = log.read_bytes()[log_at:].decode(errors="replace")
-        found = DONE.findall(text)
-        for i, row in enumerate(rows):
-            if i < len(found):
-                row["decode_tok_s"] = float(found[i][0])
-                row["acc_n"] = int(found[i][1].replace(",", ""))
-                row["acc_d"] = int(found[i][2].replace(",", ""))
+        for row, fields in zip(rows, parse_done(text), strict=False):
+            row.update(fields)
     return score(rows, powers)

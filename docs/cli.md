@@ -25,7 +25,7 @@ launcher to `~/.local/bin/goethe`. Everything else is standard library. Run the 
 - `goethe doctor` checks driver, GPU, memory, disk, build tools, the engine's dynamic libraries and network, and changes nothing. Each problem comes with a fix.
   Exit code 1 if anything failed. `--json` for scripts.
 - `goethe bench` replays the bundled agent traces against a server that is already running. One stream, temperature 1.
-  Decode tok/s and acceptance come from the engine log (`--log`). The first two requests are not in the mean.
+  Decode tok/s is token-weighted. Cache hit, time to first token and acceptance come from the engine log (`--log`). The first two requests are not in the mean.
 - `goethe update --check` compares the installed NInfer commit, the down-projection patch and the model file to `NINFER_PIN`.
   It hashes the model file and changes nothing. Exit code 1 if anything differs. `--json` for scripts.
 - `goethe rollback` points `engines/current` at the previous directory. `goethe serve` does not read that link; it starts the binary under `NVFP4_HOME`. A refused gate leaves the link where it is. The two directories before the current one are kept. A running server is not restarted.
