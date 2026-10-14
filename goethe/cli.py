@@ -9,8 +9,9 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
-from goethe import __version__, connect, doctor, engine, fit, hw, registry, resolve, store, update
+from goethe import __version__, bench, connect, doctor, engine, fit, hw, registry, resolve, store, update
 
 PROG = "goethe"
 
@@ -50,6 +51,10 @@ def _parser() -> argparse.ArgumentParser:
     up = sub.add_parser("update", help="compare the install to the pin, change nothing")
     up.add_argument("--check", action="store_true", required=True)
     up.add_argument("--json", action="store_true")
+
+    bn = sub.add_parser("bench", help="replay the bundled agent traces against a running server")
+    bn.add_argument("--port", type=int, default=8080)
+    bn.add_argument("--log", help="engine log, for decode tok/s and acceptance")
     return p
 
 
@@ -206,6 +211,16 @@ def cmd_update(args: argparse.Namespace) -> int:
     return doctor.exit_code(rows)
 
 
+def cmd_bench(args: argparse.Namespace) -> int:
+    traj = store.REPO_ROOT / "nvfp4-kernels" / "bench" / "traj"
+    if not engine.healthy("127.0.0.1", args.port):
+        print(f"error: nothing is serving on port {args.port}", file=sys.stderr)
+        return 1
+    log = Path(args.log) if args.log else None
+    print(json.dumps(bench.run(traj, args.port, log), indent=2))
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     model = next(iter(registry.load().values()))
     inst = engine.locate(model)
@@ -234,7 +249,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.engine_args = engine_args
     try:
         return {"serve": cmd_serve, "list": cmd_list, "doctor": cmd_doctor,
-                "connect": cmd_connect, "update": cmd_update}[args.command](args)
+                "connect": cmd_connect, "update": cmd_update,
+                "bench": cmd_bench}[args.command](args)
     except (resolve.ResolveError, registry.RegistryError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
