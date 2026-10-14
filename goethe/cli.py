@@ -10,7 +10,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 
-from goethe import __version__, connect, doctor, engine, fit, hw, registry, resolve, store
+from goethe import __version__, connect, doctor, engine, fit, hw, registry, resolve, store, update
 
 PROG = "goethe"
 
@@ -46,6 +46,10 @@ def _parser() -> argparse.ArgumentParser:
     dr = sub.add_parser("doctor", help="check this machine, change nothing")
     dr.add_argument("--json", action="store_true")
     dr.add_argument("--port", type=int, default=8080)
+
+    up = sub.add_parser("update", help="compare the install to the pin, change nothing")
+    up.add_argument("--check", action="store_true", required=True)
+    up.add_argument("--json", action="store_true")
     return p
 
 
@@ -190,6 +194,18 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    model = next(iter(registry.load().values()))
+    inst = engine.locate(model)
+    rows = update.check(inst, registry.read_pin(inst.recipe / "NINFER_PIN"))
+    if args.json:
+        print(json.dumps(doctor.as_dicts(rows), indent=2))
+    else:
+        for c in rows:
+            print(f"{c.status:<5} {c.name:<8} {c.detail}" + (f"\n{'':14}fix: {c.fix}" if c.fix else ""))
+    return doctor.exit_code(rows)
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     model = next(iter(registry.load().values()))
     inst = engine.locate(model)
@@ -218,7 +234,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.engine_args = engine_args
     try:
         return {"serve": cmd_serve, "list": cmd_list, "doctor": cmd_doctor,
-                "connect": cmd_connect}[args.command](args)
+                "connect": cmd_connect, "update": cmd_update}[args.command](args)
     except (resolve.ResolveError, registry.RegistryError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
