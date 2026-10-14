@@ -11,6 +11,7 @@
 - `goethe update --check` compares the installed engine, patch and model file to the pin.
 - `goethe doctor` names missing engine libraries and the apt line.
 - `goethe bench` replays the bundled agent traces and reports token-weighted decode tok/s, cache hit, time to first token, acceptance, tool-call validity and power.
+- `goethe serve` treats a CUDA out-of-memory boot as a failed fit, and lowers context, instead of waiting out the probe.
 - `goethe rollback` flips the engine link. A refused gate leaves the current link where it is.
 - `nvfp4-kernels/`: patched NInfer tile for the down projection and a draft-shortlist patch for the model file, applied by `install.sh` and `fetch_model.sh` (about 5 % faster decode).
 - Passive lineup README; serve via [`examples/`](examples/) (ternary + Flash-Next NVFP4).
