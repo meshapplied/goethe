@@ -22,7 +22,7 @@ launcher to `~/.local/bin/goethe`. Everything else is standard library. Run the 
   continue, zed, cursor, jan, roo and cline are refused: each is configured through its own file or settings screen.
 - `goethe list` shows each model and whether this GPU can run it: `tested`, `compatible`, or `unsupported` with the reason.
   `--json` for scripts.
-- `goethe doctor` checks driver, GPU, memory, disk, build tools and network, and changes nothing. Each problem comes with a fix.
+- `goethe doctor` checks driver, GPU, memory, disk, build tools, the engine's dynamic libraries and network, and changes nothing. Each problem comes with a fix.
   Exit code 1 if anything failed. `--json` for scripts.
 - `goethe update --check` compares the installed NInfer commit, the down-projection patch and the model file to `NINFER_PIN`.
   It hashes the model file and changes nothing. Exit code 1 if anything differs. `--json` for scripts.
