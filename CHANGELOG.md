@@ -4,6 +4,7 @@
 
 - `goethe` command (`serve`, `list`, `doctor`), standard library only, with an installer. See `docs/cli.md`.
 - `goethe connect` runs a coding agent against the server for one command.
+- `goethe update --check` compares the installed engine, patch and model file to the pin.
 - `nvfp4-kernels/`: patched NInfer tile for the down projection and a draft-shortlist patch for the model file, applied by `install.sh` and `fetch_model.sh` (about 5 % faster decode).
 - Passive lineup README; serve via [`examples/`](examples/) (ternary + Flash-Next NVFP4).
 - SGLang patch: skip ternary for DSpark/NEXTN draft stages and mismatched expert counts.
