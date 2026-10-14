@@ -28,6 +28,7 @@ launcher to `~/.local/bin/goethe`. Everything else is standard library. Run the 
   Decode tok/s and acceptance come from the engine log (`--log`). The first two requests are not in the mean.
 - `goethe update --check` compares the installed NInfer commit, the down-projection patch and the model file to `NINFER_PIN`.
   It hashes the model file and changes nothing. Exit code 1 if anything differs. `--json` for scripts.
+- `goethe rollback` points `engines/current` at the previous directory. `goethe serve` does not read that link; it starts the binary under `NVFP4_HOME`. A refused gate leaves the link where it is. The two directories before the current one are kept. A running server is not restarted.
 
 ## What runs where
 

@@ -11,7 +11,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from goethe import __version__, bench, connect, doctor, engine, fit, hw, registry, resolve, store, update
+from goethe import __version__, bench, connect, doctor, engine, fit, hw, registry, release, resolve, store, update
 
 PROG = "goethe"
 
@@ -55,6 +55,8 @@ def _parser() -> argparse.ArgumentParser:
     bn = sub.add_parser("bench", help="replay the bundled agent traces against a running server")
     bn.add_argument("--port", type=int, default=8080)
     bn.add_argument("--log", help="engine log, for decode tok/s and acceptance")
+
+    sub.add_parser("rollback", help="point the engine link back at the previous one")
     return p
 
 
@@ -221,6 +223,16 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rollback(args: argparse.Namespace) -> int:
+    try:
+        name = release.rollback(store.data_dir() / "engines")
+    except release.ReleaseError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"current -> {name}")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     model = next(iter(registry.load().values()))
     inst = engine.locate(model)
@@ -250,7 +262,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return {"serve": cmd_serve, "list": cmd_list, "doctor": cmd_doctor,
                 "connect": cmd_connect, "update": cmd_update,
-                "bench": cmd_bench}[args.command](args)
+                "bench": cmd_bench, "rollback": cmd_rollback}[args.command](args)
     except (resolve.ResolveError, registry.RegistryError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

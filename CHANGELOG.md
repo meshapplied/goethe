@@ -7,6 +7,7 @@
 - `goethe update --check` compares the installed engine, patch and model file to the pin.
 - `goethe doctor` names missing engine libraries and the apt line.
 - `goethe bench` replays the bundled agent traces and reports decode tok/s, acceptance, tool-call validity and power.
+- `goethe rollback` flips the engine link. A refused gate leaves the current link where it is.
 - `nvfp4-kernels/`: patched NInfer tile for the down projection and a draft-shortlist patch for the model file, applied by `install.sh` and `fetch_model.sh` (about 5 % faster decode).
 - Passive lineup README; serve via [`examples/`](examples/) (ternary + Flash-Next NVFP4).
 - SGLang patch: skip ternary for DSpark/NEXTN draft stages and mismatched expert counts.
