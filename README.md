@@ -124,6 +124,28 @@ Radix cache off + flush between lengths; random prompts, out=256, concurrency 1.
 
 Idle serve VRAM ≈ **89.3 / 95.6 GB**.
 
+## Performance (Qwen3.8-27B NVFP4 NInfer)
+
+32 GiB Blackwell (RTX 5090-class; measured on PRO 6000 with free VRAM capped to ~32 GiB), DFlash2 K=7, T=0. Details on the Hub card [`Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer).
+
+### Agentic coding
+
+| Concurrency | out tok/s | TTFT ms | ITL ms |
+|------------:|----------:|--------:|-------:|
+| 1 | **326** | 218 | 17.0 |
+| 4 | **587** | 365 | 38.7 |
+
+### Cold prefill and long-context decode
+
+| prompt | decode tok/s | prefill tok/s | TTFT mean / p50 / p90 / p99 (ms) | ITL mean / p50 / p90 / p99 (ms) |
+|------:|-------------:|--------------:|--------------------------------:|-------------------------------:|
+| 1024 | 211 | ~16k | 65 / 56 / 105 / 116 | 17.1 / 17.1 / 17.2 / 17.3 |
+| 4096 | 147 | ~16k | 254 / 248 / 394 / 413 | 17.2 / 17.2 / 17.3 / 17.4 |
+| 16384 | 81 | ~16k | 998 / 1010 / 1606 / 1777 | 17.4 / 17.4 / 17.7 / 17.8 |
+| 32768 | 56 | ~18k | 1778 / 1586 / 3068 / 3639 | 17.6 / 17.6 / 18.0 / 18.2 |
+
+Idle NInfer VRAM ≈ **24.7–27.0 / 32 GiB**.
+
 ## Layout
 
 | Path | Role |
