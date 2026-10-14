@@ -24,10 +24,11 @@ class Fake(doctor.System):
     """A machine described by keyword arguments; defaults are a healthy 5090 box."""
 
     def __init__(self, gpus=(RTX_5090,), tools=TOOLS, nvcc="release 13.4", header="13040", cmake="cmake version 3.31.1",
-                 pkg=True, free_gb=500.0, ram_gib=64.0, direct=True, port_open=True, net=True, apps="", smi_ok=True):
+                 pkg=True, free_gb=500.0, ram_gib=64.0, direct=True, port_open=True, net=True, apps="", smi_ok=True,
+                 ldd="\tlibc.so.6 => /lib/libc.so.6\n"):
         self.gpus, self.tools, self.nvcc, self.header, self.cmake, self.pkg = gpus, tools, nvcc, header, cmake, pkg
         self.free_gb, self.ram_gib, self.direct, self.port_open = free_gb, ram_gib, direct, port_open
-        self.net, self.apps, self.smi_ok = net, apps, smi_ok
+        self.net, self.apps, self.smi_ok, self.ldd = net, apps, smi_ok, ldd
 
     def run(self, cmd):
         if cmd[0] == "nvidia-smi":
@@ -40,6 +41,8 @@ class Fake(doctor.System):
             return 0, self.cmake
         if cmd[0] == "pkg-config":
             return (0 if self.pkg else 1), ""
+        if cmd[0] == "ldd":
+            return 0, self.ldd
         return 1, ""
 
     def which(self, name):
@@ -152,6 +155,13 @@ class Machines(DoctorTest):
         self.assertEqual(checks["build tools"].status, "info")
         self.assertNotIn("nvcc", checks)
         self.assertEqual(checks["engine"].status, "ok")
+        self.assertEqual(checks["libraries"].status, "ok")
+
+    def test_missing_runtime_libraries_name_the_apt_line(self):
+        ldd = "\tlibavcodec.so.60 => not found\n\tlibcurl.so.4 => not found\n\tlibcuda.so.1 => not found\n"
+        c = self.run_checks(Fake(ldd=ldd), binary=True)["libraries"]
+        self.assertEqual(c.status, "fail")
+        self.assertEqual(c.fix, "apt install ffmpeg libcurl4; install the NVIDIA driver (580 or newer)")
 
     def test_nvcc_version_and_header_match(self):
         self.assertEqual(self.run_checks(Fake(nvcc="release 13.4"))["nvcc"].status, "ok")

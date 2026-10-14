@@ -223,14 +223,47 @@ def check_toolchain(sys_: System, inst: Install) -> list[Check]:
     return out
 
 
+# Runtime libraries ldd reported on a built ninfer-serve. The prebuilt tarball is meant to
+# bundle libcudart; until it does, a missing libcudart is the CUDA runtime.
+_APT = {"libavformat": "ffmpeg", "libavcodec": "ffmpeg", "libavutil": "ffmpeg", "libswscale": "ffmpeg",
+        "libcurl": "libcurl4"}
+
+
+def check_libraries(sys_: System, binary: Path) -> Check:
+    code, text = sys_.run(["ldd", str(binary)])
+    missing = [line.split()[0] for line in text.splitlines() if "not found" in line and line.split()]
+    if code != 0 and not missing:
+        return Check("libraries", "warn", "ldd could not read the engine")
+    if not missing:
+        return Check("libraries", "ok", "dynamic libraries resolve")
+    apt, notes = set(), []
+    for name in missing:
+        stem = name.split(".so", 1)[0]
+        if stem in _APT:
+            apt.add(_APT[stem])
+        elif stem.startswith("libcuda"):
+            notes.append("install the NVIDIA driver (580 or newer)")
+        elif stem.startswith("libcudart"):
+            notes.append("install the CUDA 13 runtime (libcudart.so.13)")
+        else:
+            notes.append(name)
+    if apt:
+        notes.insert(0, "apt install " + " ".join(sorted(apt)))
+    return Check("libraries", "fail", "missing " + ", ".join(missing), "; ".join(notes))
+
+
 def check_install(sys_: System, inst: Install, port: int) -> list[Check]:
-    return [
+    rows = [
         Check("engine", "ok" if inst.has_binary else "info",
-              str(inst.binary) if inst.has_binary else "not built yet, goethe serve builds it"),
+              str(inst.binary) if inst.has_binary else "not built yet, goethe serve builds it")]
+    if inst.has_binary:
+        rows.append(check_libraries(sys_, inst.binary))
+    rows += [
         Check("model file", "ok" if inst.has_model else "info",
               str(inst.model_file) if inst.has_model else "not downloaded yet, goethe serve fetches it"),
         Check("port", "ok", f"{port} is free") if sys_.port_free(port)
         else Check("port", "warn", f"{port} is already in use", "stop the other server or pass --port")]
+    return rows
 
 
 def check_network(sys_: System, inst: Install, repo: str) -> Check:
