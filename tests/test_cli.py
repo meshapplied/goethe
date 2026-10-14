@@ -39,7 +39,7 @@ class Surface(unittest.TestCase):
         self.assertEqual(code, 0)
         commands = out.split("positional arguments:")[1].split("options:")[0].splitlines()[2:]
         listed = [line.split()[0] for line in commands if line.strip()]
-        self.assertEqual(listed, ["serve", "list", "connect", "doctor", "update"])
+        self.assertEqual(listed, ["serve", "list", "connect", "doctor", "update", "bench"])
 
     def test_unknown_command_exits_2(self):
         with self.assertRaises(SystemExit) as e, contextlib.redirect_stderr(io.StringIO()):

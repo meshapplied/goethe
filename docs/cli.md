@@ -24,6 +24,8 @@ launcher to `~/.local/bin/goethe`. Everything else is standard library. Run the 
   `--json` for scripts.
 - `goethe doctor` checks driver, GPU, memory, disk, build tools, the engine's dynamic libraries and network, and changes nothing. Each problem comes with a fix.
   Exit code 1 if anything failed. `--json` for scripts.
+- `goethe bench` replays the bundled agent traces against a server that is already running. One stream, temperature 1.
+  Decode tok/s and acceptance come from the engine log (`--log`). The first two requests are not in the mean.
 - `goethe update --check` compares the installed NInfer commit, the down-projection patch and the model file to `NINFER_PIN`.
   It hashes the model file and changes nothing. Exit code 1 if anything differs. `--json` for scripts.
 
