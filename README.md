@@ -126,14 +126,7 @@ Idle serve VRAM ≈ **89.3 / 95.6 GB**.
 
 ## Performance (Qwen3.8-27B NVFP4 NInfer)
 
-32 GiB Blackwell (RTX 5090-class; measured on PRO 6000 with free VRAM capped to ~32 GiB), DFlash2 K=7, T=0. Details on the Hub card [`Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer).
-
-### Agentic coding
-
-| Concurrency | out tok/s | TTFT ms | ITL ms |
-|------------:|----------:|--------:|-------:|
-| 1 | **326** | 218 | 17.0 |
-| 4 | **587** | 365 | 38.7 |
+32 GiB Blackwell, DFlash2 K=7. Agent-replay decode n=1 ≈ **239** tok/s on a physical 5090 (patched ≈ **255**); same protocol on PRO 6000 Max-Q with ~32 GiB free ≈ **241** tok/s. Cold/short-random tables and VRAM on the Hub card [`Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer).
 
 ### Cold prefill and long-context decode
 
