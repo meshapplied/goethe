@@ -20,3 +20,4 @@ dist/
 build/
 .eggs/
 *.local.toml
+docs/gpu-checks.md
