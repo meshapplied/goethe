@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 Runner = Callable[[list[str]], tuple[int, str]]
 
-QUERY = ("index,name,memory.total,memory.free,driver_version,compute_cap,power.limit,"
+QUERY = ("index,name,memory.total,memory.free,driver_version,compute_cap,"
          "pcie.link.width.current,pcie.link.width.max")
 
 
@@ -30,7 +30,6 @@ class Gpu:
     free_mib: int
     driver: str
     compute_cap: str
-    power_limit_w: float | None
     pcie_width: int | None
     pcie_width_max: int | None
 
@@ -50,12 +49,11 @@ def parse(csv: str) -> list[Gpu]:
     gpus = []
     for line in csv.strip().splitlines():
         f = [x.strip() for x in line.split(",")]
-        if len(f) != 9:
+        if len(f) != 8:
             raise ValueError(f"unexpected nvidia-smi line: {line!r}")
         gpus.append(Gpu(
             index=int(f[0]), name=f[1], total_mib=int(f[2]), free_mib=int(f[3]), driver=f[4],
-            compute_cap=f[5], power_limit_w=_num(f[6], float),
-            pcie_width=_num(f[7], int), pcie_width_max=_num(f[8], int)))
+            compute_cap=f[5], pcie_width=_num(f[6], int), pcie_width_max=_num(f[7], int)))
     return gpus
 
 
