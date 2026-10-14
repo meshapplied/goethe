@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Qwen3.8-27B NVFP4 NInfer: cold prefill/long-ctx + VRAM tables; agent-replay n=1 re-check **241** tok/s on 32 GiB-capped PRO 6000 (matches 5090 ~239/255).
+- Qwen3.8-27B NVFP4 NInfer: agentic table (c1 **255** / c4 **686**) plus cold prefill/long-ctx + VRAM.
 - DeepSeek-V4.1 Ternary performance: agentic **194** tok/s (conc=1 TP4) and cold prefill/long-ctx latency tables.
 - Flash-Next Ternary performance: agentic **168** tok/s (conc=1 TP1) and cold prefill/long-ctx latency tables.
 - Flash-Next NVFP4 performance: agentic **184** tok/s (conc=1) and cold prefill/long-ctx latency tables.
