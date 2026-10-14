@@ -15,7 +15,10 @@ mkdir -p "$NVFP4_HOME"
 [ -d "$SRC/.git" ] || git clone "$NINFER_REPO" "$SRC"
 git -C "$SRC" fetch --quiet origin
 git -C "$SRC" checkout --quiet --force "$NINFER_REV"
-[ "${NVFP4_PATCHES:-1}" = 0 ] || git -C "$SRC" apply "$HERE/patches/ninfer-dn-sched.patch"
+if [ "${NVFP4_PATCHES:-1}" != 0 ]; then
+  git -C "$SRC" apply "$HERE/patches/ninfer-dn-sched.patch"
+  git -C "$SRC" apply "$HERE/patches/openai-tool-name-128.patch"
+fi
 
 cmake -S "$SRC" -B "$SRC/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build "$SRC/build" -j "${JOBS:-$(nproc)}"

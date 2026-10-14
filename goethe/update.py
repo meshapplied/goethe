@@ -9,14 +9,13 @@ from pathlib import Path
 from goethe.doctor import Check
 from goethe.engine import Install
 
-PATCH = "patches/ninfer-dn-sched.patch"
-
 
 def check(inst: Install, pin: dict[str, str]) -> list[Check]:
     src = inst.home / "ninfer"
     rev = _rev(src)
     want = pin["NINFER_REV"]
-    rows = [_rev_row(rev, want), _patch_row(src, inst.recipe / PATCH, rev == want)]
+    rows = [_rev_row(rev, want)]
+    rows += [_patch_row(src, patch, rev == want) for patch in sorted((inst.recipe / "patches").glob("*.patch"))]
     rows.append(Check("binary", "ok", str(inst.binary)) if inst.has_binary
                 else Check("binary", "fail", "ninfer-serve is not built", "run goethe serve"))
     rows.append(_model_row(inst, pin))

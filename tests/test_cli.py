@@ -7,11 +7,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from goethe import cli, engine, hw
+from goethe import cli, engine, fit, hw
 from tests.fixtures import PRO_6000, RTX_3090, RTX_5090
 
 
-def run(*argv, gpus=(RTX_5090,), env=None, config=None, busy=False):
+def run(*argv, gpus=(RTX_5090,), env=None, config=None, busy=False, fitted=None):
     """(exit code, stdout, stderr) of goethe with a fake GPU list and an empty home."""
     out, err = io.StringIO(), io.StringIO()
     with tempfile.TemporaryDirectory() as home:
@@ -21,13 +21,13 @@ def run(*argv, gpus=(RTX_5090,), env=None, config=None, busy=False):
             (Path(home) / ".config" / "goethe" / "config.toml").write_text(config)
         probe = (list(gpus), None) if gpus else ([], "nvidia-smi not found")
 
-        def fitted(plan, argv, model_file):
+        def default_fitted(plan, argv, model_file):
             from goethe import fit
             return fit.Fit(int(plan.value("context")), int(plan.value("lanes")), int(plan.value("context")), 1)
 
         with mock.patch.dict(os.environ, environ, clear=True), mock.patch.object(hw, "probe", lambda *a: probe), \
                 mock.patch.object(engine, "port_in_use", lambda *a: busy), \
-                mock.patch.object(cli, "_fitted", fitted), \
+                mock.patch.object(cli, "_fitted", fitted or default_fitted), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main(list(argv))
     return code, out.getvalue(), err.getvalue()
@@ -48,6 +48,15 @@ class Surface(unittest.TestCase):
 
 
 class Serve(unittest.TestCase):
+    def test_a_fit_failure_is_one_line(self):
+        def boom(*_a, **_k):
+            raise fit.ProbeError("still does not fit after 4 boots")
+
+        with mock.patch("subprocess.run"):
+            code, _, err = run("serve", fitted=boom)
+        self.assertEqual(code, 1)
+        self.assertEqual(err, "error: still does not fit after 4 boots\n")
+
     def test_dry_run_prints_plan_commands_and_runs_nothing(self):
         with mock.patch("subprocess.run") as sub, mock.patch("os.execv") as ex:
             code, out, _ = run("serve", "--dry-run")

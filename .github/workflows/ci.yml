@@ -34,3 +34,4 @@ jobs:
           git clone --quiet --filter=blob:none --no-checkout "$NINFER_REPO" ninfer
           git -C ninfer checkout --quiet "$NINFER_REV"
           git -C ninfer apply --check "$GITHUB_WORKSPACE/nvfp4-kernels/patches/ninfer-dn-sched.patch"
+          git -C ninfer apply --check "$GITHUB_WORKSPACE/nvfp4-kernels/patches/openai-tool-name-128.patch"

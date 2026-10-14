@@ -263,7 +263,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return {"serve": cmd_serve, "list": cmd_list, "doctor": cmd_doctor,
                 "connect": cmd_connect, "update": cmd_update,
                 "bench": cmd_bench, "rollback": cmd_rollback}[args.command](args)
-    except (resolve.ResolveError, registry.RegistryError) as e:
+    except (resolve.ResolveError, registry.RegistryError, fit.ProbeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     except subprocess.CalledProcessError as e:
