@@ -2,19 +2,19 @@ import unittest
 
 from goethe import hw
 
-LINE = "0, NVIDIA GeForce RTX 5090, 32607, 32100, 580.178.04, 12.0, 575.00, 16, 16"
+LINE = "0, NVIDIA GeForce RTX 5090, 32607, 32100, 580.178.04, 12.0, 16, 16"
 
 
 class Probe(unittest.TestCase):
     def test_parse(self):
         (g,) = hw.parse(LINE + "\n")
         self.assertEqual((g.index, g.name, g.total_mib, g.free_mib), (0, "NVIDIA GeForce RTX 5090", 32607, 32100))
-        self.assertEqual((g.driver, g.compute_cap, g.power_limit_w, g.pcie_width), ("580.178.04", "12.0", 575.0, 16))
+        self.assertEqual((g.driver, g.compute_cap, g.pcie_width), ("580.178.04", "12.0", 16))
         self.assertAlmostEqual(g.total_gib, 31.84, places=2)
 
     def test_not_available_fields_become_none(self):
-        (g,) = hw.parse("1, GPU X, 100, 50, 580.1, 12.0, [N/A], [N/A], [N/A]")
-        self.assertEqual((g.index, g.power_limit_w, g.pcie_width, g.pcie_width_max), (1, None, None, None))
+        (g,) = hw.parse("1, GPU X, 100, 50, 580.1, 12.0, [N/A], [N/A]")
+        self.assertEqual((g.index, g.pcie_width, g.pcie_width_max), (1, None, None))
 
     def test_two_gpus(self):
         self.assertEqual([g.index for g in hw.parse(LINE + "\n" + LINE.replace("0,", "1,", 1))], [0, 1])
@@ -35,7 +35,7 @@ class Probe(unittest.TestCase):
         seen = []
         hw.probe(lambda cmd: (seen.append(cmd), (0, LINE))[1])
         self.assertIn(f"--query-gpu={hw.QUERY}", seen[0])
-        self.assertEqual(hw.QUERY.count(",") + 1, 9)
+        self.assertEqual(hw.QUERY.count(",") + 1, 8)
 
     def test_compute_apps(self):
         out = "4242, /usr/bin/python3, 2048\n77, weird, name, [N/A]\n"

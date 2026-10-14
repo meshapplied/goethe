@@ -16,7 +16,7 @@ TOOLS = ("git", "cmake", "ninja", "pkg-config", "curl", "c++", "nvcc")
 
 
 def smi(*gpus):
-    return "\n".join(f"{g.index}, {g.name}, {g.total_mib}, {g.free_mib}, {g.driver}, {g.compute_cap}, 575.00, "
+    return "\n".join(f"{g.index}, {g.name}, {g.total_mib}, {g.free_mib}, {g.driver}, {g.compute_cap}, "
                      f"{g.pcie_width}, {g.pcie_width_max}" for g in gpus)
 
 
