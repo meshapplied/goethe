@@ -5,11 +5,12 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
 
-from goethe import __version__, doctor, engine, fit, hw, registry, resolve, store
+from goethe import __version__, connect, doctor, engine, fit, hw, registry, resolve, store
 
 PROG = "goethe"
 
@@ -36,6 +37,11 @@ def _parser() -> argparse.ArgumentParser:
 
     ls = sub.add_parser("list", help="models and whether this GPU can run them")
     ls.add_argument("--json", action="store_true")
+
+    cn = sub.add_parser("connect", help="run a coding agent against the server, for one command")
+    cn.add_argument("harness", help="claude, codex, aider, opencode, qwen, goose, kilo or mini-swe-agent")
+    cn.add_argument("--port", type=int, default=8080)
+    cn.add_argument("--print", dest="show", action="store_true", help="print the command, run nothing")
 
     dr = sub.add_parser("doctor", help="check this machine, change nothing")
     dr.add_argument("--json", action="store_true")
@@ -121,6 +127,47 @@ def _fitted(plan: resolve.Plan, argv: list[str], model_file) -> fit.Fit:
     return result
 
 
+def cmd_connect(args: argparse.Namespace) -> int:
+    model = next(iter(registry.load().values()))
+    try:
+        cached = json.loads(fit.tune_path().read_text()) if fit.tune_path().exists() else {}
+    except (OSError, json.JSONDecodeError):
+        cached = {}
+    context = cached.get("context", model.profiles["agent"].context) if isinstance(cached, dict) else \
+        model.profiles["agent"].context
+    env, argv = connect.command(args.harness, model.served_name, args.port, context)
+    argv += args.engine_args
+    if args.harness == "kilo":
+        root = store.state_dir() / "connect-kilo"
+        env["XDG_CONFIG_HOME"] = str(root)
+        body = connect.kilo_config(connect.BASE.format(port=args.port), model.served_name)
+    else:
+        root, body = None, None
+    if args.show:
+        if body:
+            print(body)
+        for key, value in env.items():
+            print(f"{key}={value}")
+        print(shlex.join(argv))
+        return 0
+    if not engine.healthy("127.0.0.1", args.port):
+        print(f"error: nothing is serving on port {args.port}. Run `goethe serve` first.", file=sys.stderr)
+        return 1
+    missing = connect.conforms(args.port)
+    if missing:
+        print(f"error: the server is missing {', '.join(missing)}", file=sys.stderr)
+        return 1
+    if body:
+        dest = root / "kilo"
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "kilo.jsonc").write_text(body)
+    binary = shutil.which(argv[0])
+    if binary is None:
+        print(f"error: {argv[0]} is not installed", file=sys.stderr)
+        return 1
+    os.execve(binary, argv, {**os.environ, **env})
+
+
 def cmd_list(args: argparse.Namespace) -> int:
     models = registry.load()
     gpus, err = hw.probe()
@@ -166,11 +213,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.command:
         parser.print_help()
         return 0
-    if engine_args and args.command != "serve":
-        parser.error("arguments after -- only apply to serve")
+    if engine_args and args.command not in ("serve", "connect"):
+        parser.error("arguments after -- only apply to serve and connect")
     args.engine_args = engine_args
     try:
-        return {"serve": cmd_serve, "list": cmd_list, "doctor": cmd_doctor}[args.command](args)
+        return {"serve": cmd_serve, "list": cmd_list, "doctor": cmd_doctor,
+                "connect": cmd_connect}[args.command](args)
     except (resolve.ResolveError, registry.RegistryError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

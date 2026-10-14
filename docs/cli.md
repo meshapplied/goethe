@@ -17,6 +17,9 @@ launcher to `~/.local/bin/goethe`. Everything else is standard library. Run the 
   `nvfp4-kernels/`), then starts an OpenAI, Responses and Anthropic compatible server on `127.0.0.1:8080`.
   `--explain` prints every setting with where it came from and why; `--dry-run` also prints the commands and runs nothing.
   Arguments after `--` go to `ninfer-serve` unchanged. If a healthy server already answers on the port, it says so and stops.
+- `goethe connect <harness>` runs a coding agent against the server for one command. It sets environment variables and runs nothing else; it does not edit a config file. `--print` shows the command, arguments after `--` go to the agent. The agent has to be installed already.
+  claude, codex, aider, opencode, qwen, goose, kilo and mini-swe-agent work this way. Claude Code is started with thinking off and `--effort medium`, because the server rejects Claude's own defaults. Codex is started with web search off, because the server has no such tool. A headless `qwen` waits forever for approval unless you pass `-y`. Kilo reads a config file and has no env override, so connect writes one under the state directory and points that run at it.
+  continue, zed, cursor, jan, roo and cline are refused: each is configured through its own file or settings screen.
 - `goethe list` shows each model and whether this GPU can run it: `tested`, `compatible`, or `unsupported` with the reason.
   `--json` for scripts.
 - `goethe doctor` checks driver, GPU, memory, disk, build tools and network, and changes nothing. Each problem comes with a fix.
