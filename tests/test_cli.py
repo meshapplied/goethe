@@ -20,8 +20,14 @@ def run(*argv, gpus=(RTX_5090,), env=None, config=None, busy=False):
             (Path(home) / ".config" / "goethe").mkdir(parents=True)
             (Path(home) / ".config" / "goethe" / "config.toml").write_text(config)
         probe = (list(gpus), None) if gpus else ([], "nvidia-smi not found")
+
+        def fitted(plan, argv, model_file):
+            from goethe import fit
+            return fit.Fit(int(plan.value("context")), int(plan.value("lanes")), int(plan.value("context")), 1)
+
         with mock.patch.dict(os.environ, environ, clear=True), mock.patch.object(hw, "probe", lambda *a: probe), \
                 mock.patch.object(engine, "port_in_use", lambda *a: busy), \
+                mock.patch.object(cli, "_fitted", fitted), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main(list(argv))
     return code, out.getvalue(), err.getvalue()
@@ -66,7 +72,7 @@ class Serve(unittest.TestCase):
 
     def test_passthrough_goes_to_the_engine(self):
         _, out, _ = run("serve", "--dry-run", "--", "--request-log-jsonl", "/tmp/r.jsonl")
-        self.assertTrue(out.splitlines()[-1].endswith("--request-log-jsonl /tmp/r.jsonl"), out)
+        self.assertIn("--request-log-jsonl /tmp/r.jsonl", out)
 
     def test_set_flag(self):
         _, out, _ = run("serve", "--explain", "--set", "lanes=2", "--set", "kv_dtype=nvfp4")

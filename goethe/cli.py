@@ -9,7 +9,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 
-from goethe import __version__, doctor, engine, hw, registry, resolve, store
+from goethe import __version__, doctor, engine, fit, hw, registry, resolve, store
 
 PROG = "goethe"
 
@@ -85,6 +85,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         for cmd in engine.commands(inst):
             print("run     ", shlex.join(cmd))
         print("exec    ", shlex.join(resolve.server_argv(plan, inst.binary, inst.model_file, redact=True)))
+        print(f"fit      context and lanes probed against the engine, cached in {fit.tune_path()}")
     if args.explain or args.dry_run:
         return 0
     host, port = str(plan.value("host")), int(plan.value("port"))
@@ -96,12 +97,28 @@ def cmd_serve(args: argparse.Namespace) -> int:
               "a server may still be starting, or pick another port with --port", file=sys.stderr)
         return 1
     engine.ensure(inst)
+    argv = resolve.server_argv(plan, inst.binary, inst.model_file)
+    result = _fitted(plan, argv, inst.model_file)
+    if (result.context, result.lanes) != (plan.value("context"), plan.value("lanes")):
+        print(f"fitted to {result.lanes} lanes and {result.context} context "
+              f"({result.kv_tokens} KV tokens, {result.attempts} boots)")
+    plan.settings["context"].value, plan.settings["lanes"].value = result.context, result.lanes
+    argv = resolve.server_argv(plan, inst.binary, inst.model_file)
     if plan.settings.get("api_key", resolve.Setting("", "")).source == "generated":
         print(f"API key: {store.state_dir() / 'api_key'}")
     print(f"serving {plan.model.served_name} on http://{host}:{port} "
           f"({plan.value('lanes')} lanes, {plan.value('context')} context, {plan.profile})", flush=True)
-    argv = resolve.server_argv(plan, inst.binary, inst.model_file)
     os.execv(argv[0], argv)
+
+
+def _fitted(plan: resolve.Plan, argv: list[str], model_file) -> fit.Fit:
+    """The cached fit when it still applies, otherwise a fresh probe saved for next time."""
+    key, path, free = fit.cache_key(plan, model_file), fit.tune_path(), fit.free_mib()
+    if (cached := fit.load(path, key, free)):
+        return fit.Fit(cached["context"], cached["lanes"], cached["kv_tokens"], 0)
+    result = fit.fit(plan, argv, path.with_suffix(".log"))
+    fit.save(path, key, result, free)
+    return result
 
 
 def cmd_list(args: argparse.Namespace) -> int:
