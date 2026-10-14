@@ -51,13 +51,18 @@ def fit(plan: Plan, argv: list[str], log: Path, *, boot: Callable[[list[str], Pa
         text = boot(engine_argv(argv, context, lanes, port=PROBE_PORT), log)
         if (got := CAPACITY.search(text)):
             return Fit(context, lanes, int(got[1].replace(",", "")), attempt)
-        if not FATAL.search(text):
+        if not _failed(text):
             raise ProbeError(f"boot {attempt} neither started nor gave the reservation error")
         context -= STEP
         if context < STEP:
             raise ProbeError(f"boot {attempt} does not fit even at the smallest context")
         time.sleep(2)  # GPU memory from the failed boot is freed within a second; don't boot on top of it
     raise ProbeError(f"still does not fit after {ATTEMPTS} boots")
+
+
+def _failed(text: str) -> bool:
+    """Reservation shortfall and CUDA out-of-memory are both a boot that did not start."""
+    return FATAL.search(text) is not None or "cudaErrorMemoryAllocation" in text
 
 
 def engine_argv(argv: list[str], context: int, lanes: int, port: int | None = None) -> list[str]:
@@ -90,7 +95,7 @@ def _boot(argv: list[str], log: Path, seconds: float = 40) -> str:
             if not chunk:
                 break
             text += chunk.decode(errors="replace")
-            if "listening on" in text or FATAL.search(text):
+            if "listening on" in text or _failed(text):
                 return text
         raise ProbeError(f"boot produced no result in {seconds:.0f}s")
     finally:

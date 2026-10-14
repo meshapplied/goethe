@@ -55,6 +55,23 @@ class FitLoop(unittest.TestCase):
             # the correct probe returns in about 8s; missing the line costs four full timeouts
             self.assertLess(time.monotonic() - started_at, 14)
 
+    def test_cuda_oom_lowers_context_without_waiting_out_the_probe(self):
+        line = ("FATAL server failed during startup | cudaMalloc failed: "
+                "cudaErrorMemoryAllocation: out of memory")
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "tune.log"
+            seen = Path(d) / "argv"
+            fake = Path(d) / "engine.py"
+            fake.write_text("import sys, time\n"
+                            f"open({str(seen)!r}, 'a').write(' '.join(sys.argv) + '\\n')\n"
+                            f"print({line!r}, flush=True)\ntime.sleep(30)\n")
+            started_at = time.monotonic()
+            with self.assertRaisesRegex(fit.ProbeError, "still does not fit"):
+                fit.fit(plan("agent"), ["python3", str(fake)], log, seconds=3)
+            self.assertLess(time.monotonic() - started_at, 16)
+            contexts = [int(row.split("--max-context ")[1].split()[0]) for row in seen.read_text().splitlines()]
+        self.assertEqual(contexts, [100000, 83616, 67232, 50848])
+
     def test_real_boot_creates_the_log_and_kills_the_engine(self):
         with tempfile.TemporaryDirectory() as d:
             log = Path(d) / "new" / "tune.log"
