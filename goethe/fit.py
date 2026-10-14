@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import subprocess
 import time
 from collections.abc import Callable
@@ -36,16 +37,6 @@ class Fit:
     lanes: int
     kv_tokens: int
     attempts: int
-
-
-def _context(plan: Plan, value: int) -> Plan:
-    plan.settings["context"].value = value
-    return plan
-
-
-def _lanes(plan: Plan, value: int) -> Plan:
-    plan.settings["lanes"].value = value
-    return plan
 
 
 def fit(plan: Plan, argv: list[str], log: Path, *, boot: Callable[[list[str], Path], str] | None = None,
@@ -86,24 +77,32 @@ def engine_argv(argv: list[str], context: int, lanes: int, port: int | None = No
 
 def _boot(argv: list[str], log: Path, seconds: float = 40) -> str:
     """Start the engine, return its log once it listens or dies. Kills it either way."""
-    log.parent.mkdir(parents=True, exist_ok=True)
-    log.write_text("")
-    with log.open("a") as out:
-        proc = subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT)  # noqa: S603 argv is our own
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)  # noqa: S603 argv is our own
+    # reading the pipe, not a file: a block-buffered child never flushes to a file the probe can re-read
+    text, poller = "", selectors.DefaultSelector()
+    poller.register(proc.stdout, selectors.EVENT_READ)
     try:
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            text = log.read_text(errors="replace")
-            if "listening on" in text or FATAL.search(text) or proc.poll() is not None:
+            if not poller.select(timeout=deadline - time.monotonic()):
+                break
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            text += chunk.decode(errors="replace")
+            if "listening on" in text or FATAL.search(text):
                 return text
-            time.sleep(0.5)
         raise ProbeError(f"boot produced no result in {seconds:.0f}s")
     finally:
+        poller.close()
         proc.terminate()
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait(timeout=5)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(text)
 
 
 def cache_key(plan: Plan, model_file: Path) -> dict:
@@ -121,6 +120,8 @@ def load(path: Path, key: dict, free_mib: int) -> dict | None:
         return None
     if cached.get("key") != key or free_mib < cached.get("free_mib", 0):
         return None
+    if not all(k in cached for k in ("context", "lanes", "kv_tokens")):
+        return None  # a hand-edited or older file is a cache miss, not a crash in serve
     return cached
 
 
@@ -133,7 +134,10 @@ def save(path: Path, key: dict, result: Fit, free_mib: int) -> None:
 def free_mib() -> int:
     code, out = __import__("goethe.hw", fromlist=["run"]).run(
         ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"])
-    return int(out.splitlines()[0]) if code == 0 and out.strip() else 0
+    try:
+        return int(out.splitlines()[0])
+    except (IndexError, ValueError):
+        return 0  # nvidia-smi failed; treated as no free memory, so the cache is not trusted
 
 
 def tune_path(env: os._Environ | dict | None = None) -> Path:

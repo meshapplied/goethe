@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -39,6 +40,20 @@ class FitLoop(unittest.TestCase):
             got = fit.fit(plan(), ["serve", "--port", "8080", "--max-context", "1", "--max-concurrency", "1"],
                           Path(d) / "tune.log", boot=boot)
         self.assertEqual((got.context, got.lanes, got.kv_tokens, got.attempts), (131072, 1, 131072, 1))
+
+    def test_probe_reads_block_buffered_output(self):
+        # the real engine block-buffers stdout, so this fails if the probe reads a buffered pipe
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "tune.log"
+            fake = Path(d) / "engine.py"
+            line = ("FATAL minimum Engine runtime reservation requires 9 bytes in addition to 1 bytes "
+                    "of automatic headroom, but only 5 bytes are available")
+            fake.write_text(f"import time\nprint({line!r}, flush=True)\ntime.sleep(30)\n")
+            started_at = time.monotonic()
+            with self.assertRaisesRegex(fit.ProbeError, "still does not fit"):
+                fit.fit(plan("long"), ["python3", str(fake)], log, seconds=3)
+            # the correct probe returns in about 8s; missing the line costs four full timeouts
+            self.assertLess(time.monotonic() - started_at, 14)
 
     def test_real_boot_creates_the_log_and_kills_the_engine(self):
         with tempfile.TemporaryDirectory() as d:
