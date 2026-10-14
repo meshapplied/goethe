@@ -1,6 +1,6 @@
 # Spikes
 
-Measured on greengoblin, RTX 5090, engine `81c8ce093b2c` with the down-projection patch, model file `qwen3_8_27b_nvfp4.ninfer`. One sample unless a count is given.
+Measured on one RTX 5090, engine `81c8ce093b2c` with the down-projection patch, model file `qwen3_8_27b_nvfp4.ninfer`. One sample unless a count is given.
 
 ## Context above capacity
 
