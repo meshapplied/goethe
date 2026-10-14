@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- DeepSeek-V4.1 Ternary performance: agentic **194** tok/s (conc=1 TP4) and cold prefill/long-ctx latency tables.
 - Flash-Next Ternary performance: agentic **168** tok/s (conc=1 TP1) and cold prefill/long-ctx latency tables.
 - Flash-Next NVFP4 performance: agentic **184** tok/s (conc=1) and cold prefill/long-ctx latency tables.
 - `goethe` command (`serve`, `list`, `doctor`), standard library only, with an installer. See `docs/cli.md`.
