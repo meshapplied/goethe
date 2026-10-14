@@ -54,6 +54,28 @@ Serve commands and knobs live in-repo — open the matching file and follow it:
 
 Pack on-disk format: [docs/pack.md](docs/pack.md). Full Flash-Next NVFP4 serve flags and benches: Hub card [`Qwen3.8-Flash-Next-NVFP4-Latest`](https://huggingface.co/meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest).
 
+## Performance (Flash-Next Ternary)
+
+Single RTX PRO 6000 96 GB, **TP1**, NEXTN 3/4 + hot vocab, T=0. Details on the Hub card [`Qwen3.8-Flash-Next-Ternary-Latest`](https://huggingface.co/meshapplied/Qwen3.8-Flash-Next-Ternary-Latest).
+
+### Agentic coding
+
+| Concurrency | out tok/s | accept | TTFT ms | ITL ms |
+|------------:|----------:|-------:|--------:|-------:|
+| 1 | **168** | 2.99 | 338 | 5.2 |
+| 4 | **265** | 3.03 | 451 | 13.3 |
+
+### Cold prefill and long-context decode
+
+| prompt | decode tok/s | prefill tok/s | TTFT mean / p50 / p90 / p99 (ms) | ITL mean / p50 / p90 / p99 (ms) |
+|------:|-------------:|--------------:|--------------------------------:|-------------------------------:|
+| 1024 | 135 | ~4.2k | 247 / 179 / 448 / 482 | 5.7 / 4.1 / 8.3 / 16.6 |
+| 4096 | 114 | ~9.2k | 444 / 402 / 701 / 820 | 5.7 / 4.2 / 8.4 / 16.8 |
+| 16384 | 61 | ~11k | 1490 / 1524 / 2322 / 2521 | 5.9 / 4.2 / 8.4 / 16.9 |
+| 32768 | 43 | ~13k | 2517 / 2267 / 4240 / 4861 | 5.7 / 4.2 / 8.4 / 17.0 |
+
+Idle serve VRAM ≈ **85.2 / 95.6 GB**.
+
 ## Performance (Flash-Next NVFP4)
 
 Single RTX PRO 6000 96 GB, TP1, NEXTN 3/4 + hot vocab, T=0. Details and percentiles on the Hub card.

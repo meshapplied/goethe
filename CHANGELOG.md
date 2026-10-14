@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Flash-Next Ternary performance: agentic **168** tok/s (conc=1 TP1) and cold prefill/long-ctx latency tables.
 - Flash-Next NVFP4 performance: agentic **184** tok/s (conc=1) and cold prefill/long-ctx latency tables.
 - `goethe` command (`serve`, `list`, `doctor`), standard library only, with an installer. See `docs/cli.md`.
 - `goethe connect` runs a coding agent against the server for one command.
