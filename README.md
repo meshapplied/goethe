@@ -162,6 +162,7 @@ Idle NInfer VRAM ≈ **24.7–27.0 / 32 GiB**.
 | [`examples/`](examples/) | SGLang flags for the other three models |
 | [`ternary-kernels/ternary_runtime/`](ternary-kernels/ternary_runtime/) | Pack download, SGLang patches, CUDA kernels |
 | [`docs/pack.md`](docs/pack.md) | How a ternary pack is laid out on disk |
+| [`docs/HUB_CARDS.md`](docs/HUB_CARDS.md) | Canonical Hub ids and card text contract |
 
 ## License
 

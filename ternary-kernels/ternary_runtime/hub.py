@@ -16,6 +16,13 @@ from typing import Any, Dict, Optional
 
 CONFIG_NAME = "ternary_config.json"
 
+# Old Hub ids that 307 to the ternary cards. fetch() rewrites so docs stay honest.
+LEGACY_REPO_IDS = {
+    "meshapplied/DeepSeek-V4.1-Flash-NVFP4": "meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest",
+    "meshapplied/DeepSeek-V4.1-Flash-NVFP4-latest": "meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest",
+    "meshapplied/qwen3.8-flash-next-ternary-latest": "meshapplied/Qwen3.8-Flash-Next-Ternary-Latest",
+}
+
 
 @dataclass(frozen=True)
 class ResolvedModel:
@@ -94,6 +101,7 @@ def fetch(
     base_local:
         Optional existing local base checkpoint; skips base download when set.
     """
+    repo_id = LEGACY_REPO_IDS.get(repo_id, repo_id)
     root = Path(cache_dir) if cache_dir else _cache_root()
     pack_local = root / "packs" / repo_id.replace("/", "__")
     pack_dir = _snapshot(

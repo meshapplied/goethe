@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Port remaining PR #1 bits: `fetch()` rewrites legacy Hub ids to Ternary-Latest, and `docs/HUB_CARDS.md` records the card contract.
+
 - `goethe serve <model>` starts that model. No name still starts Qwen3.8-27B on NInfer. The other three names run the SGLang command in `examples/`.
 
 - `nvfp4-kernels/image.sh` builds `goethe:pack` from a `pack.sh` tarball. The image does not compile NInfer.
