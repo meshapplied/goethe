@@ -1,9 +1,4 @@
-"""Download ternary packs + base checkpoints for plug-and-play use.
-
-A Hugging Face ternary repo ships the expert pack and ``ternary_config.json``.
-The base model is fetched from the original HF id listed in that config (no need
-to re-upload hundreds of GB of base weights into the ternary repo).
-"""
+"""Download ternary packs and their declared base checkpoints."""
 
 from __future__ import annotations
 
@@ -16,18 +11,9 @@ from typing import Any, Dict, Optional
 
 CONFIG_NAME = "ternary_config.json"
 
-# Old Hub ids that 307 to the ternary cards. fetch() rewrites so docs stay honest.
-LEGACY_REPO_IDS = {
-    "meshapplied/DeepSeek-V4.1-Flash-NVFP4": "meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest",
-    "meshapplied/DeepSeek-V4.1-Flash-NVFP4-latest": "meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest",
-    "meshapplied/qwen3.8-flash-next-ternary-latest": "meshapplied/Qwen3.8-Flash-Next-Ternary-Latest",
-}
-
 
 @dataclass(frozen=True)
 class ResolvedModel:
-    """Local paths after resolve/download."""
-
     pack_dir: Path
     base_dir: Path
     profile: str
@@ -35,7 +21,6 @@ class ResolvedModel:
     repo_id: Optional[str] = None
 
     def apply_env(self) -> None:
-        """Export env vars consumed by sitecustomize / bootstrap."""
         os.environ["TERNARY_PACK_DIR"] = str(self.pack_dir)
         os.environ["TERNARY_PROFILE"] = self.profile
         os.environ["TERNARY_MODEL_DIR"] = str(self.base_dir)
@@ -91,17 +76,6 @@ def fetch(
     base_local: Optional[str] = None,
     apply_env: bool = True,
 ) -> ResolvedModel:
-    """Download ternary pack from ``repo_id`` and its declared base model.
-
-    Parameters
-    ----------
-    repo_id:
-        HF repo containing layer-*.safetensors + ternary_config.json
-        (e.g. ``meshapplied/Qwen3.8-Flash-Next-Ternary-Latest``).
-    base_local:
-        Optional existing local base checkpoint; skips base download when set.
-    """
-    repo_id = LEGACY_REPO_IDS.get(repo_id, repo_id)
     root = Path(cache_dir) if cache_dir else _cache_root()
     pack_local = root / "packs" / repo_id.replace("/", "__")
     pack_dir = _snapshot(
@@ -151,7 +125,6 @@ def resolve_local(
     base_dir: Optional[str | Path] = None,
     apply_env: bool = True,
 ) -> ResolvedModel:
-    """Resolve a local pack that already has ternary_config.json."""
     pack = Path(pack_dir)
     cfg = load_ternary_config(pack)
     profile = cfg.get("profile") or cfg.get("ternary_profile")

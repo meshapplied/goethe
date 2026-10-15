@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Port remaining PR #1 bits: `fetch()` rewrites legacy Hub ids to Ternary-Latest, and `docs/HUB_CARDS.md` records the card contract.
+- `docs/HUB_CARDS.md` records the Hub card contract for the Ternary-Latest ids.
 
 - `goethe serve <model>` starts that model. No name still starts Qwen3.8-27B on NInfer. The other three names run the SGLang command in `examples/`.
 
