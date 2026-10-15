@@ -1,6 +1,16 @@
 # Goethe
 
-Goethe is a runtime and set of model packs for fast coding and research inference on fewer GPUs. The lineup:
+Blackwell, about 30 GiB. This runs the Qwen3.8-27B NVFP4 server. Nothing in this program phones home.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/meshapplied/Goethe/main/install.sh | bash
+goethe doctor
+goethe serve
+```
+
+If a source build stops on a header mismatch, run `goethe doctor`. See [docs/cli.md](docs/cli.md).
+
+## Models
 
 - **DeepSeek-V4.1-Flash Ternary** — complex coding agents and long research loops ([`meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest`](https://huggingface.co/meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest))
 - **Qwen3.8-Flash-Next NVFP4** — everyday coding and STEM chat on one 96 GB GPU ([`meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest`](https://huggingface.co/meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest))
@@ -9,7 +19,7 @@ Goethe is a runtime and set of model packs for fast coding and research inferenc
 
 Ternary packs are expert overlays on a public base checkpoint. NVFP4 packs are full ready-to-serve trees. For ternary models, `ternary_runtime.fetch()` downloads the pack and its base.
 
-## Install
+## Ternary runtime
 
 ```bash
 git clone https://github.com/meshapplied/goethe
@@ -19,16 +29,6 @@ python -c "import ternary_runtime; print(ternary_runtime.__version__)"
 ```
 
 Linux, a CUDA GPU, Python ≥ 3.10, and a matching PyTorch build are required. JIT kernels cache under `~/.cache/ternary-flash/build` (or `$TERNARY_BUILD_DIR`).
-
-## The goethe command
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/meshapplied/Goethe/main/install.sh | bash
-goethe doctor    # check this machine
-goethe serve     # install what is missing and start the Qwen3.8-27B NVFP4 server
-```
-
-See [docs/cli.md](docs/cli.md). It covers the NInfer models for now; the ternary packs below are still used from Python.
 
 ## Fetch a ternary pack
 

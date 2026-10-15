@@ -57,6 +57,18 @@ class Serve(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(err, "error: still does not fit after 4 boots\n")
 
+    def test_unpacked_binary_skips_the_source_build(self):
+        with tempfile.TemporaryDirectory() as packed:
+            binary = Path(packed) / "bin" / "ninfer-serve"
+            binary.parent.mkdir()
+            binary.write_text("#!/bin/sh\n")
+            binary.chmod(0o755)
+            code, out, _ = run("serve", "--dry-run", env={"NVFP4_HOME": packed})
+        self.assertEqual(code, 0)
+        self.assertNotIn("install.sh", out)
+        self.assertIn("fetch_model.sh", out)
+        self.assertIn(str(binary), out)
+
     def test_dry_run_prints_plan_commands_and_runs_nothing(self):
         with mock.patch("subprocess.run") as sub, mock.patch("os.execv") as ex:
             code, out, _ = run("serve", "--dry-run")
