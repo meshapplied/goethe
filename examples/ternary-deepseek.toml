@@ -1,4 +1,4 @@
-# Example DeepSeek-V4.1-Flash ternary serve config.
+# Flags for `goethe serve deepseek-ternary`. fetch downloads the pack and the base, then this command runs.
 
 [model]
 path = "${TERNARY_MODEL_DIR}"

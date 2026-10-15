@@ -39,7 +39,7 @@ class Surface(unittest.TestCase):
         self.assertEqual(code, 0)
         commands = out.split("positional arguments:")[1].split("options:")[0].splitlines()[2:]
         listed = [line.split()[0] for line in commands if line.strip()]
-        self.assertEqual(listed, ["serve", "list", "connect", "doctor", "update", "bench", "rollback"])
+        self.assertEqual(listed, ["serve", "list", "connect", "doctor", "update", "bench"])
 
     def test_unknown_command_exits_2(self):
         with self.assertRaises(SystemExit) as e, contextlib.redirect_stderr(io.StringIO()):
@@ -81,6 +81,48 @@ class Serve(unittest.TestCase):
         self.assertRegex(out, r"run\s+\S+/fetch_model\.sh")
         self.assertRegex(out, r"exec\s+\S+ninfer-serve \S+ --host 127\.0\.0\.1 --port 8080 --model-id qwen3\.8-27b")
         self.assertIn("--max-concurrency 4", out)
+        self.assertNotIn("sglang", out)
+
+    def test_ternary_dry_run_prints_the_sglang_command(self):
+        code, out, _ = run("serve", "qwen-flash-next-ternary", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("ternary_runtime.fetch", out)
+        self.assertIn("sglang.launch_server", out)
+        self.assertIn("--tp-size 2", out)
+        self.assertNotIn("install.sh", out)
+        self.assertNotIn("fit", out)
+
+    def test_nvfp4_dry_run_does_not_fetch(self):
+        code, out, _ = run("serve", "qwen-flash-next-nvfp4", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("sglang.launch_server", out)
+        self.assertIn("${NVFP4_MODEL_DIR}", out)
+        self.assertNotIn("fetch", out)
+
+    def test_nvfp4_row_needs_a_model_directory(self):
+        code, _, err = run("serve", "qwen-flash-next-nvfp4")
+        self.assertEqual(code, 1)
+        self.assertIn("NVFP4_MODEL_DIR", err)
+
+    def test_sglang_row_refuses_when_sglang_is_missing(self):
+        with tempfile.TemporaryDirectory() as model_dir, mock.patch("importlib.util.find_spec", return_value=None), \
+                mock.patch("os.execv") as ex:
+            code, _, err = run("serve", "qwen-flash-next-nvfp4", env={"NVFP4_MODEL_DIR": model_dir})
+        self.assertEqual(code, 1)
+        self.assertEqual(err, "error: sglang is not installed\n")
+        ex.assert_not_called()
+
+    def test_dry_run_without_a_gpu_prints_the_command(self):
+        code, out, err = run("serve", "--dry-run", gpus=())
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("ninfer-serve", out)
+        self.assertIn("fetch_model.sh", out)
+        self.assertNotIn("fit", out)
+
+    def test_serve_without_a_gpu_is_an_error(self):
+        code, _, err = run("serve", gpus=())
+        self.assertEqual(code, 1)
+        self.assertIn("nvidia-smi not found", err)
 
     def test_explain_says_where_each_value_came_from(self):
         _, out, _ = run("serve", "--explain", "--profile", "chat", "--port", "9001", env={"GOETHE_LANES": "2"},
@@ -109,7 +151,6 @@ class Serve(unittest.TestCase):
         for argv, gpus, message in ((["serve", "--dry-run", "--set", "lanes=abc"], (RTX_5090,), "not an integer"),
                                     (["serve", "--dry-run", "--set", "lanes"], (RTX_5090,), "KEY=VALUE"),
                                     (["serve", "--dry-run"], (RTX_3090,), "sm_120a"),
-                                    (["serve", "--dry-run"], (), "nvidia-smi not found"),
                                     (["serve", "nope", "--dry-run"], (RTX_5090,), "unknown model")):
             with self.subTest(argv=argv):
                 code, _, err = run(*argv, gpus=gpus)
@@ -179,6 +220,9 @@ class ListAndDoctor(unittest.TestCase):
         rows = json.loads(run("list", "--json", gpus=(RTX_3090,))[1])
         self.assertEqual((rows[0]["id"], rows[0]["status"], rows[0]["installed"]),
                          ("qwen3-8-27b", "unsupported", False))
+        sglang = [r for r in rows if r["engine"] == "sglang"]
+        self.assertEqual(len(sglang), 3)
+        self.assertTrue(all(r["status"] == "compatible" and "sm_120" not in r["why"] for r in sglang))
         self.assertEqual(json.loads(run("list", "--json", gpus=())[1])[0]["status"], "no gpu")
 
     def test_doctor_exit_code_follows_failures(self):

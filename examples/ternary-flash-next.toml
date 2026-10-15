@@ -1,4 +1,4 @@
-# Example Qwen Flash-Next ternary serve config.
+# Flags for `goethe serve qwen-flash-next-ternary`. fetch downloads the pack and the base, then this command runs.
 
 [model]
 path = "${TERNARY_MODEL_DIR}"

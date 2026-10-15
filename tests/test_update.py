@@ -87,6 +87,23 @@ class Check(unittest.TestCase):
                                                     "MODEL_PATCHED_SHA256": "aa", "MODEL_SHA256": "bb"})}
         self.assertTrue(all(c.status == "fail" for c in rows.values()))
 
+    def test_digest_is_recorded_and_the_server_is_not_started(self):
+        with tempfile.TemporaryDirectory() as d:
+            inst, pin = install(Path(d), b"hello", applied=True)
+            pin["GREEDY_DIGEST"] = "c9da62f164a33a1f"
+            seen = []
+            real = subprocess.run
+
+            def spy(cmd, *args, **kwargs):
+                seen.append(cmd)
+                return real(cmd, *args, **kwargs)
+
+            with unittest.mock.patch("goethe.update.subprocess.run", spy):
+                rows = {c.name: c for c in check(inst, pin)}
+        self.assertEqual(rows["digest"].status, "ok")
+        self.assertEqual(rows["digest"].detail, "c9da62f164a33a1f, replay is not run here")
+        self.assertFalse(any("ninfer-serve" in " ".join(map(str, cmd)) for cmd in seen))
+
 
 if __name__ == "__main__":
     unittest.main()

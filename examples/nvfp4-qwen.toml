@@ -1,4 +1,4 @@
-# Example NVFP4 Flash-Next serve config; set NVFP4_MODEL_DIR to the Hub tree.
+# Flags for `goethe serve qwen-flash-next-nvfp4`. Set NVFP4_MODEL_DIR to the tree. Goethe does not download it.
 
 [model]
 path = "${NVFP4_MODEL_DIR}"

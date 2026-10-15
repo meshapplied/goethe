@@ -19,6 +19,8 @@ def check(inst: Install, pin: dict[str, str]) -> list[Check]:
     rows.append(Check("binary", "ok", str(inst.binary)) if inst.has_binary
                 else Check("binary", "fail", "ninfer-serve is not built", "run goethe serve"))
     rows.append(_model_row(inst, pin))
+    if "GREEDY_DIGEST" in pin:
+        rows.append(Check("digest", "ok", f"{pin['GREEDY_DIGEST']}, replay is not run here"))
     return rows
 
 

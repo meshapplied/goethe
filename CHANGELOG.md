@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `goethe serve <model>` starts that model. No name still starts Qwen3.8-27B on NInfer. The other three names run the SGLang command in `examples/`.
+
+- `nvfp4-kernels/image.sh` builds `goethe:pack` from a `pack.sh` tarball. The image does not compile NInfer.
 - `goethe serve` uses `$NVFP4_HOME/bin/ninfer-serve` when that file is executable, and does not build. `nvfp4-kernels/pack.sh` writes that layout with `libcudart.so.13` beside the binary.
 
 - OpenAI and Responses tool names may be 128 characters, the same limit the Anthropic adapter already had. A fit that cannot boot prints one line instead of a traceback.
@@ -18,7 +21,7 @@
 - `goethe doctor` names missing engine libraries and the apt line.
 - `goethe bench` replays the bundled agent traces and reports token-weighted decode tok/s, cache hit, time to first token, acceptance, tool-call validity and power.
 - `goethe serve` treats a CUDA out-of-memory boot as a failed fit, and lowers context, instead of waiting out the probe.
-- `goethe rollback` flips the engine link. A refused gate leaves the current link where it is.
+- The engine-link command was removed. `serve` starts the binary under `NVFP4_HOME`.
 - `nvfp4-kernels/`: patched NInfer tile for the down projection and a draft-shortlist patch for the model file, applied by `install.sh` and `fetch_model.sh` (about 5 % faster decode).
 - Passive lineup README; serve via [`examples/`](examples/) (ternary + Flash-Next NVFP4).
 - SGLang patch: skip ternary for DSpark/NEXTN draft stages and mismatched expert counts.
