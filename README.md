@@ -1,5 +1,7 @@
 # Goethe
 
+🤗 [View our models](https://meshapplied.com/models)
+
 One command to start the models in this repo on your GPU. The `goethe` package is 1,672 lines of Python, tests not included. Those lines are not an engine. They exec NInfer or SGLang.
 
 ```bash
