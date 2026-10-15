@@ -1,8 +1,8 @@
-# Qwen3.8-27B NVFP4 (NInfer)
+# Qwen3.8-27B NVFP4
 
-Dense hybrid in NVFP4 with MTP and DFlash2 in one artifact. Recipe card: [`meshapplied/Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer). Weights: [`neroued/Qwen3.8-27B-nvfp4-NInfer`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) file `qwen3_8_27b_nvfp4.ninfer` (23.7 GB). Pins in [NINFER_PIN](NINFER_PIN).
+23.7 GB file, Blackwell sm_120a, 32 GiB. `goethe serve` runs these scripts. Card: [`meshapplied/Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer). Weights: [`neroued/Qwen3.8-27B-nvfp4-NInfer`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer), file `qwen3_8_27b_nvfp4.ninfer`. Pins in [NINFER_PIN](NINFER_PIN).
 
-Engine: [NInfer](https://github.com/Neroued/ninfer) at the commit in `NINFER_PIN`, built with one small patch (below). Hardware: Blackwell sm_120a, 32 GiB VRAM (RTX 5090 or RTX PRO 6000). CUDA 13.x with `nvcc`, `cmake`, `ninja`, C++20.
+Engine: [NInfer](https://github.com/Neroued/ninfer) at the commit in `NINFER_PIN`, plus the patches below. CUDA 13.x, `nvcc`, `cmake`, `ninja`, C++20. RTX 5090 is the machine we measured. An RTX PRO 6000 is the same compute capability. We have not run it.
 
 ```bash
 ./run.sh

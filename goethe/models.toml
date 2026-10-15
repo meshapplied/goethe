@@ -29,3 +29,23 @@ why = "one user, short history, smallest KV and runtime reservation"
 lanes = 1
 context = 131072
 why = "one lane with a long window; boots on a 32 GiB card, not benchmarked and not yet fitted to free memory"
+
+[models.qwen-flash-next-ternary]
+title = "Qwen3.8 Flash-Next Ternary"
+engine = "sglang"
+served_name = "qwen38-flash-next"
+config = "examples/ternary-flash-next.toml"
+fetch = "meshapplied/Qwen3.8-Flash-Next-Ternary-Latest"
+
+[models.deepseek-ternary]
+title = "DeepSeek-V4.1-Flash Ternary"
+engine = "sglang"
+served_name = "deepseek-v41-flash-ternary"
+config = "examples/ternary-deepseek.toml"
+fetch = "meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest"
+
+[models.qwen-flash-next-nvfp4]
+title = "Qwen3.8 Flash-Next NVFP4"
+engine = "sglang"
+served_name = "qwen38-flash-next-nvfp4"
+config = "examples/nvfp4-qwen.toml"

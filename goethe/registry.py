@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 MODELS_TOML = Path(__file__).with_name("models.toml")
-ENGINES = {"ninfer"}
+ENGINES = {"ninfer", "sglang"}
+NINFER_KEYS = {"title", "engine", "served_name", "native_context", "recipe",
+               "min_vram_gib", "tested", "base", "profiles"}
+SGLANG_KEYS = {"title", "engine", "served_name", "config"}
 
 
 class RegistryError(ValueError):
@@ -27,12 +30,14 @@ class Model:
     title: str
     engine: str
     served_name: str
-    native_context: int
-    recipe: str
-    min_vram_gib: float
-    tested: tuple[str, ...]
-    base: dict[str, object]
-    profiles: dict[str, Profile]
+    native_context: int = 0
+    recipe: str = ""
+    min_vram_gib: float | None = None
+    tested: tuple[str, ...] = ()
+    base: dict[str, object] = field(default_factory=dict)
+    profiles: dict[str, Profile] = field(default_factory=dict)
+    config: str = ""
+    fetch: str = ""
 
 
 def _table(data: object, where: str, required: set[str]) -> dict:
@@ -46,10 +51,21 @@ def _table(data: object, where: str, required: set[str]) -> dict:
 
 def _model(model_id: str, raw: object) -> Model:
     where = f"models.{model_id}"
-    t = _table(raw, where, {"title", "engine", "served_name", "native_context", "recipe",
-                            "min_vram_gib", "tested", "base", "profiles"})
-    if t["engine"] not in ENGINES:
+    if not isinstance(raw, dict):
+        raise RegistryError(f"{where}: expected a table")
+    engine = raw.get("engine")
+    if engine == "sglang":
+        keys = SGLANG_KEYS | ({"fetch"} if "fetch" in raw else set())
+        t = _table(raw, where, keys)
+        if not isinstance(t["config"], str) or not t["config"]:
+            raise RegistryError(f"{where}: config must be a path")
+        fetch = t.get("fetch", "")
+        if not isinstance(fetch, str) or ("fetch" in t and not fetch):
+            raise RegistryError(f"{where}: fetch must be a Hugging Face repo id")
+        return Model(model_id, t["title"], "sglang", t["served_name"], config=t["config"], fetch=fetch)
+    if engine != "ninfer":
         raise RegistryError(f"{where}: engine must be one of {sorted(ENGINES)}")
+    t = _table(raw, where, NINFER_KEYS)
     base = _table(t["base"], f"{where}.base", {"kv_dtype", "spec", "draft_tokens", "prefill_chunk"})
     profiles = {}
     for name, body in _table(t["profiles"], f"{where}.profiles", {"agent", "chat", "long"}).items():

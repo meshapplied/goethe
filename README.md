@@ -1,6 +1,6 @@
 # Goethe
 
-Blackwell, about 30 GiB. This runs the Qwen3.8-27B NVFP4 server. Nothing in this program phones home.
+One command to start the models in this repo on your GPU. The `goethe` package is 1,699 lines of Python, tests not included. Those lines are not an engine. They exec NInfer or SGLang.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/meshapplied/Goethe/main/install.sh | bash
@@ -8,18 +8,26 @@ goethe doctor
 goethe serve
 ```
 
-If a source build stops on a header mismatch, run `goethe doctor`. See [docs/cli.md](docs/cli.md).
+`goethe serve` with no name starts Qwen3.8-27B on NInfer, at `127.0.0.1:8080`. It builds NInfer if the binary is missing and downloads the weights if the file is missing. Run `goethe doctor` first. It tells you if this GPU can do that.
+
+A name starts a different model. `goethe serve qwen-flash-next-ternary` and `goethe serve deepseek-ternary` download a pack and the public base checkpoint, then run the SGLang command in `examples/`. `goethe serve qwen-flash-next-nvfp4` runs the Flash-Next NVFP4 command, and only if `NVFP4_MODEL_DIR` already points at the tree. Goethe does not install SGLang. If `python -m sglang.launch_server` is missing, serve stops and says so.
+
+If the 27B build dies on a CUDA header mismatch, `goethe doctor` names the fix. The rest of the commands are in [docs/cli.md](docs/cli.md).
 
 ## Models
 
-- **DeepSeek-V4.1-Flash Ternary** — complex coding agents and long research loops ([`meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest`](https://huggingface.co/meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest))
-- **Qwen3.8-Flash-Next NVFP4** — everyday coding and STEM chat on one 96 GB GPU ([`meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest`](https://huggingface.co/meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest))
-- **Qwen3.8-27B NVFP4 NInfer** — personal agents ([`meshapplied/Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer))
-- **Qwen3.8-Flash-Next Ternary** — fast retrieval and data analysis ([`meshapplied/Qwen3.8-Flash-Next-Ternary-Latest`](https://huggingface.co/meshapplied/Qwen3.8-Flash-Next-Ternary-Latest))
+`goethe list` prints these ids and whether this GPU is in the tested set.
 
-Ternary packs are expert overlays on a public base checkpoint. NVFP4 packs are full ready-to-serve trees. For ternary models, `ternary_runtime.fetch()` downloads the pack and its base.
+- **qwen3-8-27b**, Qwen3.8-27B NVFP4. NInfer. Measured on an RTX 5090. The GPU needs 30 GiB. [`meshapplied/Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer)
+- **qwen-flash-next-ternary**, Qwen3.8 Flash-Next ternary. SGLang, two GPUs. Serve downloads the pack and the base. [`meshapplied/Qwen3.8-Flash-Next-Ternary-Latest`](https://huggingface.co/meshapplied/Qwen3.8-Flash-Next-Ternary-Latest)
+- **deepseek-ternary**, DeepSeek-V4.1-Flash ternary. SGLang, four GPUs. Same download. [`meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest`](https://huggingface.co/meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest)
+- **qwen-flash-next-nvfp4**, Qwen3.8 Flash-Next NVFP4. SGLang, one 96 GB GPU. The tree has to already be on disk. [`meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest`](https://huggingface.co/meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest)
+
+A ternary pack is the expert weights laid over a public base checkpoint. An NVFP4 pack is the whole model.
 
 ## Ternary runtime
+
+`goethe serve` calls this for the two ternary ids. Install it yourself when you want `fetch` from Python.
 
 ```bash
 git clone https://github.com/meshapplied/goethe
@@ -28,7 +36,7 @@ pip install -e ./ternary-kernels
 python -c "import ternary_runtime; print(ternary_runtime.__version__)"
 ```
 
-Linux, a CUDA GPU, Python ≥ 3.10, and a matching PyTorch build are required. JIT kernels cache under `~/.cache/ternary-flash/build` (or `$TERNARY_BUILD_DIR`).
+Linux, a CUDA GPU, Python ≥ 3.10, and a PyTorch build that matches the GPU. The JIT cache is `~/.cache/ternary-flash/build`, or `$TERNARY_BUILD_DIR` if you set it.
 
 ## Fetch a ternary pack
 
@@ -40,19 +48,19 @@ m = ternary_runtime.fetch("meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest")
 ternary_runtime.bootstrap()
 ```
 
-This sets `TERNARY_PACK_DIR`, `TERNARY_MODEL_DIR`, and `TERNARY_PROFILE`.
+That sets `TERNARY_PACK_DIR`, `TERNARY_MODEL_DIR`, and `TERNARY_PROFILE` in the process. `bootstrap()` applies the SGLang patches.
 
-## Run
+## SGLang flags
 
-Serve commands and knobs live in-repo — open the matching file and follow it:
+`goethe serve <id>` reads the matching file and execs it. The flags are here if you want to see them, or change them.
 
-| Model | Start here |
-|-------|------------|
+| Model | Flags |
+|-------|-------|
 | Qwen Flash-Next ternary | [`examples/ternary-flash-next.toml`](examples/ternary-flash-next.toml) |
 | DeepSeek ternary | [`examples/ternary-deepseek.toml`](examples/ternary-deepseek.toml) |
 | Qwen Flash-Next NVFP4 | [`examples/nvfp4-qwen.toml`](examples/nvfp4-qwen.toml) |
 
-Pack on-disk format: [docs/pack.md](docs/pack.md). Full Flash-Next NVFP4 serve flags and benches: Hub card [`Qwen3.8-Flash-Next-NVFP4-Latest`](https://huggingface.co/meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest).
+Pack format: [docs/pack.md](docs/pack.md). The Flash-Next NVFP4 numbers and the full flag list are on the Hub card [`Qwen3.8-Flash-Next-NVFP4-Latest`](https://huggingface.co/meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest).
 
 ## Performance (DeepSeek-V4.1 Ternary)
 
@@ -148,12 +156,12 @@ Idle NInfer VRAM ≈ **24.7–27.0 / 32 GiB**.
 
 ## Layout
 
-| Path | Role |
-|------|------|
-| [`ternary-kernels/ternary_runtime/`](ternary-kernels/ternary_runtime/) | Loader, Hub fetch, SGLang patches, CUDA kernels |
-| [`examples/`](examples/) | Serve config templates |
-| [`docs/pack.md`](docs/pack.md) | Expert pack contract |
-| [`nvfp4-kernels/`](nvfp4-kernels/) | Optional Qwen3.8-27B NInfer helpers |
+| Path | What it is |
+|------|------------|
+| [`nvfp4-kernels/`](nvfp4-kernels/) | Build NInfer, download the 27B file, start that server |
+| [`examples/`](examples/) | SGLang flags for the other three models |
+| [`ternary-kernels/ternary_runtime/`](ternary-kernels/ternary_runtime/) | Pack download, SGLang patches, CUDA kernels |
+| [`docs/pack.md`](docs/pack.md) | How a ternary pack is laid out on disk |
 
 ## License
 

@@ -44,9 +44,30 @@ def load_text(text):
 class Load(unittest.TestCase):
     def test_registry_in_the_repo_loads(self):
         models = registry.load()
+        self.assertEqual(list(models), [
+            "qwen3-8-27b", "qwen-flash-next-ternary", "deepseek-ternary", "qwen-flash-next-nvfp4"])
         m = models["qwen3-8-27b"]
         self.assertEqual((m.engine, m.served_name, m.native_context), ("ninfer", "qwen3.8-27b", 262144))
         self.assertEqual(set(m.profiles), {"agent", "chat", "long"})
+        self.assertEqual(models["qwen-flash-next-nvfp4"].fetch, "")
+        self.assertEqual(models["deepseek-ternary"].fetch, "meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest")
+
+    def test_the_command_line_count_is_the_number_in_the_readme(self):
+        root = Path(__file__).resolve().parents[1]
+        n = sum(len(p.read_text().splitlines()) for p in (root / "goethe").glob("*.py"))
+        self.assertIn(f"{n:,} lines", (root / "README.md").read_text())
+
+    def test_sglang_row_rejects_an_unknown_key(self):
+        text = """
+[models.x]
+title = "X"
+engine = "sglang"
+served_name = "x"
+config = "examples/nvfp4-qwen.toml"
+min_vram_gib = 1
+"""
+        with self.assertRaisesRegex(registry.RegistryError, "unknown.*min_vram_gib"):
+            load_text(text)
 
     def test_minimal_valid_file(self):
         self.assertEqual(load_text(GOOD)["m"].served_name, "m-1")
@@ -74,8 +95,9 @@ class Pin(unittest.TestCase):
     def test_recipe_pin_has_everything_goethe_reads(self):
         m = registry.load()["qwen3-8-27b"]
         pin = registry.read_pin(REPO / m.recipe / "NINFER_PIN")
-        for key in ("MODEL_REPO", "MODEL_FILE", "MODEL_BYTES", "MODEL_SHA256", "NINFER_REV"):
+        for key in ("MODEL_REPO", "MODEL_FILE", "MODEL_BYTES", "MODEL_SHA256", "NINFER_REV", "GREEDY_DIGEST"):
             self.assertIn(key, pin)
+        self.assertEqual(pin["GREEDY_DIGEST"], "c9da62f164a33a1f")
         self.assertTrue(pin["MODEL_BYTES"].isdigit())
         self.assertEqual(len(pin["MODEL_SHA256"]), 64)
 

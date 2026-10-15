@@ -94,12 +94,14 @@ def tier_for(model: Model, gpu: Gpu) -> Tier:
     if model.engine == "ninfer" and gpu.compute_cap != "12.0":
         return Tier("unsupported", f"NInfer builds only for sm_120a (compute capability 12.0); "
                                    f"{gpu.name} is {gpu.compute_cap}")
-    if gpu.total_gib < model.min_vram_gib:
+    if model.min_vram_gib is not None and gpu.total_gib < model.min_vram_gib:
         return Tier("unsupported", f"{model.title} needs a GPU with at least {model.min_vram_gib:g} GiB, "
                                    f"{gpu.name} has {gpu.total_gib:.1f}")
     if gpu.name in model.tested:
-        return Tier("tested", "measured by us")
-    return Tier("compatible", "compute capability 12.0 and enough memory, not tested by us")
+        return Tier("tested", "we ran this")
+    if model.engine == "ninfer":
+        return Tier("compatible", "Blackwell, enough memory. we have not run it")
+    return Tier("compatible", "we have not run it")
 
 
 def pick_gpu(model: Model, gpus: list[Gpu]) -> tuple[Gpu, Tier]:
@@ -139,9 +141,15 @@ def env_overrides(env: Mapping[str, str]) -> dict[str, str]:
 
 def resolve(model: Model, gpus: list[Gpu], profile: str, *, flags: Mapping[str, str] | None = None,
             env: Mapping[str, str] = os.environ, config: dict | None = None,
-            extra_args: list[str] | None = None) -> Plan:
+            extra_args: list[str] | None = None, probe: bool = True) -> Plan:
     """Layers, lowest first: model base, profile, config.toml, environment, command-line flags."""
-    gpu, tier = pick_gpu(model, gpus)
+    if gpus:
+        gpu, tier = pick_gpu(model, gpus)
+    elif probe:
+        raise ResolveError("no NVIDIA GPU found")
+    else:
+        gpu = Gpu(0, "not probed", 0, 0, "", "0.0", None, None)
+        tier = Tier("unknown", "not probed")
     chosen = model.profiles[profile]
     merged: dict[str, Setting] = {
         "host": Setting("127.0.0.1", "default", "loopback only"),
