@@ -15,6 +15,8 @@ launcher to `~/.local/bin/goethe`. Everything else is standard library. Run the 
 
 - `goethe serve [model] [--profile agent|chat|long]` installs what is missing (NInfer build, model download, head patch from
   `nvfp4-kernels/`), then starts an OpenAI, Responses and Anthropic compatible server on `127.0.0.1:8080`.
+  If `$NVFP4_HOME/bin/ninfer-serve` is executable it uses that file and does not build. Unpack with
+  `tar -C "$NVFP4_HOME" -xf ninfer-serve-*-cu13-linux-x86_64.tar` so `bin/libcudart.so.13` sits beside it.
   `--explain` prints every setting with where it came from and why; `--dry-run` also prints the commands and runs nothing.
   Arguments after `--` go to `ninfer-serve` unchanged. If a healthy server already answers on the port, it says so and stops.
 - `goethe connect <harness>` runs a coding agent against the server for one command. It sets environment variables and runs nothing else; it does not edit a config file. `--print` shows the command, arguments after `--` go to the agent. The agent has to be installed already.

@@ -35,8 +35,10 @@ def locate(model: Model, env: Mapping[str, str] = os.environ) -> Install:
     recipe = store.REPO_ROOT / model.recipe
     pin = read_pin(recipe / "NINFER_PIN")
     home = store.recipe_home(env)
-    return Install(recipe, home, home / "ninfer" / "build" / "apps" / "ninfer-serve",
-                   home / "models" / pin["MODEL_FILE"], int(pin["MODEL_BYTES"]))
+    built = home / "ninfer" / "build" / "apps" / "ninfer-serve"
+    unpacked = home / "bin" / "ninfer-serve"
+    binary = unpacked if os.access(unpacked, os.X_OK) else built
+    return Install(recipe, home, binary, home / "models" / pin["MODEL_FILE"], int(pin["MODEL_BYTES"]))
 
 
 def commands(inst: Install) -> list[list[str]]:
