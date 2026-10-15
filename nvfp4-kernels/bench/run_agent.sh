@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Record agent trajectories: mini-swe-agent (bash tool) on SWE-bench Lite against a running ninfer-serve.
-# Needs: pip install mini-swe-agent, podman (SWE-bench images are pulled from docker.io, about 3 GB each).
-# usage: run_agent.sh OUTDIR [WORKERS=4] [SLICE=0:8] [PORT=8080]
 set -euo pipefail
 OUT="${1:?output dir}"; WORKERS="${2:-4}"; SLICE="${3:-0:8}"; PORT="${4:-8080}"
 export OPENAI_API_BASE="http://127.0.0.1:$PORT/v1" OPENAI_API_KEY=x

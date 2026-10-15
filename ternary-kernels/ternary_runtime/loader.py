@@ -39,7 +39,6 @@ class LayerWeights:
     zero_experts: List[int] = field(default_factory=list)
     fallbacks: List[FallbackExpert] = field(default_factory=list)
 
-    # Back-compat aliases used by DeepSeek call sites / older code.
     @property
     def signs5120(self) -> torch.Tensor:
         return self.signs_hidden
@@ -77,9 +76,6 @@ def _load_weight_map(ckpt_dir: Path) -> Dict[str, str]:
 
 def _is_zero_codes(codes: torch.Tensor) -> bool:
     """True when packed codes unpack to an all-zero matrix (Wx is identically 0)."""
-    # codes int32 words: trit 0 is packed as code value 1 → word bits pattern can be nonzero.
-    # All-zero reconstructed weight ⇔ every 2-bit field is 01, or we unpack. Cheap check:
-    # if every word equals the "all trit-0" pattern 0x55555555, scales irrelevant.
     if codes.numel() == 0:
         return True
     return bool(torch.equal(codes, torch.full_like(codes, 0x55555555)))
@@ -244,7 +240,6 @@ def load_layer(
             if ok:
                 mask[slot] = True
             else:
-                # Ternary W is the zero matrix → MoE contribution is 0; skip compute.
                 zero_experts.append(eid)
     ternary_mask = mask.to(device)
 

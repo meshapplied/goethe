@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Pack ninfer-serve and libcudart.so.13 so the binary finds the runtime beside itself.
-# Refuses to run until patchelf is on PATH. Does not install it.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/NINFER_PIN"

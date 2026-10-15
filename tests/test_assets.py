@@ -7,7 +7,7 @@ from tests.fixtures import REPO
 
 KERNELS = REPO / "nvfp4-kernels"
 PATCHES = KERNELS / "patches"
-ROWS, ROW_BYTES = 131072, 2560 + 160  # q4_g64 row: 2560 code bytes plus 160 scale bytes
+ROWS, ROW_BYTES = 131072, 2560 + 160
 
 
 class HeadPatch(unittest.TestCase):

@@ -1,12 +1,4 @@
-"""Model-aware ternary runtime profiles.
-
-Two production targets today:
-  - deepseek_v41: MoE w1/w2/w3 packs (SGLang EP)
-  - bonsai:       dense TernaryLinear (ckpt embeds codes+scales; vLLM/SSD path)
-
-Flash-Next (qwen4_exp MoE gate_up/down) is registered for detection; MoE path
-wired, decode Ks specialized — full serve bring-up deferred.
-"""
+"""Model-aware ternary runtime profiles."""
 
 from __future__ import annotations
 
@@ -23,10 +15,10 @@ from safetensors import safe_open
 @dataclass(frozen=True)
 class ModelSpec:
     name: str
-    kind: str  # "moe" | "dense"
-    layout: str  # "w123" | "gate_up_down" | "dense_linear"
+    kind: str
+    layout: str
     num_layers: int
-    num_experts: int  # 0 for dense
+    num_experts: int
     hidden: int
     intermediate: int
     top_k: int
@@ -34,7 +26,7 @@ class ModelSpec:
     block_inter: int
     pack_stem: str
     ckpt_prefix: str
-    fallback: str  # "fp4" | "bf16" | "none"
+    fallback: str
     manifest_fallback_key: str
     routed_scaling_factor: float
     swiglu_limit: Optional[float]
@@ -60,7 +52,6 @@ class ModelSpec:
         return feature in self.features
 
 
-# Feature flags (gate patch / experts / loader branches).
 F_MOE_PATCH = "moe_patch"
 F_ENGRAM = "engram_readahead"
 F_FP4_FALLBACK = "fp4_fallback"
@@ -119,7 +110,6 @@ BONSAI = ModelSpec(
     routed_scaling_factor=1.0,
     swiglu_limit=None,
     fuse_routed_scaling_in_topk=False,
-    # down_proj K=17408, gate/up/attn K=5120 (same pack format as MoE GEMV).
     specialized_k=(5120, 17408),
     features=_DENSE,
 )
@@ -146,7 +136,6 @@ FLASH_NEXT = ModelSpec(
     features=_MOE_QWEN,
 )
 
-# Back-compat alias used by older env / docs.
 QWEN4_EXP = FLASH_NEXT
 
 _BY_NAME = {
@@ -163,12 +152,10 @@ _BY_NAME = {
     "qwen": FLASH_NEXT,
 }
 
-# Union of every registered specialization (CUDA launch table).
 ALL_SPECIALIZED_K: Tuple[int, ...] = tuple(
     sorted({k for p in (DEEPSEEK_V41, BONSAI, FLASH_NEXT) for k in p.specialized_k})
 )
 
-# Legacy name kept for imports.
 PackProfile = ModelSpec
 
 

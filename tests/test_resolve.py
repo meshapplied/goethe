@@ -81,7 +81,7 @@ class Layers(unittest.TestCase):
     def test_draft_tokens_bound_depends_on_spec(self):
         self.assertEqual(plan(flags={"spec": "mtp", "draft_tokens": "3"}).value("draft_tokens"), 3)
         with self.assertRaisesRegex(resolve.ResolveError, "outside 1..5 for spec mtp"):
-            plan(flags={"spec": "mtp"})  # the default 7 is a dflash2 value
+            plan(flags={"spec": "mtp"})
 
     def test_bad_env_value_names_its_source(self):
         with self.assertRaisesRegex(resolve.ResolveError, "lanes from env"):

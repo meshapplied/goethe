@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Image of a pack.sh tarball. The tarball has to exist; this does not build NInfer.
 set -euo pipefail
 tarfile="${1:?pack.sh tarball}"
 [ -f "$tarfile" ] || { echo "error: $tarfile not found" >&2; exit 1; }

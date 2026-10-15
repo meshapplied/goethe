@@ -80,7 +80,7 @@ class DoctorTest(unittest.TestCase):
             inst.binary.chmod(inst.binary.stat().st_mode | stat.S_IXUSR)
         if model:
             with open(inst.model_file, "wb") as f:
-                f.truncate(SIZE)  # sparse, costs no disk
+                f.truncate(SIZE)
         return inst
 
     def run_checks(self, machine, **installed):

@@ -1,9 +1,4 @@
-"""Replay the bundled agent traces against a running server and score what came back.
-
-One stream. Temperature 1. The first two requests are reported separately and are not in the mean.
-Decode tok/s is the token-weighted rate from the engine log, which also supplies cache hit and time to first token.
-Wall tok/s includes prefill.
-"""
+"""Replay the bundled agent traces against a running server and score what came back."""
 from __future__ import annotations
 
 import json

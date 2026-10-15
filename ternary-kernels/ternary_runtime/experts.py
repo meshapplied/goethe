@@ -260,7 +260,6 @@ class TernaryExperts(nn.Module):
             from ternary_runtime.prefill import warmup_ternary_gmm
 
             t0 = time.perf_counter()
-            # gate_up: act K=2560 → N=1280; down: act K=640 → N=2560.
             warmup_ternary_gmm(device, k=2560, n_list=(1280,))
             warmup_ternary_gmm(device, k=640, n_list=(2560,))
             print(
@@ -445,7 +444,6 @@ class TernaryExperts(nn.Module):
             .sum(dim=1)
             .to(x.dtype)
         )
-        # coef: [T, F]. Always run all F experts; unrouted slots get coef=0 → zero contrib.
         result = out
         inter = self.intermediate_size
         for f in range(fb_w13.shape[0]):

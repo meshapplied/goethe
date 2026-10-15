@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# Start ninfer-serve (OpenAI and Anthropic compatible HTTP) with a named profile.
-#   PROFILE=default  DFlash2, 7 draft tokens, 4 lanes, 100k context   (measured, see RESULTS.md)
-#   PROFILE=long     DFlash2, 7 draft tokens, 1 lane, 131072 context  (boots, not benchmarked)
-#   PROFILE=batch    MTP, 4 draft tokens, 8 lanes, 131072 context     (measured)
-# Override any value: SPEC=mtp|dflash2  K=<draft tokens>  MAX_CONCURRENCY=<1..8>  MAX_CONTEXT=<tokens>
-# Extra arguments are passed to ninfer-serve. REQUEST_LOG=<file> writes a per-request JSONL log.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/NINFER_PIN"

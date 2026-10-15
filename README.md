@@ -1,6 +1,6 @@
 # Goethe
 
-One command to start the models in this repo on your GPU. The `goethe` package is 1,699 lines of Python, tests not included. Those lines are not an engine. They exec NInfer or SGLang.
+One command to start the models in this repo on your GPU. The `goethe` package is 1,672 lines of Python, tests not included. Those lines are not an engine. They exec NInfer or SGLang.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/meshapplied/Goethe/main/install.sh | bash

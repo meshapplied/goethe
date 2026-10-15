@@ -42,7 +42,7 @@ def _num(text: str, cast: Callable[[str], float]) -> float | None:
     try:
         return cast(text)
     except ValueError:
-        return None  # "[N/A]" and friends
+        return None
 
 
 def parse(csv: str) -> list[Gpu]:
@@ -78,6 +78,6 @@ def compute_apps(runner: Runner = run) -> list[tuple[int, str, int]]:
     apps = []
     for line in out.strip().splitlines() if code == 0 else []:
         pid, rest = line.split(",", 1)
-        name, used = rest.rsplit(",", 1)  # process names may contain commas
+        name, used = rest.rsplit(",", 1)
         apps.append((int(pid), name.strip(), _num(used.strip(), int) or 0))
     return apps

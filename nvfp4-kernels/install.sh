@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Clone NInfer at the pinned commit, apply our patch, build. NVFP4_PATCHES=0 builds it unpatched.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/NINFER_PIN"

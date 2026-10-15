@@ -18,10 +18,10 @@ from goethe.engine import Install
 from goethe.registry import Model
 from goethe.resolve import tier_for
 
-MIN_DRIVER = 580  # CUDA 13 runtime
+MIN_DRIVER = 580
 MIN_NVCC = (13, 1)
 MIN_CMAKE = (3, 28)
-MIN_FREE_RAM_GIB = 12  # the server pins 9.5 GiB of host context
+MIN_FREE_RAM_GIB = 12
 BUILD_TREE_GB = 2
 FFMPEG_LIBS = ("libavformat", "libavcodec", "libavutil", "libswscale")
 
@@ -29,7 +29,7 @@ FFMPEG_LIBS = ("libavformat", "libavcodec", "libavutil", "libswscale")
 @dataclass(frozen=True)
 class Check:
     name: str
-    status: str  # ok, warn, fail, info
+    status: str
     detail: str
     fix: str = ""
 
@@ -223,8 +223,6 @@ def check_toolchain(sys_: System, inst: Install) -> list[Check]:
     return out
 
 
-# Runtime libraries ldd reported on a built ninfer-serve. The prebuilt tarball is meant to
-# bundle libcudart; until it does, a missing libcudart is the CUDA runtime.
 _APT = {"libavformat": "ffmpeg", "libavcodec": "ffmpeg", "libavutil": "ffmpeg", "libswscale": "ffmpeg",
         "libcurl": "libcurl4"}
 

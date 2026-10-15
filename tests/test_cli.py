@@ -182,8 +182,8 @@ class Serve(unittest.TestCase):
         with mock.patch.object(engine, "healthy", return_value=False), mock.patch("subprocess.run") as sub, \
                 mock.patch("os.execv") as ex:
             code, out, _ = run("serve", "--profile", "long")
-        self.assertFalse(code)  # os.execv never returns for real
-        self.assertEqual(sub.call_count, 2)  # install.sh, fetch_model.sh
+        self.assertFalse(code)
+        self.assertEqual(sub.call_count, 2)
         self.assertTrue(all(c.kwargs["env"]["NVFP4_HOME"] for c in sub.call_args_list))
         self.assertIn("serving qwen3.8-27b on http://127.0.0.1:8080 (1 lanes, 131072 context, long)", out)
         argv = ex.call_args.args[1]

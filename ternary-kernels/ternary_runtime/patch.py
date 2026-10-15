@@ -179,7 +179,6 @@ def _patch_moe_class(profile: PackProfile) -> None:
             def __call__(self, *args, **kwargs):
                 layer_id = kwargs.get("layer_id", -1)
                 prefix = str(kwargs.get("prefix", "")).lower()
-                # MTP / NEXTN / DSpark draft stages keep published experts.
                 if profile.has("mtp_skip_ternary") and (
                     "mtp" in prefix
                     or "nextn" in prefix
@@ -188,7 +187,6 @@ def _patch_moe_class(profile: PackProfile) -> None:
                     or kwargs.get("is_nextn")
                 ):
                     return stock_cls(*args, **kwargs)
-                # DSpark draft MoE uses fewer routed experts than the backbone pack.
                 ne = kwargs.get("num_experts")
                 if ne is not None and int(ne) != int(profile.num_experts):
                     return stock_cls(*args, **kwargs)
@@ -490,7 +488,6 @@ def _patch_weight_iterators() -> None:
 
     wu.safetensors_weights_iterator = _ternary_safetensors_iterator
     wu.buffered_multi_thread_safetensors_weights_iterator = _ternary_buffered_iterator
-    # Rebind aliases captured by `from weight_utils import ...` if loader is already imported.
     try:
         import sglang.srt.model_loader.loader as loader_mod
 

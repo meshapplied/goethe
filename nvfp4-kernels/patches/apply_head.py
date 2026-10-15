@@ -1,19 +1,12 @@
 #!/usr/bin/env python3
-"""Swap 677 rows of the draft-token shortlist (`--lm-head-draft`) in the model file, or put the original back with --revert.
-
-The original shortlist never proposes <tool_call> and </tool_call>, so every tool call costs rejected drafts. head_swap.json lists the
-rows to drop and the tokens to add, head_rows.dat holds the new rows. Nothing is written unless the result matches the hashes in
-NINFER_PIN; the original bytes are kept in <model>.head-orig. Standard library only.
-
-usage: apply_head.py MODEL [--revert]
-"""
+"""Swap 677 rows of the draft-token shortlist (`--lm-head-draft`) in the model file, or put the original back with --revert."""
 import array, hashlib, json, os, sys
 
 here = os.path.dirname(os.path.abspath(__file__))
 model, revert = sys.argv[1], "--revert" in sys.argv[2:]
 pin = dict(l.strip().split("=", 1) for l in open(os.path.join(here, "..", "NINFER_PIN")) if "=" in l and l[0] != "#")
 HEAD_AT, HEAD_N, IDS_AT, IDS_N = (int(pin[k]) for k in ("HEAD_OFFSET", "HEAD_BYTES", "IDS_OFFSET", "IDS_BYTES"))
-ROWS, BASE, SCALE, SCALE_AT = 131072, 2560, 160, 335544320   # q4_g64 rows: 2560 code bytes and 160 scale bytes per row
+ROWS, BASE, SCALE, SCALE_AT = 131072, 2560, 160, 335544320
 sha = lambda b: hashlib.sha256(b).hexdigest()
 orig = (pin["HEAD_ORIG_SHA256"], pin["IDS_ORIG_SHA256"])
 new = (pin["HEAD_PATCHED_SHA256"], pin["IDS_PATCHED_SHA256"])

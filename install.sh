@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Install the goethe command: clone this repository and put a launcher in ~/.local/bin.
-# GOETHE_REF installs a branch or tag, GOETHE_BIN and GOETHE_SRC move the launcher and the clone.
 set -euo pipefail
 REPO="${GOETHE_REPO:-https://github.com/meshapplied/Goethe.git}"
 REF="${GOETHE_REF:-main}"

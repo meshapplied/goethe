@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Replay the recorded agent turns against several server configs and print throughput versus decode batch.
-# usage: run_matrix.sh "SPEC:K:LANES:CONTEXT ..." "WORKERS ..."      (profile values from RESULTS.md)
-#   run_matrix.sh "mtp:3:8:131072 mtp:4:8:131072 dflash2:7:4:100000" "1 2 4 7"
-# Needs: pip install httpx. Writes logs to ${OUT:-./out}.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${OUT:-./out}"; PORT="${PORT:-18081}"

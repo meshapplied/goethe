@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Download the model (resumable), check its hash, apply the proposal-head patch.
-# NVFP4_HEAD=0 leaves (or puts back) the original head. VERIFY=1 re-hashes an existing file.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/NINFER_PIN"

@@ -1,12 +1,7 @@
-"""Unpack DeepSeek FP4 E2M1 expert weights.
-
-Two values per byte. The low nibble is the earlier element along K.
-One E8M0 scale covers 32 unpacked K values.
-"""
+"""Unpack DeepSeek FP4 E2M1 expert weights."""
 
 import torch
 
-# OCP E2M1 magnitudes. Bit 3 is the sign.
 E2M1 = (
     0.0,
     0.5,

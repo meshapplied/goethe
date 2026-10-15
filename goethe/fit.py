@@ -1,9 +1,4 @@
-"""Fit context and lanes to the memory the engine actually has, by booting it.
-
-NInfer has no dry-run for memory, so the only honest probe is a real boot. A boot that fails says exactly how
-many bytes it wanted and how many it had, and a boot that starts says how many KV tokens it got. Both lines are
-stable text in the server log; if a new NInfer version changes them, the probe raises instead of guessing.
-"""
+"""Fit context and lanes to the memory the engine actually has, by booting it."""
 from __future__ import annotations
 
 import json
@@ -18,13 +13,12 @@ from pathlib import Path
 
 from goethe.resolve import Plan
 
-# ponytail: string match on ninfer's own log lines. A version that rewords them fails loudly (ProbeError).
 FATAL = re.compile(r"minimum Engine runtime reservation requires (\d+) bytes in addition to (\d+) bytes of "
                    r"automatic headroom, but only (\d+) bytes are available")
 CAPACITY = re.compile(r"capacity \| KV ([\d,]+) tokens")
 ATTEMPTS = 4
-STEP = 16384  # the reservation grows steeply with context, so a fixed step converges faster than a ratio
-PROBE_PORT = 18099  # the probe must not take the port the real server will bind
+STEP = 16384
+PROBE_PORT = 18099
 
 
 class ProbeError(Exception):
@@ -56,7 +50,7 @@ def fit(plan: Plan, argv: list[str], log: Path, *, boot: Callable[[list[str], Pa
         context -= STEP
         if context < STEP:
             raise ProbeError(f"boot {attempt} does not fit even at the smallest context")
-        time.sleep(2)  # GPU memory from the failed boot is freed within a second; don't boot on top of it
+        time.sleep(2)
     raise ProbeError(f"still does not fit after {ATTEMPTS} boots")
 
 
@@ -82,8 +76,7 @@ def engine_argv(argv: list[str], context: int, lanes: int, port: int | None = No
 
 def _boot(argv: list[str], log: Path, seconds: float = 40) -> str:
     """Start the engine, return its log once it listens or dies. Kills it either way."""
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)  # noqa: S603 argv is our own
-    # reading the pipe, not a file: a block-buffered child never flushes to a file the probe can re-read
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     text, poller = "", selectors.DefaultSelector()
     poller.register(proc.stdout, selectors.EVENT_READ)
     try:
@@ -126,7 +119,7 @@ def load(path: Path, key: dict, free_mib: int) -> dict | None:
     if cached.get("key") != key or free_mib < cached.get("free_mib", 0):
         return None
     if not all(k in cached for k in ("context", "lanes", "kv_tokens")):
-        return None  # a hand-edited or older file is a cache miss, not a crash in serve
+        return None
     return cached
 
 
@@ -142,7 +135,7 @@ def free_mib() -> int:
     try:
         return int(out.splitlines()[0])
     except (IndexError, ValueError):
-        return 0  # nvidia-smi failed; treated as no free memory, so the cache is not trusted
+        return 0
 
 
 def tune_path(env: os._Environ | dict | None = None) -> Path:

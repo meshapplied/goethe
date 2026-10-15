@@ -1,6 +1,4 @@
 # Example Flash-Next NVFP4 weight-only (compressed-tensors) serve config.
-# Set NVFP4_WO_MODEL_DIR to the model tree.
-# Needs nvfp4-kernels/patches/sglang-nvfp4-weight-only.patch applied to the SGLang checkout.
 
 [model]
 path = "${NVFP4_WO_MODEL_DIR}"

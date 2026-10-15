@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Drop standing comments outside function bodies; keep file-top lines and docstrings only.
+
 - `docs/HUB_CARDS.md` records the Hub card contract for the Ternary-Latest ids.
 
 - `goethe serve <model>` starts that model. No name still starts Qwen3.8-27B on NInfer. The other three names run the SGLang command in `examples/`.

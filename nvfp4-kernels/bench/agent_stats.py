@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Summarise ninfer-serve --request-log-jsonl files from an agent run: context, cache hits, output length,
-tokens per round, per-position acceptance, time split, and breakdowns by context and output length.
-
-usage: agent_stats.py REQUEST_LOG [REQUEST_LOG ...]
-"""
+"""Summarise ninfer-serve --request-log-jsonl files from an agent run: context, cache hits, output length,"""
 import json, sys, statistics as st
 
 def pct(x, p):
@@ -39,7 +35,6 @@ if rd:
     pos = len(rows[0]["app"]); tot = [sum(r["app"][i] for r in rows if len(r["app"]) > i) for i in range(pos)]
     print("per-position survival (accepted at depth i / rounds):", [round(x / rd, 3) for x in tot])
 print(f"time split (sum over requests): prefill {sum(r['pre'] for r in rows):.0f}s  decode {tdec:.0f}s  total {sum(r['tot'] for r in rows):.0f}s")
-# by context bucket
 for lo, hi in [(0, 8000), (8000, 16000), (16000, 32000), (32000, 64000), (64000, 200000)]:
     s = [r for r in rows if lo <= r["ctx"] < hi]
     if not s: continue

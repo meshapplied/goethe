@@ -48,7 +48,6 @@ def _text(value: object) -> str:
     return str(value)
 
 
-# Every setting a user may override, with its validator.
 VALIDATORS = {
     "host": _text,
     "port": _int(1, 65535),
@@ -66,13 +65,13 @@ CONFIG_PROFILE_KEYS = {"lanes", "context", "spec", "draft_tokens", "kv_dtype"}
 @dataclass
 class Setting:
     value: int | str
-    source: str  # default, profile, config, env, flag, generated
+    source: str
     why: str = ""
 
 
 @dataclass(frozen=True)
 class Tier:
-    name: str  # tested, compatible, unsupported
+    name: str
     reason: str
 
 

@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Throughput-vs-actual-decode-batch curve from a ninfer --request-log-jsonl (request_done records).
-For each request: decode interval = [done - decode_s, done]; n_bar = time-average number of requests decoding during it.
-Aggregate rate at batch n ~ n * mean per-stream rate of requests with round(n_bar)==n  (token-weighted).
-usage: batch_curve.py req_log.jsonl [...]"""
+"""Throughput-vs-actual-decode-batch curve from a ninfer --request-log-jsonl (request_done records)."""
 import json, sys, collections
 
 reqs = []
@@ -11,12 +8,12 @@ for f in sys.argv[1:]:
         r = json.loads(l)
         if r.get("event") != "request_done" or "result" not in r: continue
         t = r["timings_seconds"]; d = t["decode"]
-        if d <= 0.2: continue  # too short to carry a rate
+        if d <= 0.2: continue
         end = r["timestamp_unix_ms"] / 1000; sp = r.get("speculative") or {}
         reqs.append(dict(s=end - d, e=end, out=r["result"]["completion_tokens"], d=d, ctx=r["result"]["prompt_tokens"],
                          rounds=sp.get("rounds", 0), acc=sp.get("accepted_tokens", 0)))
 ev = sorted([(r["s"], 1) for r in reqs] + [(r["e"], -1) for r in reqs])
-def nbar(r):  # time-average concurrency over [s,e]
+def nbar(r):
     cur = 0; last = None; area = 0.0
     for t, k in ev:
         if last is not None and t > r["s"] and last < r["e"]:

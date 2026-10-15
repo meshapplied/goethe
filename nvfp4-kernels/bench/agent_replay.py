@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Replay recorded agent turns against a running ninfer-serve at a fixed number of workers.
-
-Each worker takes whole sessions from a shared queue (longest first) and, for every STRIDE-th
-assistant turn, sends messages[:i] and generates up to the recorded completion length (capped by --cap).
-Per-request detail (decode rate, tokens per round) comes from the server request log; see batch_curve.py.
-
-usage: agent_replay.py TRAJ_DIR WORKERS [--stride 6] [--cap 1500] [--port 8080] [--think 1]
-"""
+"""Replay recorded agent turns against a running ninfer-serve at a fixed number of workers."""
 import argparse
 import glob
 import gzip

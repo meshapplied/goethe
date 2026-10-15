@@ -1,10 +1,4 @@
-"""Ternary expert kernels: block Hadamard rotation and grouped ternary GEMM.
-
-CUDA specializations track ``profile.ALL_SPECIALIZED_K``:
-  deepseek_v41 → 5120, 2304
-  bonsai       → 5120, 17408
-  flash_next   → 2560, 640
-"""
+"""Ternary expert kernels: block Hadamard rotation and grouped ternary GEMM."""
 
 import os
 from pathlib import Path
@@ -84,7 +78,6 @@ def _extension():
             with_cuda=True,
             verbose=False,
         )
-        # Sanity: every registered model K is listed for ops engineers.
         _ = ALL_SPECIALIZED_K
     return _EXT
 

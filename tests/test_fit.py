@@ -42,7 +42,6 @@ class FitLoop(unittest.TestCase):
         self.assertEqual((got.context, got.lanes, got.kv_tokens, got.attempts), (131072, 1, 131072, 1))
 
     def test_probe_reads_block_buffered_output(self):
-        # the real engine block-buffers stdout, so this fails if the probe reads a buffered pipe
         with tempfile.TemporaryDirectory() as d:
             log = Path(d) / "tune.log"
             fake = Path(d) / "engine.py"
@@ -52,7 +51,6 @@ class FitLoop(unittest.TestCase):
             started_at = time.monotonic()
             with self.assertRaisesRegex(fit.ProbeError, "still does not fit"):
                 fit.fit(plan("long"), ["python3", str(fake)], log, seconds=3)
-            # the correct probe returns in about 8s; missing the line costs four full timeouts
             self.assertLess(time.monotonic() - started_at, 14)
 
     def test_cuda_oom_lowers_context_without_waiting_out_the_probe(self):
@@ -114,7 +112,6 @@ class FitLoop(unittest.TestCase):
         self.assertEqual(sizes, [131072, 131072 - fit.STEP])
 
     def test_lanes_never_change(self):
-        # fewer lanes reserve more KV, not less, so shrinking them cannot help
         fail = FATAL.format(need=100, head=0, have=50)
         boot = boots(fail, started(4096))
         with tempfile.TemporaryDirectory() as d:
@@ -155,7 +152,7 @@ class Cache(unittest.TestCase):
             key = self.key(model)
             fit.save(path, key, fit.Fit(65536, 1, 65000, 2), free_mib=20000)
             self.assertEqual(fit.load(path, key, 20000)["context"], 65536)
-            self.assertIsNone(fit.load(path, key, 19000))  # less free memory than the fit saw
+            self.assertIsNone(fit.load(path, key, 19000))
             self.assertIsNone(fit.load(path, {**key, "driver": "other"}, 30000))
             self.assertIsNone(fit.load(Path(d) / "missing.json", key, 30000))
             path.write_text("{")

@@ -1,6 +1,4 @@
 FROM ubuntu:24.04
-# Runtime libraries the packed ninfer-serve links, plus Python for the goethe command.
-# libcuda is mounted from the host. It is not in this image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 ca-certificates curl libcurl4 \
         libavformat60 libavcodec60 libavutil58 libswscale7 \
