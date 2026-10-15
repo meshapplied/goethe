@@ -1,0 +1,43 @@
+# Example Flash-Next NVFP4 weight-only (compressed-tensors) serve config.
+# Set NVFP4_WO_MODEL_DIR to the model tree.
+# Needs nvfp4-kernels/patches/sglang-nvfp4-weight-only.patch applied to the SGLang checkout.
+
+[model]
+path = "${NVFP4_WO_MODEL_DIR}"
+name = "qwen38-flash-next-nvfp4-wo"
+
+[serve]
+engine = "sglang"
+host = "127.0.0.1"
+port = 31003
+tp_size = 1
+dtype = "auto"
+max_model_len = 65536
+trust_remote_code = true
+mem_fraction_static = 0.90
+extra_args = [
+  "--quantization", "compressed-tensors",
+  "--fp4-gemm-backend", "flashinfer_cutlass",
+  "--ple-offload-embedding",
+  "--ple-offload-backend", "pinned",
+  "--kv-cache-dtype", "fp8_e4m3",
+  "--speculative-algorithm", "NEXTN",
+  "--speculative-num-steps", "3",
+  "--speculative-eagle-topk", "1",
+  "--speculative-num-draft-tokens", "4",
+  "--speculative-token-map", "${SPEC_HOT_VOCAB:-${NVFP4_WO_MODEL_DIR}/spec/hot_self_64k.pt}",
+  "--mamba-full-memory-ratio", "0.95",
+  "--context-length", "65536",
+  "--max-running-requests", "1",
+  "--chunked-prefill-size", "2048",
+  "--page-size", "64",
+  "--cuda-graph-backend-decode", "full",
+  "--cuda-graph-backend-prefill", "disabled",
+  "--cuda-graph-max-bs-decode", "1",
+  "--mm-io-worker-num", "0",
+  "--mm-processor-worker-num", "0",
+  "--watchdog-timeout", "3600",
+  "--reasoning-parser", "qwen3",
+  "--tool-call-parser", "qwen",
+  "--served-model-name", "qwen38-flash-next-nvfp4-wo",
+]

@@ -32,3 +32,14 @@ Throughput (one RTX 5090, replayed agent turns, mean context ~28k, thinking on):
 Together about 5 % faster decode, see [RESULTS.md](RESULTS.md#patches). The throughput table above was measured without them. `NVFP4_PATCHES=0 ./install.sh` builds NInfer unpatched, `NVFP4_HEAD=0 ./fetch_model.sh` keeps or restores the original head.
 
 Third-party attribution: [NOTICE](NOTICE).
+
+## Flash-Next NVFP4 weight-only (SGLang)
+
+Serve a Flash-Next NVFP4 weight-only (compressed-tensors) tree with SGLang, not NInfer. Stock SGLang does not dispatch that scheme. Apply the patch to the SGLang checkout first, then start from [`examples/nvfp4-weight-only.toml`](../examples/nvfp4-weight-only.toml):
+
+```bash
+git -C "$SGLANG_DIR" apply --check "$PWD/patches/sglang-nvfp4-weight-only.patch"
+git -C "$SGLANG_DIR" apply "$PWD/patches/sglang-nvfp4-weight-only.patch"
+```
+
+The patch touches two files under `python/sglang/srt/layers/quantization/compressed_tensors/`: scheme selection for weight-only NVFP4 experts and the NVFP4 MoE input-scale defaults (1.0 when the checkpoint has no static activation scales). The WNA16 guard only matches INT weights, so FP8 channel weight-only layers reach the W8A16 FP8 scheme.

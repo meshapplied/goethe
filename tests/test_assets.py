@@ -37,6 +37,15 @@ class HeadPatch(unittest.TestCase):
         self.assertEqual(files, ["src/ops/linear/nvfp4/shapes/n5120_k17408.cu",
                                  "src/ops/linear_add/nvfp4/nvfp4_linear_add_a4.cu"])
 
+    def test_sglang_patch_touches_only_the_compressed_tensors_nvfp4_files(self):
+        text = (PATCHES / "sglang-nvfp4-weight-only.patch").read_text()
+        files = [line.split(" b/")[1] for line in text.splitlines() if line.startswith("diff --git")]
+        self.assertEqual(files, [
+            "python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py",
+            "python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py",
+        ])
+        self.assertIn("+    def _is_fp4_nvfp4_weight_only(", text)
+
 
 if __name__ == "__main__":
     unittest.main()

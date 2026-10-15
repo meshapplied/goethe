@@ -1,0 +1,81 @@
+diff --git a/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py b/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
+index 68e85fe..cfd6f92 100644
+--- a/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
++++ b/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
+@@ -599,6 +599,22 @@ class CompressedTensorsConfig(QuantizationConfig):
+             and is_symmetric
+         )
+ 
++    def _is_fp4_nvfp4_weight_only(
++        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
++    ) -> bool:
++        # Weight-only NVFP4 (compressed-tensors): experts are E2M1
++        # group-16 with no static activation scales; acts are quantized online.
++        if weight_quant is None or input_quant is not None:
++            return False
++        return (
++            weight_quant.type == QuantizationType.FLOAT
++            and weight_quant.num_bits == 4
++            and weight_quant.strategy == QuantizationStrategy.TENSOR_GROUP.value
++            and weight_quant.group_size == 16
++            and bool(weight_quant.symmetric)
++            and not weight_quant.dynamic
++        )
++
+     def _is_wNa16_group_channel(
+         self, weight_quant: BaseModel, input_quant: BaseModel
+     ) -> bool:
+@@ -608,11 +624,14 @@ class CompressedTensorsConfig(QuantizationConfig):
+             or weight_quant.strategy == QuantizationStrategy.GROUP.value
+         )
+         is_static = not weight_quant.dynamic
++        # INT-only: FP8 channel weight-only (float type) must fall through to
++        # CompressedTensorsW8A16Fp8, not the INT WNA16 / Sparse24 branch.
++        is_int = weight_quant.type == QuantizationType.INT
+ 
+         # Both symmetric and asymmetric weight quant are handled by
+         # CompressedTensorsWNA16 via the Marlin kernel path; asymmetric
+         # checkpoints carry a weight zero-point.
+-        return is_channel_group and input_quant_none and is_static
++        return is_int and is_channel_group and input_quant_none and is_static
+ 
+     def _is_wna16_triton_moe_supported(self, weight_quant: BaseModel) -> bool:
+         return (
+@@ -881,6 +900,11 @@ class CompressedTensorsConfig(QuantizationConfig):
+         elif self._is_fp4a4_nvfp4(weight_quant, input_quant):
+             logger.info_once("Using CompressedTensorsW4A4Nvfp4MoE")
+             return CompressedTensorsW4A4Nvfp4MoE()
++        elif self._is_fp4_nvfp4_weight_only(weight_quant, input_quant):
++            logger.info_once(
++                "Using CompressedTensorsW4A4Nvfp4MoE (weight-only, dynamic acts)"
++            )
++            return CompressedTensorsW4A4Nvfp4MoE()
+         elif self._is_fp8_w8a8(weight_quant, input_quant):
+             logger.info_once("Using CompressedTensorsW8A8Fp8MoE")
+             return CompressedTensorsW8A8Fp8MoE(weight_quant, input_quant)
+diff --git a/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py b/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py
+index c724431..5bf1c77 100644
+--- a/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py
++++ b/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py
+@@ -143,9 +143,10 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
+         )
+         set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
+ 
+-        # Input Global Scales
++        # Input Global Scales (default 1.0 for weight-only NVFP4 checkpoints
++        # that omit static activation scales; overwritten when present on disk).
+         w13_input_scale = torch.nn.Parameter(
+-            torch.empty(num_experts, 2, dtype=torch.float32), requires_grad=False
++            torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
+         )
+         layer.register_parameter("w13_input_global_scale", w13_input_scale)
+         extra_weight_attrs.update(
+@@ -154,7 +155,7 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
+         set_weight_attrs(w13_input_scale, extra_weight_attrs)
+ 
+         w2_input_scale = torch.nn.Parameter(
+-            torch.empty(num_experts, dtype=torch.float32), requires_grad=False
++            torch.ones(num_experts, dtype=torch.float32), requires_grad=False
+         )
+         layer.register_parameter("w2_input_global_scale", w2_input_scale)
+         extra_weight_attrs.update(
