@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build portable goethe and goethed (glibc 2.31 baseline) in Ubuntu 20.04.
+# Build portable goethe and goethed (glibc 2.31 baseline) in Ubuntu 20.04 with the pinned rust-toolchain.toml.
 
 set -euo pipefail
 
@@ -32,8 +32,10 @@ docker run --rm --name "goethe-build-portable-${ARCH}" \
       export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
       export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
     fi
-    [ -x /cache/cargo/bin/cargo ] || curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path >/dev/null
+    [ -x /cache/cargo/bin/rustup ] || curl -fsSL https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path >/dev/null
     . /cache/cargo/env
+    rustup toolchain install "$(sed -n "s/^channel = \"\(.*\)\"/\1/p" rust-toolchain.toml)" --profile minimal >/dev/null
     if [[ "$GOETHE_ARCH" == aarch64 ]]; then
       rustup target add aarch64-unknown-linux-gnu >/dev/null
     fi
