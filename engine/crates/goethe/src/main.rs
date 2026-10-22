@@ -10,14 +10,13 @@ use goethe_core::hf;
 use goethe_core::install::{self, InstallOpts};
 use goethe_core::models;
 use goethe_core::nginx;
-use goethe_core::paths::{ensure_layout, goethe_home};
+use goethe_core::paths::{ensure_layout, goethe_home, validate_model_id};
 use goethe_core::registry;
 use goethe_core::recommend;
 use goethe_core::rpc;
 use goethe_core::security;
 use goethe_core::shutdown;
 use serde_json::{json, Value};
-use std::io::IsTerminal;
 
 #[derive(Parser)]
 #[command(
@@ -67,8 +66,14 @@ enum Commands {
         no_load: bool,
         #[arg(long, help = "With --load, return after spawn without waiting for RUNNING.")]
         no_wait: bool,
-        #[arg(long, help = "Overwrite an existing install.")]
+        #[arg(long, help = "Re-download (Hub) or replace an existing local install of another kind.")]
         force: bool,
+        #[arg(long, help = "Rebuild the model card from defaults instead of merging into the existing one.")]
+        reset: bool,
+        #[arg(long = "trust-remote-code", help = "Let SGLang run Python code shipped with the model (config.json auto_map).")]
+        trust_remote_code: bool,
+        #[arg(long, help = "With --load, load next to processes goethe did not start without asking.")]
+        yes: bool,
         #[arg(long, help = "Skip sha256 verification.")]
         no_verify: bool,
         #[arg(long, help = "Registered model id for local installs.")]
@@ -99,13 +104,13 @@ enum Commands {
         #[arg(long, help = "Only registry models.")]
         available: bool,
     },
-    #[command(about = "Delete an installed model from disk and the local registry.")]
+    #[command(about = "Remove an installed model: unload it, delete files goethe downloaded, or unregister a local folder.")]
     Remove {
         #[arg(help = "Installed model id to remove.")]
         model_id: String,
-        #[arg(long, help = "Skip confirmation.")]
+        #[arg(long, help = "Do not ask; also unloads the model if it is loaded.")]
         yes: bool,
-        #[arg(long, help = "Remove even if loaded.")]
+        #[arg(long, help = "When unloading first, skip draining in-flight requests.")]
         force: bool,
     },
     #[command(about = "Change default load settings stored on the model card.")]
@@ -265,7 +270,7 @@ enum KeyCommands {
     Create {
         #[arg(long, help = "Human-readable label stored with the key.")]
         name: String,
-        #[arg(long, help = "Print the raw token once.")]
+        #[arg(long, help = "Print only the token on stdout (for API_KEY=$(goethe key create --raw ...)).")]
         raw: bool,
         #[arg(long, help = "Requests-per-minute limit.")]
         rpm: Option<i64>,
@@ -401,6 +406,18 @@ enum HwCommands {
     },
 }
 
+fn usage(msg: impl std::fmt::Display) -> ! {
+    eprintln!("error: {msg}");
+    std::process::exit(2);
+}
+
+fn checked_id(id: &str) -> &str {
+    if let Err(e) = validate_model_id(id) {
+        usage(e);
+    }
+    id
+}
+
 fn parse_gpus(raw: &str) -> Result<Vec<u32>, String> {
     raw.split(',')
         .map(|s| s.trim().parse::<u32>().map_err(|_| format!("invalid gpu index: {s}")))
@@ -437,6 +454,9 @@ fn main() {
             no_load: _,
             no_wait,
             force,
+            reset,
+            trust_remote_code,
+            yes,
             no_verify,
             name,
             copy,
@@ -444,9 +464,15 @@ fn main() {
         } => {
             let gpus_parsed = match gpus.as_deref().map(parse_gpus) {
                 Some(Ok(v)) => Some(v),
-                Some(Err(e)) => fail(e),
+                Some(Err(e)) => usage(e),
                 None => None,
             };
+            if !std::path::Path::new(&model_id).is_dir() && !model_id.starts_with(['.', '/', '~']) {
+                checked_id(&model_id);
+            }
+            if let Some(n) = name.as_deref() {
+                checked_id(n);
+            }
             install::run(InstallOpts {
                 model_id,
                 ctx,
@@ -460,6 +486,9 @@ fn main() {
                 copy_local: copy,
                 sglang_args: sglang_arg,
                 no_wait,
+                trust_remote_code,
+                yes,
+                reset,
             })
         }
         Commands::Login { token_stdin } => do_login(token_stdin),
@@ -504,7 +533,7 @@ fn main() {
             model_id,
             yes,
             force,
-        } => models::run_remove(&model_id, yes, force),
+        } => models::run_remove(checked_id(&model_id), yes, force),
         Commands::Config {
             model_id,
             ctx,
@@ -516,11 +545,11 @@ fn main() {
         } => {
             let gpus_parsed = match gpus.as_deref().map(parse_gpus) {
                 Some(Ok(v)) => Some(v),
-                Some(Err(e)) => fail(e),
+                Some(Err(e)) => usage(e),
                 None => None,
             };
             config::run(ConfigOpts {
-                model_id,
+                model_id: checked_id(&model_id).to_string(),
                 ctx,
                 max_conc,
                 tp,
@@ -552,7 +581,17 @@ fn main() {
             extra,
             no_wait,
         }),
-        Commands::Unload { model_id, all, force } => do_unload(model_id, all, force),
+        Commands::Unload { model_id, all, force } => {
+            match (&model_id, all) {
+                (Some(id), false) => {
+                    checked_id(id);
+                }
+                (None, false) => usage("give a model id or --all"),
+                (Some(_), true) => usage("give either a model id or --all, not both"),
+                (None, true) => {}
+            }
+            do_unload(model_id, all, force)
+        }
         Commands::Ps { json } => do_ps(json),
         Commands::Stop => shutdown::run_stop(),
         Commands::Service { cmd } => match cmd {
@@ -565,7 +604,7 @@ fn main() {
                 } else if on {
                     goethe_core::autostart::set_restore_enabled(true)
                 } else {
-                    Err("usage: goethe service restore --on|--off".to_string())
+                    usage("goethe service restore needs --on or --off")
                 }
             }
         },
@@ -632,17 +671,12 @@ fn main() {
                 expires,
                 models,
                 admin,
-            } => match security::key_create(
-                &name,
-                raw,
-                rpm,
-                expires.as_deref(),
-                models.as_deref(),
-                admin,
-            ) {
-                Ok(out) => {
-                    println!("{out}");
-                    print_gateway_line();
+            } => match security::key_create(&name, true, rpm, expires.as_deref(), models.as_deref(), admin) {
+                Ok(token) => {
+                    print!("{}", key_create_stdout(&token, &name, raw));
+                    if let Some(line) = nginx::format_gateway_line(&goethe_home()) {
+                        eprintln!("{line}");
+                    }
                     Ok(())
                 }
                 Err(e) => Err(e),
@@ -718,13 +752,21 @@ struct DoLoadArgs {
 }
 
 fn do_load(args: DoLoadArgs) -> Result<(), String> {
+    // Validate locally, warn about host RAM for offloading cards, then load with the foreign-process prompt.
+    checked_id(&args.model_id);
     if matches!(args.ep, Some(0)) {
-        return Err("--ep must be at least 1".to_string());
+        usage("--ep must be at least 1");
     }
     if let (Some(ep), Some(tp)) = (args.ep, args.tp) {
         if ep > 0 && tp % ep != 0 {
-            return Err(format!("--tp {tp} is not divisible by --ep {ep}"));
+            usage(format!("--tp {tp} is not divisible by --ep {ep}"));
         }
+    }
+    if let Some(msg) = goethe_core::sglang_infer::reserved_flag_error(&args.extra) {
+        usage(msg);
+    }
+    if let Some(warning) = models::host_ram_warning(&goethe_home(), &args.model_id) {
+        eprintln!("{warning}");
     }
     let mut extra = args.extra;
     if let Some(ep) = args.ep {
@@ -733,32 +775,32 @@ fn do_load(args: DoLoadArgs) -> Result<(), String> {
             extra.push(ep.to_string());
         }
     }
-    let reply = rpc::call(
-        "load",
-        json!({
-            "model_id": args.model_id,
-            "gpus": args.gpus,
-            "ctx": args.ctx,
-            "max_conc": args.max_conc,
-            "tp": args.tp,
-            "force": args.force,
-            "yes": args.yes,
-            "is_tty": std::io::stdin().is_terminal(),
-            "extra_sglang_args": extra,
-            "async_finish": true,
-        }),
+    let stdout = install::send_load(json!({
+        "model_id": args.model_id,
+        "gpus": args.gpus,
+        "ctx": args.ctx,
+        "max_conc": args.max_conc,
+        "tp": args.tp,
+        "force": args.force,
+        "yes": args.yes,
+        "extra_sglang_args": extra,
+        "async_finish": true,
+    }))?;
+    if !stdout.is_empty() {
+        print!("{stdout}");
+    }
+    goethe_core::load_wait::wait_after_load_stdout(&stdout, args.no_wait)
+}
+
+fn key_create_stdout(token: &str, name: &str, raw: bool) -> String {
+    // --raw prints exactly the token; otherwise the token once, its id, and a store-it-now note.
+    if raw {
+        return format!("{token}\n");
+    }
+    let id = token.get(8..16).unwrap_or("?");
+    format!(
+        "API key: {token}\nKey id:  {id} (name {name})\nStore this key now: goethe keeps only its hash and cannot show it again.\n"
     )
-    .map_err(rpc_daemon_err)?;
-    if !reply.stdout.is_empty() {
-        print!("{}", reply.stdout);
-    }
-    if reply.code != 0 {
-        if !reply.stderr.is_empty() {
-            eprint!("{}", reply.stderr);
-        }
-        std::process::exit(reply.code as i32);
-    }
-    goethe_core::load_wait::wait_after_load_stdout(&reply.stdout, args.no_wait)
 }
 
 fn rpc_daemon_err(e: String) -> String {
@@ -976,4 +1018,20 @@ fn do_logout() -> Result<(), String> {
 fn fail(msg: String) -> ! {
     eprintln!("{msg}");
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_create_raw_is_only_the_token() {
+        let token = "goethe_sk_0123456789abcdef0123456789abcdef";
+        assert_eq!(key_create_stdout(token, "ops", true), format!("{token}\n"));
+        let human = key_create_stdout(token, "ops", false);
+        assert!(human.contains(token));
+        assert!(human.contains("Key id:  k_012345"));
+        assert!(human.contains("Store this key now"));
+        assert_eq!(human.matches(token).count(), 1);
+    }
 }
