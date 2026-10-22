@@ -1,9 +1,0 @@
-# Build metadata for mesh_kernels CUDA extension (setuptools driver).
-[build-system]
-requires = ["setuptools", "torch"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "mesh-kernels"
-version = "0.1.0"
-requires-python = ">=3.11"

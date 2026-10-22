@@ -1,4 +1,4 @@
-# Flags for `goethe serve deepseek-ternary`. fetch downloads the pack and the base, then this command runs.
+# Flags for `goethe-lab serve deepseek-ternary`. fetch downloads the pack and the base, then this command runs.
 
 [model]
 path = "${TERNARY_MODEL_DIR}"

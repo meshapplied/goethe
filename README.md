@@ -6,19 +6,19 @@ One command to start the models in this repo on your GPU. The `goethe` package i
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/meshapplied/Goethe/main/install.sh | bash
-goethe doctor
-goethe serve
+goethe-lab doctor
+goethe-lab serve
 ```
 
-`goethe serve` with no name starts Qwen3.8-27B on NInfer, at `127.0.0.1:8080`. It builds NInfer if the binary is missing and downloads the weights if the file is missing. Run `goethe doctor` first. It tells you if this GPU can do that.
+`goethe-lab serve` with no name starts Qwen3.8-27B on NInfer, at `127.0.0.1:8080`. It builds NInfer if the binary is missing and downloads the weights if the file is missing. Run `goethe-lab doctor` first. It tells you if this GPU can do that.
 
-A name starts a different model. `goethe serve qwen-flash-next-ternary` and `goethe serve deepseek-ternary` download a pack and the public base checkpoint, then run the SGLang command in `examples/`. `goethe serve qwen-flash-next-nvfp4` runs the Flash-Next NVFP4 command, and only if `NVFP4_MODEL_DIR` already points at the tree. Goethe does not install SGLang. If `python -m sglang.launch_server` is missing, serve stops and says so.
+A name starts a different model. `goethe-lab serve qwen-flash-next-ternary` and `goethe-lab serve deepseek-ternary` download a pack and the public base checkpoint, then run the SGLang command in `examples/`. `goethe-lab serve qwen-flash-next-nvfp4` runs the Flash-Next NVFP4 command, and only if `NVFP4_MODEL_DIR` already points at the tree. Goethe does not install SGLang. If `python -m sglang.launch_server` is missing, serve stops and says so.
 
-If the 27B build dies on a CUDA header mismatch, `goethe doctor` names the fix. The rest of the commands are in [docs/cli.md](docs/cli.md).
+If the 27B build dies on a CUDA header mismatch, `goethe-lab doctor` names the fix. The rest of the commands are in [docs/cli.md](docs/cli.md).
 
 ## Models
 
-`goethe list` prints these ids and whether this GPU is in the tested set.
+`goethe-lab list` prints these ids and whether this GPU is in the tested set.
 
 - **qwen3-8-27b**, Qwen3.8-27B NVFP4. NInfer. Measured on an RTX 5090. The GPU needs 30 GiB. [`meshapplied/Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer)
 - **qwen-flash-next-ternary**, Qwen3.8 Flash-Next ternary. SGLang, two GPUs. Serve downloads the pack and the base. [`meshapplied/Qwen3.8-Flash-Next-Ternary-Latest`](https://huggingface.co/meshapplied/Qwen3.8-Flash-Next-Ternary-Latest)
@@ -29,7 +29,7 @@ A ternary pack is the expert weights laid over a public base checkpoint. An NVFP
 
 ## Ternary runtime
 
-`goethe serve` calls this for the two ternary ids. Install it yourself when you want `fetch` from Python.
+`goethe-lab serve` calls this for the two ternary ids. Install it yourself when you want `fetch` from Python.
 
 ```bash
 git clone https://github.com/meshapplied/goethe
@@ -54,7 +54,7 @@ That sets `TERNARY_PACK_DIR`, `TERNARY_MODEL_DIR`, and `TERNARY_PROFILE` in the 
 
 ## SGLang flags
 
-`goethe serve <id>` reads the matching file and execs it. The flags are here if you want to see them, or change them.
+`goethe-lab serve <id>` reads the matching file and execs it. The flags are here if you want to see them, or change them.
 
 | Model | Flags |
 |-------|-------|
