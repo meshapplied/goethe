@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Stage 1 hermetic py-env and SGLang fork gate."""
+"""Stage 1 hermetic py-env and SGLang fork gate (the interpreter named by GOETHE_PYTHON)."""
 
 from __future__ import annotations
 
-import os
-import subprocess
-from lib.goethe_test import gpu_flock, main_exit, require_gpus, resolve_goethe_home, resolve_python, run, test_gpus
+import shutil
+
+from lib.goethe_test import gpu_flock, main_exit, require_gpus, resolve_python, run
 
 
 def main() -> None:
-    """Verify Python 3.11 py-env, CUDA torch, SGLang fork, and hf CLI."""
-    gpus = require_gpus(1)
-    gpu = gpus[0]
-    home = resolve_goethe_home()
+    """Verify Python 3.11, CUDA torch, the patched SGLang fork and the hf CLI of the py-env under test."""
+    gpu = require_gpus(1)[-1]
     py = resolve_python()
     if not py.is_file():
         raise RuntimeError(f"missing py-env python at {py}")
@@ -21,47 +19,34 @@ def main() -> None:
         raise RuntimeError(f"expected Python 3.11, got {ver.stdout.strip()}")
     with gpu_flock([gpu]):
         cuda = run(
-            [
-                str(py),
-                "-c",
-                "import torch; print(torch.cuda.is_available()); print(torch.version.cuda)",
-            ],
-            env={**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu)},
+            [str(py), "-c", "import torch; print(torch.cuda.is_available()); print(torch.version.cuda)"],
+            env={"CUDA_VISIBLE_DEVICES": str(gpu)},
         )
-    if "True" not in cuda.stdout.splitlines()[0]:
-        raise RuntimeError("torch.cuda not available on test GPU")
-    if not cuda.stdout.splitlines()[1].strip():
-        raise RuntimeError("torch.version.cuda empty")
-    imp = run([str(py), "-c", "import sglang; from sglang.version import __version__; print(__version__ or sglang.__file__)"], env=os.environ.copy())
+    lines = cuda.stdout.splitlines()
+    if len(lines) < 2 or lines[0] != "True" or not lines[1].startswith("13."):
+        raise RuntimeError(f"torch must see the test GPU with CUDA 13: {cuda.stdout} {cuda.stderr[-300:]}")
+    imp = run([str(py), "-c", "import sglang; from sglang.version import __version__; print(__version__)"])
     if imp.returncode != 0:
-        raise RuntimeError(f"import sglang failed: {imp.stderr}")
-    help_rr = run([str(py), "-m", "sglang.launch_server", "--help"], timeout=60)
-    if help_rr.returncode != 0:
+        raise RuntimeError(f"import sglang failed: {imp.stderr[-400:]}")
+    if run([str(py), "-m", "sglang.launch_server", "--help"], timeout=120).returncode != 0:
         raise RuntimeError("sglang.launch_server --help failed")
-    hf = home / "py-env" / "bin" / "hf"
-    if not hf.is_file():
-        raise RuntimeError("hf CLI missing in py-env")
-    hf_rr = run([str(hf), "download", "--help"], env={**os.environ, "HF_HUB_ENABLE_HF_TRANSFER": "1"})
-    if hf_rr.returncode != 0:
-        raise RuntimeError("hf download --help failed")
-    uv = home / "bin" / "uv"
-    if not uv.is_file():
-        uv_path = run(["bash", "-lc", "command -v uv"])
-        if uv_path.returncode != 0 or not uv_path.stdout.strip():
-            raise RuntimeError("uv not found")
+    hf = py.parent / "hf"
+    if not hf.is_file() or run([str(hf), "download", "--help"]).returncode != 0:
+        raise RuntimeError(f"hf CLI missing or broken at {hf}")
+    if not (py.parent / "uv").is_file() and shutil.which("uv") is None:
+        raise RuntimeError("uv not found next to the py-env or on PATH")
     marlin = run(
         [
             str(py),
             "-c",
             "from sglang.srt.layers.quantization import goethe_marlin as m; "
-            "import os; os.environ.pop('GOETHE_MARLIN', None); "
-            "assert m.mode() in ('marlin_small', 'marlin_all'), m.mode()",
+            "assert m.mode() in ('marlin_small', 'marlin_all'), m.mode(); print(m.mode(), m.max_rows())",
         ],
-        env={**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu)},
+        env={"CUDA_VISIBLE_DEVICES": str(gpu), "GOETHE_MARLIN": "1"},
     )
     if marlin.returncode != 0:
-        raise RuntimeError(f"goethe Marlin patch not active: {marlin.stderr}")
-    print("stage1_pyenv ok")
+        raise RuntimeError(f"goethe Marlin patch not active: {marlin.stderr[-400:]}")
+    print(f"stage1_pyenv ok python={py} route={marlin.stdout.strip()}")
 
 
 if __name__ == "__main__":

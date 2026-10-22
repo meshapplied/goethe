@@ -173,7 +173,8 @@ def _test_stub_contract() -> None:
         payloads = [e[1] for e in events]
         check(len(payloads) == 7 and payloads[-1] == b"[DONE]", f"4 tokens, finish, usage, DONE: {len(payloads)}")
         first = json.loads(payloads[0])
-        check(first["object"] == "chat.completion.chunk" and first["choices"][0]["delta"]["role"] == "assistant", "chunk")
+        delta = first["choices"][0]["delta"]
+        check(first["object"] == "chat.completion.chunk" and delta["role"] == "assistant", "chunk schema")
         check(json.loads(payloads[5])["usage"]["completion_tokens"] == 4, "usage chunk")
         gaps = [events[i + 1][0] - events[i][0] for i in range(3)]
         check(all(g >= 0.03 for g in gaps), f"incremental sse gaps {gaps}")

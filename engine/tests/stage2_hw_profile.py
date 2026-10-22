@@ -6,9 +6,8 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from pathlib import Path
 
-from lib.goethe_test import main_exit, require_cli, resolve_goethe_home, run_goethe
+from lib.goethe_test import main_exit, require_cli, run_goethe, temp_home
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -29,7 +28,8 @@ def _smi_gpu_rows() -> list[dict[str, str | int]]:
     proc = subprocess.run(
         [
             "nvidia-smi",
-            "--query-gpu=index,uuid,name,compute_cap,memory.total,memory.used,memory.free,pcie.link.gen.current,pcie.link.width.current",
+            "--query-gpu=index,uuid,name,compute_cap,memory.total,memory.used,memory.free,"
+            "pcie.link.gen.current,pcie.link.width.current",
             "--format=csv,noheader,nounits",
         ],
         capture_output=True,
@@ -87,7 +87,9 @@ def _smi_pcie_snapshot() -> dict[int, dict[str, int]]:
     return out
 
 
-def _check_pcie_link(idx: int, goethe_gen: int, goethe_width: int, before: dict[int, dict[str, int]], after: dict[int, dict[str, int]]) -> None:
+def _check_pcie_link(
+    idx: int, goethe_gen: int, goethe_width: int, before: dict[int, dict[str, int]], after: dict[int, dict[str, int]]
+) -> None:
     """Accept goethe PCIe values if they match either nvidia-smi sample and sit within max."""
     b, a = before[idx], after[idx]
     gen_ok = {b["pcie_gen"], a["pcie_gen"]}
@@ -135,17 +137,20 @@ def _topo_map() -> dict[tuple[int, int], str]:
 
 
 def main() -> None:
-    """Run goethe hw profile and compare hardware_state.json."""
+    """Run goethe hw profile into a temp home and compare hardware_state.json with nvidia-smi."""
     goethe = require_cli("goethe")
-    home = resolve_goethe_home()
-    pcie_before = _smi_pcie_snapshot()
-    run_goethe([str(goethe), "hw", "profile"], env={"GOETHE_HOME": str(home)})
-    pcie_after = _smi_pcie_snapshot()
-    path = home / "hardware_state.json"
-    if not path.is_file():
-        raise RuntimeError("hardware_state.json missing")
-    state = json.loads(path.read_text(encoding="utf-8"))
+    with temp_home(stub_python=True, tag="hwprof") as home:
+        pcie_before = _smi_pcie_snapshot()
+        run_goethe([str(goethe), "hw", "profile"], env={"GOETHE_HOME": str(home)})
+        pcie_after = _smi_pcie_snapshot()
+        path = home / "hardware_state.json"
+        if not path.is_file():
+            raise RuntimeError("hardware_state.json missing")
+        state = json.loads(path.read_text(encoding="utf-8"))
     smi = {int(r["index"]): r for r in _smi_gpu_rows()}
+    reported = {int(g["index"]) for g in state.get("gpus", [])}
+    if not smi or reported != set(smi):
+        raise RuntimeError(f"profile reports GPUs {sorted(reported)}, nvidia-smi sees {sorted(smi)}")
     for gpu in state.get("gpus", []):
         idx = int(gpu["index"])
         ref = smi.get(idx)
