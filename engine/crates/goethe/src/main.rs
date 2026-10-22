@@ -475,6 +475,9 @@ fn main() {
             if let Some(n) = name.as_deref() {
                 checked_id(n);
             }
+            if let Some(msg) = goethe_core::sglang_infer::reserved_flag_error(&sglang_arg) {
+                usage(msg);
+            }
             install::run(InstallOpts {
                 model_id,
                 ctx,
@@ -550,6 +553,9 @@ fn main() {
                 Some(Err(e)) => usage(e),
                 None => None,
             };
+            if let Some(msg) = goethe_core::sglang_infer::reserved_flag_error(&sglang_arg) {
+                usage(msg);
+            }
             config::run(ConfigOpts {
                 model_id: checked_id(&model_id).to_string(),
                 ctx,

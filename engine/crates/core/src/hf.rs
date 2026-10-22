@@ -211,6 +211,15 @@ pub fn preflight_model_opts(
             "model {model_id} is gated: accept its license on huggingface.co/{model_id}, then run `goethe login`"
         ));
     }
+    if gated && has_token && !allow_gated_without_token {
+        let probe = format!("{endpoint}/{model_id}/resolve/{}/config.json", revision.unwrap_or("main"));
+        let r = api_request("GET", &probe, token.as_deref(), None)?;
+        if r.status == 401 || r.status == 403 {
+            return Err(format!(
+                "model {model_id} is gated and the Hugging Face token in use has no access: accept the license on huggingface.co/{model_id} with that account, or run `goethe login` with a token that has access"
+            ));
+        }
+    }
     Ok(ModelPreflight {
         gated,
         siblings: parse_siblings(&body),
