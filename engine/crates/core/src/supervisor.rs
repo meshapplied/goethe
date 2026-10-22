@@ -172,18 +172,6 @@ fn insts(con: &Connection, filter: &str, args: &[&dyn ToSql]) -> rusqlite::Resul
     rows.collect()
 }
 
-pub fn internal_port_for_model(model_id: &str) -> Option<u16> {
-    let home = goethe_home();
-    let con = db::open(&home).ok()?;
-    con.query_row(
-        "SELECT internal_port FROM loaded_instances WHERE model_id = ?1 AND status = 'RUNNING' LIMIT 1",
-        [model_id],
-        |r| r.get::<_, i64>(0),
-    )
-    .ok()
-    .and_then(|p| u16::try_from(p).ok())
-}
-
 pub fn handle_load(params: LoadParams) -> Result<(Value, String), LoadErr> {
     // Validate, then plan, gate, spawn and record one engine; the health wait continues on a background thread.
     let home = goethe_home();
@@ -795,19 +783,6 @@ pub fn graceful_shutdown(home: &Path) -> Result<(), String> {
         ),
     );
     Ok(())
-}
-
-pub fn model_draining(model_id: &str) -> bool {
-    let home = goethe_home();
-    let Ok(con) = db::open(&home) else {
-        return false;
-    };
-    con.query_row(
-        "SELECT 1 FROM loaded_instances WHERE model_id = ?1 AND status = 'DRAINING' LIMIT 1",
-        [model_id],
-        |_| Ok(()),
-    )
-    .is_ok()
 }
 
 fn drain_inflight(model_ids: &[String], home: &Path) {
