@@ -59,45 +59,54 @@ fn recv_check(rx: mpsc::Receiver<Check>, name: &str) -> Check {
     })
 }
 
+type CheckFn = fn(&Path) -> Check;
+
+const CHECKS: &[(&str, CheckFn)] = &[
+    ("hardware", check_hardware),
+    ("glibc", |_| check_glibc()),
+    ("nginx", check_nginx),
+    ("goethe_home", check_goethe_home),
+    ("disk", check_disk),
+    ("ram", check_ram),
+    ("state_db", check_state_db),
+    ("environment", check_environment),
+    ("cloud", check_cloud),
+    ("py-env", check_pyenv),
+    ("ports", check_ports),
+    ("goethed", |_| check_goethed()),
+    ("gateway", check_gateway),
+    ("tls", check_tls),
+    ("huggingface", check_hf),
+    ("registry", check_registry),
+    ("nvidia_driver", |_| check_nvidia_driver()),
+];
+
 fn collect_checks(home: &Path) -> Vec<Check> {
-    let home2 = home.to_path_buf();
-    let home3 = home.to_path_buf();
-    let home4 = home.to_path_buf();
-    let home5 = home.to_path_buf();
-    let home6 = home.to_path_buf();
-    let home7 = home.to_path_buf();
-    let home8 = home.to_path_buf();
-    let home9 = home.to_path_buf();
-    let home10 = home.to_path_buf();
-    let r1 = spawn_check(move || check_hardware(&home2));
-    let r3 = spawn_check(check_glibc);
-    let r4 = spawn_check(move || check_nginx(&home3));
-    let r5 = spawn_check(move || check_goethe_home(&home4));
-    let r6 = spawn_check(move || check_disk(&home5));
-    let r7 = spawn_check(move || check_pyenv(&home6));
-    let r8 = spawn_check(move || check_ports(&home7));
-    let r9 = spawn_check(check_goethed);
-    let r10 = spawn_check(move || check_gateway(&home8));
-    let r11 = spawn_check(move || check_tls(&home9));
-    let r12 = spawn_check(move || check_hf(&home10));
-    let home11 = home.to_path_buf();
-    let r13 = spawn_check(move || check_registry(&home11));
-    let r14 = spawn_check(check_nvidia_driver);
-    vec![
-        recv_check(r1, "hardware"),
-        recv_check(r3, "glibc"),
-        recv_check(r4, "nginx"),
-        recv_check(r5, "goethe_home"),
-        recv_check(r6, "disk"),
-        recv_check(r7, "py-env"),
-        recv_check(r8, "ports"),
-        recv_check(r9, "goethed"),
-        recv_check(r10, "gateway"),
-        recv_check(r11, "tls"),
-        recv_check(r12, "huggingface"),
-        recv_check(r13, "registry"),
-        recv_check(r14, "nvidia_driver"),
-    ]
+    // Run every check in parallel; each result carries the check's fixed name even on timeout.
+    let pending: Vec<_> = CHECKS
+        .iter()
+        .map(|(name, f)| {
+            let h = home.to_path_buf();
+            let f = *f;
+            (*name, spawn_check(move || f(&h)))
+        })
+        .collect();
+    pending
+        .into_iter()
+        .map(|(name, rx)| {
+            let mut c = recv_check(rx, name);
+            c.name = name.to_string();
+            c
+        })
+        .collect()
+}
+
+fn check(name: &str, status: &str, hint: impl Into<String>) -> Check {
+    Check {
+        name: name.to_string(),
+        status: status.to_string(),
+        hint: hint.into(),
+    }
 }
 
 fn check_nvidia_driver() -> Check {
@@ -213,20 +222,10 @@ fn print_public_security_advisory() {
 }
 
 fn check_hardware(home: &Path) -> Check {
+    // NVML probe plus per-GPU support and foreign-process counts.
     let hw = match crate::hw::profile(home) {
         Ok(h) => h,
-        Err(e) => {
-            return Check {
-                name: "nvml".into(),
-                status: "FAIL".into(),
-                hint: format!("{e}; install NVIDIA driver and ensure nvidia-smi works"),
-            };
-        }
-    };
-    let nvml = Check {
-        name: "nvml".into(),
-        status: "OK".into(),
-        hint: format!("driver {}", hw.driver),
+        Err(e) => return check("hardware", "FAIL", format!("{e}; install the NVIDIA driver and make sure nvidia-smi works")),
     };
     let managed = crate::db::open(home)
         .ok()
@@ -249,16 +248,7 @@ fn check_hardware(home: &Path) -> Check {
             g.index, g.name, g.compute_capability, g.vram_free_mb, g.vram_total_mb
         ));
     }
-    let gpu_hint = parts.join("; ");
-    Check {
-        name: "hardware".into(),
-        status: if nvml.status == "FAIL" {
-            "FAIL".into()
-        } else {
-            "OK".into()
-        },
-        hint: format!("{} | gpus: {}", nvml.hint, gpu_hint),
-    }
+    check("hardware", "OK", format!("driver {} | gpus: {}", hw.driver, parts.join("; ")))
 }
 
 fn check_glibc() -> Check {
@@ -281,19 +271,16 @@ fn check_glibc() -> Check {
 }
 
 fn check_nginx(home: &Path) -> Check {
-    let bin = home.join("nginx-root/usr/sbin/nginx");
+    // Same lookup the gateway uses: NGINX_BIN, GOETHE_HOME/nginx-root, then PATH.
+    let bin = crate::nginx::nginx_bin(home);
     if bin.is_file() {
-        return Check {
-            name: "nginx".into(),
-            status: "OK".into(),
-            hint: bin.display().to_string(),
-        };
+        return check("nginx", "OK", bin.display().to_string());
     }
-    Check {
-        name: "nginx".into(),
-        status: "FAIL".into(),
-        hint: "run goethe installer or place nginx under GOETHE_HOME/nginx-root".into(),
-    }
+    check(
+        "nginx",
+        "FAIL",
+        "nginx not found: set NGINX_BIN, install nginx, or rerun the goethe installer (rootless nginx under GOETHE_HOME/nginx-root)",
+    )
 }
 
 fn check_goethe_home(home: &Path) -> Check {
@@ -313,35 +300,111 @@ fn check_goethe_home(home: &Path) -> Check {
 }
 
 fn check_disk(home: &Path) -> Check {
+    // Free space on the models volume against the largest installed model (and a 50 GB floor).
     let models = home.join("models");
     let _ = fs::create_dir_all(&models);
-    match available_gb(&models) {
-        Ok(gb) if gb >= 50.0 => Check {
-            name: "disk".into(),
-            status: "OK".into(),
-            hint: format!("{gb:.0} GB free for models"),
-        },
-        Ok(gb) => Check {
-            name: "disk".into(),
-            status: "WARN".into(),
-            hint: format!("only {gb:.0} GB free under models/"),
-        },
-        Err(e) => Check {
-            name: "disk".into(),
-            status: "WARN".into(),
-            hint: e,
-        },
+    let gb = match available_gb(&models) {
+        Ok(gb) => gb,
+        Err(e) => return check("disk", "WARN", e),
+    };
+    let largest = crate::models::installed_ids(home)
+        .into_iter()
+        .filter_map(|id| crate::model_facts::weights_gb(&crate::paths::model_dir(home, &id)).ok().map(|s| (s, id)))
+        .max_by(|a, b| a.0.total_cmp(&b.0));
+    let need = largest.as_ref().map(|l| l.0).unwrap_or(0.0).max(50.0);
+    let detail = largest
+        .map(|(s, id)| format!("; largest installed model {id} is {s:.0} GB"))
+        .unwrap_or_default();
+    if gb >= need {
+        check("disk", "OK", format!("{gb:.0} GB free for models{detail}"))
+    } else {
+        check("disk", "WARN", format!("only {gb:.0} GB free under models/{detail}; free space before installing more"))
+    }
+}
+
+fn check_ram(home: &Path) -> Check {
+    // MemAvailable against the largest host-RAM need of installed models (offloaded weights).
+    let Some(avail) = crate::host::mem_available_gb() else {
+        return check("ram", "WARN", "cannot read /proc/meminfo");
+    };
+    let worst = crate::models::installed_ids(home)
+        .into_iter()
+        .filter_map(|id| crate::models::host_ram_need_gb(home, &id).map(|gb| (gb, id)))
+        .max_by(|a, b| a.0.total_cmp(&b.0));
+    match worst {
+        Some((need, id)) if avail < need.max(12.0) + 4.0 => check(
+            "ram",
+            "WARN",
+            format!("{avail:.1} GB available; {id} offloads {need:.1} GB to host RAM and may fail to load"),
+        ),
+        _ if avail < 16.0 => check("ram", "WARN", format!("only {avail:.1} GB RAM available; engines need host memory while loading")),
+        Some((need, id)) => check("ram", "OK", format!("{avail:.1} GB available; {id} needs {need:.1} GB pinned")),
+        None => check("ram", "OK", format!("{avail:.1} GB available")),
+    }
+}
+
+fn check_state_db(home: &Path) -> Check {
+    // SQLite WAL needs shared memory that network filesystems do not provide reliably.
+    let host = crate::host::probe_host(home, &crate::host::probe_environment(8443).cloud);
+    match host.disks.iter().find(|d| d.role == "goethe_home") {
+        Some(d) if d.network_fs => check(
+            "state_db",
+            "WARN",
+            format!("state.db is on {} ({}); SQLite WAL is unsafe there, set GOETHE_HOME to a local disk", d.mount_point, d.fs_type),
+        ),
+        Some(d) => check("state_db", "OK", format!("{} on {}", d.fs_type, d.mount_point)),
+        None => check("state_db", "WARN", "cannot inspect the GOETHE_HOME filesystem"),
+    }
+}
+
+fn check_environment(home: &Path) -> Check {
+    // How goethed should be kept running here: systemd units, or nohup/cron in containers.
+    let env = crate::host::probe_environment(crate::nginx::public_port_u16(home));
+    match (&env.container, env.systemd_pid1) {
+        (Some(c), false) => {
+            let volume = match &env.persistent_volume {
+                Some(v) if home.starts_with(v) => format!("; GOETHE_HOME is on the persistent volume {v}"),
+                Some(v) => format!("; GOETHE_HOME is not on the persistent volume {v} and is lost when the container is recreated"),
+                None => String::new(),
+            };
+            check(
+                "environment",
+                "INFO",
+                format!("container {c} without systemd: goethe service enable starts goethed with nohup; add goethed to the container start command{volume}"),
+            )
+        }
+        (Some(c), true) => check("environment", "INFO", format!("container {c} with systemd: goethe service enable installs a unit")),
+        (None, true) => check("environment", "OK", "systemd is PID 1: goethe service enable installs a unit"),
+        (None, false) => check("environment", "INFO", "no systemd: goethe service enable uses crontab @reboot"),
+    }
+}
+
+fn check_cloud(home: &Path) -> Check {
+    // Provider-specific reachability hints for the public gateway port.
+    let port = crate::nginx::public_port_u16(home);
+    let env = crate::host::probe_environment(port);
+    let hints = if env.public_endpoints.is_empty() {
+        String::new()
+    } else {
+        format!("; endpoints: {}", env.public_endpoints.join(", "))
+    };
+    match env.cloud.as_str() {
+        "none" => check("cloud", "INFO", "no cloud provider detected"),
+        "runpod" => check(
+            "cloud",
+            "INFO",
+            format!("RunPod: expose TCP port {port} in the pod settings (the HTTPS proxy terminates TLS, the gateway expects it){hints}"),
+        ),
+        "vast" => check("cloud", "INFO", format!("Vast.ai: map port {port} in the instance template (-p {port}:{port}){hints}")),
+        other => check("cloud", "INFO", format!("{other}: open TCP {port} in the provider firewall or security group{hints}")),
     }
 }
 
 fn check_pyenv(home: &Path) -> Check {
+    // The hermetic py-env exists and imports sglang.
     let py = home.join("py-env/bin/python");
     if !py.is_file() {
-        return Check {
-            name: "py-env".into(),
-            status: "FAIL".into(),
-            hint: "run installer or goethe update --engine".into(),
-        };
+        return check("py-env", "FAIL", "run the installer or goethe update --engine");
     }
     let out = std::process::Command::new(&py)
         .args(["-c", "import sglang; print(getattr(sglang, '__version__', 'ok'))"])
@@ -349,19 +412,8 @@ fn check_pyenv(home: &Path) -> Check {
         .stderr(std::process::Stdio::null())
         .output();
     match out {
-        Ok(o) if o.status.success() => Check {
-            name: "sglang".into(),
-            status: "OK".into(),
-            hint: format!(
-                "sglang {}",
-                String::from_utf8_lossy(&o.stdout).trim()
-            ),
-        },
-        _ => Check {
-            name: "sglang".into(),
-            status: "FAIL".into(),
-            hint: "py-env present but sglang import failed; run goethe update --engine".into(),
-        },
+        Ok(o) if o.status.success() => check("py-env", "OK", format!("sglang {}", String::from_utf8_lossy(&o.stdout).trim())),
+        _ => check("py-env", "FAIL", "py-env present but sglang import failed; run goethe update --engine"),
     }
 }
 
@@ -437,22 +489,26 @@ fn check_tls(home: &Path) -> Check {
             hint: "no server.crt".into(),
         };
     }
-    let out = std::process::Command::new("openssl")
-        .args(["x509", "-enddate", "-noout", "-in"])
-        .arg(&cert)
-        .output();
-    match out {
-        Ok(o) if o.status.success() => Check {
-            name: "tls".into(),
-            status: "OK".into(),
-            hint: String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        },
-        _ => Check {
-            name: "tls".into(),
-            status: "WARN".into(),
-            hint: "could not read certificate expiry".into(),
-        },
+    let openssl = |extra: &[&str]| {
+        std::process::Command::new("openssl")
+            .args(["x509", "-noout", "-in"])
+            .arg(&cert)
+            .args(extra)
+            .stderr(Stdio::null())
+            .output()
+    };
+    let end = match openssl(&["-enddate"]) {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => return check("tls", "WARN", "could not read certificate expiry"),
+    };
+    let valid_for = |secs: &str| openssl(&["-checkend", secs]).map(|o| o.status.success()).unwrap_or(false);
+    if !valid_for("0") {
+        return check("tls", "FAIL", format!("certificate expired ({end}); renew it or rerun the installer"));
     }
+    if !valid_for("604800") {
+        return check("tls", "WARN", format!("certificate expires within 7 days ({end})"));
+    }
+    check("tls", "OK", end)
 }
 
 fn check_hf(home: &Path) -> Check {
