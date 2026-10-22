@@ -4,7 +4,7 @@ use crate::chooser::ChooserInput;
 use crate::db;
 use crate::host;
 use crate::hw::HardwareState;
-use crate::install::{self, CARD_FILE};
+use crate::install;
 use crate::paths::{contained_in_models, goethe_home, shell_quote, validate_model_id};
 use crate::recommend::{best_fit, registry_input};
 use crate::registry::{fetch, registry_url, Registry};
@@ -303,18 +303,7 @@ fn source_of(dir: &Path) -> Option<String> {
 }
 
 fn is_link_or_farm(dir: &Path) -> bool {
-    // True when deleting dir can only remove links and goethe's own card files.
-    if fs::symlink_metadata(dir).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-        return true;
-    }
-    fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten().all(|e| {
-                e.file_name().to_string_lossy().starts_with(CARD_FILE)
-                    || e.file_type().map(|t| t.is_symlink()).unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
+    fs::symlink_metadata(dir).map(|m| m.file_type().is_symlink()).unwrap_or(false) || install::is_farm(dir)
 }
 
 fn remove_owned(home: &Path, p: &Path) -> Result<(), String> {
@@ -445,7 +434,7 @@ mod tests {
         fs::create_dir_all(&dirs.base).unwrap();
         fs::create_dir_all(h.join("models/mesh__pack")).unwrap();
         fs::write(
-            h.join("models/mesh__pack").join(CARD_FILE),
+            h.join("models/mesh__pack").join(install::CARD_FILE),
             "model_id = \"mesh/pack\"\ncontext_length = 1\nmax_running_requests = 1\ntp_size = 0\nep_size = 1\nkv_cache_dtype = \"auto\"\npreferred_gpus = []\nextra_sglang_args = []\nruntime = \"ternary\"\npack_id = \"mesh/pack\"\nbase_model_id = \"base/model\"\n",
         )
         .unwrap();
