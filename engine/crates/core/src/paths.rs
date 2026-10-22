@@ -49,23 +49,6 @@ pub fn is_writable(path: &Path) -> bool {
     unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
 }
 
-pub fn goethe_mux_port() -> u16 {
-    // Read-only: the port goethed persisted, then GOETHE_MUX_PORT, then 30000; the CLI never writes ports.
-    if let Ok(v) = std::fs::read_to_string(goethe_home().join("nginx/mux_port")) {
-        if let Ok(p) = v.trim().parse::<u16>() {
-            return p;
-        }
-    }
-    std::env::var("GOETHE_MUX_PORT")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(30000)
-}
-
-pub fn goethe_mux_addr() -> String {
-    format!("127.0.0.1:{}", goethe_mux_port())
-}
-
 pub fn goethe_sock() -> PathBuf {
     if let Ok(v) = std::env::var("GOETHE_SOCK") {
         if !v.is_empty() {
