@@ -1,8 +1,11 @@
 // In-place goethe_card.toml and installed_models default updates.
 
 use crate::db;
-use crate::paths::goethe_home;
-use std::path::PathBuf;
+use crate::install::{kv_element_bytes, write_card_table, CARD_FILE};
+use crate::paths::{goethe_home, validate_model_id};
+use crate::sglang_infer as sgl;
+use rusqlite::OptionalExtension;
+use std::path::{Path, PathBuf};
 
 pub struct ConfigOpts {
     pub model_id: String,
@@ -15,108 +18,96 @@ pub struct ConfigOpts {
 }
 
 pub fn run(opts: ConfigOpts) -> Result<(), String> {
+    // Update card fields atomically, then mirror the load defaults into installed_models.
+    validate_model_id(&opts.model_id)?;
     let home = goethe_home();
-    let dir = find_model_dir(&home, &opts.model_id)?;
-    let card_path = dir.join("goethe_card.toml");
-    let text = std::fs::read_to_string(&card_path).map_err(|e| e.to_string())?;
-    let mut root: toml::Value = toml::from_str(&text).map_err(|e| e.to_string())?;
-    let table = root
-        .as_table_mut()
-        .ok_or_else(|| "goethe_card.toml root must be a table".to_string())?;
+    let con = db::open(&home).map_err(|e| format!("state.db: {e}"))?;
+    let row: Option<(String, Option<i64>)> = con
+        .query_row(
+            "SELECT local_path, kv_elems_per_token FROM installed_models WHERE model_id = ?1",
+            [&opts.model_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("state.db: {e}"))?;
+    let dir = match &row {
+        Some((rel, _)) => home.join(rel),
+        None => find_model_dir(&home, &opts.model_id)?,
+    };
+    let text = std::fs::read_to_string(dir.join(CARD_FILE)).map_err(|e| format!("{}: {e}", dir.join(CARD_FILE).display()))?;
+    let mut table: toml::Table = toml::from_str(&text).map_err(|e| format!("{CARD_FILE}: {e}"))?;
+    let int = |v: u64| toml::Value::Integer(v as i64);
     if let Some(ctx) = opts.ctx {
-        table.insert(
-            "context_length".into(),
-            toml::Value::Integer(ctx as i64),
-        );
+        table.insert("context_length".into(), int(ctx));
     }
     if let Some(mc) = opts.max_conc {
-        table.insert(
-            "max_running_requests".into(),
-            toml::Value::Integer(mc as i64),
-        );
+        table.insert("max_running_requests".into(), int(mc));
     }
     if let Some(tp) = opts.tp {
-        table.insert("tp_size".into(), toml::Value::Integer(tp as i64));
+        table.insert("tp_size".into(), int(tp));
     }
     if let Some(gpus) = opts.gpus {
-        let arr: Vec<toml::Value> = gpus
-            .into_iter()
-            .map(|g| toml::Value::Integer(g as i64))
-            .collect();
-        table.insert("preferred_gpus".into(), toml::Value::Array(arr));
+        table.insert("preferred_gpus".into(), toml::Value::Array(gpus.into_iter().map(|g| int(g as u64)).collect()));
     }
-    if opts.clear_sglang_args {
-        table.insert("extra_sglang_args".into(), toml::Value::Array(vec![]));
-    } else if !opts.sglang_args.is_empty() {
-        let mut cur: Vec<String> = table
-            .get("extra_sglang_args")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        for a in &opts.sglang_args {
-            if !cur.contains(a) {
-                cur.push(a.clone());
-            }
-        }
+    let (new_args, kv_dtype) = sgl::take_flag(&opts.sglang_args, "--kv-cache-dtype")?;
+    if let Some(msg) = sgl::reserved_flag_error(&new_args) {
+        return Err(msg);
+    }
+    if opts.clear_sglang_args || !new_args.is_empty() {
+        let cur: Vec<String> = if opts.clear_sglang_args {
+            Vec::new()
+        } else {
+            table
+                .get("extra_sglang_args")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default()
+        };
+        let merged = sgl::merge_extra_args(&cur, &new_args)?;
         table.insert(
             "extra_sglang_args".into(),
-            toml::Value::Array(cur.into_iter().map(toml::Value::String).collect()),
+            toml::Value::Array(merged.into_iter().map(toml::Value::String).collect()),
         );
     }
-    let tp = table
-        .get("tp_size")
-        .and_then(|v| v.as_integer())
-        .unwrap_or(1);
-    let ctx = table
-        .get("context_length")
-        .and_then(|v| v.as_integer())
-        .unwrap_or(4096);
-    let mc = table
-        .get("max_running_requests")
-        .and_then(|v| v.as_integer())
-        .unwrap_or(4);
-    let out = toml::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    std::fs::write(&card_path, out).map_err(|e| e.to_string())?;
-    if let Ok(con) = db::open(&home) {
-        let _ = con.execute(
-            "UPDATE installed_models SET default_ctx = ?1, default_max_conc = ?2, default_tp = ?3
-             WHERE model_id = ?4",
+    if let Some(kv) = &kv_dtype {
+        table.insert("kv_cache_dtype".into(), toml::Value::String(kv.clone()));
+    }
+    write_card_table(&dir, &table)?;
+    let get = |k: &str, d: i64| table.get(k).and_then(|v| v.as_integer()).unwrap_or(d);
+    let (ctx, mc, tp) = (get("context_length", 4096), get("max_running_requests", 8), get("tp_size", 0));
+    if row.is_some() {
+        con.execute(
+            "UPDATE installed_models SET default_ctx = ?1, default_max_conc = ?2, default_tp = ?3 WHERE model_id = ?4",
             rusqlite::params![ctx, mc, tp, opts.model_id],
-        );
+        )
+        .map_err(|e| format!("state.db: {e}"))?;
+    }
+    if let (Some(kv), Some((_, Some(elems)))) = (&kv_dtype, &row) {
+        let cfg = crate::model_facts::read_config(&dir)?;
+        let bytes = *elems as u64 * kv_element_bytes(kv, &cfg);
+        con.execute(
+            "UPDATE installed_models SET kv_bytes_per_token = ?1 WHERE model_id = ?2",
+            rusqlite::params![bytes as i64, opts.model_id],
+        )
+        .map_err(|e| format!("state.db: {e}"))?;
     }
     Ok(())
 }
 
-fn find_model_dir(home: &std::path::Path, model_id: &str) -> Result<PathBuf, String> {
+fn find_model_dir(home: &Path, model_id: &str) -> Result<PathBuf, String> {
+    // Cards placed under models/ without a state.db row are found by their model_id.
     let models = home.join("models");
-    if !models.is_dir() {
-        return Err(format!("model {model_id} not installed"));
-    }
-    for entry in std::fs::read_dir(&models).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        if !path.is_dir() {
+    for entry in std::fs::read_dir(&models).map_err(|_| format!("model {model_id} is not installed"))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        let Ok(text) = std::fs::read_to_string(path.join(CARD_FILE)) else {
             continue;
-        }
-        let card_path = path.join("goethe_card.toml");
-        if !card_path.is_file() {
-            continue;
-        }
-        let text = std::fs::read_to_string(&card_path).map_err(|e| e.to_string())?;
-        if card_model_id(&text).as_deref() == Some(model_id) {
+        };
+        let id = toml::from_str::<toml::Table>(&text)
+            .ok()
+            .and_then(|t| t.get("model_id").and_then(|v| v.as_str()).map(String::from));
+        if id.as_deref() == Some(model_id) {
             return Ok(path);
         }
     }
-    Err(format!("model {model_id} not found under models/"))
-}
-
-fn card_model_id(text: &str) -> Option<String> {
-    let root: toml::Value = toml::from_str(text).ok()?;
-    root.get("model_id")
-        .and_then(|v| v.as_str())
-        .map(String::from)
+    Err(format!("model {model_id} is not installed"))
 }

@@ -75,6 +75,20 @@ pub struct RegistryModel {
     pub modalities: Option<Vec<String>>,
 }
 
+const TERNARY_PROFILES: &[&str] = &[
+    "flash_next",
+    "flash-next",
+    "qwen4_exp",
+    "qwen38",
+    "qwen",
+    "deepseek_v41",
+    "deepseek",
+    "ds",
+    "bonsai",
+    "bonsai-27b",
+    "ternary-bonsai",
+];
+
 fn default_arch() -> String {
     "dense".to_string()
 }
@@ -193,7 +207,6 @@ pub fn run_validate(source: &str, opts: &ValidateOpts) -> Result<(), String> {
             errors.push(format!("duplicate id {}", m.id));
         }
         validate_entry(m, &mut errors);
-        warn_legacy_fields(m);
     }
     if opts.online {
         for m in &reg.models {
@@ -250,8 +263,17 @@ fn validate_entry(m: &RegistryModel, errors: &mut Vec<String>) {
     if rt != "sglang" && rt != "ternary" {
         errors.push(format!("{}: runtime must be sglang or ternary", m.id));
     }
-    if rt == "ternary" && (m.pack_id.is_none() || m.base_model_id.is_none()) {
-        errors.push(format!("{}: ternary requires pack_id and base_model_id", m.id));
+    if rt == "ternary" {
+        validate_ternary(m, errors);
+    }
+    if let Some(msg) = sglang_infer::reserved_flag_error(&m.extra_sglang_args) {
+        errors.push(format!("{}: {msg}", m.id));
+    }
+    if let Err(e) = sglang_infer::parse_groups(&m.extra_sglang_args).and_then(|g| sglang_infer::check_arity(&g)) {
+        errors.push(format!("{}: {e}", m.id));
+    }
+    if sglang_infer::has_flag(&m.extra_sglang_args, "--kv-cache-dtype") {
+        errors.push(format!("{}: set kv_cache_dtype instead of passing --kv-cache-dtype", m.id));
     }
     if m.supported_sm.is_empty() {
         errors.push(format!("{}: supported_sm required", m.id));
@@ -263,23 +285,28 @@ fn validate_entry(m: &RegistryModel, errors: &mut Vec<String>) {
     }
 }
 
-fn warn_legacy_fields(m: &RegistryModel) {
-    for field in [
-        "default_max_conc",
-        "default_tp",
-        "min_total_vram_gb",
-        "kv_cache_dtype",
-    ] {
-        let warn = match field {
-            "default_max_conc" => m.default_max_conc.is_some(),
-            "default_tp" => m.default_tp.is_some(),
-            "min_total_vram_gb" => m.min_total_vram_gb.is_some(),
-            "kv_cache_dtype" => m.kv_cache_dtype.is_some(),
-            _ => false,
-        };
-        if warn {
-            eprintln!("warning: {}: legacy field {field} is ignored at load time", m.id);
+fn validate_ternary(m: &RegistryModel, errors: &mut Vec<String>) {
+    // Ternary entries must name both checkpoints, a known profile, and the dirs install creates.
+    let (Some(pack), Some(base)) = (m.pack_id.as_deref(), m.base_model_id.as_deref()) else {
+        errors.push(format!("{}: ternary requires pack_id and base_model_id", m.id));
+        return;
+    };
+    let dirs = crate::install::ternary_dirs(Path::new("$GOETHE_HOME"), pack, base);
+    let env = m.env.as_ref().and_then(|v| v.as_table());
+    let get = |k: &str| env.and_then(|t| t.get(k)).and_then(|v| v.as_str()).unwrap_or("");
+    for (key, want) in [("TERNARY_PACK_DIR", &dirs.pack), ("TERNARY_MODEL_DIR", &dirs.base)] {
+        let want = want.display().to_string();
+        if get(key) != want {
+            errors.push(format!("{}: env {key} must be {want} (got {:?})", m.id, get(key)));
         }
+    }
+    if !TERNARY_PROFILES.contains(&get("TERNARY_PROFILE")) {
+        errors.push(format!(
+            "{}: env TERNARY_PROFILE {:?} is not one of {}",
+            m.id,
+            get("TERNARY_PROFILE"),
+            TERNARY_PROFILES.join(", ")
+        ));
     }
 }
 
@@ -307,6 +334,9 @@ fn online_checks(m: &RegistryModel, opts: &ValidateOpts, errors: &mut Vec<String
     match hf::preflight_model_opts(&m.id, Some(rev), true) {
         Err(e) => errors.push(format!("{}: {e}", m.id)),
         Ok(p) => {
+            if !p.siblings.is_empty() && !hf::has_weight_files(&p.siblings) {
+                errors.push(format!("{}: repository has no model weight files", m.id));
+            }
             let entry_gated = m.gated.unwrap_or(false);
             if p.gated && entry_gated && !has_token {
                 eprintln!(
@@ -454,14 +484,14 @@ pub fn run_add(opts: &AddOpts) -> Result<(), String> {
                     eprintln!("warning: {w}");
                 }
                 if let Some(o) = overlay.get(&entry.id) {
-                    merge_overlay(&mut entry, o);
+                    merge_overlay(&mut entry, o).map_err(|e| format!("{}: {e}", entry.id))?;
                 }
                 if let Some(idx) = reg.models.iter().position(|m| m.id == entry.id) {
                     if !opts.update {
                         skipped += 1;
                         continue;
                     }
-                    merge_measured(&mut reg.models[idx], &entry);
+                    merge_measured(&mut reg.models[idx], &entry).map_err(|e| format!("{}: {e}", entry.id))?;
                     updated += 1;
                 } else {
                     reg.models.push(entry);
@@ -522,7 +552,7 @@ fn load_overlay(path: Option<&str>) -> Result<std::collections::HashMap<String, 
     Ok(reg.models.into_iter().map(|m| (m.id.clone(), m)).collect())
 }
 
-fn merge_overlay(dst: &mut RegistryModel, src: &RegistryModel) {
+fn merge_overlay(dst: &mut RegistryModel, src: &RegistryModel) -> Result<(), String> {
     if src.description.is_some() {
         dst.description = src.description.clone();
     }
@@ -541,10 +571,11 @@ fn merge_overlay(dst: &mut RegistryModel, src: &RegistryModel) {
     if !src.supported_sm.is_empty() {
         dst.supported_sm = src.supported_sm.clone();
     }
-    dst.extra_sglang_args = dedupe_args(&dst.extra_sglang_args, &src.extra_sglang_args);
+    dst.extra_sglang_args = sglang_infer::merge_extra_args(&dst.extra_sglang_args, &src.extra_sglang_args)?;
+    Ok(())
 }
 
-fn merge_measured(dst: &mut RegistryModel, src: &RegistryModel) {
+fn merge_measured(dst: &mut RegistryModel, src: &RegistryModel) -> Result<(), String> {
     dst.static_vram_gb = src.static_vram_gb;
     dst.kv_elems_per_token = src.kv_elems_per_token;
     dst.max_ctx = src.max_ctx;
@@ -555,17 +586,8 @@ fn merge_measured(dst: &mut RegistryModel, src: &RegistryModel) {
     dst.revision = src.revision.clone();
     dst.gated = src.gated;
     dst.download_gb = src.download_gb;
-    dst.extra_sglang_args = dedupe_args(&src.extra_sglang_args, &dst.extra_sglang_args);
-}
-
-fn dedupe_args(base: &[String], append: &[String]) -> Vec<String> {
-    let mut out = base.to_vec();
-    for a in append {
-        if !out.contains(a) {
-            out.push(a.clone());
-        }
-    }
-    out
+    dst.extra_sglang_args = sglang_infer::merge_extra_args(&src.extra_sglang_args, &dst.extra_sglang_args)?;
+    Ok(())
 }
 
 pub fn infer_one_entry(
@@ -592,14 +614,21 @@ pub fn infer_one_entry(
         }
     }
     let facts = model_facts::facts_from_config(&cfg, 0.0, None, repo_id)?;
-    let safetensors_bytes = hf::safetensors_bytes_from_siblings(&pre.siblings);
-    let download_gb = safetensors_bytes as f64 / 1e9;
-    let (extra, w2) = sglang_infer::infer_extra_sglang_args(&cfg);
-    warnings.extend(w2);
+    if !hf::has_weight_files(&pre.siblings) {
+        return Err("repository has no model weight files".to_string());
+    }
+    let weight_bytes = hf::weight_bytes_from_siblings(repo_id, &sha, &pre.siblings)?;
+    let state_bytes = (facts.swa_kv_elems_per_request * 2 + facts.linear_state_bytes_per_request) * 4;
+    let download_gb = hf::download_bytes(&pre.siblings) as f64 / 1e9;
+    let mut extra = Vec::new();
+    if sglang_infer::wants_remote_code(&cfg) {
+        extra.push("--trust-remote-code".to_string());
+        warnings.push(format!("{repo_id}: config.json ships custom code (auto_map); added --trust-remote-code, review it"));
+    }
     let entry = RegistryModel {
         id: repo_id.to_string(),
         architecture: facts.architecture,
-        static_vram_gb: download_gb,
+        static_vram_gb: (weight_bytes as f64 + state_bytes as f64) / model_facts::GIB,
         kv_bytes_per_token: None,
         kv_elems_per_token: Some(facts.kv_elems_per_token),
         min_total_vram_gb: None,
@@ -637,13 +666,31 @@ mod validate_tests {
     #[test]
     fn legacy_ternary_entry_validates() {
         let json = r#"{"version":1,"models":[{"id":"goethe/x","runtime":"ternary","architecture":"moe",
-            "pack_id":"p","base_model_id":"b","static_vram_gb":1.0,"kv_bytes_per_token":512,
+            "pack_id":"o/p","base_model_id":"o/b","static_vram_gb":1.0,"kv_bytes_per_token":512,
             "supported_sm":["12.0"],"default_ctx":4096,"default_max_conc":4,"default_tp":2,
-            "kv_cache_dtype":"fp8_e4m3"}]}"#;
+            "kv_cache_dtype":"fp8_e4m3","env":{"TERNARY_PACK_DIR":"$GOETHE_HOME/models/o__p__pack",
+            "TERNARY_MODEL_DIR":"$GOETHE_HOME/models/o__b","TERNARY_PROFILE":"flash_next"}}]}"#;
         let reg = parse_registry(json).unwrap();
         let mut errors = Vec::new();
         validate_entry(&reg.models[0], &mut errors);
-        assert!(errors.is_empty());
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut bad = reg.models[0].clone();
+        bad.env = Some(toml::Value::Table(toml::from_str("TERNARY_PACK_DIR = \"x\"\nTERNARY_PROFILE = \"moe\"").unwrap()));
+        bad.extra_sglang_args = vec!["--tool-call-parser".into()];
+        let mut errors = Vec::new();
+        validate_entry(&bad, &mut errors);
+        assert_eq!(errors.len(), 4, "{errors:?}");
+    }
+
+    #[test]
+    fn reserved_flags_are_refused() {
+        let json = r#"{"version":1,"models":[{"id":"o/m","static_vram_gb":1.0,"kv_elems_per_token":2,"max_ctx":8,
+            "num_attention_heads":1,"num_kv_heads":1,"supported_sm":["12.0"],
+            "extra_sglang_args":["--max-running-requests","8","--kv-cache-dtype","fp8_e4m3"]}]}"#;
+        let reg = parse_registry(json).unwrap();
+        let mut errors = Vec::new();
+        validate_entry(&reg.models[0], &mut errors);
+        assert_eq!(errors.len(), 2, "{errors:?}");
     }
 
     #[test]
