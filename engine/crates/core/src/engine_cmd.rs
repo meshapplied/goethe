@@ -57,6 +57,18 @@ pub fn card_extra_args(card: &toml::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn multi_tokenizer(args: &[String]) -> bool {
+    // SGLang refuses --api-key with --tokenizer-worker-num > 1, so such engines run keyless on loopback.
+    args.iter().enumerate().any(|(i, a)| {
+        let value = match a.strip_prefix("--tokenizer-worker-num") {
+            Some("") => args.get(i + 1).map(String::as_str),
+            Some(rest) => rest.strip_prefix('='),
+            None => None,
+        };
+        value.and_then(|v| v.parse::<u32>().ok()).is_some_and(|n| n > 1)
+    })
+}
+
 pub fn new_engine_key() -> Result<String, String> {
     // 32 random hex characters from the kernel CSPRNG.
     let mut buf = [0u8; 16];
@@ -150,9 +162,11 @@ pub fn command(spec: &EngineSpec) -> Command {
         .arg("--max-running-requests")
         .arg(spec.max_conc.to_string())
         .arg("--mem-fraction-static")
-        .arg(format!("{:.6}", spec.mem_frac))
-        .arg("--api-key")
-        .arg(spec.engine_key);
+        .arg(format!("{:.6}", spec.mem_frac));
+    let extras: Vec<String> = card_extra_args(spec.card).into_iter().chain(spec.load_extra.iter().cloned()).collect();
+    if !multi_tokenizer(&extras) {
+        cmd.arg("--api-key").arg(spec.engine_key);
+    }
     if let Some(dtype) = spec
         .card
         .get("kv_cache_dtype")
@@ -168,7 +182,7 @@ pub fn command(spec: &EngineSpec) -> Command {
     if let Some(name) = spec.card.get("model_id").and_then(|v| v.as_str()) {
         cmd.arg("--served-model-name").arg(name);
     }
-    cmd.args(card_extra_args(spec.card)).args(spec.load_extra);
+    cmd.args(&extras);
     let gpus: Vec<String> = spec.gpus.iter().map(|g| g.to_string()).collect();
     cmd.env_clear()
         .envs(kept_env())
@@ -264,6 +278,16 @@ mod tests {
         let a = args(&plain);
         let k = a.iter().position(|x| x == "--api-key").unwrap();
         assert_eq!(a[k + 1].len(), 32);
+    }
+
+    #[test]
+    fn multi_tokenizer_engines_run_without_api_key() {
+        let multi = args(&spec_cmd("extra_sglang_args = [\"--tokenizer-worker-num\", \"4\"]", 1));
+        assert!(!multi.iter().any(|a| a == "--api-key"));
+        let eq = args(&spec_cmd("extra_sglang_args = [\"--tokenizer-worker-num=2\"]", 1));
+        assert!(!eq.iter().any(|a| a == "--api-key"));
+        let single = args(&spec_cmd("extra_sglang_args = [\"--tokenizer-worker-num\", \"1\"]", 1));
+        assert!(single.iter().any(|a| a == "--api-key"));
     }
 
     #[test]
