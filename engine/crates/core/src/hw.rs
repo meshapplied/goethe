@@ -257,29 +257,6 @@ pub fn gpu_free_mb_live(gpu_index: u32) -> Result<u64, String> {
     Ok(if unified { free.saturating_sub(UNIFIED_OS_RESERVE_GB * 1024) } else { free })
 }
 
-pub fn foreign_compute_on_gpu(gpu_index: u32, managed: &HashSet<i32>) -> Result<Option<(i32, f64)>, String> {
-    // First compute or graphics process on the GPU that goethe does not manage.
-    let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
-    let dev = nvml.device_by_index(gpu_index).map_err(|e| format!("device {gpu_index}: {e}"))?;
-    for procs in [dev.running_compute_processes(), dev.running_graphics_processes()] {
-        let Ok(procs) = procs else {
-            continue;
-        };
-        for p in procs {
-            let pid = p.pid as i32;
-            if managed.contains(&pid) {
-                continue;
-            }
-            let gb = match p.used_gpu_memory {
-                UsedGpuMemory::Used(bytes) => bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-                UsedGpuMemory::Unavailable => 0.0,
-            };
-            return Ok(Some((pid, gb)));
-        }
-    }
-    Ok(None)
-}
-
 pub fn refresh_gpu_vram(gpu_index: u32) -> Result<(u64, u64, u64, Vec<RunningProcess>), String> {
     let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
     let dev = nvml.device_by_index(gpu_index).map_err(|e| format!("device {gpu_index}: {e}"))?;
