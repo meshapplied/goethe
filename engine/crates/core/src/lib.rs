@@ -44,5 +44,6 @@ pub mod engine_overhead;
 pub mod startup_stall;
 pub mod key_usage;
 pub mod metrics;
+pub mod gateway_cache;
 pub mod run_registry;
 pub mod load_slot;
