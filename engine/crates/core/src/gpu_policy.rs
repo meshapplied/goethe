@@ -92,7 +92,7 @@ pub fn validate_gpu_index(home: &Path, index: u32) -> Result<(), String> {
 pub fn instances_on_gpu(con: &Connection, index: u32) -> Result<Vec<String>, String> {
     let needle = index.to_string();
     let mut stmt = con
-        .prepare("SELECT instance_id, gpu_indices FROM loaded_instances WHERE status != 'STOPPING'")
+        .prepare("SELECT instance_id, gpu_indices FROM loaded_instances WHERE status IN ('STARTING', 'RUNNING', 'RESTARTING', 'DRAINING')")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))

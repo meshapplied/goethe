@@ -1,8 +1,12 @@
-// Automatic GPU selection for goethe load when preferred_gpus is empty.
+// GPU set ranking and the view of which processes belong to live Goethe instances.
 
-use crate::hw::{self, GpuPlacementSnapshot};
+use crate::foreign::{self, GpuLive};
+use crate::hw::{self, HardwareState};
+use crate::proc_ident::{self, Identity};
 use rusqlite::Connection;
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuPlacementInput {
@@ -11,14 +15,12 @@ pub struct GpuPlacementInput {
     pub free_vram_mb: u64,
 }
 
-impl From<GpuPlacementSnapshot> for GpuPlacementInput {
-    fn from(s: GpuPlacementSnapshot) -> Self {
-        Self {
-            index: s.index,
-            foreign_process: s.foreign_compute,
-            free_vram_mb: s.free_vram_mb,
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetRank {
+    pub gpus: Vec<u32>,
+    pub foreign: usize,
+    pub link: u32,
+    pub min_free_mb: u64,
 }
 
 pub fn ensure_eligible_for_tp(
@@ -26,6 +28,7 @@ pub fn ensure_eligible_for_tp(
     tp: usize,
     denied: &HashSet<u32>,
 ) -> Result<(), String> {
+    // Explain up front when too few GPUs are visible or allowed for the requested tensor parallel size.
     if tp == 0 {
         return Err("tensor parallel size must be at least 1".to_string());
     }
@@ -47,38 +50,80 @@ pub fn ensure_eligible_for_tp(
     ))
 }
 
-pub fn rank_gpus_for_placement(inputs: &[GpuPlacementInput], tp: usize) -> Result<Vec<u32>, String> {
-    ensure_eligible_for_tp(inputs, tp, &HashSet::new())?;
-    let mut sorted: Vec<&GpuPlacementInput> = inputs.iter().collect();
-    sorted.sort_by(|a, b| {
-        a.foreign_process
-            .cmp(&b.foreign_process)
-            .then(b.free_vram_mb.cmp(&a.free_vram_mb))
-            .then(a.index.cmp(&b.index))
-    });
-    let mut picked: Vec<u32> = sorted.iter().take(tp).map(|g| g.index).collect();
-    picked.sort_unstable();
-    Ok(picked)
+fn combos(n: usize, k: usize) -> Vec<Vec<usize>> {
+    // Every k-subset of 0..n in lexicographic order.
+    if k == 0 || k > n {
+        return Vec::new();
+    }
+    let mut idx: Vec<usize> = (0..k).collect();
+    let mut out = vec![idx.clone()];
+    while let Some(i) = (0..k).rev().find(|&i| idx[i] != i + n - k) {
+        idx[i] += 1;
+        for j in i + 1..k {
+            idx[j] = idx[j - 1] + 1;
+        }
+        out.push(idx.clone());
+    }
+    out
 }
 
-pub fn auto_pick_gpus(con: &Connection, tp: usize) -> Result<Vec<u32>, String> {
-    let managed = managed_pids(con);
-    let snaps = hw::list_gpus_for_placement(&managed)?;
-    let denied = crate::gpu_policy::denied_set(con)?;
-    let inputs: Vec<GpuPlacementInput> = snaps
+pub fn rank_sets(inputs: &[GpuPlacementInput], hw: Option<&HardwareState>, tp: usize) -> Vec<SetRank> {
+    // Every tp-sized GPU set, best first: fewest GPUs with foreign processes, best link, most free VRAM, lowest ids.
+    let mut sorted: Vec<&GpuPlacementInput> = inputs.iter().collect();
+    sorted.sort_by_key(|g| g.index);
+    let mut out: Vec<SetRank> = combos(sorted.len(), tp)
         .into_iter()
-        .map(GpuPlacementInput::from)
-        .filter(|g| !denied.contains(&g.index))
+        .map(|c| {
+            let gpus: Vec<u32> = c.iter().map(|&i| sorted[i].index).collect();
+            SetRank {
+                foreign: c.iter().filter(|&&i| sorted[i].foreign_process).count(),
+                link: hw.map(|h| hw::worst_link_rank(h, &gpus)).unwrap_or(0),
+                min_free_mb: c.iter().map(|&i| sorted[i].free_vram_mb).min().unwrap_or(0),
+                gpus,
+            }
+        })
         .collect();
-    ensure_eligible_for_tp(&inputs, tp, &denied)?;
-    rank_gpus_for_placement(&inputs, tp)
+    out.sort_by_key(|s| (s.foreign, s.link, Reverse(s.min_free_mb), s.gpus.clone()));
+    out
+}
+
+pub fn placement_inputs(
+    snap: &[GpuLive],
+    managed: &HashSet<i32>,
+    live: &HashSet<String>,
+    denied: &HashSet<u32>,
+    reserved_gb: impl Fn(u32) -> f64,
+) -> Vec<GpuPlacementInput> {
+    // Placement view of the live GPUs: denied ones dropped, free VRAM net of STARTING reservations.
+    snap.iter()
+        .filter(|g| !denied.contains(&g.index))
+        .map(|g| GpuPlacementInput {
+            index: g.index,
+            foreign_process: g.procs.iter().any(|(p, _)| !foreign::is_ours(*p, managed, live)),
+            free_vram_mb: (g.free_mb as f64 - reserved_gb(g.index) * 1024.0).max(0.0) as u64,
+        })
+        .collect()
+}
+
+pub fn load_hw(home: &Path) -> Option<HardwareState> {
+    let text = std::fs::read_to_string(home.join("hardware_state.json")).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 pub fn run_pick_gpus(tp: u64) -> Result<(), String> {
+    // Print the GPU set a load with this tp would prefer, using the same ranking as goethe load.
     let home = crate::paths::goethe_home();
     let con = crate::db::open(&home).map_err(|e| e.to_string())?;
-    let gpus = auto_pick_gpus(&con, tp.max(1) as usize)?;
-    println!("placed on GPU {}", format_gpu_list(&gpus));
+    let snap = foreign::snapshot()?;
+    let denied = crate::gpu_policy::denied_set(&con)?;
+    let inputs = placement_inputs(&snap, &managed_pids(&con), &live_instance_ids(&con), &denied, |_| 0.0);
+    let tp = tp.max(1) as usize;
+    ensure_eligible_for_tp(&inputs, tp, &denied)?;
+    let best = rank_sets(&inputs, load_hw(&home).as_ref(), tp)
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("cannot place tp={tp}"))?;
+    println!("placed on GPU {}", format_gpu_list(&best.gpus));
     Ok(())
 }
 
@@ -89,55 +134,63 @@ pub fn format_gpu_list(gpus: &[u32]) -> String {
         .join(",")
 }
 
-pub fn managed_pids(con: &Connection) -> HashSet<i32> {
-    let mut set = HashSet::new();
-    let Ok(mut stmt) = con.prepare("SELECT pid FROM loaded_instances") else {
-        return set;
+fn live_rows(con: &Connection) -> Vec<(String, Option<Identity>)> {
+    // Instance ids and identities of every row that is not a FAILED or CANCELLED tombstone.
+    let Ok(mut stmt) = con.prepare(
+        "SELECT instance_id, pid, boot_id, start_ticks FROM loaded_instances
+         WHERE status NOT IN ('FAILED', 'CANCELLED')",
+    ) else {
+        return Vec::new();
     };
-    let rows = stmt.query_map([], |r| r.get::<_, i64>(0));
-    if let Ok(rows) = rows {
-        for pid in rows.filter_map(|r| r.ok()) {
-            set.insert(pid as i32);
-            for child in descendant_pids(pid as i32) {
-                set.insert(child);
+    stmt.query_map([], |r| {
+        let id: String = r.get(0)?;
+        let ident = Identity::from_row(&id, r.get(1)?, r.get(2)?, r.get(3)?);
+        Ok((id, ident))
+    })
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
+}
+
+pub fn live_instance_ids(con: &Connection) -> HashSet<String> {
+    live_rows(con).into_iter().map(|(id, _)| id).collect()
+}
+
+pub fn managed_pids(con: &Connection) -> HashSet<i32> {
+    // Verified leaders of live instances and all their descendants (TP ranks), from one /proc scan.
+    let roots: HashSet<i32> = live_rows(con)
+        .into_iter()
+        .filter_map(|(_, ident)| ident.filter(proc_ident::leader_matches).map(|i| i.pid))
+        .collect();
+    if roots.is_empty() {
+        return roots;
+    }
+    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    if let Ok(rd) = std::fs::read_dir("/proc") {
+        for ent in rd.flatten() {
+            let Some(pid) = ent.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else {
+                continue;
+            };
+            if let Some(pp) = proc_ident::ppid(pid) {
+                children.entry(pp).or_default().push(pid);
             }
         }
     }
-    set
-}
-
-fn descendant_pids(root: i32) -> Vec<i32> {
-    let mut out = Vec::new();
-    let mut stack = vec![root];
+    let mut out = roots.clone();
+    let mut stack: Vec<i32> = roots.into_iter().collect();
     while let Some(p) = stack.pop() {
-        if let Ok(entries) = std::fs::read_dir("/proc") {
-            for ent in entries.filter_map(|e| e.ok()) {
-                let name = ent.file_name().to_string_lossy().to_string();
-                if let Ok(child) = name.parse::<i32>() {
-                    if child == p {
-                        continue;
-                    }
-                    if proc_ppid(child) == Some(p) {
-                        out.push(child);
-                        stack.push(child);
-                    }
-                }
+        for &c in children.get(&p).into_iter().flatten() {
+            if out.insert(c) {
+                stack.push(c);
             }
         }
     }
     out
 }
 
-fn proc_ppid(pid: i32) -> Option<i32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rparen = stat.rfind(')')?;
-    let rest = stat.get(rparen + 2..)?;
-    rest.split_whitespace().nth(1)?.parse().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hw::LinkState;
 
     fn inp(idx: u32, foreign: bool, free_mb: u64) -> GpuPlacementInput {
         GpuPlacementInput {
@@ -147,49 +200,60 @@ mod tests {
         }
     }
 
-    #[test]
-    fn clean_gpu_beats_foreign() {
-        let gpus = rank_gpus_for_placement(
-            &[inp(0, true, 90000), inp(1, false, 1000)],
-            1,
-        )
-        .unwrap();
-        assert_eq!(gpus, vec![1]);
-    }
-
-    #[test]
-    fn orders_by_free_vram() {
-        let gpus = rank_gpus_for_placement(
-            &[inp(0, false, 1000), inp(1, false, 5000), inp(2, false, 3000)],
-            1,
-        )
-        .unwrap();
-        assert_eq!(gpus, vec![1]);
-    }
-
-    #[test]
-    fn tie_breaks_to_lowest_index() {
-        let gpus = rank_gpus_for_placement(
-            &[inp(2, false, 5000), inp(3, false, 5000), inp(4, false, 5000)],
-            1,
-        )
-        .unwrap();
-        assert_eq!(gpus, vec![2]);
-    }
-
-    #[test]
-    fn tp_two_returns_ascending_pair() {
-        let gpus = rank_gpus_for_placement(
-            &[
-                inp(0, true, 90000),
-                inp(1, true, 90000),
-                inp(2, false, 8000),
-                inp(3, false, 7000),
-                inp(4, false, 6000),
+    fn host_hw() -> HardwareState {
+        let link = |a, b, t: &str| LinkState {
+            a,
+            b,
+            link_type: t.to_string(),
+        };
+        HardwareState {
+            profiled_at: "t".to_string(),
+            driver: "t".to_string(),
+            gpus: Vec::new(),
+            links: vec![
+                link(0, 1, "PHB"),
+                link(0, 2, "NODE"),
+                link(0, 3, "NODE"),
+                link(1, 2, "NODE"),
+                link(1, 3, "NODE"),
+                link(2, 3, "NODE"),
             ],
-            2,
-        )
-        .unwrap();
-        assert_eq!(gpus, vec![2, 3]);
+        }
+    }
+
+    #[test]
+    fn combos_enumerates_all_subsets() {
+        assert_eq!(combos(4, 2).len(), 6);
+        assert_eq!(combos(3, 3), vec![vec![0, 1, 2]]);
+        assert!(combos(2, 3).is_empty());
+    }
+
+    #[test]
+    fn clean_gpu_beats_foreign_then_free_then_index() {
+        let r = rank_sets(&[inp(0, true, 90000), inp(1, false, 1000)], None, 1);
+        assert_eq!(r[0].gpus, vec![1]);
+        let r = rank_sets(&[inp(0, false, 1000), inp(1, false, 5000), inp(2, false, 5000)], None, 1);
+        assert_eq!(r[0].gpus, vec![1]);
+    }
+
+    #[test]
+    fn foreign_count_outranks_a_better_link() {
+        let gpus = [inp(0, true, 7000), inp(1, true, 7000), inp(2, true, 77000), inp(3, false, 97000)];
+        let r = rank_sets(&gpus, Some(&host_hw()), 2);
+        assert_eq!(r[0].gpus, vec![2, 3], "one foreign GPU with most free VRAM wins");
+        assert_eq!(r.last().map(|s| s.foreign), Some(2));
+        assert!(r.iter().position(|s| s.gpus == vec![0, 1]).unwrap() > 2);
+    }
+
+    #[test]
+    fn placement_inputs_drop_denied_and_subtract_ledger() {
+        let snap = vec![
+            GpuLive { index: 2, free_mb: 20480, procs: vec![(i32::MAX - 7, 100)] },
+            GpuLive { index: 3, free_mb: 20480, procs: Vec::new() },
+            GpuLive { index: 4, free_mb: 20480, procs: Vec::new() },
+        ];
+        let denied = HashSet::from([4u32]);
+        let got = placement_inputs(&snap, &HashSet::new(), &HashSet::new(), &denied, |g| if g == 3 { 5.0 } else { 0.0 });
+        assert_eq!(got, vec![inp(2, true, 20480), inp(3, false, 15360)]);
     }
 }

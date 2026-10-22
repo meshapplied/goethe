@@ -1,4 +1,4 @@
-// Localhost port selection for mux and nginx gateway.
+// Localhost port selection for the mux, the nginx gateway and the engine port range.
 
 use std::fs;
 use std::net::{SocketAddr, TcpListener};
@@ -49,6 +49,27 @@ fn read_port_file(home: &Path, rel: &str) -> Option<u16> {
 
 fn write_port_file(home: &Path, rel: &str, port: u16) -> Result<(), String> {
     fs::write(home.join(rel), format!("{port}\n")).map_err(|e| e.to_string())
+}
+
+const ENGINE_PORTS_DEFAULT: (u16, u16) = (30001, 30099);
+
+pub fn parse_engine_ports(raw: Option<&str>) -> Result<(u16, u16), String> {
+    // GOETHE_ENGINE_PORTS=<lo>-<hi>; unset or empty means the default range.
+    let Some(v) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(ENGINE_PORTS_DEFAULT);
+    };
+    let bad = || format!("invalid GOETHE_ENGINE_PORTS '{v}': expected <lo>-<hi> with 1 <= lo <= hi <= 65535");
+    let (lo, hi) = v.split_once('-').ok_or_else(bad)?;
+    let lo: u16 = lo.trim().parse().map_err(|_| bad())?;
+    let hi: u16 = hi.trim().parse().map_err(|_| bad())?;
+    if lo == 0 || lo > hi {
+        return Err(bad());
+    }
+    Ok((lo, hi))
+}
+
+pub fn engine_port_range() -> Result<(u16, u16), String> {
+    parse_engine_ports(std::env::var("GOETHE_ENGINE_PORTS").ok().as_deref())
 }
 
 pub fn localhost_port_free(port: u16) -> bool {
@@ -123,6 +144,16 @@ pub fn resolve_public_port(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_ports_parse_and_reject_bad_ranges() {
+        assert_eq!(parse_engine_ports(None).unwrap(), (30001, 30099));
+        assert_eq!(parse_engine_ports(Some(" ")).unwrap(), (30001, 30099));
+        assert_eq!(parse_engine_ports(Some("40000-40010")).unwrap(), (40000, 40010));
+        for bad in ["40010-40000", "0-10", "abc", "1-70000", "5"] {
+            assert!(parse_engine_ports(Some(bad)).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn mux_explicit_busy_errors() {
