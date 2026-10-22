@@ -13,10 +13,10 @@ from lib.goethe_test import (
     main_exit,
     make_tls_certs,
     require_cli,
-    require_gpus,
     run_goethe,
     seed_installed_model,
     start_goethed,
+    stub_load_gpu,
     temp_home,
     test_mux_port,
     test_public_port,
@@ -28,7 +28,7 @@ from lib.goethe_test import (
 def main() -> None:
     """Scrape mux /metrics, then prove an allowlisted client with a valid key cannot read it via nginx."""
     goethe = require_cli("goethe")
-    gpu = require_gpus(1)[0]
+    gpu = stub_load_gpu()
     with gpu_flock([gpu]), temp_home(stub_python=True) as home:
         ensure_nginx(home)
         make_tls_certs(home)

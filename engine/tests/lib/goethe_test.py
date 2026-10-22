@@ -511,6 +511,26 @@ def gpu_pids(index: int) -> list[tuple[int, int]]:
     return rows
 
 
+def gpu_free_gb(index: int) -> float:
+    """Free VRAM of a physical GPU in GiB, as the product's budget check sees it."""
+    out = _nvidia_smi_query(["--query-gpu=memory.free", "--format=csv,noheader,nounits", f"--id={index}"])
+    return int(out.strip().split("\n")[0]) / 1024.0
+
+
+def roomy_test_gpus(min_free_gb: float) -> list[int]:
+    """GOETHE_TEST_GPUS indices with at least min_free_gb GiB free, most free first."""
+    ranked = sorted(((gpu_free_gb(i), i) for i in test_gpus()), reverse=True)
+    return [i for free, i in ranked if free >= min_free_gb]
+
+
+def stub_load_gpu(min_free_gb: float = 15.0) -> int:
+    """Test GPU with the most free VRAM for stub loads (budgets use live free memory); Skip when none has room."""
+    roomy = roomy_test_gpus(min_free_gb)
+    if not roomy:
+        raise Skip(f"no GOETHE_TEST_GPUS index has {min_free_gb:.0f} GiB free for stub load budgets")
+    return roomy[0]
+
+
 def clean_test_gpu() -> int | None:
     """First GOETHE_TEST_GPUS index with no compute process on it, or None."""
     for idx in test_gpus():

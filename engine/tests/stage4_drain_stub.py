@@ -18,13 +18,13 @@ from lib.goethe_test import (
     http_post,
     main_exit,
     require_cli,
-    require_gpus,
     run,
     run_goethe,
     seed_installed_model,
     sse_events,
     start_goethed,
     stub_launch,
+    stub_load_gpu,
     temp_home,
     test_mux_port,
     wait_until,
@@ -60,7 +60,7 @@ def _slow_stream(home: Path, token: str, out: dict[str, Any]) -> None:
 def main() -> None:
     """Graceful drain, forced unload, and idle unload via mux."""
     goethe = require_cli("goethe")
-    gpu = require_gpus(1)[0]
+    gpu = stub_load_gpu()
     with gpu_flock([gpu]), temp_home(stub_python=True) as home:
         model_a = home / "models" / "org__a"
         write_card(model_a, "a", env={"STUB_TOKEN_INTERVAL": "1.0"})

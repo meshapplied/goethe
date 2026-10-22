@@ -16,7 +16,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-RECORDED_ENV = ("CUDA_VISIBLE_DEVICES", "GOETHE_HOME", "PYTHONPATH", "GOETHE_INSTANCE_ID", "GOETHE_KERNEL_DIR")
+RECORDED_ENV = (
+    "CUDA_VISIBLE_DEVICES", "GOETHE_HOME", "PYTHONPATH", "GOETHE_INSTANCE_ID", "GOETHE_KERNEL_DIR", "SPT_NOENV",
+)
 FILE_KNOBS = ("STUB_START_DELAY", "STUB_IGNORE_SIGTERM", "STUB_SIGTERM_DELAY", "STUB_TOKEN_INTERVAL")
 AUTH_EXEMPT = ("/health", "/ready", "/metrics")
 _record_lock = threading.Lock()
@@ -416,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:
         httpd = ThreadingHTTPServer((args.host, args.port), _Handler)
         record.update({"tp_pids": tp_pids, "listening_at": time.time()})
         launch.write_text(json.dumps(record, indent=2), encoding="utf-8")
-        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         thread.start()
         while thread.is_alive() and model_dir.is_dir():
             time.sleep(0.2)

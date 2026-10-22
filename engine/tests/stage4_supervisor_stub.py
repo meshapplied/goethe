@@ -14,6 +14,7 @@ from typing import Any
 
 from lib.goethe_test import (
     Proc,
+    Skip,
     _acquire_gpu_flocks,
     assert_alive,
     assert_no_stub_engines,
@@ -29,13 +30,14 @@ from lib.goethe_test import (
     main_exit,
     pid_alive,
     require_cli,
-    require_gpus,
+    roomy_test_gpus,
     run,
     run_goethe,
     seed_installed_model,
     sqlite_query,
     start_goethed,
     stub_launch,
+    stub_load_gpu,
     temp_home,
     test_gpus,
     vram_per_gpu_gb,
@@ -46,6 +48,7 @@ from lib.goethe_test import (
 
 ASSERTS = 0
 SOFT: list[str] = []
+NOT_RUN: list[str] = []
 FOREIGN_MB = 3072
 
 
@@ -171,7 +174,7 @@ class Sup:
 def _foreign_scenario(sup: Sup, model_a: Path) -> None:
     """Unmanaged GPU process: exit 3 with the contractual notice, structured RPC result, --yes loads alongside."""
     clean = clean_test_gpu()
-    host = clean if clean is not None else test_gpus()[-1]
+    host = clean if clean is not None else stub_load_gpu(20.0)
     foreign = foreign_gpu_process(host, mb=FOREIGN_MB)
     try:
         check(wait_gpu_pid(host, foreign.popen.pid, int(FOREIGN_MB * 0.9), timeout=60), "foreign VRAM visible")
@@ -216,7 +219,7 @@ def main() -> None:
     """Exercise goethe load, co-residency, foreign PID, unload and watchdog paths with stub engines."""
     goethe = require_cli("goethe")
     require_cli("goethed")
-    gpu = require_gpus(1)[0]
+    gpu = stub_load_gpu(30.0)
     aliens = gpu_compute_pids(test_gpus())
     static_w, kv_bytes, ctx, max_conc = 10.0, 1000, 4096, 4
     release_gpu = _acquire_gpu_flocks([gpu])
@@ -250,7 +253,9 @@ def main() -> None:
         release_gpu()
     assert_alive(aliens, "alien GPU processes")
     if SOFT:
-        raise RuntimeError(f"{len(SOFT)} contract checks failed: " + " | ".join(SOFT))
+        raise RuntimeError(f"{len(SOFT)} contract checks failed: " + " | ".join(SOFT) + f" | not run: {NOT_RUN}")
+    if NOT_RUN:
+        raise Skip(f"all other scenarios passed ({ASSERTS} assertions); not run: {NOT_RUN}")
     print(f"stage4_supervisor_stub ok assertions={ASSERTS}")
 
 
@@ -280,6 +285,9 @@ def _scenarios(
     check("GOETHE_KERNEL_DIR" not in stub["env"], "no GOETHE_KERNEL_DIR")
     check("--enable-goethe-fused-gemv" not in stub["argv"], "no goethe-fused-gemv flag")
     soft(bool(stub["env"].get("GOETHE_INSTANCE_ID")), "engine env carries GOETHE_INSTANCE_ID")
+    soft(stub["env"].get("SPT_NOENV") == "1", "engine env carries SPT_NOENV=1")
+    soft(not any(k.startswith(("GOETHE_SOCK", "GOETHE_MUX", "GOETHE_PUBLIC")) for k in stub["env_keys"]),
+         "goethed's own environment does not leak into the engine")
     combined = sup.load("b", str(gpu))
     check("currently hosts [" in combined and "Free VRAM:" in combined, "co-residency notice")
     check(stub_launch(model_b)["parsed"].get("kv_cache_dtype") == "fp8_e4m3", "card kv_cache_dtype passed")
@@ -308,8 +316,10 @@ def _scenarios(
     auto_text = sup.goethe_ok("load", "auto", "--yes")
     check("auto:" in auto_text or "tp=" in auto_text, "auto decision message")
     sup.goethe_ok("unload", "auto")
-    avail = test_gpus()
-    if len(avail) >= 2:
+    avail = roomy_test_gpus(10.0)
+    if len(avail) < 2:
+        NOT_RUN.append(f"tp=2 scenario (test GPUs with 10 GiB free: {avail})")
+    else:
         two = f"{avail[0]},{avail[1]}"
         out2 = sup.load("auto", two)
         check("tp=2" in out2, "gpus infer tp=2")
@@ -350,8 +360,13 @@ def _scenarios(
     check("ternary-kernels" in tenv.get("PYTHONPATH", ""), "ternary PYTHONPATH")
     check("GOETHE_KERNEL_DIR" not in tenv, "ternary no kernel dir")
     sup.goethe_ok("unload", "t")
-    sup.load("a", str(gpu), "--context-length", "4096")
-    check(stub_launch(model_a)["parsed"].get("context_length") == 4096, "load trailing sglang arg")
+    sup.load("a", str(gpu), "--chunked-prefill-size", "4096")
+    argv = stub_launch(model_a)["argv"]
+    check("--chunked-prefill-size" in argv and argv[argv.index("--chunked-prefill-size") + 1] == "4096",
+          "load passes trailing SGLang args through")
+    for owned in (["--context-length", "4096"], ["--port=31999"], ["--tp", "2"], ["--api-key", "x"]):
+        rr_owned = run([str(sup.goethe), "load", "a", "--gpus", str(gpu), "--yes", *owned], env=sup.env, timeout=60)
+        soft(rr_owned.returncode == 2, f"load rejects owned flag {owned[0]} with exit 2 (got {rr_owned.returncode})")
     sup.goethe_ok("unload", "a")
     sup.load("a", str(gpu))
     check(sup.status_is("a", {"RUNNING"}, timeout=60.0), "watchdog prekill RUNNING")
