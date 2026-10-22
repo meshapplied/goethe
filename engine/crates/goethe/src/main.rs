@@ -211,6 +211,8 @@ enum Commands {
         ternary: bool,
         #[arg(long, help = "Skip confirmation.")]
         yes: bool,
+        #[arg(long = "allow-downgrade", help = "Install the published version even if it is older.")]
+        allow_downgrade: bool,
     },
     #[command(about = "Remove goethe binaries and optionally delete downloaded models.")]
     Uninstall {
@@ -634,11 +636,13 @@ fn main() {
             engine,
             ternary,
             yes,
+            allow_downgrade,
         } => goethe_core::update::run(goethe_core::update::UpdateOpts {
             check_only: check,
             engine,
             ternary,
             yes,
+            allow_downgrade,
         }),
         Commands::Uninstall {
             purge_models,
