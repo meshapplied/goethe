@@ -1,33 +1,42 @@
-// goethed load, unload, and instance supervision.
+// goethed load, unload, adoption and watchdog supervision of SGLang engines.
 
-use crate::calc::{mem_fraction_from_free, static_weight_gb};
-use crate::chooser::{self, ChooserInput};
+use crate::autostart;
+use crate::calc::{mem_fraction_from_free, missing_gb, static_weight_gb};
+use crate::chooser::{self, ChooserInput, LoadPlan};
+use crate::coordinator;
 use crate::db;
-use crate::hw::{
-    foreign_compute_on_gpu, gpu_free_mb_live, gpu_used_mb_live, managed_vram_listed_mb,
-    refresh_gpu_vram, HardwareState,
-};
-use crate::placement::{self, GpuPlacementInput};
+use crate::engine_cmd::{self, EngineSpec};
+use crate::foreign::{self, Foreign};
+use crate::hw::HardwareState;
+use crate::load_slot;
 use crate::paths::{ensure_layout, goethe_home};
-use rusqlite::Connection;
+use crate::placement;
+use crate::proc_ident::{self, Identity};
+use crate::run_registry;
+use crate::shutdown::shutdown_requested;
+use crate::watchdog_liveness::{self, LivenessState, ProbeInput, WatchdogAction};
+use rusqlite::{Connection, ToSql, TransactionBehavior};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::net::TcpListener;
-use std::process::{Command, Stdio};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
+use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
+use std::thread;
 use std::time::{Duration, Instant};
-use crate::load_slot;
-use crate::run_registry::{self, RunEntry};
 
 static SLOT_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 static WATCHDOG_TICK_LOCK: Mutex<()> = Mutex::new(());
+
+const LIVE: &str = "('STARTING', 'RUNNING', 'RESTARTING', 'DRAINING', 'STOPPING')";
+const GPU_RELEASE_WAIT: Duration = Duration::from_secs(2);
+const HTTP_PROBE_SECS: u64 = 25;
+const USER_GATE_WAIT: Duration = Duration::from_secs(590);
+
+pub type LoadErr = (i32, String, Value);
 
 fn slot_lock(key: &str) -> Arc<Mutex<()>> {
     let map = SLOT_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -35,6 +44,10 @@ fn slot_lock(key: &str) -> Arc<Mutex<()>> {
     g.entry(key.to_string())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
+}
+
+fn err1(e: impl ToString) -> LoadErr {
+    (1, e.to_string(), Value::Null)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,450 +68,616 @@ pub struct LoadParams {
     #[serde(default)]
     pub yes: bool,
     #[serde(default)]
-    pub is_tty: bool,
-    #[serde(default)]
     pub restart_count: Option<u64>,
     #[serde(default)]
     pub slot_key: Option<String>,
-    #[serde(default)]
-    pub async_finish: bool,
 }
 
-struct LoadFinishCtx {
+struct InstRow {
+    local_path: String,
+    static_vram_gb: f64,
+    kv_bytes_per_token: i64,
+    default_ctx: i64,
+    default_max_conc: i64,
+    default_tp: i64,
+    kv_elems_per_token: Option<i64>,
+    max_ctx: Option<i64>,
+    num_attention_heads: Option<i64>,
+    num_kv_heads: Option<i64>,
+    attention: Option<String>,
+}
+
+struct LoadReq {
     home: PathBuf,
-    instance_id: String,
-    port: u16,
-    pid: i32,
-    pgid: i32,
     params: LoadParams,
+    row: InstRow,
+    model_path: PathBuf,
+    card: toml::Value,
+    pinned: Vec<u32>,
+    pinned_tp: Option<usize>,
+    default_tp: Option<usize>,
+    ctx: u64,
+    max_conc: u64,
+    denied: HashSet<u32>,
+    hw: Option<HardwareState>,
+}
+
+struct Starting {
+    home: PathBuf,
+    params: LoadParams,
+    instance_id: String,
+    engine_key: String,
+    identity: Identity,
+    port: u16,
     log_path: PathBuf,
+    log_offset: u64,
     budget_gb: f64,
     gpu_name: String,
     tp: u64,
     model_path: PathBuf,
     card: toml::Value,
-    gpu_indices: Vec<u32>,
+    gpus: Vec<u32>,
     ctx: u64,
     max_conc: u64,
-    cancel: std::sync::Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
+    hold: coordinator::Hold,
 }
 
-pub fn internal_port_for_model(model_id: &str) -> Option<u16> {
-    let home = goethe_home();
-    let con = db::open(&home).ok()?;
-    con.query_row(
-        "SELECT internal_port FROM loaded_instances WHERE model_id = ?1 AND status = 'RUNNING' LIMIT 1",
-        [model_id],
-        |r| r.get::<_, i64>(0),
-    )
-    .ok()
-    .and_then(|p| u16::try_from(p).ok())
+struct Inst {
+    instance_id: String,
+    model_id: String,
+    slot_key: String,
+    status: String,
+    identity: Option<Identity>,
+    gpus: Vec<u32>,
+    port: u16,
+    engine_key: String,
+    restarts: i64,
 }
 
-pub fn handle_load(params: LoadParams) -> Result<(Value, String), (i32, String)> {
+enum Step {
+    Started(Box<Starting>, String),
+    Wait(Vec<u32>),
+}
+
+enum Startup {
+    Ready,
+    Cancelled,
+    Failed,
+}
+
+fn insts(con: &Connection, filter: &str, args: &[&dyn ToSql]) -> rusqlite::Result<Vec<Inst>> {
+    // Instance rows matching a WHERE clause, with identity, GPUs and engine key parsed; any bad row is an error.
+    let sql = format!(
+        "SELECT instance_id, model_id, COALESCE(slot_key, model_id), status, pid, boot_id, start_ticks,
+                gpu_indices, internal_port, COALESCE(engine_key, ''), COALESCE(restart_count, 0)
+         FROM loaded_instances WHERE {filter} ORDER BY rowid"
+    );
+    let mut stmt = con.prepare(&sql)?;
+    let rows = stmt.query_map(args, |r| {
+        let instance_id: String = r.get(0)?;
+        let identity = Identity::from_row(&instance_id, r.get(4)?, r.get(5)?, r.get(6)?);
+        Ok(Inst {
+            identity,
+            model_id: r.get(1)?,
+            slot_key: r.get(2)?,
+            status: r.get(3)?,
+            gpus: parse_gpu_csv(&r.get::<_, String>(7)?),
+            port: u16::try_from(r.get::<_, i64>(8)?).unwrap_or(0),
+            engine_key: r.get(9)?,
+            restarts: r.get(10)?,
+            instance_id,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn handle_load(params: LoadParams) -> Result<(Value, String), LoadErr> {
+    // Validate, then plan, gate, spawn and record one engine; the health wait continues on a background thread.
     let home = goethe_home();
-    ensure_layout(&home).map_err(|e| (1, e.to_string()))?;
-    let con = db::open(&home).map_err(|e| (1, e.to_string()))?;
-    let row = fetch_installed(&con, &params.model_id).map_err(|e| (1, e))?;
-    let card_path = home.join(&row.local_path).join("goethe_card.toml");
-    let card = read_card_value(&card_path).map_err(|e| (1, e))?;
-    let runtime = card
-        .get("runtime")
-        .and_then(|v| v.as_str())
-        .unwrap_or("sglang");
-    if runtime == "ternary" {
-        crate::runtime::require_ternary_runtime(&home).map_err(|e| (1, e))?;
+    ensure_layout(&home).map_err(err1)?;
+    let con = db::open(&home).map_err(err1)?;
+    let row = fetch_installed(&con, &params.model_id).map_err(err1)?;
+    let model_path = home.join(&row.local_path);
+    let card = read_card_value(&model_path.join("goethe_card.toml")).map_err(err1)?;
+    if card.get("runtime").and_then(|v| v.as_str()) == Some("ternary") {
+        crate::runtime::require_ternary_runtime(&home).map_err(err1)?;
     }
-    let pinned_gpus = parse_gpus_param(params.gpus.as_deref(), &card);
-    let pinned_tp = params.tp.map(|t| t as usize).or({
-        if !pinned_gpus.is_empty() {
-            Some(pinned_gpus.len())
-        } else {
-            None
+    for extra in [engine_cmd::card_extra_args(&card), params.extra_sglang_args.clone()] {
+        engine_cmd::check_extra_args(&extra).map_err(|e| (2, e, Value::Null))?;
+    }
+    let pinned = pinned_gpus(params.gpus.as_deref(), &card, params.tp).map_err(|e| (2, e, Value::Null))?;
+    let denied = crate::gpu_policy::denied_set(&con).map_err(err1)?;
+    if let Some(g) = pinned.iter().find(|g| denied.contains(g)) {
+        return Err(err1(format!(
+            "GPU {g} is denied by policy; run `goethe gpu allow {g}` to use it"
+        )));
+    }
+    let req = LoadReq {
+        pinned_tp: params
+            .tp
+            .map(|t| t as usize)
+            .or((!pinned.is_empty()).then_some(pinned.len())),
+        default_tp: (row.default_tp > 0).then_some(row.default_tp as usize),
+        ctx: params.ctx.unwrap_or_else(|| default_ctx(&row)),
+        max_conc: params.max_conc.unwrap_or(row.default_max_conc as u64),
+        hw: placement::load_hw(&home),
+        home,
+        params,
+        row,
+        model_path,
+        card,
+        pinned,
+        denied,
+    };
+    let ticket = coordinator::enqueue(&req.params.model_id);
+    let deadline = Instant::now() + USER_GATE_WAIT;
+    loop {
+        if ticket.cancelled() || shutdown_requested() {
+            return Err(err1("load cancelled"));
         }
-    });
-    if let (Some(pt), true) = (params.tp, !pinned_gpus.is_empty()) {
-        if pt as usize != pinned_gpus.len() {
-            return Err((
-                1,
-                format!(
-                    "--tp {pt} disagrees with {} GPUs on --gpus",
-                    pinned_gpus.len()
-                ),
-            ));
+        let step = {
+            let _plan = coordinator::plan_lock();
+            if ticket.cancelled() {
+                return Err(err1("load cancelled"));
+            }
+            plan_and_start(&req, &con)?
+        };
+        match step {
+            Step::Started(starting, notices) => return Ok(launch_finish(*starting, notices)),
+            Step::Wait(gpus) if req.params.slot_key.is_none() && Instant::now() >= deadline => {
+                return Err(err1(format!(
+                    "GPU {} is still starting another engine after {}s; load not started, retry when it is RUNNING",
+                    gpu_csv(&gpus),
+                    USER_GATE_WAIT.as_secs()
+                )));
+            }
+            Step::Wait(_) => coordinator::wait_change(Duration::from_secs(1)),
         }
     }
-    let denied = crate::gpu_policy::denied_set(&con).map_err(|e| (1, e))?;
-    for &g in &pinned_gpus {
-        if denied.contains(&g) {
-            return Err((
-                1,
-                format!(
-                    "GPU {g} is denied by policy; run `goethe gpu allow {g}` to use it"
-                ),
-            ));
+}
+
+fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
+    // Under the planning lock: refuse a slot that is already live, plan on live VRAM, then fit, notice and gate.
+    if let Some(slot) = req.params.slot_key.as_deref() {
+        let live = format!("SELECT 1 FROM loaded_instances WHERE slot_key = ?1 AND status IN {LIVE}");
+        if con.query_row(&live, [slot], |_| Ok(())).is_ok() {
+            return Err(err1(format!("slot {slot} already has a live instance; not starting a second one")));
+        }
+        if !autostart::desired_exists(con, slot) {
+            return Err(err1(format!("slot {slot} is no longer desired; not starting it")));
         }
     }
-    let ctx_default = row
-        .max_ctx
-        .map(|v| v as u64)
-        .unwrap_or(row.default_ctx as u64)
-        .min(131072);
-    let ctx = params.ctx.unwrap_or(ctx_default);
-    let max_conc = params.max_conc.unwrap_or(row.default_max_conc as u64);
-    let hw = load_hw(&home);
-    let snaps = crate::hw::list_gpus_for_placement(&placement::managed_pids(&con))
-        .map_err(|e| (1, e))?;
-    let inputs: Vec<GpuPlacementInput> = snaps
-        .into_iter()
-        .map(GpuPlacementInput::from)
-        .filter(|g| !denied.contains(&g.index))
+    let snap = foreign::snapshot().map_err(err1)?;
+    if let Some(g) = req.pinned.iter().find(|g| !snap.iter().any(|s| s.index == **g)) {
+        return Err(err1(format!(
+            "GPU {g} does not exist; this host has {} GPUs",
+            snap.len()
+        )));
+    }
+    let managed = placement::managed_pids(con);
+    let live = placement::live_instance_ids(con);
+    let netted = placement::placement_inputs(&snap, &managed, &live, &req.denied, coordinator::reserved_gb);
+    let raw = placement::placement_inputs(&snap, &managed, &live, &req.denied, |_| 0.0);
+    if let Some(tp) = req.pinned_tp {
+        placement::ensure_eligible_for_tp(&netted, tp, &req.denied).map_err(err1)?;
+    }
+    let base = chooser_input(req, &req.pinned, req.ctx, req.max_conc);
+    let pinned = (!req.pinned.is_empty()).then_some(req.pinned.as_slice());
+    let tp = req.pinned_tp.or(req.default_tp);
+    let plan = match chooser::pick_load_plan(&base, &netted, req.hw.as_ref(), tp, pinned) {
+        Ok(plan) => plan,
+        Err(e) => chooser::pick_load_plan(&base, &raw, req.hw.as_ref(), tp, pinned)
+            .map_err(|_| missing_error(e.message, &foreign::foreign_on(&snap, &e.gpus, &managed, &live)))?,
+    };
+    let busy = coordinator::busy(&plan.gpus);
+    let free: HashMap<u32, f64> = plan
+        .gpus
+        .iter()
+        .map(|g| {
+            let mb = netted.iter().find(|i| i.index == *g).map(|i| i.free_vram_mb).unwrap_or(0);
+            (*g, mb as f64 / 1024.0)
+        })
         .collect();
-    if let Some(tp) = pinned_tp {
-        placement::ensure_eligible_for_tp(&inputs, tp, &denied).map_err(|e| (1, e))?;
+    let gpu_name = gpu_name(req.hw.as_ref(), plan.gpus[0]);
+    let input = chooser_input(req, &plan.gpus, plan.ctx, plan.max_conc);
+    let budget = chooser::per_gpu_budget_gb(&input, plan.tp)
+        + crate::engine_overhead::read_learned_extra_gb(con, &req.params.model_id, &gpu_name, plan.tp as u64);
+    let found = foreign::foreign_on(&snap, &plan.gpus, &managed, &live);
+    let short = plan.gpus.iter().map(|g| (*g, free[g])).find(|(_, f)| missing_gb(budget, *f) > 0.0);
+    if let (Some((g, f)), false) = (short, busy) {
+        return Err(missing_error(
+            format!(
+                "VRAM budget {budget:.2} GB exceeds free {f:.2} GB on GPU {g}; missing {:.2} GB",
+                missing_gb(budget, f)
+            ),
+            &found,
+        ));
     }
-    let plan = chooser::pick_load_plan(
-        &chooser_input_from_row(&row, &card, ctx, max_conc, &home, &pinned_gpus),
-        &inputs,
-        hw.as_ref(),
-        pinned_tp.or(if row.default_tp == 0 {
-            None
-        } else {
-            Some(row.default_tp as usize)
-        }),
-        if pinned_gpus.is_empty() {
-            None
-        } else {
-            Some(pinned_gpus.as_slice())
-        },
-    )
-    .map_err(|e| (1, e))?;
-    let tp = plan.tp as u64;
-    let gpu_indices = plan.gpus;
-    let ctx = plan.ctx;
-    let max_conc = plan.max_conc;
-    let input = chooser_input_from_row(&row, &card, ctx, max_conc, &home, &gpu_indices);
-    let mut notices = String::new();
-    notices.push_str(&format!("{}\n", plan.message));
-    for &gpu in &gpu_indices {
-        if let Some(msg) = check_foreign(gpu, &con, params.force || params.yes)? {
-            if !params.force && !params.yes && !params.is_tty {
-                return Err((3, msg));
-            }
-            if !params.force && !params.yes && params.is_tty {
-                print!("{msg}");
-                std::io::stdout().flush().ok();
-                let mut buf = String::new();
-                if std::io::stdin().read_line(&mut buf).is_err() || !buf.trim().eq_ignore_ascii_case("y") {
-                    return Err((1, "load aborted".to_string()));
-                }
-            }
-        }
-        if let Some(line) =
-            co_residency_notice(gpu, &params.model_id, &con, &home).map_err(|e| (1, e))?
-        {
+    if !found.is_empty() && !(req.params.force || req.params.yes) {
+        return Err((3, foreign::notice(&found, &free, budget), json!({ "foreign": found })));
+    }
+    if busy {
+        return Ok(Step::Wait(plan.gpus));
+    }
+    let mut notices = format!("{}\n", plan.message);
+    for &g in &plan.gpus {
+        if let Some(line) = co_residency_notice(con, g, &req.params.model_id, free[&g]) {
             notices.push_str(&line);
             notices.push('\n');
         }
     }
-    let gpu_name = gpu_indices
-        .first()
-        .and_then(|idx| gpu_name(&hw, *idx))
-        .unwrap_or_else(|| "gpu".to_string());
-    let learned = crate::engine_overhead::read_learned_extra_gb(&con, &params.model_id, &gpu_name, tp);
-    let mut b_gb = chooser::per_gpu_budget_gb(
-        &input,
-        plan.tp,
-        chooser::bytes_per_elem(
-            &gpu_indices
-                .iter()
-                .map(|idx| gpu_cap(&hw, *idx))
-                .collect::<Vec<_>>(),
-            None,
-        ),
-    );
-    b_gb += learned;
-    let gpu_list_csv = gpu_csv(&gpu_indices);
-    let ordinal = if let Some(sk) = params.slot_key.as_deref() {
-        crate::slots::parse_slot_key(sk)
-            .map(|(_, _, o)| o)
-            .unwrap_or(0)
-    } else {
-        crate::slots::next_ordinal(&con, &params.model_id, &gpu_list_csv).unwrap_or(0)
+    let min_free = free.values().copied().fold(f64::INFINITY, f64::min);
+    let starting = start_engine(req, con, &plan, budget, min_free, gpu_name)?;
+    Ok(Step::Started(Box::new(starting), notices))
+}
+
+fn missing_error(message: String, holders: &[Foreign]) -> LoadErr {
+    let mut lines = vec![message];
+    lines.extend(foreign::holder_lines(holders));
+    (1, lines.join("\n"), Value::Null)
+}
+
+fn start_engine(
+    req: &LoadReq,
+    con: &Connection,
+    plan: &LoadPlan,
+    budget: f64,
+    min_free: f64,
+    gpu_name: String,
+) -> Result<Starting, LoadErr> {
+    // Port and slot, spawn, then the STARTING row and ledger entry; any failure after spawn stops the engine.
+    let (lo, hi) = crate::ports::engine_port_range().map_err(err1)?;
+    let port = next_port(con, lo, hi).map_err(err1)?;
+    let model_id = &req.params.model_id;
+    let ordinal = match req.params.slot_key.as_deref() {
+        Some(sk) => crate::slots::parse_slot_key(sk).map(|(_, _, o)| o).unwrap_or(0),
+        None => crate::slots::next_ordinal(con, model_id, &plan.gpus).map_err(err1)?,
     };
-    let slot_key = params
+    let slot_key = req
+        .params
         .slot_key
         .clone()
-        .unwrap_or_else(|| crate::slots::slot_key(&params.model_id, &gpu_indices, ordinal));
-    for &gpu in &gpu_indices {
-        let free_gb = gpu_free_gb(&home, gpu).map_err(|e| (1, e))?;
-        if b_gb > free_gb - 1.5 {
-            let missing = b_gb - (free_gb - 1.5);
-            return Err((
-                1,
-                format!(
-                    "VRAM budget {:.2} GB exceeds free {:.2} GB on GPU {gpu}; missing {:.2} GB",
-                    b_gb, free_gb, missing
-                ),
-            ));
-        }
-    }
-    let port = next_port(&con).map_err(|e| (1, e))?;
+        .unwrap_or_else(|| crate::slots::slot_key(model_id, &plan.gpus, ordinal));
     let instance_id = format!("inst-{}", uuid_simple());
-    let model_path = home.join(&row.local_path);
-    let mem_frac = mem_fraction(&home, &gpu_indices, b_gb).map_err(|e| (1, e))?;
-    let log_path = home.join("logs").join(format!("{instance_id}.log"));
-    let mut log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| (1, e.to_string()))?;
-    let (pid, pgid) = spawn_tracked_engine(
-        &home,
-        &instance_id,
-        &params.model_id,
-        &model_path,
-        &card,
+    let engine_key = engine_cmd::new_engine_key().map_err(err1)?;
+    let mem_frac = mem_fraction_from_free(budget, min_free).map_err(err1)?;
+    let log_path = req.home.join("logs").join(format!("{instance_id}.log"));
+    let tp = plan.tp as u64;
+    let spec = EngineSpec {
+        home: &req.home,
+        instance_id: &instance_id,
+        engine_key: &engine_key,
+        model_path: &req.model_path,
+        card: &req.card,
         port,
-        ctx,
-        max_conc,
+        ctx: plan.ctx,
+        max_conc: plan.max_conc,
         tp,
         mem_frac,
-        &gpu_indices,
-        &params.extra_sglang_args,
-        &mut log,
-    )
-    .map_err(|e| (1, e))?;
-    let restarts = params.restart_count.unwrap_or(0) as i64;
-    con.execute(
-        "INSERT INTO loaded_instances
-        (instance_id, model_id, pid, pgid, internal_port, gpu_indices,
-         allocated_vram_gb_per_gpu, mem_fraction_static, ctx_len, max_conc, status, restart_count,
-         slot_key, slot_ordinal)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'STARTING', ?11, ?12, ?13)",
-        rusqlite::params![
-            instance_id,
-            params.model_id,
-            pid as i64,
-            pgid as i64,
-            port as i64,
-            gpu_csv(&gpu_indices),
-            b_gb,
-            mem_frac,
-            ctx as i64,
-            max_conc as i64,
-            restarts,
-            slot_key,
-            ordinal as i64,
-        ],
-    )
-    .map_err(|e| (1, e.to_string()))?;
-    let _ = con.execute(
-        "DELETE FROM watchdog_probe_state WHERE instance_id = ?1",
-        [&instance_id],
-    );
-    let cancel = load_slot::begin_slot_load(&slot_key);
-    let finish = LoadFinishCtx {
-        home: home.clone(),
-        instance_id: instance_id.clone(),
-        port,
-        pid,
-        pgid,
-        params: {
-            let mut p = params.clone();
-            p.slot_key = Some(slot_key.clone());
-            p
-        },
-        log_path: log_path.clone(),
-        budget_gb: b_gb,
-        gpu_name: gpu_name.clone(),
-        tp,
-        model_path: model_path.clone(),
-        card: card.clone(),
-        gpu_indices: gpu_indices.clone(),
-        ctx,
-        max_conc,
-        cancel,
+        gpus: &plan.gpus,
+        load_extra: &req.params.extra_sglang_args,
     };
-    if params.async_finish {
-        let sk = slot_key.clone();
-        thread::spawn(move || {
-            load_slot::slot_in_flight_inc(&sk);
-            let slot_arc = slot_lock(&sk);
-            let _guard = slot_arc.lock().unwrap_or_else(|e| e.into_inner());
-            finish_load_health(finish);
-            load_slot::slot_in_flight_dec(&sk);
+    let (identity, log_offset) = spawn_engine(&spec, &log_path).map_err(err1)?;
+    let mut params = req.params.clone();
+    params.slot_key = Some(slot_key.clone());
+    let recorded = con
+        .execute(
+            "DELETE FROM loaded_instances WHERE slot_key = ?1 AND status IN ('FAILED', 'CANCELLED')",
+            [&slot_key],
+        )
+        .and_then(|_| {
+            con.execute(
+                "INSERT INTO loaded_instances
+                (instance_id, model_id, pid, pgid, internal_port, gpu_indices, allocated_vram_gb_per_gpu,
+                 mem_fraction_static, ctx_len, max_conc, status, restart_count, slot_key, slot_ordinal,
+                 extra_sglang_args, boot_id, start_ticks, engine_key)
+                VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'STARTING', ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                rusqlite::params![
+                    instance_id,
+                    model_id,
+                    identity.pid as i64,
+                    port as i64,
+                    gpu_csv(&plan.gpus),
+                    budget,
+                    mem_frac,
+                    plan.ctx as i64,
+                    plan.max_conc as i64,
+                    params.restart_count.unwrap_or(0) as i64,
+                    slot_key,
+                    ordinal as i64,
+                    serde_json::to_string(&params.extra_sglang_args).unwrap_or_default(),
+                    identity.boot_id,
+                    identity.start_ticks as i64,
+                    engine_key,
+                ],
+            )
         });
-        return Ok((
-            json!({"instance_id": instance_id, "port": port, "status": "STARTING", "slot_key": slot_key}),
-            notices,
-        ));
+    if let Err(e) = recorded {
+        stop_one(&req.home, &identity);
+        return Err(err1(format!("record instance: {e}; engine stopped")));
     }
-    finish_load_health(finish);
-    let status: String = db::open(&home)
-        .map_err(|e| (1, e.to_string()))?
+    let hold = coordinator::reserve(&instance_id, &plan.gpus, budget);
+    if let Err(e) = crate::logs::append_spawn_index(&req.home, &instance_id, model_id, &log_path) {
+        eprintln!("append_spawn_index({instance_id}): {e}");
+    }
+    Ok(Starting {
+        home: req.home.clone(),
+        cancel: load_slot::begin_slot_load(&slot_key),
+        hold,
+        params,
+        instance_id,
+        engine_key,
+        identity,
+        port,
+        log_path,
+        log_offset,
+        budget_gb: budget,
+        gpu_name,
+        tp,
+        model_path: req.model_path.clone(),
+        card: req.card.clone(),
+        gpus: plan.gpus.clone(),
+        ctx: plan.ctx,
+        max_conc: plan.max_conc,
+    })
+}
+
+fn spawn_engine(spec: &EngineSpec, log_path: &Path) -> Result<(Identity, u64), String> {
+    // Start the engine in its own session, capture its identity and register its run entry before anything else.
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|e| e.to_string())?;
+    let offset = log.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut cmd = engine_cmd::command(spec);
+    cmd.stdin(Stdio::null())
+        .stdout(log.try_clone().map_err(|e| e.to_string())?)
+        .stderr(log);
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("spawn engine: {e}"))?;
+    let Some(identity) = proc_ident::capture(spec.instance_id, child.id() as i32) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("cannot read the engine identity from /proc; engine stopped".to_string());
+    };
+    if let Err(e) = run_registry::register(spec.home, &identity) {
+        proc_ident::terminate(std::slice::from_ref(&identity));
+        return Err(format!("run registry: {e}; engine stopped"));
+    }
+    drop(child);
+    Ok((identity, offset))
+}
+
+fn launch_finish(starting: Starting, notices: String) -> (Value, String) {
+    // Hand the STARTING engine to a slot-serialized thread that waits for health.
+    let result = json!({
+        "instance_id": starting.instance_id,
+        "port": starting.port,
+        "status": "STARTING",
+        "slot_key": starting.params.slot_key,
+    });
+    let sk = starting.params.slot_key.clone().unwrap_or_default();
+    load_slot::slot_in_flight_inc(&sk);
+    thread::spawn(move || {
+        let slot = slot_lock(&sk);
+        let _guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let mut starting = starting;
+        startup(&mut starting);
+        drop(starting);
+        load_slot::slot_in_flight_dec(&sk);
+    });
+    (result, notices)
+}
+
+fn startup(s: &mut Starting) {
+    // Drive a STARTING engine to RUNNING, CANCELLED or FAILED, retrying twice with a larger budget on a VRAM shortfall.
+    let mut mem_retries = 0;
+    loop {
+        match wait_engine_ready(s) {
+            Startup::Ready => return mark_running(s),
+            Startup::Cancelled => return cancel_engine(s),
+            Startup::Failed => {}
+        }
+        if load_slot::is_cancelled(&s.cancel) {
+            return cancel_engine(s);
+        }
+        let log = crate::engine_overhead::read_log_since(&s.log_path, s.log_offset);
+        if let Some(extra) = crate::engine_overhead::parse_shortfall_gb(&log) {
+            if let Ok(con) = db::open(&s.home) {
+                let model = &s.params.model_id;
+                let _ = crate::engine_overhead::store_learned_extra_gb(&con, model, &s.gpu_name, s.tp, extra);
+            }
+            if mem_retries < 2 {
+                match retry_with_budget(s, extra) {
+                    Ok(()) => {
+                        mem_retries += 1;
+                        continue;
+                    }
+                    Err(_) if load_slot::is_cancelled(&s.cancel) => return cancel_engine(s),
+                    Err(notice) => load_slot::push_instance_notice(&s.instance_id, &notice),
+                }
+            }
+        }
+        return fail_engine(s);
+    }
+}
+
+fn wait_engine_ready(s: &Starting) -> Startup {
+    // Poll health every 500 ms; a gone leader, a stalled log or the hard cap fail the start.
+    let hard_cap = crate::startup_stall::hard_cap_secs_from_env();
+    let mut tracker = crate::startup_stall::StallTracker::new(now_epoch_secs(), log_file_len(&s.log_path));
+    loop {
+        if load_slot::is_cancelled(&s.cancel) {
+            return Startup::Cancelled;
+        }
+        let alive = proc_ident::leader_alive(&s.identity);
+        let step = crate::startup_stall::poll_startup_step(
+            &mut tracker,
+            now_epoch_secs(),
+            alive,
+            log_file_len(&s.log_path),
+            alive && health_ok(s.port, &s.engine_key),
+            hard_cap,
+        );
+        match step {
+            crate::startup_stall::StartupStep::Ready => return Startup::Ready,
+            crate::startup_stall::StartupStep::Failed(_) => return Startup::Failed,
+            crate::startup_stall::StartupStep::Continue => thread::sleep(Duration::from_millis(500)),
+        }
+    }
+}
+
+fn mark_running(s: &Starting) {
+    // STARTING to RUNNING and the desired slot in one transaction, so a concurrent unload can never resurrect it.
+    let Ok(mut con) = db::open(&s.home) else {
+        return;
+    };
+    let Ok(tx) = con.transaction_with_behavior(TransactionBehavior::Immediate) else {
+        return;
+    };
+    let changed = tx
+        .execute(
+            "UPDATE loaded_instances SET status = 'RUNNING' WHERE instance_id = ?1 AND status = 'STARTING'",
+            [&s.instance_id],
+        )
+        .unwrap_or(0);
+    if changed == 1 {
+        let _ = autostart::mark_desired(&tx, &s.params);
+    }
+    let _ = tx.commit();
+}
+
+fn cancel_engine(s: &Starting) {
+    // A cancelled start nobody else is stopping: stop it (verified) and leave a CANCELLED tombstone.
+    let Ok(con) = db::open(&s.home) else {
+        return;
+    };
+    let status: Option<String> = con
         .query_row(
             "SELECT status FROM loaded_instances WHERE instance_id = ?1",
-            [&instance_id],
+            [&s.instance_id],
             |r| r.get(0),
         )
-        .map_err(|e| (1, e.to_string()))?;
-    if status == "FAILED" {
-        return Err((1, "engine health check failed".to_string()));
+        .ok();
+    if status.as_deref() != Some("STARTING") {
+        return;
     }
-    Ok((json!({"instance_id": instance_id, "port": port, "status": status}), notices))
+    settle(&con, s, "CANCELLED");
 }
 
-fn gpu_name(hw: &Option<crate::hw::HardwareState>, idx: u32) -> Option<String> {
-    hw.as_ref()?.gpus.iter().find(|g| g.index == idx).map(|g| g.name.clone())
+fn fail_engine(s: &Starting) {
+    // A start that cannot succeed: stop the engine (verified) and leave a FAILED tombstone for ps.
+    if let Ok(con) = db::open(&s.home) {
+        settle(&con, s, "FAILED");
+    }
 }
 
-fn finish_load_health(mut ctx: LoadFinishCtx) {
-    let mut budget_gb = ctx.budget_gb;
-    let mut mem_retries = 0u32;
-    let mut pid = ctx.pid;
-    let mut pgid = ctx.pgid;
-    let port = ctx.port;
-    let instance_id = ctx.instance_id.clone();
-    loop {
-        if load_slot::is_cancelled(&ctx.cancel) {
-            if let Ok(con) = db::open(&ctx.home) {
-                let stopping: bool = con
-                    .query_row(
-                        "SELECT status FROM loaded_instances WHERE instance_id = ?1",
-                        [&instance_id],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .map(|s| s == "STOPPING")
-                    .unwrap_or(false);
-                if stopping {
-                    load_slot::clear_instance_notices(&instance_id);
-                    return;
-                }
-                run_registry::kill_instance(&ctx.home, &instance_id, pgid, pid);
-                let _ = con.execute(
-                    "UPDATE loaded_instances SET status = 'CANCELLED' WHERE instance_id = ?1",
-                    [&instance_id],
-                );
-            }
-            load_slot::clear_instance_notices(&instance_id);
-            return;
-        }
-        match wait_engine_ready(port, pgid, &ctx.log_path) {
-            Ok(()) => {
-                let Ok(con) = db::open(&ctx.home) else {
-                    return;
-                };
-                let _ = con.execute(
-                    "UPDATE loaded_instances SET status = 'RUNNING' WHERE instance_id = ?1",
-                    [&instance_id],
-                );
-                let _ = crate::autostart::mark_desired(&ctx.params);
-                return;
-            }
-            Err(_fail) => {
-                if load_slot::is_cancelled(&ctx.cancel) {
-                    continue;
-                }
-                let log = crate::engine_overhead::read_log_tail(&ctx.log_path, 256 * 1024);
-                let shortfall = crate::engine_overhead::parse_shortfall_gb(&log);
-                if let Some(extra) = shortfall {
-                    if let Ok(con) = db::open(&ctx.home) {
-                        let _ = crate::engine_overhead::store_learned_extra_gb(
-                            &con,
-                            &ctx.params.model_id,
-                            &ctx.gpu_name,
-                            ctx.tp,
-                            extra,
-                        );
-                    }
-                    if mem_retries < 2 {
-                        let new_budget = budget_gb + extra;
-                        let mut fits = true;
-                        let mut missing = 0.0f64;
-                        for &gpu in &ctx.gpu_indices {
-                            if let Ok(free_gb) = gpu_free_gb(&ctx.home, gpu) {
-                                if new_budget > free_gb - 1.5 {
-                                    fits = false;
-                                    missing = new_budget - (free_gb - 1.5);
-                                    break;
-                                }
-                            }
-                        }
-                        if fits {
-                            mem_retries += 1;
-                            budget_gb = new_budget;
-                            let notice = format!(
-                                "engine needed {:.1} GB more than estimated, retried",
-                                extra
-                            );
-                            load_slot::push_instance_notice(&instance_id, &notice);
-                            run_registry::kill_instance(&ctx.home, &instance_id, pgid, pid);
-                            let mem_frac = match mem_fraction(&ctx.home, &ctx.gpu_indices, budget_gb) {
-                                Ok(f) => f,
-                                Err(_) => break,
-                            };
-                            let mut log = match OpenOptions::new().append(true).open(&ctx.log_path) {
-                                Ok(f) => f,
-                                Err(_) => break,
-                            };
-                            let spawned = spawn_tracked_engine(
-                                &ctx.home,
-                                &instance_id,
-                                &ctx.params.model_id,
-                                &ctx.model_path,
-                                &ctx.card,
-                                port,
-                                ctx.ctx,
-                                ctx.max_conc,
-                                ctx.tp,
-                                mem_frac,
-                                &ctx.gpu_indices,
-                                &ctx.params.extra_sglang_args,
-                                &mut log,
-                            );
-                            let Ok((npid, npgid)) = spawned else {
-                                break;
-                            };
-                            pid = npid;
-                            pgid = npgid;
-                            ctx.pid = npid;
-                            ctx.pgid = npgid;
-                            if let Ok(con) = db::open(&ctx.home) {
-                                let _ = con.execute(
-                                    "UPDATE loaded_instances SET pid = ?1, pgid = ?2,
-                                     allocated_vram_gb_per_gpu = ?3, mem_fraction_static = ?4,
-                                     status = 'STARTING'
-                                     WHERE instance_id = ?5",
-                                    rusqlite::params![
-                                        npid as i64,
-                                        npgid as i64,
-                                        budget_gb,
-                                        mem_frac,
-                                        instance_id,
-                                    ],
-                                );
-                            }
-                            continue;
-                        }
-                        let notice = format!(
-                            "VRAM budget {:.2} GB exceeds free GPU headroom; missing {:.2} GB",
-                            new_budget, missing
-                        );
-                        load_slot::push_instance_notice(&instance_id, &notice);
-                    }
-                }
-                run_registry::kill_instance(&ctx.home, &instance_id, pgid, pid);
-                if let Ok(con) = db::open(&ctx.home) {
-                    let _ = con.execute(
-                        "UPDATE loaded_instances SET status = 'FAILED' WHERE instance_id = ?1",
-                        [&instance_id],
-                    );
-                }
-                return;
-            }
-        }
+fn settle(con: &Connection, s: &Starting, status: &str) {
+    // Stop a STARTING engine and tombstone its row as status with pid 0, or keep it STOPPING if it survived.
+    let _ = if stop_one(&s.home, &s.identity) {
+        con.execute(
+            "UPDATE loaded_instances SET status = ?2, pid = 0, pgid = 0 WHERE instance_id = ?1 AND status = 'STARTING'",
+            [s.instance_id.as_str(), status],
+        )
+    } else {
+        con.execute(
+            "UPDATE loaded_instances SET status = 'STOPPING' WHERE instance_id = ?1 AND status = 'STARTING'",
+            [&s.instance_id],
+        )
+    };
+    let _ = con.execute("DELETE FROM watchdog_probe_state WHERE instance_id = ?1", [&s.instance_id]);
+    load_slot::clear_instance_notices(&s.instance_id);
+}
+
+fn stop_one(home: &Path, id: &Identity) -> bool {
+    // Stop one engine (verified); its run entry goes only if nothing survived, so a survivor is reaped later.
+    let gone = proc_ident::terminate(std::slice::from_ref(id)).survivors.is_empty();
+    if gone {
+        run_registry::unregister(home, &id.instance_id);
+    } else {
+        append_goethed_log(home, &format!("{} survived SIGKILL; run entry kept\n", id.instance_id));
     }
+    gone
+}
+
+fn retry_with_budget(s: &mut Starting, extra: f64) -> Result<(), String> {
+    // Stop the short engine, re-check live VRAM for the larger budget and respawn under the same instance id.
+    let budget = s.budget_gb + extra;
+    let stopped = proc_ident::terminate(std::slice::from_ref(&s.identity));
+    foreign::wait_released(&s.gpus, &stopped.pids, GPU_RELEASE_WAIT);
+    if !stopped.survivors.is_empty() {
+        return Err("the short engine survived SIGKILL; not respawning over it".to_string());
+    }
+    let snap = foreign::snapshot()?;
+    let free = s
+        .gpus
+        .iter()
+        .map(|g| snap.iter().find(|x| x.index == *g).map(|x| x.free_mb as f64 / 1024.0).unwrap_or(0.0))
+        .fold(f64::INFINITY, f64::min);
+    let missing = missing_gb(budget, free);
+    if missing > 0.0 {
+        return Err(format!(
+            "VRAM budget {budget:.2} GB exceeds free GPU headroom ({free:.2} GB free); missing {missing:.2} GB"
+        ));
+    }
+    if load_slot::is_cancelled(&s.cancel) {
+        return Err("load cancelled during the retry".to_string());
+    }
+    load_slot::push_instance_notice(
+        &s.instance_id,
+        &format!("engine needed {extra:.1} GB more than estimated, retried"),
+    );
+    let spec = EngineSpec {
+        home: &s.home,
+        instance_id: &s.instance_id,
+        engine_key: &s.engine_key,
+        model_path: &s.model_path,
+        card: &s.card,
+        port: s.port,
+        ctx: s.ctx,
+        max_conc: s.max_conc,
+        tp: s.tp,
+        mem_frac: budget / free,
+        gpus: &s.gpus,
+        load_extra: &s.params.extra_sglang_args,
+    };
+    let (identity, offset) = spawn_engine(&spec, &s.log_path)?;
+    let changed = db::open(&s.home)
+        .and_then(|con| {
+            con.execute(
+                "UPDATE loaded_instances SET pid = ?1, pgid = ?1, boot_id = ?2, start_ticks = ?3,
+                 allocated_vram_gb_per_gpu = ?4, mem_fraction_static = ?5
+                 WHERE instance_id = ?6 AND status = 'STARTING'",
+                rusqlite::params![
+                    identity.pid as i64,
+                    identity.boot_id,
+                    identity.start_ticks as i64,
+                    budget,
+                    budget / free,
+                    s.instance_id,
+                ],
+            )
+        })
+        .unwrap_or(0);
+    if changed != 1 {
+        stop_one(&s.home, &identity);
+        return Err("instance left STARTING during the retry; new engine stopped".to_string());
+    }
+    s.identity = identity;
+    s.log_offset = offset;
+    s.budget_gb = budget;
+    s.hold.resize(budget);
+    if let Err(e) = crate::logs::append_spawn_index(&s.home, &s.instance_id, &s.params.model_id, &s.log_path) {
+        eprintln!("append_spawn_index({}): {e}", s.instance_id);
+    }
+    Ok(())
 }
 
 pub fn slot_has_running_instance(slot_or_model: &str) -> bool {
@@ -514,19 +693,6 @@ pub fn slot_has_running_instance(slot_or_model: &str) -> bool {
     .is_ok()
 }
 
-pub fn model_has_running_instance(model_id: &str) -> bool {
-    let home = goethe_home();
-    let Ok(con) = db::open(&home) else {
-        return false;
-    };
-    con.query_row(
-        "SELECT 1 FROM loaded_instances WHERE model_id = ?1 AND status = 'RUNNING' LIMIT 1",
-        [model_id],
-        |_| Ok(()),
-    )
-    .is_ok()
-}
-
 fn append_goethed_log(home: &Path, line: &str) {
     let path = home.join("logs/goethed.log");
     let _ = std::fs::OpenOptions::new()
@@ -536,72 +702,98 @@ fn append_goethed_log(home: &Path, line: &str) {
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
-pub fn prepare_shutdown(_home: &Path) {
-    load_slot::request_cancel_all();
-    let _ = load_slot::wait_all_slots_quiet(Duration::from_millis(500));
+fn stop_processes(home: &Path, list: &[Inst]) -> HashSet<String> {
+    // Stop instances (verified, all at once) and wait for their pids to leave NVML; returns instances that survived.
+    let ids: Vec<Identity> = list.iter().filter_map(|i| i.identity.clone()).collect();
+    let stopped = proc_ident::terminate(&ids);
+    let gpus: Vec<u32> = list
+        .iter()
+        .flat_map(|i| i.gpus.iter().copied())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    if !foreign::wait_released(&gpus, &stopped.pids, GPU_RELEASE_WAIT) {
+        append_goethed_log(home, &format!("teardown: pids {:?} still listed on GPUs {gpus:?} after 2s\n", stopped.pids));
+    }
+    for i in list {
+        if stopped.survivors.contains(&i.instance_id) {
+            append_goethed_log(home, &format!("teardown: {} survived SIGKILL; kept as STOPPING\n", i.instance_id));
+        } else {
+            run_registry::unregister(home, &i.instance_id);
+        }
+    }
+    stopped.survivors
+}
+
+fn teardown(con: &Connection, home: &Path, list: &[Inst]) {
+    // Verified stop of instances; their rows, probe state and notices go, survivors stay STOPPING with identity.
+    let survivors = stop_processes(home, list);
+    for i in list {
+        if survivors.contains(&i.instance_id) {
+            let _ = con.execute(
+                "UPDATE loaded_instances SET status = 'STOPPING' WHERE instance_id = ?1",
+                [&i.instance_id],
+            );
+            continue;
+        }
+        let _ = con.execute("DELETE FROM loaded_instances WHERE instance_id = ?1", [&i.instance_id]);
+        let _ = con.execute("DELETE FROM watchdog_probe_state WHERE instance_id = ?1", [&i.instance_id]);
+        load_slot::clear_instance_notices(&i.instance_id);
+    }
 }
 
 pub fn graceful_shutdown(home: &Path) -> Result<(), String> {
+    // Cancel pending loads and stop every live engine (verified), even ones whose row or state.db is gone.
     let t0 = Instant::now();
-    prepare_shutdown(home);
-    let con = db::open(home).map_err(|e| e.to_string())?;
-    let mut stmt = con
-        .prepare("SELECT instance_id FROM loaded_instances")
-        .map_err(|e| e.to_string())?;
-    let ids: Vec<String> = stmt
-        .query_map([], |r| r.get(0))
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
-    if ids.is_empty() {
-        run_registry::kill_all_goethe_engines_under(home);
-        append_goethed_log(
-            home,
-            &format!("shutdown done ms={} (no instances)\n", t0.elapsed().as_millis()),
-        );
-        return Ok(());
+    coordinator::cancel_queued(None);
+    let con = match db::open(home) {
+        Ok(con) => con,
+        Err(e) => {
+            load_slot::request_cancel_all();
+            proc_ident::terminate(&run_registry::tracked());
+            return Err(format!("state.db unavailable at shutdown ({e}); stopped tracked engines only"));
+        }
+    };
+    let list = {
+        let _plan = coordinator::plan_lock();
+        let found = insts(&con, &format!("status IN {LIVE}"), &[]).unwrap_or_default();
+        for i in &found {
+            let _ = con.execute(
+                &format!("UPDATE loaded_instances SET status = 'STOPPING' WHERE instance_id = ?1 AND status IN {LIVE}"),
+                [&i.instance_id],
+            );
+        }
+        found
+    };
+    load_slot::request_cancel_all();
+    let _ = load_slot::wait_all_slots_quiet(Duration::from_millis(500));
+    teardown(&con, home, &list);
+    let strays = run_registry::tracked();
+    let stopped = proc_ident::terminate(&strays);
+    for id in strays.iter().filter(|id| !stopped.survivors.contains(&id.instance_id)) {
+        run_registry::unregister(home, &id.instance_id);
     }
-    if ids.len() == 1 {
-        teardown_instance(&con, &ids[0], home).map_err(|(_, m)| m)?;
-    } else {
-        teardown_batch(&con, &ids, home).map_err(|(_, m)| m)?;
-    }
-    run_registry::kill_all_goethe_engines_under(home);
     append_goethed_log(
         home,
         &format!(
-            "shutdown done ms={} instances={}\n",
+            "shutdown done ms={} instances={} strays={}\n",
             t0.elapsed().as_millis(),
-            ids.len()
+            list.len(),
+            strays.len()
         ),
     );
     Ok(())
 }
 
-pub fn model_draining(model_id: &str) -> bool {
-    let home = goethe_home();
-    let Ok(con) = db::open(&home) else {
-        return false;
-    };
-    con.query_row(
-        "SELECT 1 FROM loaded_instances WHERE model_id = ?1 AND status = 'DRAINING' LIMIT 1",
-        [model_id],
-        |_| Ok(()),
-    )
-    .is_ok()
-}
-
 fn drain_inflight(model_ids: &[String], home: &Path) {
+    // Wait for in-flight mux requests of these models to finish, bounded by GOETHE_DRAIN_SECS.
     let max_secs: u64 = std::env::var("GOETHE_DRAIN_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(120);
     let deadline = Instant::now() + Duration::from_secs(max_secs);
     loop {
-        let pending: usize = model_ids
-            .iter()
-            .map(|mid| crate::inflight::count(mid))
-            .sum();
+        let pending: usize = model_ids.iter().map(|mid| crate::inflight::count(mid)).sum();
         if pending == 0 {
             return;
         }
@@ -616,116 +808,86 @@ fn drain_inflight(model_ids: &[String], home: &Path) {
     }
 }
 
+fn claim_for_unload(con: &mut Connection, model: Option<&str>, next: &str) -> rusqlite::Result<Vec<Inst>> {
+    // One immediate transaction: drop desired slots and tombstones, collect live rows, mark exactly those DRAINING/STOPPING.
+    let tx = con.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let only = "(?1 IS NULL OR model_id = ?1)";
+    tx.execute(&format!("DELETE FROM desired_loads WHERE {only}"), [model])?;
+    tx.execute(
+        &format!("DELETE FROM loaded_instances WHERE status IN ('FAILED', 'CANCELLED') AND {only}"),
+        [model],
+    )?;
+    let list = insts(&tx, &format!("status IN {LIVE} AND {only}"), &[&model])?;
+    for i in &list {
+        tx.execute(
+            "UPDATE loaded_instances SET status = ?2
+             WHERE instance_id = ?1 AND status IN ('STARTING', 'RUNNING', 'RESTARTING')",
+            rusqlite::params![i.instance_id, next],
+        )?;
+    }
+    tx.commit()?;
+    Ok(list)
+}
+
 pub fn handle_unload(
     model_id: Option<String>,
     all: bool,
     force: bool,
 ) -> Result<Value, (i32, String)> {
+    // Clear desired slots first (even with no instances), then drain unless forced and stop every match (verified).
+    let model = match (all, model_id.as_deref()) {
+        (true, _) => None,
+        (false, Some(m)) => Some(m),
+        (false, None) => return Err((2, "model_id required".to_string())),
+    };
     let home = goethe_home();
-    let t0 = std::time::Instant::now();
-    let con = db::open(&home).map_err(|e| (1, e.to_string()))?;
-    let starting: Vec<String> = {
-        let sql = if all {
-            "SELECT DISTINCT COALESCE(slot_key, model_id) FROM loaded_instances WHERE status='STARTING'"
-        } else {
-            "SELECT DISTINCT COALESCE(slot_key, model_id) FROM loaded_instances WHERE status='STARTING' AND model_id = ?1"
-        };
-        if all {
-            let mut stmt = con.prepare(sql).map_err(|e| (1, e.to_string()))?;
-            let rows = stmt.query_map([], |r| r.get(0)).map_err(|e| (1, e.to_string()))?;
-            rows.filter_map(|r| r.ok()).collect()
-        } else if let Some(mid) = model_id.as_ref() {
-            let mut stmt = con.prepare(sql).map_err(|e| (1, e.to_string()))?;
-            let rows = stmt
-                .query_map([mid], |r| r.get(0))
-                .map_err(|e| (1, e.to_string()))?;
-            rows.filter_map(|r| r.ok()).collect()
-        } else {
-            Vec::new()
-        }
+    let t0 = Instant::now();
+    coordinator::cancel_queued(model);
+    let mut con = db::open(&home).map_err(|e| (1, e.to_string()))?;
+    let list = {
+        let _plan = coordinator::plan_lock();
+        claim_for_unload(&mut con, model, if force { "STOPPING" } else { "DRAINING" })
+            .map_err(|e| (1, e.to_string()))?
     };
-    for sk in &starting {
-        load_slot::request_cancel_slot(sk);
-        let _ = load_slot::wait_slot_quiet(sk, Duration::from_millis(500));
+    for i in list.iter().filter(|i| i.status == "STARTING") {
+        load_slot::request_cancel_slot(&i.slot_key);
+        let _ = load_slot::wait_slot_quiet(&i.slot_key, Duration::from_millis(500));
     }
-    let model_id_for_clear = model_id.clone();
-    let ids: Vec<String> = if all {
-        let mut stmt = con
-            .prepare("SELECT instance_id FROM loaded_instances")
-            .map_err(|e| (1, e.to_string()))?;
-        let rows = stmt
-            .query_map([], |r| r.get(0))
-            .map_err(|e| (1, e.to_string()))?;
-        rows.filter_map(|r| r.ok()).collect()
-    } else {
-        let mid = model_id.ok_or((2, "model_id required".to_string()))?;
-        let mut stmt = con
-            .prepare("SELECT instance_id FROM loaded_instances WHERE model_id = ?1")
-            .map_err(|e| (1, e.to_string()))?;
-        let rows = stmt
-            .query_map([&mid], |r| r.get(0))
-            .map_err(|e| (1, e.to_string()))?;
-        rows.filter_map(|r| r.ok()).collect()
-    };
-    if ids.is_empty() {
+    if list.is_empty() {
         return Ok(Value::Null);
     }
-    let model_ids: Vec<String> = if all {
-        let mut stmt = con
-            .prepare("SELECT DISTINCT model_id FROM loaded_instances")
-            .map_err(|e| (1, e.to_string()))?;
-        let rows = stmt
-            .query_map([], |r| r.get(0))
-            .map_err(|e| (1, e.to_string()))?;
-        rows.filter_map(|r| r.ok()).collect()
-    } else {
-        vec![model_id_for_clear
-            .ok_or((2, "model_id required".to_string()))?]
-    };
     if !force {
-        for id in &ids {
+        let models: Vec<String> = list
+            .iter()
+            .map(|i| i.model_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        drain_inflight(&models, &home);
+        for i in &list {
             let _ = con.execute(
-                "UPDATE loaded_instances SET status = 'DRAINING' WHERE instance_id = ?1",
-                [id],
+                "UPDATE loaded_instances SET status = 'STOPPING' WHERE instance_id = ?1 AND status = 'DRAINING'",
+                [&i.instance_id],
             );
         }
-        drain_inflight(&model_ids, &home);
     }
-    for id in &ids {
-        let _ = con.execute(
-            "UPDATE loaded_instances SET status = 'STOPPING' WHERE instance_id = ?1",
-            [id],
-        );
-    }
-    if ids.len() == 1 {
-        teardown_instance(&con, &ids[0], &home)?;
-    } else {
-        teardown_batch(&con, &ids, &home)?;
-    }
-    for mid in model_ids {
-        if !mid.is_empty() {
-            let _ = crate::autostart::clear_desired(&mid);
-        }
-    }
+    teardown(&con, &home, &list);
     append_goethed_log(
         &home,
-        &format!(
-            "unload done ms={} instances={}\n",
-            t0.elapsed().as_millis(),
-            ids.len()
-        ),
+        &format!("unload done ms={} instances={}\n", t0.elapsed().as_millis(), list.len()),
     );
     Ok(Value::Null)
 }
 
 pub fn handle_ps() -> Result<Value, (i32, String)> {
+    // Every instance row (tombstones included) with notices, in-flight count and token rate.
     let home = goethe_home();
     let con = db::open(&home).map_err(|e| (1, e.to_string()))?;
     let mut stmt = con
         .prepare(
             "SELECT instance_id, model_id, pid, pgid, internal_port, gpu_indices, status,
                     allocated_vram_gb_per_gpu, COALESCE(restart_count, 0),
-                    COALESCE(slot_key, model_id) FROM loaded_instances",
+                    COALESCE(slot_key, model_id) FROM loaded_instances ORDER BY rowid",
         )
         .map_err(|e| (1, e.to_string()))?;
     let rows = stmt
@@ -736,7 +898,7 @@ pub fn handle_ps() -> Result<Value, (i32, String)> {
                 "pid": r.get::<_, i64>(2)?,
                 "pgid": r.get::<_, i64>(3)?,
                 "internal_port": r.get::<_, i64>(4)?,
-                "gpu_indices": parse_gpu_indices(r.get::<_, String>(5)?),
+                "gpu_indices": parse_gpu_csv(&r.get::<_, String>(5)?),
                 "status": r.get::<_, String>(6)?,
                 "allocated_vram_gb_per_gpu": r.get::<_, f64>(7)?,
                 "restarts": r.get::<_, i64>(8)?,
@@ -763,55 +925,52 @@ pub fn handle_ps() -> Result<Value, (i32, String)> {
 }
 
 pub fn reconcile_on_start() -> Result<(), String> {
+    // Adopt verified RUNNING engines that answer; stop other verified engines; clear unverifiable rows unsignaled.
     let home = goethe_home();
-    let _ = run_registry::reap_orphans_on_start(&home);
     let con = db::open(&home).map_err(|e| e.to_string())?;
-    let mut stmt = con
-        .prepare("SELECT instance_id, pid, pgid, status FROM loaded_instances")
-        .map_err(|e| e.to_string())?;
-    let rows: Vec<(String, i32, i32, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
-    for (id, pid, pgid, status) in rows {
-        if status == "DRAINING" {
-            con.execute(
-                "DELETE FROM loaded_instances WHERE instance_id = ?1",
-                [&id],
-            )
-            .ok();
-            continue;
+    let _ = con.execute(
+        "UPDATE loaded_instances SET pid = 0, pgid = 0 WHERE status IN ('FAILED', 'CANCELLED')",
+        [],
+    );
+    let rows = insts(&con, &format!("status IN {LIVE}"), &[]).map_err(|e| e.to_string())?;
+    let mut adopted = HashSet::new();
+    let mut stale = Vec::new();
+    for i in rows {
+        let verified = i.identity.clone().filter(proc_ident::leader_alive);
+        let _ = con.execute("DELETE FROM watchdog_probe_state WHERE instance_id = ?1", [&i.instance_id]);
+        let answers = || (0..3).any(|n| {
+            if n > 0 {
+                thread::sleep(Duration::from_secs(1));
+            }
+            cheap_probe_ok(i.port, &i.engine_key)
+        });
+        match verified {
+            Some(id) if i.status == "RUNNING" && answers() => {
+                let _ = run_registry::register(&home, &id);
+                append_goethed_log(&home, &format!("adopted instance {} pid {}\n", i.instance_id, id.pid));
+                adopted.insert(i.instance_id);
+                continue;
+            }
+            Some(id) => {
+                append_goethed_log(
+                    &home,
+                    &format!("instance {} ({}) not adoptable; stopping its verified engine\n", i.instance_id, i.status),
+                );
+                stale.push(id);
+            }
+            None => append_goethed_log(
+                &home,
+                &format!("cleared instance {} ({}) without signaling: identity does not verify\n", i.instance_id, i.status),
+            ),
         }
-        if pid_alive(pid) && pgid_alive(pgid) {
-            con.execute(
-                "UPDATE loaded_instances SET status = 'RUNNING' WHERE instance_id = ?1",
-                [&id],
-            )
-            .ok();
-        } else {
-            con.execute(
-                "DELETE FROM loaded_instances WHERE instance_id = ?1",
-                [&id],
-            )
-            .ok();
-        }
+        let _ = con.execute("DELETE FROM loaded_instances WHERE instance_id = ?1", [&i.instance_id]);
     }
+    let stopped = proc_ident::terminate(&stale);
+    let mut pids = stopped.pids;
+    pids.extend(run_registry::reap_orphans(&home, &adopted));
+    let gpus: Vec<u32> = foreign::snapshot().map(|s| s.iter().map(|g| g.index).collect()).unwrap_or_default();
+    foreign::wait_released(&gpus, &pids, GPU_RELEASE_WAIT);
     Ok(())
-}
-
-struct InstRow {
-    local_path: String,
-    static_vram_gb: f64,
-    kv_bytes_per_token: i64,
-    default_ctx: i64,
-    default_max_conc: i64,
-    default_tp: i64,
-    kv_elems_per_token: Option<i64>,
-    max_ctx: Option<i64>,
-    num_attention_heads: Option<i64>,
-    num_kv_heads: Option<i64>,
-    attention: Option<String>,
 }
 
 fn fetch_installed(con: &Connection, model_id: &str) -> Result<InstRow, String> {
@@ -839,65 +998,100 @@ fn fetch_installed(con: &Connection, model_id: &str) -> Result<InstRow, String> 
     .map_err(|_| format!("model {model_id} not installed"))
 }
 
-fn chooser_input_from_row(
-    row: &InstRow,
-    card: &toml::Value,
-    ctx: u64,
-    max_conc: u64,
-    home: &Path,
-    gpus: &[u32],
-) -> ChooserInput {
-    let kv_elems = row.kv_elems_per_token.unwrap_or(row.kv_bytes_per_token) as u64;
+fn default_ctx(row: &InstRow) -> u64 {
+    row.default_ctx.min(row.max_ctx.unwrap_or(row.default_ctx)).max(1) as u64
+}
+
+fn kv_bytes_per_token(row: &InstRow, card: &toml::Value) -> u64 {
+    // KV bytes per token for the card's kv_cache_dtype; auto keeps the installed figure (model dtype).
+    let elems = row.kv_elems_per_token.unwrap_or(row.kv_bytes_per_token).max(0) as u64;
+    match card.get("kv_cache_dtype").and_then(|v| v.as_str()).map(str::to_ascii_lowercase) {
+        Some(d) if d.contains("fp8") => elems,
+        Some(d) if d.contains("fp4") => elems.div_ceil(2),
+        Some(d) if d.contains("16") => elems * 2,
+        _ => row.kv_bytes_per_token.max(0) as u64,
+    }
+}
+
+fn chooser_input(req: &LoadReq, gpus: &[u32], ctx: u64, max_conc: u64) -> ChooserInput {
+    // Budget inputs for a GPU set: Marlin extra only on Blackwell-class GPUs, KV bytes from the card dtype.
+    let row = &req.row;
     ChooserInput {
-        static_vram_gb: effective_static_vram_gb(row, card, home, gpus),
-        marlin_extra_gb: card.get("marlin_extra_gb").and_then(|v| v.as_float()),
-        apply_marlin: false,
-        kv_elems_per_token: kv_elems,
+        static_vram_gb: static_weight_gb(
+            row.static_vram_gb,
+            req.card.get("marlin_extra_gb").and_then(|v| v.as_float()),
+            marlin_extra_applies(req.hw.as_ref(), gpus, &req.card),
+        ),
+        kv_bytes_per_token: kv_bytes_per_token(row, &req.card),
         num_attention_heads: row.num_attention_heads.unwrap_or(1) as u64,
         num_kv_heads: row.num_kv_heads.unwrap_or(1) as u64,
-        attention: row
-            .attention
-            .clone()
-            .unwrap_or_else(|| "gqa".to_string()),
+        attention: row.attention.clone().unwrap_or_else(|| "gqa".to_string()),
         max_ctx: row.max_ctx.unwrap_or(row.default_ctx) as u64,
         ctx,
         max_conc,
-        kv_bytes_override: Some(row.kv_bytes_per_token as u64),
     }
 }
 
-fn load_hw(home: &Path) -> Option<HardwareState> {
-    let path = home.join("hardware_state.json");
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-fn gpu_cap(hw: &Option<HardwareState>, index: u32) -> f64 {
-    hw.as_ref()
-        .and_then(|h| {
-            h.gpus
+fn marlin_extra_applies(hw: Option<&HardwareState>, gpus: &[u32], card: &toml::Value) -> bool {
+    // The Marlin weight copy exists only on compute capability 10+ unless GOETHE_MARLIN=0 (env or card).
+    let off = std::env::var("GOETHE_MARLIN").as_deref() == Ok("0")
+        || card
+            .get("env")
+            .and_then(|v| v.get("GOETHE_MARLIN"))
+            .and_then(|v| v.as_str())
+            == Some("0");
+    if off {
+        return false;
+    }
+    gpus.iter()
+        .filter_map(|g| {
+            hw?.gpus
                 .iter()
-                .find(|g| g.index == index)
-                .and_then(|g| g.compute_capability.parse().ok())
+                .find(|x| x.index == *g)?
+                .compute_capability
+                .split('.')
+                .next()?
+                .parse::<u32>()
+                .ok()
         })
-        .unwrap_or(12.0)
+        .max()
+        .unwrap_or(0)
+        >= 10
 }
 
-fn parse_gpus_param(raw: Option<&str>, card: &toml::Value) -> Vec<u32> {
-    if let Some(s) = raw {
-        return s
+fn gpu_name(hw: Option<&HardwareState>, idx: u32) -> String {
+    hw.and_then(|h| h.gpus.iter().find(|g| g.index == idx).map(|g| g.name.clone()))
+        .unwrap_or_else(|| "gpu".to_string())
+}
+
+fn pinned_gpus(raw: Option<&str>, card: &toml::Value, tp: Option<u64>) -> Result<Vec<u32>, String> {
+    // --gpus (else the card's preferred_gpus) as sorted indices; it must agree with --tp and list no GPU twice.
+    let list: Vec<u32> = match raw {
+        Some(s) => s
             .split(',')
-            .filter_map(|p| p.trim().parse().ok())
-            .collect();
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(|p| p.parse::<u32>().map_err(|_| format!("invalid GPU index '{p}' in --gpus")))
+            .collect::<Result<_, _>>()?,
+        None => card
+            .get("preferred_gpus")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_integer().and_then(|i| u32::try_from(i).ok()))
+            .collect(),
+    };
+    if let Some(t) = tp {
+        if !list.is_empty() && t as usize != list.len() {
+            return Err(format!("--tp {t} disagrees with {} GPUs on --gpus", list.len()));
+        }
     }
-    card.get("preferred_gpus")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_integer().map(|i| i as u32))
-                .collect()
-        })
-        .unwrap_or_default()
+    let mut sorted = list;
+    sorted.sort_unstable();
+    if let Some(w) = sorted.windows(2).find(|w| w[0] == w[1]) {
+        return Err(format!("GPU {} is listed twice in --gpus", w[0]));
+    }
+    Ok(sorted)
 }
 
 fn read_card_value(path: &Path) -> Result<toml::Value, String> {
@@ -905,444 +1099,78 @@ fn read_card_value(path: &Path) -> Result<toml::Value, String> {
     toml::from_str(&text).map_err(|e| e.to_string())
 }
 
-fn parse_gpu_indices(s: String) -> Value {
-    Value::Array(
-        s.split(',')
-            .filter_map(|p| p.trim().parse::<i64>().ok())
-            .map(Value::from)
-            .collect(),
-    )
+fn parse_gpu_csv(s: &str) -> Vec<u32> {
+    s.split(',').filter_map(|p| p.trim().parse().ok()).collect()
 }
 
 fn gpu_csv(gpus: &[u32]) -> String {
-    gpus.iter()
-        .map(|g| g.to_string())
-        .collect::<Vec<_>>()
-        .join(",")
+    placement::format_gpu_list(gpus)
 }
 
-fn effective_static_vram_gb(
-    row: &InstRow,
-    card: &toml::Value,
-    home: &Path,
-    gpus: &[u32],
-) -> f64 {
-    let extra = card
-        .get("marlin_extra_gb")
-        .and_then(|v| v.as_float());
-    static_weight_gb(
-        row.static_vram_gb,
-        extra,
-        marlin_extra_applies(home, gpus, card),
-    )
-}
-
-fn marlin_extra_applies(home: &Path, gpus: &[u32], card: &toml::Value) -> bool {
-    if marlin_disabled(card) {
-        return false;
-    }
-    gpus.iter()
-        .map(|g| gpu_cc_major(home, *g))
-        .max()
-        .unwrap_or(0)
-        >= 10
-}
-
-fn marlin_disabled(card: &toml::Value) -> bool {
-    if std::env::var("GOETHE_MARLIN").as_deref() == Ok("0") {
-        return true;
-    }
-    card.get("env")
-        .and_then(|v| v.as_table())
-        .and_then(|t| t.get("GOETHE_MARLIN"))
-        .and_then(|v| v.as_str())
-        == Some("0")
-}
-
-fn gpu_cc_major(home: &Path, gpu: u32) -> u32 {
-    let hw_path = home.join("hardware_state.json");
-    if let Ok(text) = std::fs::read_to_string(&hw_path) {
-        if let Ok(v) = serde_json::from_str::<Value>(&text) {
-            if let Some(arr) = v.get("gpus").and_then(|g| g.as_array()) {
-                for g in arr {
-                    if g.get("index").and_then(|i| i.as_u64()) == Some(gpu as u64) {
-                        if let Some(cc) = g.get("compute_capability").and_then(|c| c.as_str()) {
-                            if let Some(maj) = cc.split('.').next().and_then(|s| s.parse().ok()) {
-                                return maj;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    0
-}
-
-fn gpu_free_gb(home: &Path, gpu: u32) -> Result<f64, String> {
-    let hw_path = home.join("hardware_state.json");
-    if hw_path.is_file() {
-        let text = std::fs::read_to_string(&hw_path).map_err(|e| e.to_string())?;
-        let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        if let Some(arr) = v.get("gpus").and_then(|g| g.as_array()) {
-            for g in arr {
-                if g.get("index").and_then(|i| i.as_u64()) == Some(gpu as u64) {
-                    let free = g
-                        .get("vram_free_mb")
-                        .and_then(|x| x.as_u64())
-                        .unwrap_or(0);
-                    return Ok(free as f64 / 1024.0);
-                }
-            }
-        }
-    }
-    let (_t, _u, free, _p) = refresh_gpu_vram(gpu)?;
-    Ok(free as f64 / 1024.0)
-}
-
-fn mem_fraction(_home: &Path, gpus: &[u32], b_gb: f64) -> Result<f64, String> {
-    if gpus.is_empty() {
-        return Err("no gpu".to_string());
-    }
-    let mut min_free_gb = f64::MAX;
-    for &gpu in gpus {
-        let free_mb = gpu_free_mb_live(gpu)?;
-        min_free_gb = min_free_gb.min(free_mb as f64 / 1024.0);
-    }
-    mem_fraction_from_free(b_gb, min_free_gb)
-}
-
-fn check_foreign(
-    gpu: u32,
-    con: &Connection,
-    bypass: bool,
-) -> Result<Option<String>, (i32, String)> {
-    if bypass {
-        return Ok(None);
-    }
-    let managed = placement::managed_pids(con);
-    if let Some((pid, gb)) = foreign_compute_on_gpu(gpu, &managed).map_err(|e| (1, e))? {
-        return Ok(Some(format!(
-            "GPU {gpu} has unmanaged process PID {pid} using {gb:.1} GB VRAM. Proceed? [y/N] "
-        )));
-    }
-    let used_mb = gpu_used_mb_live(gpu).map_err(|e| (1, e))?;
-    let listed_mb = managed_vram_listed_mb(gpu, &managed).map_err(|e| (1, e))?;
-    if listed_mb > 0 {
-        let slack = used_mb.saturating_sub(listed_mb.saturating_add(512));
-        if slack > 4096 {
-            return Ok(Some(format!(
-                "GPU {gpu} has ~{:.1} GB VRAM not attributed to goethe engines (~{:.1} GB in use). Proceed? [y/N] ",
-                slack as f64 / 1024.0,
-                used_mb as f64 / 1024.0
-            )));
-        }
-    } else if !gpu_has_goethe_instance(con, gpu) && used_mb > 4096 {
-        return Ok(Some(format!(
-            "GPU {gpu} has ~{:.1} GB VRAM in use with no goethe engines loaded. Proceed? [y/N] ",
-            used_mb as f64 / 1024.0
-        )));
-    }
-    Ok(None)
-}
-
-fn gpu_has_goethe_instance(con: &Connection, gpu: u32) -> bool {
-    let Ok(mut stmt) = con.prepare("SELECT gpu_indices FROM loaded_instances") else {
-        return false;
-    };
-    let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
-        return false;
-    };
-    for csv in rows.filter_map(|r| r.ok()) {
-        for part in csv.split(',') {
-            if part.trim().parse::<u32>().ok() == Some(gpu) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn co_residency_notice(
-    gpu: u32,
-    model_id: &str,
-    con: &Connection,
-    home: &Path,
-) -> Result<Option<String>, String> {
+fn co_residency_notice(con: &Connection, gpu: u32, model_id: &str, free_gb: f64) -> Option<String> {
+    // Name the other live Goethe instances on this GPU and its free VRAM.
     let mut stmt = con
-        .prepare("SELECT model_id, allocated_vram_gb_per_gpu, gpu_indices FROM loaded_instances")
-        .map_err(|e| e.to_string())?;
-    let mut hosts = Vec::new();
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, f64>(1)?,
-                r.get::<_, String>(2)?,
-            ))
+        .prepare(&format!(
+            "SELECT model_id, allocated_vram_gb_per_gpu, gpu_indices FROM loaded_instances
+             WHERE status IN {LIVE} AND model_id != ?1 ORDER BY rowid"
+        ))
+        .ok()?;
+    let hosts: Vec<String> = stmt
+        .query_map([model_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?, r.get::<_, String>(2)?))
         })
-        .map_err(|e| e.to_string())?;
-    for row in rows.filter_map(|r| r.ok()) {
-        if row.0 == model_id {
-            continue;
-        }
-        if !gpu_indices_contain(&row.2, gpu) {
-            continue;
-        }
-        hosts.push(format!("{}: {:.1} GB", row.0, row.1));
-    }
+        .ok()?
+        .filter_map(|r| r.ok())
+        .filter(|(_, _, csv)| parse_gpu_csv(csv).contains(&gpu))
+        .map(|(m, gb, _)| format!("{m}: {gb:.1} GB"))
+        .collect();
     if hosts.is_empty() {
-        return Ok(None);
+        return None;
     }
-    let free_gb = gpu_free_gb(home, gpu)?;
-    Ok(Some(format!(
+    Some(format!(
         "GPU {gpu} currently hosts [{}]. Free VRAM: {free_gb:.1} GB.",
         hosts.join(", ")
-    )))
+    ))
 }
 
-fn gpu_indices_contain(csv: &str, gpu: u32) -> bool {
-    csv.split(',').any(|p| p.trim().parse::<u32>() == Ok(gpu))
-}
-
-fn next_port(con: &Connection) -> Result<u16, String> {
-    for port in 30001..=30099 {
-        let n: i64 = con
+fn next_port(con: &Connection, lo: u16, hi: u16) -> Result<u16, String> {
+    // Lowest port in the engine range that no instance row holds and nothing listens on.
+    for port in lo..=hi {
+        let held = con
             .query_row(
-                "SELECT COUNT(*) FROM loaded_instances WHERE internal_port = ?1",
+                "SELECT 1 FROM loaded_instances WHERE internal_port = ?1",
                 [port as i64],
-                |r| r.get(0),
+                |_| Ok(()),
             )
-            .map_err(|e| e.to_string())?;
-        if n == 0 && port_available(port) {
+            .is_ok();
+        if !held && crate::ports::localhost_port_free(port) {
             return Ok(port);
         }
     }
-    Err("no free internal ports in 30001-30099".to_string())
+    Err(format!("no free engine port in {lo}-{hi}; set GOETHE_ENGINE_PORTS=<lo>-<hi>"))
 }
 
-fn port_available(port: u16) -> bool {
-    TcpListener::bind(("127.0.0.1", port)).is_ok()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_tracked_engine(
-    home: &Path,
-    instance_id: &str,
-    model_id: &str,
-    model_path: &Path,
-    card: &toml::Value,
-    port: u16,
-    ctx: u64,
-    max_conc: u64,
-    tp: u64,
-    mem_frac: f64,
-    gpus: &[u32],
-    load_extra: &[String],
-    log: &mut File,
-) -> Result<(i32, i32), String> {
-    let model_path_s = model_path.to_string_lossy().into_owned();
-    let entry = RunEntry {
-        instance_id: instance_id.to_string(),
-        pgid: 0,
-        pid: 0,
-        model_path: model_path_s.clone(),
-    };
-    let _ = run_registry::register(home, &entry);
-    let (pid, pgid) = spawn_engine(
-        home,
-        model_path,
-        card,
-        port,
-        ctx,
-        max_conc,
-        tp,
-        mem_frac,
-        gpus,
-        load_extra,
-        log,
-    )?;
-    let log_path = home.join("logs").join(format!("{instance_id}.log"));
-    if let Err(e) = crate::logs::append_spawn_index(home, instance_id, model_id, &log_path) {
-        eprintln!("append_spawn_index({instance_id}): {e}");
-    }
-    let entry = RunEntry {
-        instance_id: instance_id.to_string(),
-        pgid,
-        pid,
-        model_path: model_path_s,
-    };
-    let _ = run_registry::register(home, &entry);
-    Ok((pid, pgid))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_engine(
-    home: &Path,
-    model_path: &Path,
-    card: &toml::Value,
-    port: u16,
-    ctx: u64,
-    max_conc: u64,
-    tp: u64,
-    mem_frac: f64,
-    gpus: &[u32],
-    load_extra: &[String],
-    log: &mut File,
-) -> Result<(i32, i32), String> {
-    let python = resolve_python(home);
-    let kv_dtype = card
-        .get("kv_cache_dtype")
-        .and_then(|v| v.as_str())
-        .unwrap_or("fp8_e4m3");
-    let mut cmd = Command::new(python);
-    cmd.arg("-m")
-        .arg("sglang.launch_server")
-        .arg("--model-path")
-        .arg(model_path)
-        .arg("--host")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg(port.to_string())
-        .arg("--tp-size")
-        .arg(tp.to_string())
-        .arg("--context-length")
-        .arg(ctx.to_string())
-        .arg("--max-running-requests")
-        .arg(max_conc.to_string())
-        .arg("--mem-fraction-static")
-        .arg(format!("{mem_frac:.6}"))
-        .arg("--kv-cache-dtype")
-        .arg(kv_dtype);
-    if tp > 1 {
-        cmd.arg("--disable-custom-all-reduce");
-    }
-    if let Some(name) = card.get("model_id").and_then(|v| v.as_str()) {
-        cmd.arg("--served-model-name").arg(name);
-    }
-    if let Some(table) = card.get("env").and_then(|v| v.as_table()) {
-        for (k, v) in table {
-            if let Some(s) = v.as_str() {
-                cmd.env(k, expand_home(s, home));
-            }
-        }
-    }
-    if let Some(extra) = card.get("extra_sglang_args").and_then(|v| v.as_array()) {
-        for item in extra {
-            if let Some(s) = item.as_str() {
-                cmd.arg(s);
-            }
-        }
-    }
-    for arg in load_extra {
-        cmd.arg(arg);
-    }
-    cmd.env(
-        "CUDA_VISIBLE_DEVICES",
-        gpus.iter()
-            .map(|g| g.to_string())
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-    cmd.env("CUDA_DEVICE_ORDER", "PCI_BUS_ID");
-    cmd.env("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True");
-    let runtime = card
-        .get("runtime")
-        .and_then(|v| v.as_str())
-        .unwrap_or("sglang");
-    if runtime == "ternary" {
-        apply_ternary_env(&mut cmd, home, card)?;
-    }
-    cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
-    cmd.stderr(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    let child = cmd.spawn().map_err(|e| format!("spawn engine: {e}"))?;
-    let pid = child.id() as i32;
-    std::mem::forget(child);
-    let pgid = live_pgid(pid).unwrap_or(pid);
-    Ok((pid, pgid))
-}
-
-fn apply_ternary_env(cmd: &mut Command, home: &Path, card: &toml::Value) -> Result<(), String> {
-    if let Some(table) = card.get("env").and_then(|v| v.as_table()) {
-        for (k, v) in table {
-            if let Some(s) = v.as_str() {
-                cmd.env(k, expand_home(s, home));
-            }
-        }
-    }
-    if let Some(table) = card.as_table() {
-        for (k, v) in table {
-            if k.starts_with("TERNARY_") {
-                if let Some(s) = v.as_str() {
-                    cmd.env(k, expand_home(s, home));
-                }
-            }
-        }
-    }
-    if let Some(arr) = card.get("pythonpath").and_then(|v| v.as_array()) {
-        let parts: Vec<String> = arr
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| expand_home(s, home)))
-            .collect();
-        if !parts.is_empty() {
-            cmd.env("PYTHONPATH", parts.join(":"));
-        }
-    }
-    Ok(())
-}
-
-fn expand_home(s: &str, home: &Path) -> String {
-    s.replace("$GOETHE_HOME", &home.to_string_lossy())
-}
-
-fn resolve_python(home: &Path) -> PathBuf {
-    let p = home.join("py-env/bin/python");
-    if p.is_file() {
-        return p;
-    }
-    if let Ok(env) = std::env::var("GOETHE_PYTHON") {
-        return PathBuf::from(env);
-    }
-    PathBuf::from("python3")
-}
-
-const HTTP_PROBE_SECS: u64 = 25;
-
-fn http_status(url: &str, timeout_secs: u64) -> Option<u16> {
+fn http_ok(port: u16, path: &str, key: &str, timeout_secs: u64) -> bool {
+    // GET a loopback engine path with the engine key; only 200 counts.
     let agent = ureq::AgentBuilder::new()
         .timeout_read(Duration::from_secs(timeout_secs))
         .timeout_connect(Duration::from_secs(2))
         .build();
-    agent.get(url).call().ok().map(|r| r.status())
-}
-
-fn cheap_probe_ok(port: u16) -> bool {
-    for path in ["/v1/models", "/get_model_info"] {
-        let url = format!("http://127.0.0.1:{port}{path}");
-        if http_status(&url, 2) == Some(200) {
-            return true;
-        }
+    let mut req = agent.get(&format!("http://127.0.0.1:{port}{path}"));
+    if !key.is_empty() {
+        req = req.set("Authorization", &format!("Bearer {key}"));
     }
-    false
+    req.call().is_ok_and(|r| r.status() == 200)
 }
 
-fn deep_health_ok(port: u16) -> bool {
-    readiness_health_ok(port)
+fn cheap_probe_ok(port: u16, key: &str) -> bool {
+    ["/v1/models", "/get_model_info"]
+        .iter()
+        .any(|p| http_ok(port, p, key, 2))
 }
 
-fn readiness_health_ok(port: u16) -> bool {
-    let url = format!("http://127.0.0.1:{port}/health");
-    http_status(&url, HTTP_PROBE_SECS) == Some(200)
-}
-
-pub fn health_ok(url: &str) -> bool {
-    http_status(url, HTTP_PROBE_SECS) == Some(200)
+fn health_ok(port: u16, key: &str) -> bool {
+    http_ok(port, "/health", key, HTTP_PROBE_SECS)
 }
 
 fn log_file_len(path: &Path) -> u64 {
@@ -1356,251 +1184,112 @@ fn now_epoch_secs() -> i64 {
         .unwrap_or(0)
 }
 
-fn wait_engine_ready(port: u16, pgid: i32, log_path: &Path) -> Result<(), crate::startup_stall::StartupFail> {
-    let hard_cap = crate::startup_stall::hard_cap_secs_from_env();
-    let mut tracker =
-        crate::startup_stall::StallTracker::new(now_epoch_secs(), log_file_len(log_path));
-    loop {
-        let now = now_epoch_secs();
-        let step = crate::startup_stall::poll_startup_step(
-            &mut tracker,
-            now,
-            pgid_alive(pgid),
-            log_file_len(log_path),
-            readiness_health_ok(port),
-            hard_cap,
-        );
-        match step {
-            crate::startup_stall::StartupStep::Ready => return Ok(()),
-            crate::startup_stall::StartupStep::Failed(f) => return Err(f),
-            crate::startup_stall::StartupStep::Continue => {
-                thread::sleep(Duration::from_millis(500));
-            }
-        }
-    }
-}
-
-fn teardown_batch(con: &Connection, ids: &[String], home: &Path) -> Result<(), (i32, String)> {
-    for id in ids {
-        let _ = con.execute(
-            "UPDATE loaded_instances SET status = 'STOPPING' WHERE instance_id = ?1",
-            [id],
-        );
-    }
-    let mut items = Vec::new();
-    for id in ids {
-        if let Ok(row) = con.query_row(
-            "SELECT pid, pgid, gpu_indices FROM loaded_instances WHERE instance_id = ?1",
-            [id],
-            |r| Ok((r.get::<_, i32>(0)?, r.get::<_, i32>(1)?, r.get::<_, String>(2)?)),
-        ) {
-            items.push((id.clone(), row.0, row.1, row.2));
-        }
-    }
-    let engines: Vec<(i32, i32)> = items.iter().map(|(_, pid, pgid, _)| (*pid, *pgid)).collect();
-    run_registry::kill_process_groups(&engines);
-    for (id, _, _, _) in &items {
-        run_registry::unregister(home, id);
-    }
-    for (id, _pid, _pgid, _gpus) in &items {
-        con.execute(
-            "DELETE FROM loaded_instances WHERE instance_id = ?1",
-            [id],
-        )
-        .map_err(|e| (1, e.to_string()))?;
-    }
-    let _ = home;
-    Ok(())
-}
-
-fn teardown_instance(con: &Connection, instance_id: &str, home: &Path) -> Result<(), (i32, String)> {
-    let (pid, pgid, gpus): (i32, i32, String) = con
-        .query_row(
-            "SELECT pid, pgid, gpu_indices FROM loaded_instances WHERE instance_id = ?1",
-            [instance_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .map_err(|_| (1, format!("instance {instance_id} not found")))?;
-    let _ = con.execute(
-        "UPDATE loaded_instances SET status = 'STOPPING' WHERE instance_id = ?1",
-        [instance_id],
-    );
-    run_registry::kill_process_groups(&[(pid, pgid)]);
-    run_registry::unregister(home, instance_id);
-    for g in gpus.split(',') {
-        if let Ok(idx) = g.trim().parse::<u32>() {
-            let _ = refresh_gpu_vram(idx);
-        }
-    }
-    con.execute(
-        "DELETE FROM loaded_instances WHERE instance_id = ?1",
-        [instance_id],
-    )
-    .map_err(|e| (1, e.to_string()))?;
-    let _ = home;
-    Ok(())
-}
-
-fn live_pgid(pid: i32) -> Option<i32> {
-    let pgid = unsafe { libc::getpgid(pid) };
-    if pgid > 0 {
-        Some(pgid)
-    } else {
-        None
-    }
-}
-
-fn pid_alive(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
-fn reap_pgid(pgid: i32) {
-    if pgid <= 0 {
-        return;
-    }
-    let mut status = 0;
-    loop {
-        let p = unsafe { libc::waitpid(-pgid, &mut status, libc::WNOHANG) };
-        if p <= 0 {
-            break;
-        }
-    }
-}
-
-fn pgid_alive(pgid: i32) -> bool {
-    if pgid <= 0 {
-        return false;
-    }
-    reap_pgid(pgid);
-    unsafe { libc::kill(-pgid, 0) == 0 }
-}
-
 pub fn watchdog_tick() {
-    let _guard = match WATCHDOG_TICK_LOCK.lock() {
+    // Probe RUNNING engines; restart dead ones within budget, else stop them (verified) and mark FAILED.
+    let _guard = match WATCHDOG_TICK_LOCK.try_lock() {
         Ok(g) => g,
-        Err(e) => e.into_inner(),
+        Err(TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(TryLockError::WouldBlock) => return,
     };
-    if crate::shutdown::shutdown_requested() {
+    if shutdown_requested() {
         return;
     }
     let home = goethe_home();
     let Ok(con) = db::open(&home) else {
         return;
     };
-    let Ok(mut stmt) = con.prepare(
-        "SELECT instance_id, model_id, pid, pgid, internal_port, COALESCE(restart_count,0),
-                COALESCE(slot_key, model_id)
-         FROM loaded_instances WHERE status = 'RUNNING'",
-    ) else {
-        return;
-    };
-    let rows: Vec<(String, String, i32, i32, i64, i64, String)> = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-            ))
-        })
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|r| r.ok())
-        .collect();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    for (inst, model_id, _pid, pgid, port, restarts, slot_key) in rows {
-        let in_flight: i64 = con
-            .query_row(
-                "SELECT restart_in_flight FROM watchdog_probe_state WHERE instance_id = ?1",
-                [&inst],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        if in_flight != 0 {
-            continue;
-        }
-        let group_alive = pgid_alive(pgid);
-        let mut state = load_probe_state(&con, &inst, now);
-        let cheap = group_alive && cheap_probe_ok(port as u16);
-        let deep = if crate::watchdog_liveness::deep_due(&state, now) {
-            Some(deep_health_ok(port as u16))
-        } else {
-            None
-        };
-        let action = crate::watchdog_liveness::step(
+    let now = now_epoch_secs();
+    for i in insts(&con, "status = 'RUNNING'", &[]).unwrap_or_default() {
+        let alive = i.identity.as_ref().is_some_and(proc_ident::leader_alive);
+        let mut state = load_probe_state(&con, &i.instance_id, now);
+        let cheap = alive && cheap_probe_ok(i.port, &i.engine_key);
+        let deep = watchdog_liveness::deep_due(&state, now).then(|| health_ok(i.port, &i.engine_key));
+        let action = watchdog_liveness::step(
             &mut state,
-            crate::watchdog_liveness::ProbeInput {
+            ProbeInput {
                 now,
-                pid_alive: group_alive,
+                pid_alive: alive,
                 cheap_ok: cheap,
                 deep_ok: deep,
             },
         );
-        save_probe_state(&con, &inst, &state);
-        if action == crate::watchdog_liveness::WatchdogAction::None {
-            continue;
-        }
-        let reason = match action {
-            crate::watchdog_liveness::WatchdogAction::MarkDead { reason } => reason,
-            _ => continue,
-        };
-        watchdog_log(&home, &inst, &slot_key, reason, cheap, deep);
-        if !watchdog_may_restart(&con, &slot_key) {
-            let _ = con.execute(
-                "UPDATE loaded_instances SET status = 'FAILED' WHERE instance_id = ?1",
-                [&inst],
-            );
-            continue;
-        }
-        let _ = con.execute(
-            "INSERT OR REPLACE INTO watchdog_probe_state (instance_id, restart_in_flight)
-             VALUES (?1, 1)",
-            [&inst],
-        );
-        let _ = con.execute(
-            "UPDATE loaded_instances SET status = 'RESTARTING' WHERE instance_id = ?1",
-            [&inst],
-        );
-        let _ = teardown_instance(&con, &inst, &home);
-        let params = load_params_for_slot(&con, &slot_key, &model_id);
-        let Some(params) = params else {
-            let _ = con.execute(
-                "UPDATE watchdog_probe_state SET restart_in_flight = 0 WHERE instance_id = ?1",
-                [&inst],
-            );
+        save_probe_state(&con, &i.instance_id, &state);
+        let WatchdogAction::MarkDead { reason } = action else {
             continue;
         };
-        let attempt = restarts;
-        let next_restarts = restarts + 1;
-        let sk = slot_key.clone();
-        let inst_id = inst.clone();
-        thread::spawn(move || {
-            let delay = crate::watchdog_policy::restart_backoff_secs(attempt);
-            thread::sleep(std::time::Duration::from_secs(delay));
-            let slot_arc = slot_lock(&sk);
-            let _guard = slot_arc.lock().unwrap_or_else(|e| e.into_inner());
-            let mut p = params;
-            p.restart_count = Some(next_restarts as u64);
-            p.async_finish = true;
-            p.slot_key = Some(sk);
-            if let Err((code, msg)) = handle_load(p) {
-                eprintln!("watchdog restart load failed ({code}): {msg}");
+        watchdog_log(&home, &i.instance_id, &i.slot_key, reason, cheap, deep);
+        if shutdown_requested() {
+            return;
+        }
+        if !watchdog_may_restart(&con, &i.slot_key) {
+            fail_running(&con, &home, &i);
+            continue;
+        }
+        let claimed = con
+            .execute(
+                "UPDATE loaded_instances SET status = 'RESTARTING' WHERE instance_id = ?1 AND status = 'RUNNING'",
+                [&i.instance_id],
+            )
+            .unwrap_or(0);
+        if claimed == 1 && tombstone(&con, &home, &i, "RESTARTING") {
+            if let Some(params) = load_params_for_slot(&con, &i.slot_key, &i.model_id) {
+                schedule_restart(params, i.restarts);
             }
-            if let Ok(con) = db::open(&goethe_home()) {
-                let _ = con.execute(
-                    "UPDATE watchdog_probe_state SET restart_in_flight = 0 WHERE instance_id = ?1",
-                    [&inst_id],
-                );
-            }
-        });
+        }
     }
+}
+
+fn tombstone(con: &Connection, home: &Path, i: &Inst, from: &str) -> bool {
+    // Stop a claimed instance (verified) and keep a FAILED row with pid 0 for ps; false if its processes survived.
+    if !stop_processes(home, std::slice::from_ref(i)).is_empty() {
+        let _ = con.execute(
+            "UPDATE loaded_instances SET status = 'STOPPING' WHERE instance_id = ?1 AND status = ?2",
+            [&i.instance_id, from],
+        );
+        return false;
+    }
+    let _ = con.execute(
+        "UPDATE loaded_instances SET status = 'FAILED', pid = 0, pgid = 0 WHERE instance_id = ?1 AND status = ?2",
+        [&i.instance_id, from],
+    );
+    let _ = con.execute("DELETE FROM watchdog_probe_state WHERE instance_id = ?1", [&i.instance_id]);
+    load_slot::clear_instance_notices(&i.instance_id);
+    true
+}
+
+fn fail_running(con: &Connection, home: &Path, i: &Inst) {
+    // Restart budget spent: stop the hung engine (verified) so its VRAM is freed, then keep a FAILED tombstone.
+    let claimed = con
+        .execute(
+            "UPDATE loaded_instances SET status = 'STOPPING' WHERE instance_id = ?1 AND status = 'RUNNING'",
+            [&i.instance_id],
+        )
+        .unwrap_or(0);
+    if claimed == 1 {
+        tombstone(con, home, i, "STOPPING");
+    }
+}
+
+fn schedule_restart(mut params: LoadParams, restarts: i64) {
+    // After the backoff, re-check the desired slot and shutdown under the slot lock, then relaunch outside it.
+    let slot = params.slot_key.clone().unwrap_or_default();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(crate::watchdog_policy::restart_backoff_secs(restarts)));
+        {
+            let lock = slot_lock(&slot);
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let desired = db::open(&goethe_home())
+                .map(|c| autostart::desired_exists(&c, &slot))
+                .unwrap_or(false);
+            if shutdown_requested() || !desired {
+                return;
+            }
+        }
+        params.restart_count = Some(restarts.max(0) as u64 + 1);
+        if let Err((code, msg, _)) = handle_load(params) {
+            eprintln!("watchdog restart of {slot} failed ({code}): {msg}");
+        }
+    });
 }
 
 fn watchdog_log(
@@ -1611,23 +1300,22 @@ fn watchdog_log(
     cheap_ok: bool,
     deep_ok: Option<bool>,
 ) {
-    let path = home.join("logs/goethed.log");
-    let line = format!(
-        "watchdog instance={instance_id} slot={slot_key} reason={reason} cheap_ok={cheap_ok} deep_ok={deep_ok:?}\n"
+    append_goethed_log(
+        home,
+        &format!(
+            "watchdog instance={instance_id} slot={slot_key} reason={reason} cheap_ok={cheap_ok} deep_ok={deep_ok:?}\n"
+        ),
     );
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
-fn load_probe_state(con: &Connection, instance_id: &str, now: i64) -> crate::watchdog_liveness::LivenessState {
+fn load_probe_state(con: &Connection, instance_id: &str, now: i64) -> LivenessState {
+    // Persisted liveness state of an instance, or a fresh one due for a deep probe.
     con.query_row(
-        "SELECT cheap_fail_since, deep_fail_streak, last_deep_at, COALESCE(cheap_ok_once,0) FROM watchdog_probe_state WHERE instance_id = ?1",
+        "SELECT cheap_fail_since, deep_fail_streak, last_deep_at, COALESCE(cheap_ok_once,0)
+         FROM watchdog_probe_state WHERE instance_id = ?1",
         [instance_id],
         |r| {
-            Ok(crate::watchdog_liveness::LivenessState {
+            Ok(LivenessState {
                 cheap_fail_since: r.get(0)?,
                 deep_fail_streak: r.get::<_, i64>(1)? as u32,
                 last_deep_at: r.get(2)?,
@@ -1635,17 +1323,17 @@ fn load_probe_state(con: &Connection, instance_id: &str, now: i64) -> crate::wat
             })
         },
     )
-    .unwrap_or(crate::watchdog_liveness::LivenessState {
-        last_deep_at: now - crate::watchdog_liveness::DEEP_INTERVAL_SECS,
+    .unwrap_or(LivenessState {
+        last_deep_at: now - watchdog_liveness::DEEP_INTERVAL_SECS,
         ..Default::default()
     })
 }
 
-fn save_probe_state(con: &Connection, instance_id: &str, st: &crate::watchdog_liveness::LivenessState) {
+fn save_probe_state(con: &Connection, instance_id: &str, st: &LivenessState) {
     let _ = con.execute(
         "INSERT OR REPLACE INTO watchdog_probe_state
-        (instance_id, cheap_fail_since, deep_fail_streak, last_deep_at, restart_in_flight, cheap_ok_once)
-        VALUES (?1,?2,?3,?4, COALESCE((SELECT restart_in_flight FROM watchdog_probe_state WHERE instance_id = ?1),0), ?5)",
+        (instance_id, cheap_fail_since, deep_fail_streak, last_deep_at, cheap_ok_once)
+        VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![
             instance_id,
             st.cheap_fail_since,
@@ -1657,10 +1345,7 @@ fn save_probe_state(con: &Connection, instance_id: &str, st: &crate::watchdog_li
 }
 
 fn watchdog_may_restart(con: &Connection, slot_key: &str) -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    // Consume one restart from the slot's window, or refuse when the window is spent.
     let row: Option<(i64, i64)> = con
         .query_row(
             "SELECT window_start, count FROM watchdog_restarts WHERE slot_key = ?1",
@@ -1669,16 +1354,15 @@ fn watchdog_may_restart(con: &Connection, slot_key: &str) -> bool {
         )
         .ok();
     let (start, count) = row.map(|(s, c)| (Some(s), c)).unwrap_or((None, 0));
-    match crate::watchdog_policy::decide_restart(now, start, count) {
+    match crate::watchdog_policy::decide_restart(now_epoch_secs(), start, count) {
         crate::watchdog_policy::RestartDecision::DenyFailed => false,
         crate::watchdog_policy::RestartDecision::Allow {
             new_window_start,
             new_count,
         } => {
             con.execute(
-        "INSERT OR REPLACE INTO watchdog_restarts (slot_key, window_start, count)
-         VALUES (?1, ?2, ?3)",
-        rusqlite::params![slot_key, new_window_start, new_count],
+                "INSERT OR REPLACE INTO watchdog_restarts (slot_key, window_start, count) VALUES (?1, ?2, ?3)",
+                rusqlite::params![slot_key, new_window_start, new_count],
             )
             .ok();
             true
@@ -1687,28 +1371,12 @@ fn watchdog_may_restart(con: &Connection, slot_key: &str) -> bool {
 }
 
 fn load_params_for_slot(con: &Connection, slot_key: &str, model_id: &str) -> Option<LoadParams> {
-    let extra: String = con
+    // Load parameters recorded for exactly this desired slot.
+    let (gpus, ctx, max_conc, tp, extra): (Option<String>, Option<i64>, Option<i64>, Option<i64>, String) = con
         .query_row(
-            "SELECT extra_sglang_args FROM desired_loads WHERE slot_key = ?1 OR model_id = ?2 LIMIT 1",
-            rusqlite::params![slot_key, model_id],
-            |r| r.get(0),
-        )
-        .ok()?;
-    let extra: Vec<String> = serde_json::from_str::<serde_json::Value>(&extra)
-        .ok()
-        .and_then(|v| {
-            v.as_array().map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
-                    .collect::<Vec<String>>()
-            })
-        })
-        .unwrap_or_default();
-    let (gpus, ctx, max_conc, tp): (Option<String>, Option<i64>, Option<i64>, Option<i64>) = con
-        .query_row(
-            "SELECT gpus, ctx, max_conc, tp FROM desired_loads WHERE slot_key = ?1 OR model_id = ?2 LIMIT 1",
-            rusqlite::params![slot_key, model_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            "SELECT gpus, ctx, max_conc, tp, extra_sglang_args FROM desired_loads WHERE slot_key = ?1",
+            [slot_key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .ok()?;
     Some(LoadParams {
@@ -1717,32 +1385,28 @@ fn load_params_for_slot(con: &Connection, slot_key: &str, model_id: &str) -> Opt
         ctx: ctx.map(|v| v as u64),
         max_conc: max_conc.map(|v| v as u64),
         tp: tp.map(|v| v as u64),
-        extra_sglang_args: extra,
+        extra_sglang_args: serde_json::from_str(&extra).unwrap_or_default(),
         force: true,
         yes: true,
-        is_tty: false,
         restart_count: None,
         slot_key: Some(slot_key.to_string()),
-        async_finish: true,
     })
 }
 
 fn uuid_simple() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let n = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     format!("{n:x}")
 }
 
 #[cfg(test)]
-mod unload_watchdog_tests {
+mod tests {
     use super::*;
-    use crate::db;
-    use crate::paths::ensure_layout;
-    use rusqlite::Connection;
-    use std::path::Path;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::process::{Child, Command};
     use std::sync::{Mutex, OnceLock};
 
     fn home_lock() -> &'static Mutex<()> {
@@ -1760,53 +1424,196 @@ mod unload_watchdog_tests {
         std::env::remove_var("GOETHE_HOME");
     }
 
+    fn insert_running(con: &Connection, id: &str, pid: i32, ticks: u64, port: u16) {
+        con.execute(
+            "INSERT INTO loaded_instances
+            (instance_id, model_id, pid, pgid, internal_port, gpu_indices, allocated_vram_gb_per_gpu,
+             mem_fraction_static, ctx_len, max_conc, status, slot_key, boot_id, start_ticks, engine_key)
+            VALUES (?1, 'm', ?2, ?2, ?3, '0', 1.0, 0.5, 4096, 4, 'RUNNING', 'm|0|0', ?4, ?5, 'k')",
+            rusqlite::params![id, pid, port as i64, proc_ident::boot_id(), ticks as i64],
+        )
+        .expect("insert");
+    }
+
+    fn sleeper() -> (Child, u64) {
+        let child = Command::new("sleep").arg("30").env_remove(proc_ident::INSTANCE_ENV).spawn().expect("sleep");
+        let ticks = proc_ident::start_ticks(child.id() as i32).expect("ticks");
+        (child, ticks)
+    }
+
+    fn ok_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            }
+        });
+        port
+    }
+
     #[test]
-    fn watchdog_tick_skips_stopping_instances() {
+    fn unload_never_signals_a_stale_pid_and_keeps_restart_budget() {
         with_temp_home(|_home, con| {
-            con.execute(
-                "INSERT INTO loaded_instances
-                (instance_id, model_id, pid, pgid, internal_port, gpu_indices,
-                 allocated_vram_gb_per_gpu, mem_fraction_static, ctx_len, max_conc, status, slot_key)
-                VALUES ('i-stop', 'm', 1, 1, 30001, '0', 1.0, 0.5, 4096, 4, 'STOPPING', 'm|0|0')",
-                [],
-            )
-            .expect("insert");
-            let n: i64 = con
-                .query_row(
-                    "SELECT COUNT(*) FROM loaded_instances WHERE status = 'RUNNING'",
-                    [],
-                    |r| r.get(0),
-                )
-                .expect("count");
-            assert_eq!(n, 0);
+            let (mut child, ticks) = sleeper();
+            insert_running(con, "i1", child.id() as i32, ticks + 5, 30001);
+            con.execute("INSERT INTO desired_loads (slot_key, model_id) VALUES ('m|0|0', 'm')", []).unwrap();
+            handle_unload(Some("m".to_string()), false, false).expect("unload");
+            assert!(child.try_wait().unwrap().is_none(), "unload must not signal an unverified pid");
+            let left: i64 = con.query_row("SELECT COUNT(*) FROM loaded_instances", [], |r| r.get(0)).unwrap();
+            let desired: i64 = con.query_row("SELECT COUNT(*) FROM desired_loads", [], |r| r.get(0)).unwrap();
+            let restarts: i64 = con
+                .query_row("SELECT COUNT(*) FROM watchdog_restarts", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!((left, desired, restarts), (0, 0, 0));
+            child.kill().unwrap();
+            child.wait().unwrap();
         });
     }
 
     #[test]
-    fn intentional_unload_does_not_increment_watchdog_restart_window() {
+    fn unload_clears_desired_even_without_instances() {
+        with_temp_home(|_home, con| {
+            con.execute("INSERT INTO desired_loads (slot_key, model_id) VALUES ('m|0|0', 'm')", []).unwrap();
+            handle_unload(Some("m".to_string()), false, true).expect("unload");
+            let desired: i64 = con.query_row("SELECT COUNT(*) FROM desired_loads", [], |r| r.get(0)).unwrap();
+            assert_eq!(desired, 0);
+        });
+    }
+
+    #[test]
+    fn reconcile_adopts_only_verified_and_healthy_engines() {
         with_temp_home(|home, con| {
+            let port = ok_server();
+            let (mut good, good_ticks) = sleeper();
+            let (mut stale, stale_ticks) = sleeper();
+            insert_running(con, "i-good", good.id() as i32, good_ticks, port);
+            insert_running(con, "i-stale", stale.id() as i32, stale_ticks + 9, port + 1);
+            con.execute("UPDATE loaded_instances SET slot_key = 'm|0|1' WHERE instance_id = 'i-stale'", []).unwrap();
+            let stale_id = Identity {
+                instance_id: "i-orphan".to_string(),
+                pid: stale.id() as i32,
+                boot_id: proc_ident::boot_id().to_string(),
+                start_ticks: stale_ticks + 9,
+            };
+            run_registry::register(home, &stale_id).unwrap();
+            reconcile_on_start().expect("reconcile");
+            let rows: Vec<(String, String)> = con
+                .prepare("SELECT instance_id, status FROM loaded_instances")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            assert_eq!(rows, vec![("i-good".to_string(), "RUNNING".to_string())]);
+            assert!(good.try_wait().unwrap().is_none() && stale.try_wait().unwrap().is_none());
+            assert!(run_registry::list_entries(home).iter().all(|e| e.instance_id == "i-good"));
+            for c in [&mut good, &mut stale] {
+                c.kill().unwrap();
+                c.wait().unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn restore_refuses_a_slot_that_is_already_live() {
+        with_temp_home(|home, con| {
+            let dir = home.join("models/m");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("goethe_card.toml"), "model_id = \"m\"\n").unwrap();
             con.execute(
-                "INSERT INTO loaded_instances
-                (instance_id, model_id, pid, pgid, internal_port, gpu_indices,
-                 allocated_vram_gb_per_gpu, mem_fraction_static, ctx_len, max_conc, status, slot_key)
-                VALUES ('i1', 'm', 999999, 999999, 30001, '0', 1.0, 0.5, 4096, 4, 'RUNNING', 'm|0|0')",
+                "INSERT INTO installed_models (model_id, local_path, architecture, static_vram_gb, kv_bytes_per_token,
+                 default_ctx, default_max_conc, default_tp) VALUES ('m', 'models/m', 'dense', 1.0, 100, 4096, 4, 1)",
                 [],
             )
-            .expect("insert");
-            handle_unload(Some("m".to_string()), false, false).expect("unload");
-            let restarts: i64 = con
-                .query_row(
-                    "SELECT COALESCE(count, 0) FROM watchdog_restarts WHERE slot_key = 'm|0|0'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            assert_eq!(restarts, 0, "unload must not consume watchdog restart budget");
-            let left: i64 = con
-                .query_row("SELECT COUNT(*) FROM loaded_instances", [], |r| r.get(0))
-                .expect("count");
-            assert_eq!(left, 0);
-            let _ = home;
+            .unwrap();
+            con.execute("INSERT INTO desired_loads (slot_key, model_id) VALUES ('m|0|0', 'm')", []).unwrap();
+            insert_running(con, "i-live", i32::MAX, 1, 30001);
+            con.execute("UPDATE loaded_instances SET status = 'STARTING'", []).unwrap();
+            let params = LoadParams {
+                model_id: "m".to_string(),
+                gpus: Some("0".to_string()),
+                extra_sglang_args: Vec::new(),
+                ctx: None,
+                max_conc: None,
+                tp: None,
+                force: true,
+                yes: true,
+                restart_count: Some(1),
+                slot_key: Some("m|0|0".to_string()),
+            };
+            let (code, msg, _) = handle_load(params).unwrap_err();
+            assert_eq!(code, 1);
+            assert!(msg.contains("already has a live instance"), "{msg}");
         });
+    }
+
+    #[test]
+    fn watchdog_tombstones_a_dead_engine() {
+        with_temp_home(|_home, con| {
+            let (mut child, ticks) = sleeper();
+            let pid = child.id() as i32;
+            child.kill().unwrap();
+            child.wait().unwrap();
+            insert_running(con, "i-dead", pid, ticks, 30001);
+            watchdog_tick();
+            let (status, row_pid): (String, i64) = con
+                .query_row("SELECT status, pid FROM loaded_instances WHERE instance_id = 'i-dead'", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap();
+            assert_eq!((status.as_str(), row_pid), ("FAILED", 0));
+        });
+    }
+
+    #[test]
+    fn reconcile_stops_verified_engines_it_does_not_adopt() {
+        with_temp_home(|_home, con| {
+            let (mut child, ticks) = sleeper();
+            let pid = child.id() as i32;
+            insert_running(con, "i-starting", pid, ticks, 30001);
+            con.execute("UPDATE loaded_instances SET status = 'STARTING'", []).unwrap();
+            reconcile_on_start().expect("reconcile");
+            assert_ne!(proc_ident::start_ticks(pid), Some(ticks), "verified STARTING engine must be stopped");
+            let left: i64 = con.query_row("SELECT COUNT(*) FROM loaded_instances", [], |r| r.get(0)).unwrap();
+            assert_eq!(left, 0);
+            let _ = child.wait();
+        });
+    }
+
+    #[test]
+    fn pinned_gpus_validates_and_sorts() {
+        let card: toml::Value = toml::from_str("preferred_gpus = [3, 2]").unwrap();
+        assert_eq!(pinned_gpus(None, &card, None).unwrap(), vec![2, 3]);
+        assert_eq!(pinned_gpus(Some("3,2"), &card, Some(2)).unwrap(), vec![2, 3]);
+        assert!(pinned_gpus(Some("2,2"), &card, Some(1)).unwrap_err().contains("disagrees"));
+        assert!(pinned_gpus(Some("2,2"), &card, None).unwrap_err().contains("twice"));
+        assert!(pinned_gpus(Some("x"), &card, None).unwrap_err().contains("invalid"));
+    }
+
+    #[test]
+    fn default_ctx_uses_configured_ctx_capped_by_max() {
+        let row = |default_ctx, max_ctx| InstRow {
+            local_path: String::new(),
+            static_vram_gb: 1.0,
+            kv_bytes_per_token: 100,
+            default_ctx,
+            default_max_conc: 4,
+            default_tp: 1,
+            kv_elems_per_token: Some(50),
+            max_ctx,
+            num_attention_heads: None,
+            num_kv_heads: None,
+            attention: None,
+        };
+        assert_eq!(default_ctx(&row(65536, Some(262144))), 65536);
+        assert_eq!(default_ctx(&row(65536, Some(32768))), 32768);
+        assert_eq!(default_ctx(&row(4096, None)), 4096);
+        let fp8: toml::Value = toml::from_str("kv_cache_dtype = \"fp8_e4m3\"").unwrap();
+        let auto: toml::Value = toml::from_str("kv_cache_dtype = \"auto\"").unwrap();
+        assert_eq!(kv_bytes_per_token(&row(1, None), &fp8), 50);
+        assert_eq!(kv_bytes_per_token(&row(1, None), &auto), 100);
     }
 }

@@ -13,7 +13,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::UnixListener as TokioUnixListener;
 use tokio::signal::unix::{signal, SignalKind};
@@ -44,11 +43,10 @@ fn dispatch(req: Request) -> (bool, i32, String, String, Value) {
                 Ok(p) => p,
                 Err(e) => return (false, 1, String::new(), e.to_string(), Value::Null),
             };
-            let mut p = params;
-            p.async_finish = true;
-            match supervisor::handle_load(p) {
+            match supervisor::handle_load(params) {
                 Ok((result, notice)) => (true, 0, notice, String::new(), result),
-                Err((code, msg)) => (false, code, String::new(), msg, Value::Null),
+                Err((3, msg, result)) => (false, 3, msg, String::new(), result),
+                Err((code, msg, result)) => (false, code, String::new(), msg, result),
             }
         }
         "unload" => {
@@ -108,13 +106,30 @@ fn handle_client(stream: UnixStream) {
     }
 }
 
+fn bind_socket(sock: &std::path::Path) -> TokioUnixListener {
+    // Bind goethe.sock (owner only); the instance lock already cleared any stale file.
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(parent) = sock.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let std_listener = UnixListener::bind(sock).unwrap_or_else(|e| {
+        eprintln!("bind {}: {e}", sock.display());
+        std::process::exit(1);
+    });
+    let _ = std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600));
+    std_listener
+        .set_nonblocking(true)
+        .expect("nonblocking goethe.sock");
+    TokioUnixListener::from_std(std_listener).expect("tokio unix listener")
+}
+
 #[tokio::main]
 async fn main() {
     shutdown::clear_shutdown_flag();
-    if let Err(e) = instance_lock::InstanceLock::acquire() {
+    let _lock = instance_lock::InstanceLock::acquire().unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
-    }
+    });
     let home = goethe_home();
     let _ = ensure_layout(&home);
     ports::ensure_service_ports(&home).unwrap_or_else(|e| {
@@ -122,34 +137,21 @@ async fn main() {
         std::process::exit(1);
     });
     let _ = supervisor::reconcile_on_start();
-    goethe_core::autostart::spawn_restore_background();
     security::sync_api_keys_conf(&home);
-    let _mux = mux::spawn_mux().unwrap_or_else(|e| {
+    let sock = goethe_sock();
+    let listener = bind_socket(&sock);
+    let mut mux = mux::spawn_mux().unwrap_or_else(|e| {
         eprintln!("{e}");
+        let _ = std::fs::remove_file(&sock);
         std::process::exit(1);
     });
     let _ = nginx::ensure_running();
     if let Some(line) = nginx::format_gateway_line(&home) {
         eprintln!("{line}");
     }
-    let sock = goethe_sock();
-    if sock.exists() {
-        eprintln!("goethed already running (goethe.sock present)");
-        std::process::exit(1);
-    }
-    if let Some(parent) = sock.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let std_listener = UnixListener::bind(&sock).expect("bind goethe.sock");
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
-    std_listener
-        .set_nonblocking(true)
-        .expect("nonblocking goethe.sock");
-    let listener = TokioUnixListener::from_std(std_listener).expect("tokio unix listener");
     eprintln!("goethed listening on {}", sock.display());
+    goethe_core::autostart::spawn_restore_background();
     let _ = goethe_core::log_rotation::run_rotation_pass(&home);
-    let watchdog_lock = Arc::new(Mutex::new(()));
     let home_rot = home.clone();
     let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
     let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
@@ -159,6 +161,7 @@ async fn main() {
     watchdog_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut log_rotate_tick = tokio::time::interval(Duration::from_secs(3600));
     log_rotate_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut exit_code = 0;
     loop {
         tokio::select! {
             _ = log_rotate_tick.tick() => {
@@ -168,11 +171,7 @@ async fn main() {
                 });
             }
             _ = watchdog_tick.tick() => {
-                let wd = watchdog_lock.clone();
-                tokio::task::spawn_blocking(move || {
-                    let _g = wd.lock().unwrap_or_else(|e| e.into_inner());
-                    supervisor::watchdog_tick();
-                });
+                tokio::task::spawn_blocking(supervisor::watchdog_tick);
             }
             res = listener.accept() => {
                 match res {
@@ -185,12 +184,13 @@ async fn main() {
                     Err(e) => eprintln!("accept error: {e}"),
                 }
             }
-            _ = sigterm.recv() => {
+            _ = &mut mux => {
+                eprintln!("mux stopped; shutting goethed down");
+                exit_code = 1;
                 break;
             }
-            _ = sigint.recv() => {
-                break;
-            }
+            _ = sigterm.recv() => break,
+            _ = sigint.recv() => break,
             _ = shutdown_tick.tick() => {
                 if shutdown::shutdown_requested() {
                     break;
@@ -198,5 +198,7 @@ async fn main() {
             }
         }
     }
+    shutdown::request_shutdown();
     shutdown::shutdown_daemon(&home, &sock);
+    std::process::exit(exit_code);
 }
