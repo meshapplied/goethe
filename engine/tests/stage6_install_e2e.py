@@ -8,6 +8,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -81,6 +82,13 @@ def _stop_installed_daemon(home: Path, env: dict[str, str]) -> None:
     raise RuntimeError(f"processes left under {home} after goethe stop: {leftovers}")
 
 
+def _log_tails(home: Path) -> str:
+    """Last lines of goethed.log and the newest engine log, for failures in a home that is about to vanish."""
+    logs = sorted((home / "logs").glob("*.log"), key=lambda p: p.stat().st_mtime)
+    picks = [p for p in logs if p.name == "goethed.log"] + [p for p in logs if p.name != "goethed.log"][-1:]
+    return "\n".join(f"== {p.name}\n" + "\n".join(p.read_text(errors="replace").splitlines()[-15:]) for p in picks)
+
+
 def main() -> None:
     """Install from the signed CDN, serve a chat through the gateway with a stub engine, re-install in place."""
     if os.environ.get("GOETHE_TEST_E2E", "0") != "1":
@@ -120,7 +128,9 @@ def main() -> None:
                 for sub in ("bin/goethe", "bin/goethed", "bin/uv", "nginx/certs/server.key", "hardware_state.json"):
                     if not (home / sub).exists():
                         raise RuntimeError(f"missing {sub} after install")
-                write_stub_python(home / "py-env" / "bin", home / "py-env" / "bin" / "python3")
+                bin_dir = home / "py-env" / "bin"
+                (bin_dir / "python-real").symlink_to(os.readlink(bin_dir / "python"))
+                write_stub_python(bin_dir, bin_dir / "python-real")
                 goethe = str(home / "bin" / "goethe")
                 src = home / "src-model"
                 src.mkdir()
@@ -151,6 +161,9 @@ def main() -> None:
                     raise RuntimeError(f"mux port {mux} after re-install (30000 busy={busy})")
                 if run_goethe([goethe, "ps", "--json"], env=reinstall_env).stdout.strip() not in ("[]", ""):
                     raise RuntimeError("re-install brought back an unloaded model")
+            except Exception:
+                print(_log_tails(home), file=sys.stderr)
+                raise
             finally:
                 if (home / "bin" / "goethe").is_file():
                     _stop_installed_daemon(home, env)

@@ -686,6 +686,8 @@ def write_stub_python(pyenv_bin: Path, real: Path) -> None:
     """Replace py-env/bin/python (unlinked first: never write through a venv symlink) with a stub launcher."""
     wrapper = pyenv_bin / "python"
     wrapper.unlink(missing_ok=True)
+    if real.resolve() == wrapper.resolve():
+        raise RuntimeError(f"{real} resolves to the stub launcher itself; pass a venv-local alias of the interpreter")
     wrapper.write_text(
         "#!/bin/bash\n"
         f'REAL="{real}"\n'
