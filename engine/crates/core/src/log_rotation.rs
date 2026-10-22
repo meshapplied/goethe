@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const ENGINE_LOG_MAX_BYTES: u64 = 256 * 1024 * 1024;
 pub const ENGINE_LOG_KEEP_BYTES: u64 = 64 * 1024 * 1024;
 pub const DAEMON_LOG_MAX_BYTES: u64 = 100 * 1024 * 1024;
+pub const NGINX_LOG_MAX_BYTES: u64 = 100 * 1024 * 1024;
 pub const ENGINE_LOG_MAX_AGE_DAYS: i64 = 14;
 pub const ENGINE_LOG_KEEP_NEWEST: usize = 30;
 
@@ -134,6 +135,7 @@ pub fn run_prune_pass(home: &Path, now_secs: i64) -> Result<usize, String> {
 }
 
 pub fn run_rotation_pass(home: &Path) -> Result<(), String> {
+    // Cap loaded engine and daemon logs, rotate the nginx logs, then prune old engine logs.
     let logs = home.join("logs");
     if !logs.is_dir() {
         return Ok(());
@@ -153,18 +155,35 @@ pub fn run_rotation_pass(home: &Path) -> Result<(), String> {
             let _ = rotate_file_copytruncate(&path, ENGINE_LOG_MAX_BYTES, ENGINE_LOG_KEEP_BYTES);
         }
     }
-    for name in ["goethed.log", "gateway.log", "nginx.log"] {
+    for name in ["goethed.log", "gateway.log", "nginx-stderr.log"] {
         let p = logs.join(name);
         if p.is_file() {
             let _ = rotate_file_copytruncate(&p, DAEMON_LOG_MAX_BYTES, DAEMON_LOG_MAX_BYTES / 4);
         }
     }
+    rotate_nginx_logs(home, NGINX_LOG_MAX_BYTES);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_secs() as i64;
     let _ = run_prune_pass(home, now);
     Ok(())
+}
+
+pub fn rotate_nginx_logs(home: &Path, max_bytes: u64) -> bool {
+    // Rename oversized nginx access/error logs to .1, then have our verified master reopen its files.
+    let dir = crate::nginx::nginx_prefix(home).join("logs");
+    let mut rotated = false;
+    for name in ["access.log", "error.log"] {
+        let path = dir.join(name);
+        if fs::metadata(&path).is_ok_and(|m| m.len() > max_bytes) && fs::rename(&path, dir.join(format!("{name}.1"))).is_ok() {
+            rotated = true;
+        }
+    }
+    if rotated {
+        crate::nginx::reopen_logs(home);
+    }
+    rotated
 }
 
 #[cfg(test)]
@@ -202,5 +221,20 @@ mod tests {
         assert!(rotate_file_copytruncate(&path, max, keep).unwrap());
         assert!(dir.path().join("goethed.log.1").is_file());
         assert!(fs::metadata(&path).unwrap().len() <= keep + 1024);
+    }
+
+    #[test]
+    fn nginx_logs_rotate_by_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("nginx/logs");
+        fs::create_dir_all(&logs).unwrap();
+        fs::write(logs.join("access.log"), vec![b'a'; 2048]).unwrap();
+        fs::write(logs.join("error.log"), b"small").unwrap();
+        fs::write(logs.join("access.log.1"), b"older").unwrap();
+        assert!(rotate_nginx_logs(dir.path(), 1024));
+        assert!(!logs.join("access.log").exists());
+        assert_eq!(fs::metadata(logs.join("access.log.1")).unwrap().len(), 2048);
+        assert_eq!(fs::read_to_string(logs.join("error.log")).unwrap(), "small");
+        assert!(!rotate_nginx_logs(dir.path(), 1024));
     }
 }
