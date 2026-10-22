@@ -161,27 +161,6 @@ pub struct ResolvedKey {
     pub is_admin: bool,
 }
 
-pub fn resolve_token(token: &str) -> Option<ResolvedKey> {
-    let home = goethe_home();
-    let con = db::open(&home).ok()?;
-    let hash = token_hash(token);
-    con.query_row(
-        "SELECT key_id, rpm_limit, expires_at, model_scope, is_admin FROM api_keys WHERE token_hash = ?1",
-        [&hash],
-        |r| {
-            Ok(ResolvedKey {
-                token_hash: hash.clone(),
-                key_id: r.get(0)?,
-                rpm_limit: r.get::<_, Option<i64>>(1)?.unwrap_or(120),
-                expires_at: r.get(2)?,
-                model_scope: r.get(3)?,
-                is_admin: r.get::<_, i64>(4)? != 0,
-            })
-        },
-    )
-    .ok()
-}
-
 pub fn key_expired(expires_at: &Option<String>) -> bool {
     let Some(raw) = expires_at.as_ref().filter(|s| !s.is_empty()) else {
         return false;
