@@ -194,8 +194,8 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool) -> Result<(), String> 
             steps.push(format!("delete {} ({:.1} GB)", p.display(), dir_size_gb(p)));
         }
     }
-    for (p, user) in &plan.keep {
-        steps.push(format!("keep {} (still used by {user})", p.display()));
+    for (p, why) in &plan.keep {
+        steps.push(format!("keep {} ({why})", p.display()));
     }
     if let Some(src) = &plan.source {
         steps.push(format!("unregister the model; your files in {src} stay on disk"));
@@ -257,13 +257,13 @@ fn removal_plan(home: &Path, con: &Connection, model_id: &str, local_path: &str,
             continue;
         }
         if let Some((id, _)) = users.iter().find(|(_, owned)| owned.contains(&c)) {
-            plan.keep.push((c, id.clone()));
+            plan.keep.push((c, format!("still used by {id}")));
             continue;
         }
         if c == primary && !managed {
-            plan.source = Some(source_of(&primary).unwrap_or_else(|| "<unknown>".to_string()));
+            plan.source = Some(source_of(&primary).unwrap_or_else(|| primary.display().to_string()));
             if !is_link_or_farm(&primary) {
-                plan.keep.push((c, "files that are not links".to_string()));
+                plan.keep.push((c, "it holds files, not links; delete it yourself".to_string()));
                 continue;
             }
         }
@@ -443,6 +443,6 @@ mod tests {
         let plan = removal_plan(h, &con, "mesh/pack", "models/mesh__pack", true).unwrap();
         assert_eq!(plan.delete.len(), 2, "{:?}", plan.delete);
         assert_eq!(plan.keep.len(), 1);
-        assert_eq!(plan.keep[0].1, "base/model");
+        assert_eq!(plan.keep[0].1, "still used by base/model");
     }
 }

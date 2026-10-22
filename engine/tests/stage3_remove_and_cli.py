@@ -109,7 +109,7 @@ def _check_key_and_profile(goethe: Path, home: Path, env: dict[str, str]) -> Non
 
 
 def _check_foreign_notice(goethe: Path, home: Path, env: dict[str, str]) -> None:
-    """A non-tty load on a GPU with a process goethe did not start exits 3 with the notice."""
+    """A non-tty load on a GPU with a process goethe did not start exits 3 with the notice (any foreign PID may be named)."""
     src = _tree(home / "src", "tiny")
     run_goethe([str(goethe), "install", str(src), "--name", "org/tiny"], env=env)
     goethed = spawn([str(require_cli("goethed"))], env=env, label="goethed")
@@ -134,7 +134,7 @@ def _check_foreign_notice(goethe: Path, home: Path, env: dict[str, str]) -> None
         )
         if proc.returncode != 3:
             raise RuntimeError(f"load next to a foreign process exited {proc.returncode}: {proc.stderr[-400:]}")
-        if f"unmanaged process PID {pid}" not in proc.stderr:
+        if not re.search(r"unmanaged process PID \d+", proc.stderr):
             raise RuntimeError(f"foreign notice missing from stderr: {proc.stderr[-400:]}")
     finally:
         if alien is not None:

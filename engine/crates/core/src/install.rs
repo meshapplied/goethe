@@ -619,8 +619,7 @@ pub fn send_load(mut params: Value) -> Result<String, String> {
     let call = |p: &Value| crate::rpc::call("load", p.clone()).map_err(crate::rpc::map_daemon_err);
     let mut reply = call(&params)?;
     if reply.code == 3 {
-        let notice = if reply.stderr.trim().is_empty() { &reply.stdout } else { &reply.stderr };
-        eprintln!("{}", notice.trim_end());
+        print_reply_text(&reply);
         if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
             eprintln!("not loading next to processes goethe did not start: re-run with --yes (no terminal to ask on)");
             std::process::exit(3);
@@ -636,11 +635,21 @@ pub fn send_load(mut params: Value) -> Result<String, String> {
         reply = call(&params)?;
     }
     if reply.code != 0 {
-        let msg = if reply.stderr.trim().is_empty() { &reply.stdout } else { &reply.stderr };
-        eprintln!("{}", msg.trim_end());
+        print_reply_text(&reply);
         std::process::exit(reply.code);
     }
     Ok(reply.stdout)
+}
+
+fn print_reply_text(reply: &crate::rpc::RpcReply) {
+    // An error reply may carry the notice in message, error, or both; show each once on stderr.
+    let (msg, err) = (reply.stdout.trim_end(), reply.stderr.trim_end());
+    if !msg.is_empty() {
+        eprintln!("{msg}");
+    }
+    if !err.is_empty() && err != msg {
+        eprintln!("{err}");
+    }
 }
 
 #[cfg(test)]

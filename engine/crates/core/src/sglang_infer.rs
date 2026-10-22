@@ -50,9 +50,12 @@ const VALUE_FLAGS: &[&str] = &[
 
 pub const RESERVED_FLAGS: &[(&str, &str)] = &[
     ("--model-path", "goethe passes the installed model directory"),
+    ("--model", "goethe passes the installed model directory"),
     ("--host", "engines listen on 127.0.0.1 behind the mux"),
     ("--port", "goethed assigns engine ports"),
     ("--tp-size", "use --tp"),
+    ("--tp", "use --tp"),
+    ("--tensor-parallel-size", "use --tp"),
     ("--context-length", "use --ctx"),
     ("--max-running-requests", "use --max-conc"),
     ("--mem-fraction-static", "goethed derives it from the VRAM budget"),
@@ -134,12 +137,13 @@ pub fn merge_extra_args(base: &[String], append: &[String]) -> Result<Vec<String
 }
 
 pub fn reserved_flag_error(args: &[String]) -> Option<String> {
+    // Flags goethe owns, including --flag=value and argparse prefixes such as --max-running.
     let groups = parse_groups(args).ok()?;
     groups.iter().find_map(|g| {
         RESERVED_FLAGS
             .iter()
-            .find(|(f, _)| *f == g.flag)
-            .map(|(f, why)| format!("SGLang flag {f} is managed by goethe ({why})"))
+            .find(|(f, _)| *f == g.flag || (g.flag.len() >= 5 && f.starts_with(g.flag.as_str())))
+            .map(|(f, why)| format!("SGLang flag {} is managed by goethe ({f}: {why})", g.flag))
     })
 }
 
@@ -279,7 +283,12 @@ mod tests {
     #[test]
     fn reserved_and_take_flag() {
         assert!(reserved_flag_error(&s(&["--max-running-requests", "8"])).is_some());
+        assert!(reserved_flag_error(&s(&["--max-running=8"])).is_some());
+        assert!(reserved_flag_error(&s(&["--tensor-parallel-size", "2"])).is_some());
+        assert!(reserved_flag_error(&s(&["--tp", "2"])).is_some());
+        assert!(reserved_flag_error(&s(&["--model", "/x"])).is_some());
         assert!(reserved_flag_error(&s(&["--page-size", "8"])).is_none());
+        assert!(reserved_flag_error(&s(&["--port-offset", "8"])).is_none());
         let (rest, kv) = take_flag(&s(&["--kv-cache-dtype", "fp8_e4m3", "--page-size", "64"]), "--kv-cache-dtype").unwrap();
         assert_eq!(kv.as_deref(), Some("fp8_e4m3"));
         assert_eq!(rest, s(&["--page-size", "64"]));
