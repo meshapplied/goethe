@@ -257,12 +257,12 @@ fn prepare_local_target(home: &Path, card_dir: &Path, opts: &InstallOpts) -> Res
     Ok(false)
 }
 
-fn is_farm(dir: &Path) -> bool {
+pub fn is_farm(dir: &Path) -> bool {
+    // True when dir holds only symlinks and goethe's own card files.
     fs::read_dir(dir)
         .map(|rd| {
             rd.flatten().all(|e| {
-                e.file_name() == CARD_FILE
-                    || e.file_name().to_string_lossy().starts_with(CARD_FILE)
+                e.file_name().to_string_lossy().starts_with(CARD_FILE)
                     || e.file_type().map(|t| t.is_symlink()).unwrap_or(false)
             })
         })
