@@ -286,10 +286,8 @@ fn ensure_tls(home: &Path) -> Result<(), String> {
 }
 
 pub fn format_gateway_line(home: &Path) -> Option<String> {
-    if gateway_down_reason().is_some() {
-        return None;
-    }
-    if !gateway_listening(home) {
+    // Only our own verified nginx counts; another service on the port must not look like the gateway.
+    if gateway_down_reason().is_some() || verified_master(home).is_none() || !gateway_listening(home) {
         return None;
     }
     Some(format!(
