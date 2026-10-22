@@ -1,11 +1,9 @@
-// Remove goethe install under GOETHE_HOME only.
+// Remove a goethe install under GOETHE_HOME only, after proving the directory is one.
 
-use crate::paths::goethe_home;
+use crate::paths::{goethe_home, HOME_MARKER};
 use crate::shutdown;
 use std::fs;
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub struct UninstallOpts {
     pub purge_models: bool,
@@ -13,127 +11,91 @@ pub struct UninstallOpts {
 }
 
 pub fn run(opts: UninstallOpts) -> Result<(), String> {
+    // Validate the home, confirm, stop goethed (or abort), drop autostart, then delete.
     let home = goethe_home();
-    validate_home(&home, opts.purge_models)?;
-    if !opts.yes {
-        if !std::io::stdin().is_terminal() {
-            return Err("uninstall requires --yes without a tty".to_string());
-        }
-        print_plan(&home, opts.purge_models);
-        print!("Proceed? [y/N] ");
-        std::io::Write::flush(&mut std::io::stdout()).ok();
-        let mut buf = String::new();
-        std::io::stdin().read_line(&mut buf).map_err(|e| e.to_string())?;
-        if !buf.trim().eq_ignore_ascii_case("y") {
-            return Err("uninstall aborted".to_string());
-        }
-    } else {
-        print_plan(&home, opts.purge_models);
+    validate_home(&home)?;
+    let mut plan = vec!["stop goethed and remove its autostart entry".to_string(), format!("delete {}", home.display())];
+    if !opts.purge_models {
+        plan.push(format!("keep {}", home.join("models").display()));
     }
-    let _ = shutdown::run_stop();
-    remove_installer_symlink(&home);
-    remove_systemd_unit_if_ours();
+    plan.push("remove installer symlinks that point into GOETHE_HOME".to_string());
+    crate::host::confirm(&format!("goethe uninstall will:\n  {}\nProceed?", plan.join("\n  ")), opts.yes)?;
+    shutdown::run_stop().map_err(|e| format!("could not stop goethed ({e}); stop it, then run goethe uninstall again"))?;
+    crate::service::run_disable()?;
+    remove_installer_symlinks(&home);
     remove_home_contents(&home, opts.purge_models)?;
     println!("uninstalled goethe from {}", home.display());
     Ok(())
 }
 
-fn validate_home(home: &Path, purge_models: bool) -> Result<(), String> {
-    let canonical = fs::canonicalize(home).map_err(|_| "GOETHE_HOME is not a directory".to_string())?;
+fn validate_home(home: &Path) -> Result<(), String> {
+    // Require the goethe marker and a real bin/goethe; never /, $HOME, or a symlinked binary dir.
+    let canonical = fs::canonicalize(home).map_err(|_| format!("{} is not a directory", home.display()))?;
     if canonical == Path::new("/") {
         return Err("refusing to uninstall GOETHE_HOME=/".to_string());
     }
-    if let Ok(user_home) = std::env::var("HOME") {
-        if let Ok(user_canonical) = fs::canonicalize(&user_home) {
-            if canonical == user_canonical {
-                return Err("refusing to uninstall GOETHE_HOME=$HOME".to_string());
-            }
+    if let Some(user_home) = std::env::var_os("HOME").and_then(|h| fs::canonicalize(h).ok()) {
+        if canonical == user_home {
+            return Err("refusing to uninstall GOETHE_HOME=$HOME".to_string());
         }
     }
-    let looks_like_goethe = home.join("state.db").is_file() || home.join("bin/goethe").is_file();
-    if !looks_like_goethe {
-        if only_models_dir(home) && purge_models {
-            return Ok(());
-        }
-        return Err("GOETHE_HOME does not look like a goethe install (missing state.db)".to_string());
+    let regular = |p: PathBuf| fs::symlink_metadata(p).map(|m| m.is_file()).unwrap_or(false);
+    if !regular(home.join(HOME_MARKER)) || !regular(home.join("bin/goethe")) {
+        return Err(format!(
+            "{} does not look like a goethe install (needs {HOME_MARKER} and a regular bin/goethe); nothing was removed",
+            home.display()
+        ));
     }
     Ok(())
 }
 
-fn only_models_dir(home: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(home) else {
-        return false;
-    };
-    for ent in entries.flatten() {
-        let name = ent.file_name().to_string_lossy().to_string();
-        if name == "models" {
-            continue;
-        }
-        return false;
+fn remove_installer_symlinks(home: &Path) {
+    let mut links = vec![PathBuf::from("/usr/local/bin/goethe")];
+    if let Some(h) = std::env::var_os("HOME") {
+        links.push(PathBuf::from(h).join(".local/bin/goethe"));
     }
-    home.join("models").is_dir()
-}
-
-fn print_plan(home: &Path, purge: bool) {
-    println!("Will stop goethed and remove:");
-    println!("  {}", home.display());
-    if !purge {
-        println!("  (keeping {}/models/)", home.display());
-    }
-    println!("  installer symlinks pointing into GOETHE_HOME");
-}
-
-fn remove_installer_symlink(home: &Path) {
-    for link in [
-        "/usr/local/bin/goethe",
-        &format!(
-            "{}/.local/bin/goethe",
-            std::env::var("HOME").unwrap_or_default()
-        ),
-    ] {
-        let path = PathBuf::from(link);
-        if path.is_symlink() {
-            if let Ok(target) = fs::read_link(&path) {
-                if target.starts_with(home) {
-                    let _ = fs::remove_file(&path);
-                }
-            }
+    for path in links {
+        if fs::read_link(&path).is_ok_and(|t| t.starts_with(home)) {
+            let _ = fs::remove_file(&path);
         }
     }
-}
-
-fn remove_systemd_unit_if_ours() {
-    if unsafe { libc::geteuid() } != 0 {
-        return;
-    }
-    let _ = Command::new("systemctl")
-        .args(["disable", "--now", "goethed.service"])
-        .status();
-    let unit = Path::new("/etc/systemd/system/goethed.service");
-    if unit.is_file() {
-        if let Ok(text) = fs::read_to_string(unit) {
-            if text.contains("GOETHE_HOME") || text.contains("/.goethe") {
-                let _ = fs::remove_file(unit);
-            }
-        }
-    }
-    let _ = Command::new("systemctl").args(["daemon-reload"]).status();
 }
 
 fn remove_home_contents(home: &Path, purge_models: bool) -> Result<(), String> {
     for entry in fs::read_dir(home).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name == "models" && !purge_models {
+        if entry.file_name() == "models" && !purge_models {
             continue;
         }
         let path = entry.path();
-        if path.is_dir() {
-            fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
+        let r = if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            fs::remove_dir_all(&path)
         } else {
-            fs::remove_file(&path).map_err(|e| e.to_string())?;
-        }
+            fs::remove_file(&path)
+        };
+        r.map_err(|e| format!("{}: {e}", path.display()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_needs_marker_and_regular_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = dir.path().join("home");
+        fs::create_dir_all(h.join("bin")).unwrap();
+        assert!(validate_home(&h).is_err());
+        fs::write(h.join(HOME_MARKER), "").unwrap();
+        let elsewhere = dir.path().join("real-goethe");
+        fs::write(&elsewhere, "bin").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, h.join("bin/goethe")).unwrap();
+        assert!(validate_home(&h).unwrap_err().contains("regular bin/goethe"));
+        fs::remove_file(h.join("bin/goethe")).unwrap();
+        fs::write(h.join("bin/goethe"), "bin").unwrap();
+        assert!(validate_home(&h).is_ok());
+        assert!(validate_home(Path::new("/")).is_err());
+    }
 }
