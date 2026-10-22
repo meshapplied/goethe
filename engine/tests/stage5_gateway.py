@@ -187,6 +187,7 @@ def _gateway(goethe: Path, home: Path, gpu: int, g2: int) -> None:
                 pool.map(lambda _: http_get(f"{base}/v1/models", {"Authorization": f"Bearer {token2}"})[0], range(120))
             )
         check(429 in burst, "rate limit 429")
+        time.sleep(2.5)
         stream_token = _token(goethe_ok("key", "create", "--name", "stream", "--raw"))
         goethe_ok("key", "revoke", str(key_id))
         check(http_get(f"{base}/v1/models", headers=auth)[0] == 401, "revoked key")
