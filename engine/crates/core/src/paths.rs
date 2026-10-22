@@ -50,20 +50,16 @@ pub fn is_writable(path: &Path) -> bool {
 }
 
 pub fn goethe_mux_port() -> u16 {
-    let home = goethe_home();
-    if let Ok(v) = std::env::var("GOETHE_MUX_PORT") {
-        let t = v.trim();
-        if let Ok(p) = t.parse::<u16>() {
-            let _ = std::fs::write(home.join("nginx/mux_port"), t);
-            return p;
-        }
-    }
-    if let Ok(v) = std::fs::read_to_string(home.join("nginx/mux_port")) {
+    // Read-only: the port goethed persisted, then GOETHE_MUX_PORT, then 30000; the CLI never writes ports.
+    if let Ok(v) = std::fs::read_to_string(goethe_home().join("nginx/mux_port")) {
         if let Ok(p) = v.trim().parse::<u16>() {
             return p;
         }
     }
-    30000
+    std::env::var("GOETHE_MUX_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(30000)
 }
 
 pub fn goethe_mux_addr() -> String {
