@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from lib.goethe_test import main_exit, require_cli, run_goethe, temp_home, vram_per_gpu_gb
 

@@ -521,7 +521,9 @@ def clean_test_gpu() -> int | None:
 
 def wait_gpu_pid(index: int, pid: int, min_mb: int, timeout: float = 60.0) -> bool:
     """Wait until nvidia-smi lists pid on GPU index with at least min_mb MiB."""
-    return wait_until(lambda: any(p == pid and mb >= min_mb for p, mb in gpu_pids(index)), timeout=timeout, interval=0.5)
+    return wait_until(
+        lambda: any(p == pid and mb >= min_mb for p, mb in gpu_pids(index)), timeout=timeout, interval=0.5
+    )
 
 
 def leaked_temp_paths() -> list[str]:
@@ -577,8 +579,30 @@ def goethe_rpc(home: Path, method: str, params: Any, timeout: float = 60.0) -> d
     return json.loads(buf.decode("utf-8"))
 
 
-def _cmdline(pid: int) -> str:
+def proc_cmdline(pid: int) -> str:
     return _proc_bytes(pid, "cmdline").replace(b"\0", b" ").decode("utf-8", errors="replace")
+
+
+_cmdline = proc_cmdline
+
+
+def kill_engine_group(home: Path, pgid: int, sig: int = signal.SIGKILL) -> None:
+    """Signal an engine group goethed started for this temp home, after checking the leader belongs to it."""
+    if str(home) not in proc_cmdline(pgid):
+        raise RuntimeError(f"refusing to signal pgid {pgid}: leader is not an engine of {home}")
+    os.killpg(pgid, sig)
+
+
+def gpu_compute_pids(indices: Sequence[int]) -> set[int]:
+    """Every compute PID on the given GPUs (aliens included) for a never-killed-anything check."""
+    return {pid for idx in indices for pid, _mb in gpu_pids(idx)}
+
+
+def assert_alive(pids: set[int], what: str) -> None:
+    """Fail if any of pids disappeared; goethe must never stop processes it did not start."""
+    gone = sorted(p for p in pids if not pid_alive(p))
+    if gone:
+        raise RuntimeError(f"{what} {gone} disappeared during the test; goethe must never stop them")
 
 
 def stub_engine_pids(home: Path) -> list[int]:
@@ -658,9 +682,10 @@ def test_public_port(home: Path) -> int:
     return int(home_goethe_env(home)["GOETHE_PUBLIC_PORT"])
 
 
-def _write_stub_python(pyenv_bin: Path, real: Path) -> None:
-    """Write py-env/bin/python that runs the stub for sglang.launch_server and real python otherwise."""
+def write_stub_python(pyenv_bin: Path, real: Path) -> None:
+    """Replace py-env/bin/python (unlinked first: never write through a venv symlink) with a stub launcher."""
     wrapper = pyenv_bin / "python"
+    wrapper.unlink(missing_ok=True)
     wrapper.write_text(
         "#!/bin/bash\n"
         f'REAL="{real}"\n'
@@ -715,7 +740,7 @@ def temp_home(
             pyenv_bin.mkdir(parents=True)
             real = real_python or resolve_python()
             if stub_python:
-                _write_stub_python(pyenv_bin, real)
+                write_stub_python(pyenv_bin, real)
             else:
                 shutil.copy2(real, pyenv_bin / "python")
         yield td
@@ -1021,13 +1046,18 @@ def tree_fingerprint(root: Path) -> dict[str, tuple[int, int]]:
     return out
 
 
+def link_dev_pyenv(home: Path) -> None:
+    """Point home/py-env at the dev py-env (read-only use) for checks that need the real SGLang fork."""
+    (home / "py-env").symlink_to(dev_home() / "py-env", target_is_directory=True)
+
+
 def isolated_real_home(work: Path, scrub: Sequence[str]) -> dict[str, str]:
     """Build a private home from the dev home for real-engine gates and return its goethe env."""
     src = dev_home()
     if work.resolve() == src.resolve():
         raise RuntimeError("refusing to use the dev GOETHE_HOME as a test home")
     (work / "logs").mkdir(parents=True, exist_ok=True)
-    (work / "py-env").symlink_to(src / "py-env")
+    link_dev_pyenv(work)
     if (src / "models").is_dir():
         _readonly_mirror(src / "models", work / "models")
     if (src / "state.db").is_file():
