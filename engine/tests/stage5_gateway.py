@@ -71,7 +71,8 @@ def _engine_key_checks(home: Path, model_dir: Path, client_tokens: list[str]) ->
     row = sqlite_query(home / "state.db", "SELECT engine_key FROM loaded_instances WHERE model_id='ma' LIMIT 1")
     engine_key = row[0][0] if row else None
     soft(bool(engine_key) and len(str(engine_key)) == 32, f"loaded_instances.engine_key is 32 hex: {engine_key!r}")
-    soft(stub_launch(model_dir)["parsed"].get("api_key") == engine_key, "engine launched with --api-key engine_key")
+    launched_key = stub_launch(model_dir)["parsed"].get("api_key")
+    soft(bool(engine_key) and launched_key == engine_key, "engine launched with --api-key engine_key")
     chats = [r for r in stub_requests(model_dir) if r["path"].startswith("/v1/chat/completions")]
     check(bool(chats), "engine saw the routed chat requests")
     seen = json.dumps([r["headers"] for r in stub_requests(model_dir)])
