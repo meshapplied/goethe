@@ -138,7 +138,7 @@ pub fn open(home: &Path) -> rusqlite::Result<Connection> {
     con.busy_timeout(Duration::from_secs(10))?;
     con.execute_batch("PRAGMA synchronous=NORMAL;")?;
     if !schema_checked(&path) {
-        init_schema(&con)?;
+        init_schema_retrying(&con)?;
         mark_schema_checked(&path);
     }
     Ok(con)
@@ -157,6 +157,27 @@ fn mark_schema_checked(path: &Path) {
     if let Ok(mut s) = checked_paths().lock() {
         s.insert(path.to_path_buf());
     }
+}
+
+fn init_schema_retrying(con: &Connection) -> rusqlite::Result<()> {
+    // First opens racing on a fresh database can see SQLITE_BUSY on the WAL switch; retry for up to ten seconds.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match init_schema(con) {
+            Err(e) if is_busy(&e) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            other => return other,
+        }
+    }
+}
+
+fn is_busy(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(f, _)
+            if matches!(f.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
 }
 
 fn init_schema(con: &Connection) -> rusqlite::Result<()> {
@@ -264,7 +285,7 @@ mod tests {
                 std::thread::spawn(move || {
                     let con = Connection::open(&p).unwrap();
                     con.busy_timeout(Duration::from_secs(10)).unwrap();
-                    init_schema(&con).unwrap();
+                    init_schema_retrying(&con).unwrap();
                 })
             })
             .collect();
