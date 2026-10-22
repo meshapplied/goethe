@@ -171,11 +171,9 @@ fn install_certs(home: &Path, domain: &str) -> Result<(), String> {
     }
     let cert_dir = home.join("nginx/certs");
     fs::create_dir_all(&cert_dir).map_err(|e| e.to_string())?;
-    let dst_crt = cert_dir.join("server.crt");
-    let dst_key = cert_dir.join("server.key");
-    fs::copy(&chain, &dst_crt).map_err(|e| e.to_string())?;
-    fs::copy(&key, &dst_key).map_err(|e| e.to_string())?;
-    fs::set_permissions(&dst_key, std::os::unix::fs::PermissionsExt::from_mode(0o600))
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    fs::set_permissions(&cert_dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).map_err(|e| e.to_string())?;
+    let chain_pem = fs::read(&chain).map_err(|e| e.to_string())?;
+    let key_pem = fs::read(&key).map_err(|e| e.to_string())?;
+    nginx::write_private(&cert_dir.join("server.crt"), &chain_pem)?;
+    nginx::write_private(&cert_dir.join("server.key"), &key_pem)
 }
