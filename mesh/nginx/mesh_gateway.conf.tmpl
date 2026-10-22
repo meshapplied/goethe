@@ -1,0 +1,80 @@
+# mesh gateway nginx template
+limit_req_zone $http_authorization zone=mesh_ratelimit:10m rate=20r/s;
+limit_conn_zone $binary_remote_addr zone=mesh_connlimit:10m;
+
+server {
+    listen {{PUBLIC_BIND}}:{{PUBLIC_PORT}} ssl;
+    ssl_certificate     {{CERT}};
+    ssl_certificate_key {{KEY}};
+    error_page 497 =444 @444;
+    location @444 {
+        return 444;
+    }
+
+    include {{ALLOWLIST}};
+    deny all;
+
+    limit_req_status 429;
+
+    client_max_body_size 10M;
+    client_body_timeout 10s;
+
+    location = /health {
+        proxy_pass http://127.0.0.1:{{MUX_PORT}};
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 600s;
+    }
+
+    location = /health/ready {
+        proxy_pass http://127.0.0.1:{{MUX_PORT}};
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 600s;
+    }
+
+    location /health/admin {
+        proxy_pass http://127.0.0.1:{{MUX_PORT}};
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 600s;
+    }
+
+    location = /v1/models {
+        limit_req zone=mesh_ratelimit burst=40 nodelay;
+        proxy_pass http://127.0.0.1:{{MUX_PORT}};
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 600s;
+    }
+
+    location /v1/ {
+        limit_req zone=mesh_ratelimit burst=40 nodelay;
+        limit_conn mesh_connlimit 32;
+        proxy_pass http://127.0.0.1:{{MUX_PORT}};
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding on;
+        proxy_read_timeout 600s;
+    }
+}
