@@ -63,19 +63,24 @@ pub fn list_entries(home: &Path) -> Vec<Identity> {
     out
 }
 
-pub fn reap_orphans(home: &Path, keep: &HashSet<String>) {
-    // Stop verified engines no adopted instance owns and drop their entries; unverified pids are never signaled.
+pub fn reap_orphans(home: &Path, keep: &HashSet<String>) -> Vec<i32> {
+    // Stop verified engines no adopted instance owns; unverified pids are never signaled. Survivors stay tracked.
     let orphans: Vec<Identity> = list_entries(home)
         .into_iter()
         .filter(|e| !keep.contains(&e.instance_id))
         .collect();
     if orphans.is_empty() {
-        return;
+        return Vec::new();
     }
-    proc_ident::terminate(&orphans);
+    let stopped = proc_ident::terminate(&orphans);
     for e in &orphans {
-        unregister(home, &e.instance_id);
+        if stopped.survivors.contains(&e.instance_id) {
+            live().insert(e.instance_id.clone(), e.clone());
+        } else {
+            unregister(home, &e.instance_id);
+        }
     }
+    stopped.pids
 }
 
 #[cfg(test)]

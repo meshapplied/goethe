@@ -2,12 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 pub const INSTANCE_ENV: &str = "GOETHE_INSTANCE_ID";
-pub const TERM_GRACE: Duration = Duration::from_secs(3);
+const TERM_GRACE: Duration = Duration::from_secs(3);
 const KILL_WAIT: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(20);
 
@@ -106,17 +106,26 @@ pub fn instance_tag(pid: i32) -> Option<String> {
         .map(|v| String::from_utf8_lossy(v).into_owned())
 }
 
-pub fn safe_target(pid: i32) -> bool {
+fn safe_target(pid: i32) -> bool {
     pid > 1 && pid != std::process::id() as i32 && pid != unsafe { libc::getpgrp() }
 }
 
-fn pidfd_open(pid: i32) -> Result<OwnedFd, i32> {
-    // Pin the process with a pidfd so a recycled pid can never receive the signal.
+enum Pin {
+    Fd(OwnedFd),
+    Unsupported,
+    Refused,
+}
+
+fn pin(pid: i32) -> Pin {
+    // Pin the process with a pidfd so a recycled pid is never hit; plain pids only where pidfd_open does not exist.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
+    if fd >= 0 {
+        return Pin::Fd(unsafe { OwnedFd::from_raw_fd(fd as i32) });
     }
-    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ENOSYS) | Some(libc::EPERM) => Pin::Unsupported,
+        _ => Pin::Refused,
+    }
 }
 
 pub fn signal(id: &Identity, pid: i32, sig: i32) -> bool {
@@ -124,19 +133,17 @@ pub fn signal(id: &Identity, pid: i32, sig: i32) -> bool {
     if !safe_target(pid) {
         return false;
     }
-    let pinned = match pidfd_open(pid) {
-        Ok(fd) => Some(fd),
-        Err(libc::ESRCH) => return false,
-        Err(_) => None,
-    };
+    let pinned = pin(pid);
+    if matches!(pinned, Pin::Refused) {
+        return false;
+    }
     let ours = (pid == id.pid && leader_matches(id))
         || instance_tag(pid).as_deref() == Some(id.instance_id.as_str());
     if !ours {
         return false;
     }
     match pinned {
-        Some(fd) => {
-            use std::os::fd::AsRawFd;
+        Pin::Fd(fd) => {
             let rc = unsafe {
                 libc::syscall(
                     libc::SYS_pidfd_send_signal,
@@ -148,7 +155,7 @@ pub fn signal(id: &Identity, pid: i32, sig: i32) -> bool {
             };
             rc == 0
         }
-        None => unsafe { libc::kill(pid, sig) == 0 },
+        _ => unsafe { libc::kill(pid, sig) == 0 },
     }
 }
 
@@ -157,12 +164,23 @@ fn running(pid: i32, ticks: u64) -> bool {
 }
 
 fn reap_leader(id: &Identity) {
-    // Collect our own zombie leader so it stops counting as alive; only ever waits on the verified pid.
-    if read_stat(id.pid).is_some_and(|s| s.state == 'Z') && leader_matches(id) {
-        let mut status = 0;
-        unsafe {
+    // Collect our own zombie leader through its pidfd, so a recycled pid is never waited on.
+    if !read_stat(id.pid).is_some_and(|s| s.state == 'Z') {
+        return;
+    }
+    let pinned = pin(id.pid);
+    if matches!(pinned, Pin::Refused) || !leader_matches(id) {
+        return;
+    }
+    let mut status = 0;
+    match pinned {
+        Pin::Fd(fd) => unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(libc::P_PIDFD, fd.as_raw_fd() as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG);
+        },
+        _ => unsafe {
             libc::waitpid(id.pid, &mut status, libc::WNOHANG);
-        }
+        },
     }
 }
 
@@ -171,7 +189,7 @@ pub fn leader_alive(id: &Identity) -> bool {
     running(id.pid, id.start_ticks) && leader_matches(id)
 }
 
-pub fn tagged(instance_ids: &HashSet<String>) -> HashMap<String, Vec<(i32, u64)>> {
+fn tagged(instance_ids: &HashSet<String>) -> HashMap<String, Vec<(i32, u64)>> {
     // One /proc pass collecting every process tagged with one of these instance ids.
     let mut out: HashMap<String, Vec<(i32, u64)>> = HashMap::new();
     let Ok(rd) = std::fs::read_dir("/proc") else {
@@ -221,8 +239,13 @@ fn wait_gone(ids: &[Identity], procs: &[(usize, i32, u64)], until: Instant) -> b
     }
 }
 
-pub fn terminate(ids: &[Identity]) -> Vec<i32> {
-    // TERM verified leaders, wait TERM_GRACE, then KILL verified leftovers; returns every pid that was ours.
+pub struct Stopped {
+    pub pids: Vec<i32>,
+    pub survivors: HashSet<String>,
+}
+
+pub fn terminate(ids: &[Identity]) -> Stopped {
+    // TERM verified leaders, wait TERM_GRACE, then KILL verified leftovers; reports our pids and who survived.
     let first = members(ids);
     for (n, id) in ids.iter().enumerate() {
         if leader_alive(id) {
@@ -244,7 +267,14 @@ pub fn terminate(ids: &[Identity]) -> Vec<i32> {
     wait_gone(ids, &left, Instant::now() + KILL_WAIT);
     let mut seen: HashSet<i32> = first.iter().map(|m| m.1).collect();
     seen.extend(left.iter().map(|m| m.1));
-    seen.into_iter().collect()
+    Stopped {
+        pids: seen.into_iter().collect(),
+        survivors: left
+            .iter()
+            .filter(|&&(_, p, t)| running(p, t))
+            .map(|&(n, _, _)| ids[n].instance_id.clone())
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -341,8 +371,8 @@ mod tests {
         let mut leader = setsid_sleep(Some("inst-test-term"));
         let mut stranger = setsid_sleep(None);
         let id = capture("inst-test-term", leader.id() as i32).expect("identity");
-        let pids = terminate(std::slice::from_ref(&id));
-        assert!(pids.contains(&id.pid));
+        let stopped = terminate(std::slice::from_ref(&id));
+        assert!(stopped.pids.contains(&id.pid) && stopped.survivors.is_empty());
         assert!(!running(id.pid, id.start_ticks), "leader must be gone and reaped");
         let _ = leader.wait();
         assert!(stranger.try_wait().expect("try_wait").is_none());

@@ -1,7 +1,7 @@
 // VRAM budget calculator from the product spec, with the one fit rule every load path uses.
 
-pub const SAFETY_MARGIN_GB: f64 = 1.5;
-pub const MAX_MEM_FRACTION: f64 = 0.95;
+const SAFETY_MARGIN_GB: f64 = 1.5;
+const MAX_MEM_FRACTION: f64 = 0.95;
 
 pub fn vram_per_gpu_gb(w_gb: f64, l_ctx: u64, k_bytes: u64, c_max: u64, tp: u64) -> f64 {
     let tp = tp.max(1) as f64;

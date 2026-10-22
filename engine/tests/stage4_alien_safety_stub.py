@@ -15,6 +15,7 @@ from lib.goethe_test import (
     Proc,
     assert_no_stub_engines,
     foreign_gpu_process,
+    free_port,
     gpu_pids,
     home_goethe_env,
     main_exit,
@@ -109,8 +110,10 @@ def _seed_stale_row(home: Path, instance_id: str, pid: int, port: int, status: s
 
 
 def _ghost_rows(home: Path) -> list[tuple[object, ...]]:
-    """Instance rows of the seeded ghost model."""
-    return sqlite_query(home / "state.db", "SELECT instance_id, status FROM loaded_instances WHERE model_id='ghost'")
+    """Instance rows (id, status, pid) of the seeded ghost model."""
+    return sqlite_query(
+        home / "state.db", "SELECT instance_id, status, pid FROM loaded_instances WHERE model_id='ghost'"
+    )
 
 
 def _rpc(home: Path, method: str, params: dict[str, object]) -> dict[str, object]:
@@ -160,13 +163,14 @@ def main() -> None:
             run_goethe([str(goethe), "load", "alien-stub", "--gpus", str(ALIEN_GPU), "--yes"], env=env, timeout=120)
             run_goethe([str(goethe), "unload", "alien-stub"], env=env, timeout=60)
             check(_alive(apid), "alien survives unload")
-            _seed_stale_row(home, "inst-ghost-watchdog", apid, httpd.server_port, "RUNNING")
-            check(wait_until(lambda: not _ghost_rows(home), timeout=30.0), "watchdog clears a row it cannot verify")
+            _seed_stale_row(home, "inst-ghost-watchdog", apid, free_port(), "RUNNING")
+            tomb = [("inst-ghost-watchdog", "FAILED", 0)]
+            check(wait_until(lambda: _ghost_rows(home) == tomb, timeout=30.0), "watchdog tombstones an unverified row")
             check(_alive(apid), "alien survives the watchdog")
-            _seed_stale_row(home, "inst-ghost-unload", apid, httpd.server_port, "STARTING")
+            _seed_stale_row(home, "inst-ghost-unload", apid, free_port(), "STARTING")
             run_goethe([str(goethe), "unload", "ghost"], env=env, timeout=60)
             check(not _ghost_rows(home) and _alive(apid), "alien survives unload of a row holding its pid")
-            _seed_stale_row(home, "inst-ghost-stop", apid, httpd.server_port, "STARTING")
+            _seed_stale_row(home, "inst-ghost-stop", apid, free_port(), "STARTING")
             rr_stop = run_goethe([str(goethe), "stop"], env=env, timeout=60)
             check("goethed stopped" in rr_stop.stdout, "goethe stop")
             md.popen.wait(timeout=15)
