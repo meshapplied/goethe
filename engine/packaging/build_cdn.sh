@@ -125,6 +125,7 @@ fi
   cd "${BUILD_TMP}/sglang/python"
   SGLANG_BUILD_RUST_EXTS=none "${UV}" build --wheel -o "${DIST}/wheels"
 )
+rm -f "${DIST}/wheels/.gitignore"
 (cd "${DIST}/wheels" && ls -t sglang-*.whl | head -n1 >LATEST)
 
 if [[ "${WITH_TERNARY}" -eq 1 ]]; then
