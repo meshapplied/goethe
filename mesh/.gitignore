@@ -1,0 +1,7 @@
+target/
+target-portable/
+dist/
+build/
+__pycache__/
+*.egg-info/
+*.so

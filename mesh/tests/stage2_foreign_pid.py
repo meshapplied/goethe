@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Stage 2 foreign PID detection gate."""
+
+from __future__ import annotations
+
+import json
+
+from lib.mesh_test import foreign_gpu_process, main_exit, require_cli, require_gpus, resolve_mesh_home, run_mesh
+
+
+def main() -> None:
+    """Ensure mesh hw profile lists a foreign GPU process."""
+    mesh = require_cli("mesh")
+    gpus = require_gpus(1)
+    gpu = gpus[0]
+    home = resolve_mesh_home()
+    foreign = foreign_gpu_process(gpu, mb=10240)
+    try:
+        run_mesh([str(mesh), "hw", "profile", "--json"], env={"MESH_HOME": str(home)})
+        state = json.loads((home / "hardware_state.json").read_text(encoding="utf-8"))
+        found = False
+        for entry in state.get("gpus", []):
+            if int(entry["index"]) != gpu:
+                continue
+            for proc in entry.get("running_processes", []):
+                if int(proc["pid"]) == foreign.popen.pid and int(proc["used_vram_mb"]) >= 9000:
+                    found = True
+        if not found:
+            raise RuntimeError("foreign PID not reported with ~10240 MB")
+        print("stage2_foreign_pid ok")
+    finally:
+        foreign.stop()
+
+
+if __name__ == "__main__":
+    main_exit(main)
