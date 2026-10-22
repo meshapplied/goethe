@@ -253,12 +253,12 @@ def check_libraries(sys_: System, binary: Path) -> Check:
 def check_install(sys_: System, inst: Install, port: int) -> list[Check]:
     rows = [
         Check("engine", "ok" if inst.has_binary else "info",
-              str(inst.binary) if inst.has_binary else "not built yet, goethe serve builds it")]
+              str(inst.binary) if inst.has_binary else "not built yet, goethe-lab serve builds it")]
     if inst.has_binary:
         rows.append(check_libraries(sys_, inst.binary))
     rows += [
         Check("model file", "ok" if inst.has_model else "info",
-              str(inst.model_file) if inst.has_model else "not downloaded yet, goethe serve fetches it"),
+              str(inst.model_file) if inst.has_model else "not downloaded yet, goethe-lab serve fetches it"),
         Check("port", "ok", f"{port} is free") if sys_.port_free(port)
         else Check("port", "warn", f"{port} is already in use", "stop the other server or pass --port")]
     return rows

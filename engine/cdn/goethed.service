@@ -1,0 +1,15 @@
+# Goethe systemd unit template for goethed.
+[Unit]
+Description=Goethe control plane daemon
+After=network.target
+
+[Service]
+Type=simple
+Environment=GOETHE_HOME=/var/lib/goethe
+EnvironmentFile=-/etc/goethe/goethe.env
+ExecStart=/var/lib/goethe/bin/goethed
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

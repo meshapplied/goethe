@@ -1,0 +1,9 @@
+# Build metadata for goethe_kernels CUDA extension (setuptools driver).
+[build-system]
+requires = ["setuptools", "torch"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "goethe-kernels"
+version = "0.1.0"
+requires-python = ">=3.11"
