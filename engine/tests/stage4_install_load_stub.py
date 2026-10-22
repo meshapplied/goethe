@@ -14,10 +14,10 @@ from lib.goethe_test import (
     http_post,
     main_exit,
     require_cli,
-    require_gpus,
     run_goethe,
     start_goethed,
     stub_launch,
+    stub_load_gpu,
     temp_home,
     test_mux_port,
 )
@@ -38,7 +38,7 @@ def main() -> None:
     """Install with --load must return only once the (start-delayed) stub serves chat."""
     goethe = require_cli("goethe")
     clean = clean_test_gpu()
-    gpu = clean if clean is not None else require_gpus(1)[0]
+    gpu = clean if clean is not None else stub_load_gpu()
     yes = [] if clean is not None else ["--yes"]
     with gpu_flock([gpu]), temp_home(stub_python=True) as home:
         src = home / "src_model"
