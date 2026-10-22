@@ -3,20 +3,28 @@
 import ast
 import io
 import re
+import shutil
+import subprocess
 import sys
 import tokenize
 from pathlib import Path
 
-ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else "/scratch/ternary-flash/goethe-release/engine")
-SKIP_DIRS = {"target", "dist", "build", "__pycache__", ".git", "node_modules", "experimental"}
-ARCHIVED_TESTS = {
-    "tests/stage1_archs.sh",
-    "tests/stage1_hook.sh",
-    "tests/stage1_ops.py",
-}
+ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent)
+SKIP_DIRS = {"target", "target-portable", "dist", "build", "__pycache__", ".git", "node_modules", "experimental"}
 SRC = {".py", ".rs", ".cu", ".cuh", ".cpp", ".h", ".sh", ".toml", ".conf", ".sql", ".tmpl", ".service"}
-BAD_CHARS = re.compile("[\u2013\u2014\u2015\u2212]|[\U0001F000-\U0001FFFF]|[\u2600-\u27BF]|[\u2B00-\u2BFF]")
-CTRL = re.compile(r"^\s*(if|for|while|switch|else|do|catch|try|namespace|struct|class|enum|union|match|loop|impl|trait|mod|unsafe)\b")
+BAD_CHARS = re.compile(
+    "[\u2010-\u2015\u2212]|[\U0001F000-\U0001FFFF]|[\u2600-\u27BF]|[\u2B00-\u2BFF]"
+)
+CTRL = re.compile(
+    r"^\s*(if|for|while|switch|else|do|catch|try|namespace|struct|class|enum|union|match|loop|impl|trait|mod|unsafe)\b"
+)
+SHELL_FN = re.compile(r"^\s*(function\s+)?[A-Za-z_][\w:-]*\s*\(\)\s*\{\s*$|^\s*function\s+[A-Za-z_][\w:-]*\s*\{\s*$")
+MAX_COLS = 120
+RUFF_VERSION = "0.17.0"
+RUFF_ARGS = [
+    "check", "--isolated", "--no-cache", "--output-format", "concise", "--line-length", str(MAX_COLS),
+    "--target-version", "py311", "--select", "E,F,W,B,UP,I", "--config", "lint.isort.known-first-party = ['lib']",
+]
 problems: list[str] = []
 
 
@@ -27,6 +35,9 @@ def flag(path: Path, line: int, msg: str) -> None:
 
 def lint_python(path: Path, text: str) -> None:
     """Lint a Python source file."""
+    for i, line in enumerate(text.splitlines(), 1):
+        if len(line) > MAX_COLS:
+            flag(path, i, f"line longer than {MAX_COLS} columns ({len(line)})")
     tree = ast.parse(text)
     allowed = set()
     body = tree.body
@@ -129,6 +140,9 @@ def lint_clike(path: Path, lines: list[str], marker: str) -> None:
         text = code.strip()
         if not text:
             continue
+        if marker == "#" and SHELL_FN.match(code):
+            fn_open = i
+            continue
         if marker == "//":
             if (
                 pending_sig is None
@@ -154,13 +168,36 @@ def lint_shell_like(path: Path, lines: list[str]) -> None:
     lint_clike(path, lines, "#")
 
 
+def ruff_command() -> list[str] | None:
+    """Ruff on PATH, else a pinned ruff in a throwaway uv tool environment (never the dev py-env)."""
+    if shutil.which("ruff"):
+        return ["ruff"]
+    if shutil.which("uvx"):
+        return ["uvx", f"ruff@{RUFF_VERSION}"]
+    return None
+
+
+def lint_ruff(files: list[Path]) -> None:
+    """Run ruff with the repo rule set over the Python files and record its findings."""
+    if not files:
+        return
+    cmd = ruff_command()
+    if cmd is None:
+        problems.append("ruff unavailable: install ruff or uv")
+        return
+    proc = subprocess.run([*cmd, *RUFF_ARGS, *map(str, files)], capture_output=True, text=True, cwd=ROOT)
+    found = [ln for ln in proc.stdout.splitlines() if re.match(r"^\S+:\d+:\d+: ", ln)]
+    problems.extend(f"ruff {ln}" for ln in found)
+    if proc.returncode != 0 and not found:
+        problems.append(f"ruff failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
+
+
 def main() -> int:
-    """Walk goethe/ and print style violations."""
+    """Walk the package tree and print style violations."""
+    py_files: list[Path] = []
     for path in sorted(ROOT.rglob("*")):
         rel = path.relative_to(ROOT)
         if not path.is_file() or any(p in SKIP_DIRS for p in rel.parts):
-            continue
-        if str(rel).replace("\\", "/") in ARCHIVED_TESTS:
             continue
         if path.suffix not in SRC and path.name not in {"Dockerfile"}:
             continue
@@ -170,6 +207,7 @@ def main() -> int:
                 flag(path, i, "emoji or dash character")
         lines = text.splitlines()
         if path.suffix == ".py":
+            py_files.append(path)
             lint_python(path, text)
         elif path.suffix in {".rs", ".cu", ".cuh", ".cpp", ".h"}:
             lint_clike(path, lines, "//")
@@ -186,6 +224,7 @@ def main() -> int:
                     continue
                 if BAD_CHARS.search(line):
                     flag(other, i, "emoji or dash character")
+    lint_ruff(py_files)
     print("\n".join(problems) if problems else "lint clean")
     return 1 if problems else 0
 
