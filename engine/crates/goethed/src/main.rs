@@ -171,7 +171,13 @@ async fn main() {
                 });
             }
             _ = watchdog_tick.tick() => {
-                tokio::task::spawn_blocking(supervisor::watchdog_tick);
+                let h = home_rot.clone();
+                tokio::task::spawn_blocking(move || {
+                    supervisor::watchdog_tick();
+                    if let Err(e) = goethe_core::nginx::ensure_gateway_running(&h) {
+                        eprintln!("gateway check: {e}");
+                    }
+                });
             }
             res = listener.accept() => {
                 match res {

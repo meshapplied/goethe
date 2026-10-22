@@ -11,9 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 goethe-core = { path = "../core" }
-rusqlite = { version = "0.32", features = ["bundled"] }
-sha2 = "0.10"
-futures-util = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "server-auto"] }
