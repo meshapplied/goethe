@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Goethe CDN installer: verified CDN artifacts, py-env, nginx, TLS, goethed.
+# Goethe CDN installer: verified CDN artifacts, py-env, nginx binary, TLS material, goethed.
 
 set -euo pipefail
 
-GOETHE_PKG_URL="${GOETHE_PKG_URL:-https://pkg.meshapplied.com}"
-CDN="${GOETHE_PKG_URL%/}"
-SUMS_FILE=""
+GOETHE_RELEASE_PUB_PEM='__GOETHE_RELEASE_PUB_PEM__'
+DRIVER_MIN=580
+GLIBC_MIN=2.30
 
 resolve_goethe_home() {
+  # GOETHE_HOME, else /workspace/.goethe (RunPod, Vast), else /var/lib/goethe (created for root), else ~/.goethe.
   if [[ -n "${GOETHE_HOME:-}" ]]; then
     echo "${GOETHE_HOME}"
     return
@@ -15,6 +16,9 @@ resolve_goethe_home() {
   if [[ -d /workspace && -w /workspace ]]; then
     echo "/workspace/.goethe"
     return
+  fi
+  if [[ "$(id -u)" -eq 0 ]]; then
+    mkdir -p /var/lib/goethe
   fi
   if [[ -d /var/lib/goethe && -w /var/lib/goethe ]]; then
     echo "/var/lib/goethe"
@@ -24,26 +28,15 @@ resolve_goethe_home() {
 }
 
 normalize_arch() {
-  local raw="${1:-}"
-  case "${raw}" in
+  case "${1:-}" in
     arm64 | aarch64) echo aarch64 ;;
     x86_64 | amd64) echo x86_64 ;;
-    *)
-      echo "${raw}"
-      ;;
+    *) echo "${1:-}" ;;
   esac
 }
 
-ARCH="$(normalize_arch "$(uname -m)")"
-if [[ -n "${GOETHE_ARCH:-}" ]]; then
-  ARCH="$(normalize_arch "${GOETHE_ARCH}")"
-fi
-if [[ "${ARCH}" != "x86_64" && "${ARCH}" != "aarch64" ]]; then
-  echo "unsupported architecture: $(uname -m) (need x86_64 or aarch64)" >&2
-  exit 1
-fi
-
 version_major() {
+  # Major component of a dotted version, tolerating an OpenSSL prefix and suffixes.
   local ver="${1:-}"
   ver="${ver#OpenSSL }"
   ver="${ver%% *}"
@@ -52,6 +45,7 @@ version_major() {
 }
 
 version_ge() {
+  # True when dotted version $1 >= $2.
   local found="$1" need="$2"
   local IFS=.
   local -a f n
@@ -62,12 +56,13 @@ version_ge() {
     max=${#f[@]}
   fi
   for ((i = 0; i < max; i++)); do
-    local fv="${f[i]:-0}"
-    local nv="${n[i]:-0}"
-    if ((10#${fv} > 10#${nv})); then
+    local fv="${f[i]:-0}" nv="${n[i]:-0}"
+    fv="${fv%%[!0-9]*}"
+    nv="${nv%%[!0-9]*}"
+    if ((10#${fv:-0} > 10#${nv:-0})); then
       return 0
     fi
-    if ((10#${fv} < 10#${nv})); then
+    if ((10#${fv:-0} < 10#${nv:-0})); then
       return 1
     fi
   done
@@ -75,14 +70,14 @@ version_ge() {
 }
 
 require_tool_version() {
-  local tool="$1" min="$2" ver_cmd="$3"
-  local ver
+  # Exit unless tool reports a version >= min.
+  local tool="$1" min="$2" ver_cmd="$3" ver stripped
   ver="$(${ver_cmd} 2>/dev/null | head -n1 || true)"
   if [[ -z "${ver}" ]]; then
     echo "${tool} is required" >&2
     exit 1
   fi
-  local stripped="${ver}"
+  stripped="${ver}"
   case "${tool}" in
     curl) stripped="${ver#curl }"; stripped="${stripped%% *}" ;;
     zstd) stripped="$(echo "${ver}" | sed -n 's/.* v\([0-9][0-9.]*\).*/\1/p' | head -n1)" ;;
@@ -94,57 +89,65 @@ require_tool_version() {
   fi
 }
 
+check_glibc() {
+  # The portable binaries need glibc 2.30+; musl or an unknown libc cannot run them.
+  local ver
+  ver="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)"
+  if [[ -z "${ver}" ]]; then
+    ver="$(ldd --version 2>/dev/null | head -n1 | awk '{print $NF}' || true)"
+  fi
+  if [[ ! "${ver}" =~ ^[0-9]+\.[0-9]+ ]]; then
+    echo "could not determine the glibc version; goethe needs glibc ${GLIBC_MIN}+" >&2
+    exit 1
+  fi
+  if ! version_ge "${ver}" "${GLIBC_MIN}"; then
+    echo "glibc ${ver} is below minimum ${GLIBC_MIN}" >&2
+    exit 1
+  fi
+}
+
 check_nvidia_driver() {
+  # torch cu130 in the py-env needs a CUDA 13 driver (580+) whenever a GPU driver is present.
+  local ver major
   if ! command -v nvidia-smi >/dev/null 2>&1; then
     if [[ "${GOETHE_REQUIRE_GPU:-}" == "1" ]]; then
       echo "nvidia-smi not found (GOETHE_REQUIRE_GPU=1)" >&2
       exit 1
     fi
-    echo "WARNING: nvidia-smi not found; GPU workloads need an NVIDIA driver" >&2
+    echo "WARNING: nvidia-smi not found; GPU workloads need an NVIDIA driver ${DRIVER_MIN}+" >&2
     return 0
   fi
-  local ver major
   ver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d '[:space:]')"
   if [[ -z "${ver}" ]]; then
     echo "WARNING: could not read NVIDIA driver version from nvidia-smi" >&2
     return 0
   fi
   major="$(version_major "${ver}")"
-  if [[ -z "${major}" ]] || ((major < 550)); then
-    echo "NVIDIA driver ${ver} is below minimum 550" >&2
+  if [[ -z "${major}" ]] || ((major < DRIVER_MIN)); then
+    echo "NVIDIA driver ${ver} is below minimum ${DRIVER_MIN} (CUDA 13)" >&2
     exit 1
   fi
 }
 
-GOETHE_HOME="$(resolve_goethe_home)"
-export GOETHE_HOME
-mkdir -p "${GOETHE_HOME}/bin" "${GOETHE_HOME}/logs" "${GOETHE_HOME}/nginx/certs" "${GOETHE_HOME}/goethe"
-
-GOETHE_RELEASE_PUB_PEM='__GOETHE_RELEASE_PUB_PEM__'
-printf '%s\n' "${GOETHE_RELEASE_PUB_PEM}" >"${GOETHE_HOME}/release_pub.pem"
-
 curl_auth() {
+  # curl with the optional private-package bearer token.
   local url="$1"
   shift
   local auth=()
   if [[ -n "${GOETHE_PKG_TOKEN:-}" ]]; then
     auth=(-H "Authorization: Bearer ${GOETHE_PKG_TOKEN}")
   fi
-  curl -fsSL "${auth[@]}" "$url" "$@"
+  curl -fsSL "${auth[@]}" "${url}" "$@"
 }
 
 fetch_raw() {
   curl_auth "${CDN}/$1" -o "$2"
 }
 
-lookup_sum() {
-  awk -v p="$1" '$2 == p { print $1; exit }' "${SUMS_FILE}"
-}
-
 verify_file_sum() {
-  local rel="$1" path="$2"
-  local expected got
-  expected="$(lookup_sum "${rel}")"
+  # Exit unless path matches the signed SHA256SUMS entry for rel.
+  local rel="$1" path="$2" expected got
+  expected="$(awk -v p="${rel}" '$2 == p { print $1; exit }' "${SUMS_FILE}")"
   if [[ -z "${expected}" ]]; then
     echo "SHA256SUMS missing entry for ${rel}" >&2
     exit 1
@@ -156,218 +159,272 @@ verify_file_sum() {
   fi
 }
 
-fetch_verified() {
-  local rel="$1" dest="$2"
-  fetch_raw "${rel}" "${dest}.part"
-  verify_file_sum "${rel}" "${dest}.part"
-  mv "${dest}.part" "${dest}"
+fetch() {
+  # Download rel to dest; verified against SHA256SUMS unless GOETHE_INSECURE=1.
+  fetch_raw "$1" "$2.part"
+  if [[ "${SECURE}" -eq 1 ]]; then
+    verify_file_sum "$1" "$2.part"
+  fi
+  mv "$2.part" "$2"
 }
 
-verify_cdn_or_exit() {
+verify_cdn() {
+  # Verify SHA256SUMS against the embedded key; set SECURE=1, or 0 with GOETHE_INSECURE=1.
+  local signed=1
+  if [[ "${GOETHE_RELEASE_PUB_PEM}" == *"__GOETHE_RELEASE_PUB_PEM__"* ]]; then
+    signed=0
+  else
+    printf '%s\n' "${GOETHE_RELEASE_PUB_PEM}" >"${GOETHE_HOME}/release_pub.pem"
+  fi
   if [[ "${GOETHE_INSECURE:-}" == "1" ]]; then
     echo "WARNING: GOETHE_INSECURE=1 skips CDN signature and checksum verification" >&2
-    return 1
+    SECURE=0
+    return
   fi
-  if [[ "${GOETHE_RELEASE_PUB_PEM}" == *"__GOETHE_RELEASE_PUB_PEM__"* ]]; then
+  if [[ "${signed}" -eq 0 ]]; then
     echo "unsigned install.sh; set GOETHE_INSECURE=1 for dev only" >&2
-    exit 1
-  fi
-  if ! command -v openssl >/dev/null 2>&1; then
-    echo "openssl is required for CDN verification" >&2
     exit 1
   fi
   SUMS_FILE="${GOETHE_HOME}/SHA256SUMS"
   fetch_raw "SHA256SUMS.sig" "${GOETHE_HOME}/SHA256SUMS.sig"
   fetch_raw "SHA256SUMS" "${SUMS_FILE}"
-  if ! openssl dgst -sha256 -verify "${GOETHE_HOME}/release_pub.pem" -signature "${GOETHE_HOME}/SHA256SUMS.sig" "${SUMS_FILE}" >/dev/null 2>&1; then
+  if ! openssl dgst -sha256 -verify "${GOETHE_HOME}/release_pub.pem" -signature "${GOETHE_HOME}/SHA256SUMS.sig" \
+    "${SUMS_FILE}" >/dev/null 2>&1; then
     echo "signature verification failed" >&2
     exit 1
   fi
-  if [[ ! -s "${SUMS_FILE}" ]]; then
-    echo "empty SHA256SUMS" >&2
-    exit 1
-  fi
-  if ! awk -v a="bin/linux-${ARCH}/goethe" '$2 == a { found=1; exit } END { exit !found }' "${SUMS_FILE}"; then
-    echo "CDN missing bin/linux-${ARCH}/goethe for arch ${ARCH}" >&2
-    exit 1
-  fi
-  return 0
-}
-
-if [[ "$(id -u)" -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
-  apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates openssl zstd
-fi
-
-if ! command -v curl >/dev/null 2>&1; then
-  echo "curl is required" >&2
-  exit 1
-fi
-
-require_tool_version curl 7.50 'curl --version'
-require_tool_version zstd 1.3 'zstd --version'
-require_tool_version openssl 1.1.1 'openssl version'
-check_nvidia_driver
-
-SECURE=0
-if verify_cdn_or_exit; then
+  local rel
+  for rel in "bin/linux-${ARCH}/goethe" "bin/linux-${ARCH}/goethed" "bin/linux-${ARCH}/uv" "pyenv/${LOCK}"; do
+    if ! awk -v a="${rel}" '$2 == a { found = 1; exit } END { exit !found }' "${SUMS_FILE}"; then
+      echo "CDN missing ${rel} for arch ${ARCH}" >&2
+      exit 1
+    fi
+  done
   SECURE=1
-fi
-
-fetch() {
-  if [[ "${SECURE}" -eq 1 ]]; then
-    fetch_verified "$1" "$2"
-  else
-    fetch_raw "$1" "$2"
-  fi
 }
 
-UV_BIN="${GOETHE_HOME}/bin/uv"
-if [[ ! -x "${UV_BIN}" ]]; then
-  if [[ "${SECURE}" -eq 1 ]]; then
-    fetch_verified "bin/linux-${ARCH}/uv" "${UV_BIN}"
-    chmod +x "${UV_BIN}"
-  else
-    fetch_raw "bin/linux-${ARCH}/uv" "${UV_BIN}" 2>/dev/null && chmod +x "${UV_BIN}" || true
-    if [[ ! -x "${UV_BIN}" ]]; then
-      curl -fsSL "https://github.com/astral-sh/uv/releases/latest/download/uv-${ARCH}-unknown-linux-gnu.tar.gz" \
-        | tar -xz -C "${GOETHE_HOME}/bin" --strip-components=1 "uv-${ARCH}-unknown-linux-gnu/uv" 2>/dev/null || true
-    fi
-    if [[ ! -x "${UV_BIN}" ]]; then
-      curl -fsSL https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="${GOETHE_HOME}/bin" sh
-      UV_BIN="${GOETHE_HOME}/bin/uv"
-    fi
+install_pyenv() {
+  # Fetch uv, the arch lock and bootstrap.sh, then build the hermetic py-env with the SGLang wheel.
+  local wheel_name
+  if [[ ! -x "${GOETHE_HOME}/bin/uv" ]]; then
+    fetch "bin/linux-${ARCH}/uv" "${GOETHE_HOME}/bin/uv"
+    chmod +x "${GOETHE_HOME}/bin/uv"
   fi
-fi
-export PATH="${GOETHE_HOME}/bin:${PATH}"
-
-mkdir -p "${GOETHE_HOME}/pyenv"
-fetch "pyenv/requirements.lock" "${GOETHE_HOME}/pyenv/requirements.lock"
-fetch "pyenv/bootstrap.sh" "${GOETHE_HOME}/pyenv/bootstrap.sh"
-if [[ "${GOETHE_VERIFY_ONLY:-}" == "1" ]]; then
-  exit 0
-fi
-WHEEL_NAME="$(curl_auth "${CDN}/wheels/LATEST" 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
-WHEEL_FILE=""
-if [[ -n "${WHEEL_NAME}" ]]; then
-  if [[ "${SECURE}" -eq 1 ]]; then
-    fetch_verified "wheels/LATEST" "${GOETHE_HOME}/pyenv/LATEST"
-    WHEEL_NAME="$(tr -d '[:space:]' <"${GOETHE_HOME}/pyenv/LATEST")"
+  mkdir -p "${GOETHE_HOME}/pyenv"
+  fetch "pyenv/${LOCK}" "${GOETHE_HOME}/pyenv/${LOCK}"
+  fetch "pyenv/bootstrap.sh" "${GOETHE_HOME}/pyenv/bootstrap.sh"
+  if [[ "${GOETHE_VERIFY_ONLY:-}" == "1" ]]; then
+    echo "verified CDN artifacts for ${ARCH}"
+    exit 0
   fi
-  fetch "wheels/${WHEEL_NAME}" "${GOETHE_HOME}/pyenv/${WHEEL_NAME}"
-  WHEEL_FILE="${GOETHE_HOME}/pyenv/${WHEEL_NAME}"
-fi
-if [[ -n "${WHEEL_FILE}" && -f "${WHEEL_FILE}" ]]; then
-  export GOETHE_SGLANG_WHEEL="${WHEEL_FILE}"
-fi
-bash "${GOETHE_HOME}/pyenv/bootstrap.sh"
+  fetch "wheels/LATEST" "${GOETHE_HOME}/pyenv/LATEST"
+  wheel_name="$(tr -d '[:space:]' <"${GOETHE_HOME}/pyenv/LATEST")"
+  if [[ ! "${wheel_name}" =~ ^sglang-[A-Za-z0-9_.+-]+\.whl$ ]]; then
+    echo "invalid wheel name in wheels/LATEST: ${wheel_name}" >&2
+    exit 1
+  fi
+  fetch "wheels/${wheel_name}" "${GOETHE_HOME}/pyenv/${wheel_name}"
+  GOETHE_ARCH="${ARCH}" UV="${GOETHE_HOME}/bin/uv" GOETHE_SGLANG_WHEEL="${GOETHE_HOME}/pyenv/${wheel_name}" \
+    bash "${GOETHE_HOME}/pyenv/bootstrap.sh"
+}
 
-want_ternary=0
-if [[ "${GOETHE_INSTALL_TERNARY:-}" == "1" ]]; then
-  want_ternary=1
-elif [[ "${SECURE}" -eq 1 ]] && grep -q 'goethe/ternary-kernels.tar.zst' "${SUMS_FILE}"; then
-  want_ternary=1
-fi
-fetch_ternary_pack() {
-  local dest="$1"
-  local auth=() url code
+install_ternary() {
+  # Optional ternary kernel pack: 401/403/404 means not entitled and is not an error.
+  local want=0 tar code
+  if [[ "${GOETHE_INSTALL_TERNARY:-}" == "1" ]]; then
+    want=1
+  elif [[ "${SECURE}" -eq 1 ]] && grep -q 'goethe/ternary-kernels.tar.zst' "${SUMS_FILE}"; then
+    want=1
+  fi
+  if [[ "${want}" -eq 0 || -d "${GOETHE_HOME}/goethe/ternary-kernels" ]]; then
+    return
+  fi
+  tar="${GOETHE_HOME}/goethe/ternary-kernels.tar.zst"
+  local auth=()
   if [[ -n "${GOETHE_PKG_TOKEN:-}" ]]; then
     auth=(-H "Authorization: Bearer ${GOETHE_PKG_TOKEN}")
   fi
-  url="${CDN}/goethe/ternary-kernels.tar.zst"
-  code="$(curl -sSL "${auth[@]}" -w '%{http_code}' -o "${dest}.part" "${url}" || echo 000)"
-  if [[ "${code}" == "401" || "${code}" == "403" || "${code}" == "404" ]]; then
-    rm -f "${dest}.part"
-    echo "warning: ternary pack HTTP ${code}" >&2
-    return 1
-  fi
+  code="$(curl -sSL "${auth[@]}" -w '%{http_code}' -o "${tar}.part" "${CDN}/goethe/ternary-kernels.tar.zst" || echo 000)"
   if [[ "${code}" != "200" ]]; then
-    rm -f "${dest}.part"
+    rm -f "${tar}.part"
     echo "warning: ternary pack HTTP ${code}" >&2
-    return 1
+    return
   fi
   if [[ "${SECURE}" -eq 1 ]]; then
-    verify_file_sum "goethe/ternary-kernels.tar.zst" "${dest}.part"
+    verify_file_sum "goethe/ternary-kernels.tar.zst" "${tar}.part"
   fi
-  mv "${dest}.part" "${dest}"
+  zstd -dc "${tar}.part" | tar -xf - -C "${GOETHE_HOME}/goethe"
+  rm -f "${tar}.part"
 }
 
-if [[ "${want_ternary}" -eq 1 && ! -d "${GOETHE_HOME}/goethe/ternary-kernels" ]]; then
-  TERNARY_TAR="${GOETHE_HOME}/goethe/ternary-kernels.tar.zst"
-  fetch_ternary_pack "${TERNARY_TAR}" || true
-  if [[ -f "${TERNARY_TAR}" ]]; then
-    zstd -d -f "${TERNARY_TAR}" -o "${GOETHE_HOME}/goethe/ternary-kernels.tar"
-    tar -xf "${GOETHE_HOME}/goethe/ternary-kernels.tar" -C "${GOETHE_HOME}/goethe"
-    rm -f "${TERNARY_TAR}" "${GOETHE_HOME}/goethe/ternary-kernels.tar"
-  fi
-fi
-
-for bin in goethe goethed; do
-  if [[ ! -x "${GOETHE_HOME}/bin/${bin}" ]]; then
-    if [[ "${SECURE}" -eq 1 ]]; then
-      fetch_verified "bin/linux-${ARCH}/${bin}" "${GOETHE_HOME}/bin/${bin}"
+install_binaries() {
+  # Fetch goethe and goethed, and link the CLI into a PATH directory unless GOETHE_NO_LINK is set.
+  local bin dir
+  for bin in goethe goethed; do
+    if [[ ! -x "${GOETHE_HOME}/bin/${bin}" ]]; then
+      fetch "bin/linux-${ARCH}/${bin}" "${GOETHE_HOME}/bin/${bin}"
       chmod +x "${GOETHE_HOME}/bin/${bin}"
-    else
-      fetch "bin/linux-${ARCH}/${bin}" "${GOETHE_HOME}/bin/${bin}" && chmod +x "${GOETHE_HOME}/bin/${bin}" || true
     fi
+  done
+  if [[ -n "${GOETHE_NO_LINK:-}" ]]; then
+    return
   fi
-done
-export PATH="${GOETHE_HOME}/bin:${PATH}"
-
-LINK_DIR=""
-if [[ -z "${GOETHE_NO_LINK:-}" ]]; then
   for dir in /usr/local/bin "${HOME}/.local/bin"; do
     mkdir -p "${dir}" 2>/dev/null || true
     if [[ -w "${dir}" ]]; then
       ln -sf "${GOETHE_HOME}/bin/goethe" "${dir}/goethe"
       LINK_DIR="${dir}"
-      break
+      return
     fi
   done
-fi
+}
 
-NGINX_ROOT="${GOETHE_HOME}/nginx-root"
-NGINX_BIN="${NGINX_ROOT}/usr/sbin/nginx"
-if [[ ! -x "${NGINX_BIN}" ]]; then
+resolve_nginx() {
+  # NGINX_BIN, then a system nginx, then a rootless nginx extracted under GOETHE_HOME; never started here.
+  local cand deb
+  for cand in "${NGINX_BIN:-}" "$(command -v nginx 2>/dev/null || true)" /usr/sbin/nginx /usr/local/sbin/nginx \
+    "${GOETHE_HOME}/nginx-root/usr/sbin/nginx"; do
+    if [[ -n "${cand}" && -x "${cand}" ]]; then
+      NGINX_BIN="${cand}"
+      return
+    fi
+  done
+  if ! command -v apt-get >/dev/null 2>&1 || ! command -v dpkg-deb >/dev/null 2>&1; then
+    echo "nginx not found: install nginx or set NGINX_BIN" >&2
+    exit 1
+  fi
+  mkdir -p "${GOETHE_HOME}/nginx/debs" "${GOETHE_HOME}/nginx-root"
+  (cd "${GOETHE_HOME}/nginx/debs" && apt-get download nginx nginx-common)
+  for deb in "${GOETHE_HOME}/nginx/debs"/*.deb; do
+    dpkg-deb -x "${deb}" "${GOETHE_HOME}/nginx-root"
+  done
+  NGINX_BIN="${GOETHE_HOME}/nginx-root/usr/sbin/nginx"
+}
+
+ensure_certs() {
+  # Self-signed TLS pair for the gateway, created only when missing.
+  local certs="${GOETHE_HOME}/nginx/certs"
+  if [[ -s "${certs}/server.key" && -s "${certs}/server.crt" ]]; then
+    return
+  fi
+  openssl req -x509 -newkey rsa:2048 -keyout "${certs}/server.key" -out "${certs}/server.crt" -days 3650 -nodes \
+    -subj "/CN=goethe-local" 2>/dev/null
+  chmod 600 "${certs}/server.key"
+}
+
+goethed_answers() {
+  "${GOETHE_HOME}/bin/goethe" ps >/dev/null 2>&1
+}
+
+start_goethed() {
+  # systemd unit for root on systemd hosts, otherwise a detached nohup goethed; skipped when one answers.
+  if goethed_answers; then
+    echo "goethed already running for ${GOETHE_HOME}"
+    return
+  fi
+  if [[ "$(id -u)" -eq 0 && "$(ps -p 1 -o comm= 2>/dev/null || true)" == "systemd" ]]; then
+    fetch "goethed.service" "${GOETHE_HOME}/goethed.service"
+    sed "s|__GOETHE_HOME__|${GOETHE_HOME}|g" "${GOETHE_HOME}/goethed.service" >/etc/systemd/system/goethed.service
+    mkdir -p /etc/goethe
+    printf 'NGINX_BIN=%s\n' "${NGINX_BIN}" >/etc/goethe/goethe.env
+    systemctl daemon-reload
+    systemctl enable --now goethed.service
+    return
+  fi
+  local launcher=(nohup)
+  if command -v setsid >/dev/null 2>&1; then
+    launcher=(setsid nohup)
+  fi
+  NGINX_BIN="${NGINX_BIN}" "${launcher[@]}" "${GOETHE_HOME}/bin/goethed" </dev/null \
+    >>"${GOETHE_HOME}/logs/goethed.log" 2>&1 &
+}
+
+wait_goethed() {
+  # Wait up to 30 s until goethed answers on its socket, or fail with the log tail.
+  local i
+  for ((i = 0; i < 60; i++)); do
+    if goethed_answers; then
+      return
+    fi
+    sleep 0.5
+  done
+  echo "goethed did not answer within 30s; last log lines:" >&2
+  tail -n 20 "${GOETHE_HOME}/logs/goethed.log" >&2 2>/dev/null || true
+  exit 1
+}
+
+endpoint_hints() {
+  # Print where the gateway listens, including RunPod and Vast public mappings when present.
+  local port mapped
+  port="$(cat "${GOETHE_HOME}/nginx/public_port" 2>/dev/null || echo 8443)"
+  echo "Gateway: https://127.0.0.1:${port} (default-deny: goethe allowlist add <cidr>; goethe key create --name <n>)"
+  mapped="RUNPOD_TCP_PORT_${port}"
+  if [[ -n "${RUNPOD_POD_ID:-}" ]]; then
+    if [[ -n "${RUNPOD_PUBLIC_IP:-}" && -n "${!mapped:-}" ]]; then
+      echo "RunPod public endpoint: https://${RUNPOD_PUBLIC_IP}:${!mapped}"
+    else
+      echo "RunPod: expose TCP port ${port} in the pod settings to reach the gateway from outside"
+    fi
+  fi
+  mapped="VAST_TCP_PORT_${port}"
+  if [[ -n "${PUBLIC_IPADDR:-}" && -n "${!mapped:-}" ]]; then
+    echo "Vast public endpoint: https://${PUBLIC_IPADDR}:${!mapped}"
+  elif [[ -n "${VAST_CONTAINERLABEL:-}" ]]; then
+    echo "Vast: map container port ${port} (-p ${port}:${port}) to reach the gateway from outside"
+  fi
+}
+
+main() {
+  # Verify prerequisites and the signed CDN, install everything under GOETHE_HOME, start goethed and wait for it.
+  CDN="${GOETHE_PKG_URL:-https://pkg.meshapplied.com}"
+  CDN="${CDN%/}"
+  ARCH="$(normalize_arch "${GOETHE_ARCH:-$(uname -m)}")"
+  if [[ "${ARCH}" != "x86_64" && "${ARCH}" != "aarch64" ]]; then
+    echo "unsupported architecture: ${ARCH} (need x86_64 or aarch64)" >&2
+    exit 1
+  fi
+  LOCK="requirements.lock"
+  if [[ "${ARCH}" == "aarch64" ]]; then
+    LOCK="requirements.aarch64.lock"
+  fi
+  SECURE=0
+  SUMS_FILE=""
+  LINK_DIR=""
   if [[ "$(id -u)" -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
-    apt-get install -y -qq nginx
-    NGINX_BIN="$(command -v nginx)"
-  else
-    DEB_DIR="${GOETHE_HOME}/nginx/debs"
-    mkdir -p "${DEB_DIR}" "${NGINX_ROOT}"
-    (cd "${DEB_DIR}" && apt-get download nginx nginx-common)
-    for deb in "${DEB_DIR}"/*.deb; do
-      dpkg-deb -x "${deb}" "${NGINX_ROOT}"
-    done
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates openssl zstd
   fi
-fi
-export NGINX_BIN
-
-openssl req -x509 -newkey rsa:2048 -keyout "${GOETHE_HOME}/nginx/certs/server.key" -out "${GOETHE_HOME}/nginx/certs/server.crt" -days 3650 -nodes -subj "/CN=goethe-local" 2>/dev/null
-
-PID1="$(ps -p 1 -o comm= 2>/dev/null || true)"
-if [[ "$(id -u)" -eq 0 && "${PID1}" == "systemd" ]]; then
-  fetch "goethed.service" "/etc/systemd/system/goethed.service"
-  if [[ -f "/etc/systemd/system/goethed.service" ]]; then
-    systemctl daemon-reload || echo "WARNING: systemctl daemon-reload failed" >&2
-    systemctl enable --now goethed.service || echo "WARNING: systemctl enable --now goethed.service failed" >&2
-    systemctl reload nginx 2>/dev/null || true
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl is required" >&2
+    exit 1
   fi
-else
-  if [[ -x "${GOETHE_HOME}/bin/goethed" ]] && ! pgrep -f "${GOETHE_HOME}/bin/goethed" >/dev/null 2>&1; then
-    nohup "${GOETHE_HOME}/bin/goethed" >>"${GOETHE_HOME}/logs/goethed.log" 2>&1 &
+  require_tool_version curl 7.50 'curl --version'
+  require_tool_version zstd 1.3 'zstd --version'
+  require_tool_version openssl 1.1.1 'openssl version'
+  check_glibc
+  check_nvidia_driver
+  GOETHE_HOME="$(resolve_goethe_home)"
+  export GOETHE_HOME
+  mkdir -p "${GOETHE_HOME}/bin" "${GOETHE_HOME}/logs" "${GOETHE_HOME}/models" "${GOETHE_HOME}/nginx/certs" \
+    "${GOETHE_HOME}/goethe"
+  verify_cdn
+  install_pyenv
+  install_ternary
+  install_binaries
+  export PATH="${GOETHE_HOME}/bin:${PATH}"
+  NGINX_BIN="${NGINX_BIN:-}"
+  resolve_nginx
+  export NGINX_BIN
+  ensure_certs
+  start_goethed
+  wait_goethed
+  goethe hw profile || echo "WARNING: goethe hw profile failed" >&2
+  goethe recommend 2>/dev/null | head -n 20 || true
+  endpoint_hints
+  if [[ -n "${LINK_DIR}" && ":${PATH}:" != *":${LINK_DIR}:"* ]]; then
+    echo "Add ${LINK_DIR} to PATH to use goethe"
   fi
-  if [[ -x "${NGINX_BIN}" ]] && ! pgrep -f "${NGINX_BIN}" >/dev/null 2>&1; then
-    nohup "${NGINX_BIN}" -c "${GOETHE_HOME}/nginx/nginx.conf" >>"${GOETHE_HOME}/logs/nginx.log" 2>&1 &
-  fi
-fi
+  echo "Goethe install complete: GOETHE_HOME=${GOETHE_HOME}"
+}
 
-if command -v goethe >/dev/null 2>&1; then
-  goethe hw profile || true
-  goethe recommend --json 2>/dev/null | head -c 4096 || true
-fi
-
-if [[ -n "${LINK_DIR}" && ":${PATH}:" != *":${LINK_DIR}:"* ]]; then
-  echo "Add ${LINK_DIR} to PATH to use goethe"
-fi
-echo "Goethe install complete: GOETHE_HOME=${GOETHE_HOME}"
+main "$@"

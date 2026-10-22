@@ -1,26 +1,22 @@
 #!/usr/bin/env bash
-# Stage 6 installer prerequisite checks without network.
+# Stage 6 installer checks without network: tool, glibc and driver floors, truncation safety, no kills, no nginx start.
 
 set -euo pipefail
 
-GOETHE_PKG="${GOETHE_PKG:-/scratch/ternary-flash/goethe-release/engine}"
+GOETHE_PKG="${GOETHE_PKG:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 INSTALL="${GOETHE_PKG}/cdn/install.sh"
 GATE_ID="${GOETHE_GATE_RUN_ID:-$$}"
 WORK="$(mktemp -d "/tmp/goethe-test-${GATE_ID}-installer-XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
-
-if [[ ! -f "${INSTALL}" ]]; then
-  echo "install.sh missing"
-  exit 77
-fi
+trap 'rm -rf "${WORK}"' EXIT
 
 tool_path() {
-  local name="$1"
+  # Absolute path of a host tool, or exit.
+  local name="$1" d
   if command -v "${name}" >/dev/null 2>&1; then
     command -v "${name}"
     return
   fi
-  for d in /usr/bin /bin; do
+  for d in /usr/bin /bin /usr/sbin /sbin; do
     if [[ -x "${d}/${name}" ]]; then
       echo "${d}/${name}"
       return
@@ -30,172 +26,97 @@ tool_path() {
   exit 1
 }
 
-REAL_UNAME="$(tool_path uname)"
-REAL_SED="$(tool_path sed)"
-REAL_AWK="$(tool_path awk)"
-REAL_TR="$(tool_path tr)"
-REAL_SHA256SUM="$(tool_path sha256sum)"
-REAL_MV="$(tool_path mv)"
-REAL_MKDIR="$(tool_path mkdir)"
-REAL_PRINTF="$(tool_path printf)"
-REAL_ID="$(tool_path id)"
-REAL_HEAD="$(tool_path head)"
-REAL_BASH="$(tool_path bash)"
-REAL_ENV="$(tool_path env)"
-
 make_shim_dir() {
-  local dir="$1"
+  # A PATH directory with the basic tools install.sh needs plus the real curl, zstd and openssl.
+  local dir="$1" t
   mkdir -p "${dir}"
-  ln -sf "${REAL_BASH}" "${dir}/bash"
-  ln -sf "${REAL_ENV}" "${dir}/env"
-  ln -sf "${REAL_UNAME}" "${dir}/uname"
-  ln -sf "${REAL_SED}" "${dir}/sed"
-  ln -sf "${REAL_AWK}" "${dir}/awk"
-  ln -sf "${REAL_TR}" "${dir}/tr"
-  ln -sf "${REAL_SHA256SUM}" "${dir}/sha256sum"
-  ln -sf "${REAL_MV}" "${dir}/mv"
-  ln -sf "${REAL_MKDIR}" "${dir}/mkdir"
-  ln -sf "${REAL_PRINTF}" "${dir}/printf"
-  ln -sf "${REAL_ID}" "${dir}/id"
-  ln -sf "${REAL_HEAD}" "${dir}/head"
+  for t in bash env uname sed awk tr sha256sum mv mkdir printf id head getconf ldd curl zstd openssl; do
+    ln -sf "$(tool_path "${t}")" "${dir}/${t}"
+  done
   echo "${dir}"
 }
 
+fake() {
+  # Replace one shim tool with a script that prints a fixed version line.
+  rm -f "$1/$2"
+  printf '#!/bin/sh\necho "%s"\nexit 0\n' "$3" >"$1/$2"
+  chmod +x "$1/$2"
+}
+
 run_install() {
-  local shim_dir="$1"
-  local path_tail="/usr/bin:/bin"
-  if [[ $# -ge 2 ]]; then
-    path_tail="$2"
-    shift 2
-  else
-    shift 1
-  fi
-  local home
+  # Run install.sh with PATH=<shim>[:<tail>] against an unreachable CDN; print rc then stderr.
+  local shim_dir="$1" path_tail="$2" script="${3:-${INSTALL}}" home
   home="$(mktemp -d "${WORK}/home-XXXXXX")"
-  export GOETHE_HOME="${home}"
-  export GOETHE_PKG_URL="file:///nonexistent"
-  if [[ -n "${path_tail}" ]]; then
-    export PATH="${shim_dir}:${path_tail}"
-  else
-    export PATH="${shim_dir}"
-  fi
   set +e
-  bash "${INSTALL}" "$@" 2>"${home}/stderr.txt" >/dev/null
+  env -i HOME="${WORK}" GOETHE_HOME="${home}/goethe" GOETHE_PKG_URL="file:///nonexistent" GOETHE_NO_LINK=1 \
+    GOETHE_REQUIRE_GPU="${GOETHE_REQUIRE_GPU:-}" PATH="${shim_dir}${path_tail:+:${path_tail}}" \
+    bash "${script}" 2>"${home}/stderr.txt" >/dev/null
   local rc=$?
   set -e
   echo "${rc}"
   /bin/cat "${home}/stderr.txt"
+  [[ -e "${home}/goethe" ]] && echo "HOME_CREATED"
+  return 0
 }
 
-REAL_CURL="$(tool_path curl)"
-REAL_ZSTD="$(tool_path zstd)"
-REAL_OPENSSL="$(tool_path openssl)"
-REAL_NVIDIA_SMI="$(tool_path nvidia-smi)"
+expect_fail() {
+  # Run a case that must fail and print pattern on stderr.
+  local name="$1" pattern="$2" shim="$3" tail="$4" out rc
+  out="$(run_install "${shim}" "${tail}")"
+  rc="${out%%$'\n'*}"
+  if [[ "${rc}" -eq 0 ]] || ! grep -q "${pattern}" <<<"${out}"; then
+    echo "${name}: expected failure with '${pattern}', got rc=${rc}: ${out}"
+    exit 1
+  fi
+}
 
-SHIM="$(make_shim_dir "${WORK}/shim-a")"
-printf '%b' '#!/bin/sh\necho "curl 7.40.0"\nexit 0\n' >"${SHIM}/curl"
-chmod +x "${SHIM}/curl"
-ln -sf "${REAL_ZSTD}" "${SHIM}/zstd"
-ln -sf "${REAL_OPENSSL}" "${SHIM}/openssl"
-ln -sf "${REAL_NVIDIA_SMI}" "${SHIM}/nvidia-smi"
-OUT="$(run_install "${SHIM}" "/usr/bin:/bin")"
-RC="${OUT%%$'\n'*}"
-REST="${OUT#*$'\n'}"
-if [[ "${RC}" -eq 0 ]]; then
-  echo "curl case should fail"
+if grep -nE '(^|[^_a-z])(kill|pkill|killall|fuser)([^_a-z]|$)' "${INSTALL}"; then
+  echo "install.sh must never signal processes"
   exit 1
 fi
-if ! grep -q "curl 7.40.0 is below minimum 7.50" <<<"${REST}"; then
-  echo "curl case stderr: ${REST}"
+if grep -nE 'NGINX_BIN\}?"? +-|nohup[^#]*nginx|nginx +-[cs] ' "${INSTALL}"; then
+  echo "install.sh must not start or signal nginx (goethed manages it)"
   exit 1
 fi
 
-SHIM="$(make_shim_dir "${WORK}/shim-b")"
-ln -sf "${REAL_CURL}" "${SHIM}/curl"
-printf '%b' '#!/bin/sh\necho "*** Zstandard CLI (64-bit) v1.2.0"\nexit 0\n' >"${SHIM}/zstd"
-chmod +x "${SHIM}/zstd"
-ln -sf "${REAL_OPENSSL}" "${SHIM}/openssl"
-ln -sf "${REAL_NVIDIA_SMI}" "${SHIM}/nvidia-smi"
-OUT="$(run_install "${SHIM}" "/usr/bin:/bin")"
-RC="${OUT%%$'\n'*}"
-REST="${OUT#*$'\n'}"
-if [[ "${RC}" -eq 0 ]]; then
-  echo "zstd case should fail"
-  exit 1
-fi
-if ! grep -q "below minimum 1.3" <<<"${REST}"; then
-  echo "zstd case stderr: ${REST}"
-  exit 1
-fi
+SHIM="$(make_shim_dir "${WORK}/shim-curl")"
+fake "${SHIM}" curl "curl 7.40.0"
+expect_fail curl "curl 7.40.0 is below minimum 7.50" "${SHIM}" "/usr/bin:/bin"
 
-SHIM="$(make_shim_dir "${WORK}/shim-c")"
-ln -sf "${REAL_CURL}" "${SHIM}/curl"
-ln -sf "${REAL_ZSTD}" "${SHIM}/zstd"
-printf '%b' '#!/bin/sh\necho "OpenSSL 1.0.2k"\nexit 0\n' >"${SHIM}/openssl"
-chmod +x "${SHIM}/openssl"
-ln -sf "${REAL_NVIDIA_SMI}" "${SHIM}/nvidia-smi"
-OUT="$(run_install "${SHIM}" "/usr/bin:/bin")"
-RC="${OUT%%$'\n'*}"
-REST="${OUT#*$'\n'}"
-if [[ "${RC}" -eq 0 ]]; then
-  echo "openssl case should fail"
-  exit 1
-fi
-if ! grep -q "below minimum 1.1.1" <<<"${REST}"; then
-  echo "openssl case stderr: ${REST}"
-  exit 1
-fi
+SHIM="$(make_shim_dir "${WORK}/shim-zstd")"
+fake "${SHIM}" zstd "*** Zstandard CLI (64-bit) v1.2.0"
+expect_fail zstd "below minimum 1.3" "${SHIM}" "/usr/bin:/bin"
 
-SHIM="$(make_shim_dir "${WORK}/shim-d")"
-ln -sf "${REAL_CURL}" "${SHIM}/curl"
-ln -sf "${REAL_ZSTD}" "${SHIM}/zstd"
-ln -sf "${REAL_OPENSSL}" "${SHIM}/openssl"
-printf '%b' '#!/bin/sh\necho "535.104.05"\nexit 0\n' >"${SHIM}/nvidia-smi"
-chmod +x "${SHIM}/nvidia-smi"
-OUT="$(run_install "${SHIM}" "/usr/bin:/bin")"
-RC="${OUT%%$'\n'*}"
-REST="${OUT#*$'\n'}"
-if [[ "${RC}" -eq 0 ]]; then
-  echo "nvidia case should fail"
-  exit 1
-fi
-if ! grep -q "below minimum 550" <<<"${REST}"; then
-  echo "nvidia case stderr: ${REST}"
-  exit 1
-fi
+SHIM="$(make_shim_dir "${WORK}/shim-openssl")"
+fake "${SHIM}" openssl "OpenSSL 1.0.2k"
+expect_fail openssl "below minimum 1.1.1" "${SHIM}" "/usr/bin:/bin"
 
-SHIM="$(make_shim_dir "${WORK}/shim-e")"
-ln -sf "${REAL_CURL}" "${SHIM}/curl"
-ln -sf "${REAL_ZSTD}" "${SHIM}/zstd"
-ln -sf "${REAL_OPENSSL}" "${SHIM}/openssl"
-export GOETHE_REQUIRE_GPU=1
+SHIM="$(make_shim_dir "${WORK}/shim-glibc")"
+fake "${SHIM}" getconf "glibc 2.28"
+expect_fail glibc "glibc 2.28 is below minimum 2.30" "${SHIM}" "/usr/bin:/bin"
+
+SHIM="$(make_shim_dir "${WORK}/shim-driver")"
+fake "${SHIM}" nvidia-smi "575.57.08"
+expect_fail driver "575.57.08 is below minimum 580" "${SHIM}" "/usr/bin:/bin"
+
+SHIM="$(make_shim_dir "${WORK}/shim-nogpu")"
+GOETHE_REQUIRE_GPU=1 expect_fail require-gpu "nvidia-smi not found" "${SHIM}" ""
+
 OUT="$(run_install "${SHIM}" "")"
-RC="${OUT%%$'\n'*}"
-REST="${OUT#*$'\n'}"
-unset GOETHE_REQUIRE_GPU
-if [[ "${RC}" -eq 0 ]]; then
-  echo "GOETHE_REQUIRE_GPU case should fail"
-  exit 1
-fi
-if ! grep -q "nvidia-smi not found" <<<"${REST}"; then
-  echo "require gpu stderr: ${REST}"
+if ! grep -q "WARNING: nvidia-smi not found" <<<"${OUT}" || grep -q "below minimum" <<<"${OUT}"; then
+  echo "missing-driver warning case: ${OUT}"
   exit 1
 fi
 
-SHIM="$(make_shim_dir "${WORK}/shim-f")"
-ln -sf "${REAL_CURL}" "${SHIM}/curl"
-ln -sf "${REAL_ZSTD}" "${SHIM}/zstd"
-ln -sf "${REAL_OPENSSL}" "${SHIM}/openssl"
-OUT="$(run_install "${SHIM}" "")"
-RC="${OUT%%$'\n'*}"
-REST="${OUT#*$'\n'}"
-if ! grep -q "WARNING: nvidia-smi not found" <<<"${REST}"; then
-  echo "warn gpu stderr: ${REST}"
-  exit 1
-fi
-if grep -q "below minimum" <<<"${REST}"; then
-  echo "unexpected below minimum: ${REST}"
-  exit 1
-fi
+SHIM="$(make_shim_dir "${WORK}/shim-trunc")"
+LINES="$(wc -l <"${INSTALL}")"
+for keep in $((LINES / 3)) $((LINES / 2)) $((LINES - 1)); do
+  head -n "${keep}" "${INSTALL}" >"${WORK}/install-trunc.sh"
+  OUT="$(run_install "${SHIM}" "/usr/bin:/bin" "${WORK}/install-trunc.sh")"
+  if grep -q "HOME_CREATED" <<<"${OUT}"; then
+    echo "install.sh truncated to ${keep} lines still created GOETHE_HOME: ${OUT}"
+    exit 1
+  fi
+done
 
 echo "stage6_installer_checks ok"
