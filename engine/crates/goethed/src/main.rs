@@ -13,7 +13,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::UnixListener as TokioUnixListener;
 use tokio::signal::unix::{signal, SignalKind};
@@ -153,7 +152,6 @@ async fn main() {
     eprintln!("goethed listening on {}", sock.display());
     goethe_core::autostart::spawn_restore_background();
     let _ = goethe_core::log_rotation::run_rotation_pass(&home);
-    let watchdog_lock = Arc::new(Mutex::new(()));
     let home_rot = home.clone();
     let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
     let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
@@ -173,11 +171,7 @@ async fn main() {
                 });
             }
             _ = watchdog_tick.tick() => {
-                let wd = watchdog_lock.clone();
-                tokio::task::spawn_blocking(move || {
-                    let _g = wd.lock().unwrap_or_else(|e| e.into_inner());
-                    supervisor::watchdog_tick();
-                });
+                tokio::task::spawn_blocking(supervisor::watchdog_tick);
             }
             res = listener.accept() => {
                 match res {
