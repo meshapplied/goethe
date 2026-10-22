@@ -104,22 +104,17 @@ def main() -> None:
             raise RuntimeError("expected tiny-a recommended")
         if "meshapplied/old-sm" not in exc:
             raise RuntimeError("expected old-sm excluded for supported_sm")
-        if "meshapplied/tiny-b" not in exc and "meshapplied/tiny-b" not in rec_ids:
-            raise RuntimeError("expected tiny-b tp=2 placement or exclusion")
-        if "meshapplied/tiny-b" in exc:
-            reason = exc["meshapplied/tiny-b"].lower()
-            if "vram" not in reason and "memory" not in reason and "gpu" not in reason:
-                raise RuntimeError(f"tiny-b exclusion reason unexpected: {reason}")
+        if "meshapplied/tiny-b" not in exc or "meshapplied/tiny-b" in rec_ids:
+            raise RuntimeError("tiny-b needs 400 GB total VRAM but the fixture has 192 GB: it must be excluded")
+        reason = exc["meshapplied/tiny-b"].lower()
+        if "vram" not in reason and "memory" not in reason and "gpu" not in reason:
+            raise RuntimeError(f"tiny-b exclusion reason unexpected: {reason}")
         for item in out.get("recommended", []):
             if item["model_id"] != "meshapplied/tiny-a":
                 continue
             expected = vram_per_gpu_gb(10.0, 4096, 1000, 8, item.get("tp", 1))
             if abs(float(item["vram_per_gpu_gb"]) - expected) > 0.05:
                 raise RuntimeError(f"vram_per_gpu_gb {item['vram_per_gpu_gb']} != {expected}")
-        tp2 = next((m for m in out.get("recommended", []) if m["model_id"] == "meshapplied/tiny-b"), None)
-        if tp2 is not None:
-            if int(tp2.get("tp", 1)) != 2 or len(tp2.get("gpus", [])) != 2:
-                raise RuntimeError("tiny-b should recommend tp=2 on two GPUs when not excluded")
         print("stage2_recommend ok")
 
 

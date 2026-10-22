@@ -84,7 +84,6 @@ def main() -> None:
             env={
                 "GOETHE_HOME": str(home),
                 "GOETHE_REGISTRY_URL": f"file://{reg_hit}",
-                "HF_HUB_ENABLE_HF_TRANSFER": "1",
             },
             timeout=600,
         )
