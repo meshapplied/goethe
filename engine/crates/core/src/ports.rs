@@ -53,7 +53,7 @@ fn write_port_file(home: &Path, rel: &str, port: u16) -> Result<(), String> {
 
 const ENGINE_PORTS_DEFAULT: (u16, u16) = (30001, 30099);
 
-pub fn parse_engine_ports(raw: Option<&str>) -> Result<(u16, u16), String> {
+fn parse_engine_ports(raw: Option<&str>) -> Result<(u16, u16), String> {
     // GOETHE_ENGINE_PORTS=<lo>-<hi>; unset or empty means the default range.
     let Some(v) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
         return Ok(ENGINE_PORTS_DEFAULT);
