@@ -50,4 +50,5 @@ pub mod load_slot;
 pub mod coordinator;
 pub mod engine_cmd;
 pub mod foreign;
+pub mod host;
 pub mod proc_ident;

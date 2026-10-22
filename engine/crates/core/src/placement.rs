@@ -205,6 +205,7 @@ mod tests {
             a,
             b,
             link_type: t.to_string(),
+            topo: t.to_string(),
         };
         HardwareState {
             profiled_at: "t".to_string(),
@@ -218,6 +219,8 @@ mod tests {
                 link(1, 3, "NODE"),
                 link(2, 3, "NODE"),
             ],
+            host: None,
+            environment: None,
         }
     }
 
