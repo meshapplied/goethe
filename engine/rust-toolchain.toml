@@ -1,0 +1,5 @@
+# Pin the Rust toolchain for reproducible goethe and goethed builds, locally and in packaging/build_bin.sh.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
