@@ -43,15 +43,29 @@ pub fn busy(gpus: &[u32]) -> bool {
         .any(|(held, _)| held.iter().any(|g| gpus.contains(g)))
 }
 
-pub fn reserve(instance_id: &str, gpus: &[u32], gb_per_gpu: f64) {
+pub struct Hold(String);
+
+impl Hold {
+    pub fn resize(&self, gb_per_gpu: f64) {
+        if let Some(r) = state().starting.get_mut(&self.0) {
+            r.1 = gb_per_gpu;
+        }
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        state().starting.remove(&self.0);
+        CHANGED.notify_all();
+    }
+}
+
+pub fn reserve(instance_id: &str, gpus: &[u32], gb_per_gpu: f64) -> Hold {
+    // Ledger entry and gate for a STARTING engine; dropping the hold (even on panic) frees both.
     state()
         .starting
         .insert(instance_id.to_string(), (gpus.to_vec(), gb_per_gpu));
-}
-
-pub fn release(instance_id: &str) {
-    state().starting.remove(instance_id);
-    CHANGED.notify_all();
+    Hold(instance_id.to_string())
 }
 
 pub fn wait_change(timeout: Duration) {
@@ -102,19 +116,23 @@ mod tests {
 
     #[test]
     fn ledger_counts_starting_reservations_per_gpu() {
-        reserve("inst-ledger-a", &[90, 91], 10.0);
-        reserve("inst-ledger-b", &[91], 2.5);
+        let a = reserve("inst-ledger-a", &[90, 91], 10.0);
+        let b = reserve("inst-ledger-b", &[91], 2.5);
         assert!((reserved_gb(90) - 10.0).abs() < 1e-9);
         assert!((reserved_gb(91) - 12.5).abs() < 1e-9);
         assert!(busy(&[91]) && busy(&[89, 90]) && !busy(&[92]));
-        reserve("inst-ledger-a", &[90, 91], 14.0);
+        a.resize(14.0);
         assert!((reserved_gb(90) - 14.0).abs() < 1e-9);
-        release("inst-ledger-a");
+        drop(a);
         assert_eq!(reserved_gb(90), 0.0);
         assert!(!busy(&[90]));
         assert!((reserved_gb(91) - 2.5).abs() < 1e-9);
-        release("inst-ledger-b");
-        assert!(!busy(&[91]));
+        let gated = std::thread::spawn(move || {
+            let _held = b;
+            panic!("finish thread dies");
+        });
+        assert!(gated.join().is_err());
+        assert!(!busy(&[91]), "a panicking holder must still free the gate");
     }
 
     #[test]

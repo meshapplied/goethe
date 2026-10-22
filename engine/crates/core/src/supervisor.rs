@@ -24,7 +24,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -119,6 +119,7 @@ struct Starting {
     ctx: u64,
     max_conc: u64,
     cancel: Arc<AtomicBool>,
+    hold: coordinator::Hold,
 }
 
 struct Inst {
@@ -392,13 +393,14 @@ fn start_engine(
         run_registry::unregister(&req.home, &instance_id);
         return Err(err1(format!("record instance: {e}; engine stopped")));
     }
-    coordinator::reserve(&instance_id, &plan.gpus, budget);
+    let hold = coordinator::reserve(&instance_id, &plan.gpus, budget);
     if let Err(e) = crate::logs::append_spawn_index(&req.home, &instance_id, model_id, &log_path) {
         eprintln!("append_spawn_index({instance_id}): {e}");
     }
     Ok(Starting {
         home: req.home.clone(),
         cancel: load_slot::begin_slot_load(&slot_key),
+        hold,
         params,
         instance_id,
         engine_key,
@@ -462,20 +464,16 @@ fn launch_finish(starting: Starting, notices: String) -> (Value, String) {
     thread::spawn(move || {
         let slot = slot_lock(&sk);
         let _guard = slot.lock().unwrap_or_else(|e| e.into_inner());
-        finish_load_health(starting);
+        let mut starting = starting;
+        startup(&mut starting);
+        drop(starting);
         load_slot::slot_in_flight_dec(&sk);
     });
     (result, notices)
 }
 
-fn finish_load_health(mut s: Starting) {
-    // Drive one STARTING engine to RUNNING, CANCELLED or FAILED, then free its ledger reservation.
-    startup(&mut s);
-    coordinator::release(&s.instance_id);
-}
-
 fn startup(s: &mut Starting) {
-    // Wait for health and retry twice with a larger budget on a VRAM shortfall; every exit leaves a final status.
+    // Drive a STARTING engine to RUNNING, CANCELLED or FAILED, retrying twice with a larger budget on a VRAM shortfall.
     let mut mem_retries = 0;
     loop {
         match wait_engine_ready(s) {
@@ -651,7 +649,7 @@ fn retry_with_budget(s: &mut Starting, extra: f64) -> Result<(), String> {
     s.identity = identity;
     s.log_offset = offset;
     s.budget_gb = budget;
-    coordinator::reserve(&s.instance_id, &s.gpus, budget);
+    s.hold.resize(budget);
     if let Err(e) = crate::logs::append_spawn_index(&s.home, &s.instance_id, &s.params.model_id, &s.log_path) {
         eprintln!("append_spawn_index({}): {e}", s.instance_id);
     }
@@ -709,10 +707,17 @@ fn teardown(con: &Connection, home: &Path, list: &[Inst]) {
 }
 
 pub fn graceful_shutdown(home: &Path) -> Result<(), String> {
-    // Cancel pending loads and stop every live engine (verified); desired slots stay for the next start.
+    // Cancel pending loads and stop every live engine (verified), even ones whose row or state.db is gone.
     let t0 = Instant::now();
     coordinator::cancel_queued(None);
-    let con = db::open(home).map_err(|e| e.to_string())?;
+    let con = match db::open(home) {
+        Ok(con) => con,
+        Err(e) => {
+            load_slot::request_cancel_all();
+            proc_ident::terminate(&run_registry::tracked());
+            return Err(format!("state.db unavailable at shutdown ({e}); stopped tracked engines only"));
+        }
+    };
     let list = {
         let _plan = coordinator::plan_lock();
         let found = insts(&con, &format!("status IN {LIVE}"), &[]);
@@ -725,9 +730,19 @@ pub fn graceful_shutdown(home: &Path) -> Result<(), String> {
     load_slot::request_cancel_all();
     let _ = load_slot::wait_all_slots_quiet(Duration::from_millis(500));
     teardown(&con, home, &list);
+    let strays = run_registry::tracked();
+    proc_ident::terminate(&strays);
+    for id in &strays {
+        run_registry::unregister(home, &id.instance_id);
+    }
     append_goethed_log(
         home,
-        &format!("shutdown done ms={} instances={}\n", t0.elapsed().as_millis(), list.len()),
+        &format!(
+            "shutdown done ms={} instances={} strays={}\n",
+            t0.elapsed().as_millis(),
+            list.len(),
+            strays.len()
+        ),
     );
     Ok(())
 }
@@ -1127,7 +1142,11 @@ fn now_epoch_secs() -> i64 {
 
 pub fn watchdog_tick() {
     // Probe RUNNING engines; restart dead ones within budget, else stop them (verified) and mark FAILED.
-    let _guard = WATCHDOG_TICK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = match WATCHDOG_TICK_LOCK.try_lock() {
+        Ok(g) => g,
+        Err(TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(TryLockError::WouldBlock) => return,
+    };
     if shutdown_requested() {
         return;
     }

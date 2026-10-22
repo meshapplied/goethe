@@ -1,9 +1,21 @@
-// On-disk identity of spawned engines so a restarted goethed can reap verified orphans.
+// Identity of spawned engines, on disk for a restarted goethed and in memory for this one.
 
 use crate::proc_ident::{self, Identity};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+fn live() -> MutexGuard<'static, HashMap<String, Identity>> {
+    static LIVE: OnceLock<Mutex<HashMap<String, Identity>>> = OnceLock::new();
+    LIVE.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+pub fn tracked() -> Vec<Identity> {
+    live().values().cloned().collect()
+}
 
 fn run_dir(home: &Path) -> PathBuf {
     home.join("run")
@@ -14,16 +26,19 @@ fn entry_path(home: &Path, instance_id: &str) -> PathBuf {
 }
 
 pub fn register(home: &Path, id: &Identity) -> Result<(), String> {
-    // Write the entry atomically so a crash never leaves a half-written identity behind.
+    // Write the entry atomically (a crash never leaves half an identity), then track the engine in memory.
     fs::create_dir_all(run_dir(home)).map_err(|e| e.to_string())?;
     let path = entry_path(home, &id.instance_id);
     let tmp = path.with_extension("tmp");
     let data = serde_json::to_vec(id).map_err(|e| e.to_string())?;
     fs::write(&tmp, data).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    live().insert(id.instance_id.clone(), id.clone());
+    Ok(())
 }
 
 pub fn unregister(home: &Path, instance_id: &str) {
+    live().remove(instance_id);
     let _ = fs::remove_file(entry_path(home, instance_id));
 }
 
@@ -83,10 +98,12 @@ mod tests {
         register(td.path(), &a).unwrap();
         let old = run_dir(td.path()).join("old.json");
         fs::write(&old, br#"{"instance_id":"old","pgid":1,"pid":1,"model_path":"/x"}"#).unwrap();
-        assert_eq!(list_entries(td.path()), vec![a]);
+        assert_eq!(list_entries(td.path()), vec![a.clone()]);
         assert!(!old.exists());
+        assert!(tracked().contains(&a));
         unregister(td.path(), "inst-a");
         assert!(list_entries(td.path()).is_empty());
+        assert!(!tracked().contains(&a));
     }
 
     #[test]
