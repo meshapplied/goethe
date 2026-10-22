@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from contextlib import contextmanager
 
 import torch
@@ -20,6 +19,8 @@ SMALL_M = (1, 3, 17, 32, 128)
 LARGE_M = (129, 1024)
 MARLIN_ALL_M_FULL = (1, 3, 17, 128, 129, 1024, 4096)
 GRAPH_M = (1, 4, 16, 64)
+GRAPH_LARGE_M = 256
+REF_ROWS = 1024
 
 
 def _publish_fp4(fp4_backend: str = "flashinfer_cutlass") -> None:
@@ -43,11 +44,14 @@ def _decode_nvfp4_packed(weight_packed: torch.Tensor) -> torch.Tensor:
 
 
 def _reference_fp32(x, weight_packed, scales, weight_global_scale, bias):
-    w = _decode_nvfp4_packed(weight_packed)
-    k = w.shape[1]
-    scale_rep = scales.to(torch.float32).repeat_interleave(16, dim=1)[:, :k]
-    out = torch.matmul(x.to(torch.float32), (w * scale_rep).T)
-    out = out / weight_global_scale.to(torch.float32)
+    """fp32 x @ (e2m1(W) * scales).T / global + bias, decoded in row chunks so peak memory stays small."""
+    xf = x.to(torch.float32)
+    parts = []
+    for start in range(0, weight_packed.shape[0], REF_ROWS):
+        w = _decode_nvfp4_packed(weight_packed[start : start + REF_ROWS])
+        scale_rep = scales[start : start + REF_ROWS].to(torch.float32).repeat_interleave(16, dim=1)[:, : w.shape[1]]
+        parts.append(torch.matmul(xf, (w * scale_rep).T))
+    out = torch.cat(parts, dim=1) / weight_global_scale.to(torch.float32)
     if bias is not None:
         out = out + bias.to(torch.float32)
     return out
@@ -199,71 +203,90 @@ def _large_m(n: int, k: int) -> tuple[int, ...]:
     return LARGE_M
 
 
-def _run_dtype(dtype: torch.dtype, seed: int, shapes: tuple[tuple[int, int], ...] | None = None) -> None:
-    if shapes is None:
-        shapes = tuple(SHAPES)
+def _max_rows_override(dtype: torch.dtype, seed: int) -> None:
+    """GOETHE_MARLIN_MAX_ROWS is read once at load: rows above the cap take the stock path, env flips later do not."""
+    n, k = SHAPES[0]
+    layer_stock, _ = _build(False, n, k, seed, dtype, False)
+    with _env(GOETHE_MARLIN_MAX_ROWS="32"):
+        layer_cap, raw = _build(True, n, k, seed, dtype, False)
+    if layer_cap.goethe_route != "marlin_small" or layer_cap.goethe_max_rows != 32:
+        raise RuntimeError(f"route not frozen at load: {layer_cap.goethe_route} {layer_cap.goethe_max_rows}")
+    y17, x17, b17 = _apply(layer_cap, 17, n, k, dtype, seed, True)
+    ref17 = _reference_fp32(x17, raw["weight_packed"], raw["weight_scale"], raw["weight_global_scale"], b17)
+    if not _within_tol(y17, ref17):
+        raise RuntimeError("17 rows under a 32-row cap must take the Marlin path")
+    y64, _, _ = _apply(layer_cap, 64, n, k, dtype, seed, True)
+    y64_stock, _, _ = _apply(layer_stock, 64, n, k, dtype, seed, False)
+    if not torch.equal(y64, y64_stock):
+        raise RuntimeError("64 rows over a 32-row cap must take the stock path")
+    with _env(GOETHE_MARLIN_MAX_ROWS="4096", GOETHE_MARLIN="0", GOETHE_FORCE_PATH="w4a16"):
+        y64_late, _, _ = _apply(layer_cap, 64, n, k, dtype, seed, True)
+    if not torch.equal(y64_late, y64):
+        raise RuntimeError("apply_weights re-read the routing env after load")
+
+
+def _run_dtype(
+    dtype: torch.dtype, seed: int, shapes: tuple[tuple[int, int], ...] | None = None, stock_ok: bool = True
+) -> None:
+    """Marlin vs fp32 reference per route; stock W4A4 comparisons only where stock can run (cc >= 10)."""
+    shapes = shapes or tuple(SHAPES)
     n0, k0 = SHAPES[0]
-    y_a, _, _ = _apply(_build(False, n0, k0, seed, dtype, False)[0], 4, n0, k0, dtype, seed, False)
-    y_b, _, _ = _apply(_build(False, n0, k0, seed, dtype, False)[0], 4, n0, k0, dtype, seed, False)
-    if not torch.equal(y_a, y_b):
-        raise RuntimeError("GOETHE_MARLIN=0 not deterministic")
-
-    layer_stock, _ = _build(False, n0, k0, seed, dtype, False)
-    layer_dual, _ = _build(True, n0, k0, seed, dtype, False)
-    if hasattr(layer_stock, "marlin_weight"):
-        raise RuntimeError("GOETHE_MARLIN=0 must not allocate Marlin tensors")
-    extra = _param_bytes(layer_dual) - _param_bytes(layer_stock)
-    sidecar = _marlin_sidecar_bytes(layer_dual)
-    if abs(extra - sidecar) > 256 * 1024:
-        raise RuntimeError(f"dual layout overhead {extra} != sidecar {sidecar}")
-
+    if stock_ok:
+        y_a, _, _ = _apply(_build(False, n0, k0, seed, dtype, False)[0], 4, n0, k0, dtype, seed, False)
+        y_b, _, _ = _apply(_build(False, n0, k0, seed, dtype, False)[0], 4, n0, k0, dtype, seed, False)
+        if not torch.equal(y_a, y_b):
+            raise RuntimeError("GOETHE_MARLIN=0 not deterministic")
+        layer_stock, _ = _build(False, n0, k0, seed, dtype, False)
+        layer_dual, _ = _build(True, n0, k0, seed, dtype, False)
+        if hasattr(layer_stock, "marlin_weight"):
+            raise RuntimeError("GOETHE_MARLIN=0 must not allocate Marlin tensors")
+        extra = _param_bytes(layer_dual) - _param_bytes(layer_stock)
+        sidecar = _marlin_sidecar_bytes(layer_dual)
+        if abs(extra - sidecar) > 256 * 1024:
+            raise RuntimeError(f"dual layout overhead {extra} != sidecar {sidecar}")
     for n, k in shapes:
-        layer_stock, _ = _build(False, n, k, seed, dtype, False)
         layer_goethe, raw = _build(True, n, k, seed, dtype, False)
         for m in SMALL_M:
             y, x, bias = _apply(layer_goethe, m, n, k, dtype, seed + m, True)
-            ref = _reference_fp32(
-                x, raw["weight_packed"], raw["weight_scale"], raw["weight_global_scale"], bias
-            )
+            ref = _reference_fp32(x, raw["weight_packed"], raw["weight_scale"], raw["weight_global_scale"], bias)
             if not _within_tol(y, ref):
                 raise RuntimeError(f"default marlin tol fail {n}x{k} m={m} dtype={dtype}")
-        for m in _large_m(n, k):
-            y_goethe, _, _ = _apply(layer_goethe, m, n, k, dtype, seed + m, True)
-            y_stock, _, _ = _apply(layer_stock, m, n, k, dtype, seed + m, False)
-            if not torch.equal(y_goethe, y_stock):
-                raise RuntimeError(f"large M stock path mismatch {n}x{k} m={m}")
-
+        if stock_ok:
+            layer_stock, _ = _build(False, n, k, seed, dtype, False)
+            for m in _large_m(n, k):
+                y_goethe, _, _ = _apply(layer_goethe, m, n, k, dtype, seed + m, True)
+                y_stock, _, _ = _apply(layer_stock, m, n, k, dtype, seed + m, False)
+                if not torch.equal(y_goethe, y_stock):
+                    raise RuntimeError(f"large M stock path mismatch {n}x{k} m={m}")
         with _env(GOETHE_FORCE_PATH="w4a16"):
             layer_all, raw = _build(True, n, k, seed + 7, dtype, True)
-            if layer_all.weight_packed.numel() != 0:
-                raise RuntimeError("marlin_all must release stock tensors")
-            ws_bytes = layer_all.marlin_workspace.numel() * layer_all.marlin_workspace.element_size()
-            if _param_bytes(layer_all) != _marlin_sidecar_bytes(layer_all) - ws_bytes:
-                raise RuntimeError("marlin_all memory must be Marlin tensors only")
-            for m in _marlin_all_ms(n, k):
-                y, x, bias = _apply(layer_all, m, n, k, dtype, seed + m, True, True)
-                ref = _reference_fp32(
-                    x, raw["weight_packed"], raw["weight_scale"], raw["weight_global_scale"], bias
-                )
-                if not _within_tol(y, ref):
-                    raise RuntimeError(f"marlin_all tol fail {n}x{k} m={m}")
-
+        if layer_all.weight_packed.numel() != 0:
+            raise RuntimeError("marlin_all must release stock tensors")
+        ws_bytes = layer_all.marlin_workspace.numel() * layer_all.marlin_workspace.element_size()
+        if _param_bytes(layer_all) != _marlin_sidecar_bytes(layer_all) - ws_bytes:
+            raise RuntimeError("marlin_all memory must be Marlin tensors only")
+        for m in _marlin_all_ms(n, k):
+            y, x, bias = _apply(layer_all, m, n, k, dtype, seed + m, True, True)
+            ref = _reference_fp32(x, raw["weight_packed"], raw["weight_scale"], raw["weight_global_scale"], bias)
+            if not _within_tol(y, ref):
+                raise RuntimeError(f"marlin_all tol fail {n}x{k} m={m}")
     layer_g, _ = _build(True, n0, k0, seed, dtype, False)
     _publish_fp4()
-    for m in GRAPH_M:
+    for m in GRAPH_M + ((GRAPH_LARGE_M,) if stock_ok else ()):
         x = torch.randn(m, k0, device="cuda", dtype=dtype)
         bias = torch.randn(n0, device="cuda", dtype=dtype)
         _graph_replay(layer_g, x, bias, True)
     with _env(GOETHE_FORCE_PATH="w4a16"):
         layer_ga, _ = _build(True, n0, k0, seed + 9, dtype, True)
-        for m in GRAPH_M:
-            x = torch.randn(m, k0, device="cuda", dtype=dtype)
-            bias = torch.randn(n0, device="cuda", dtype=dtype)
-            _graph_replay(layer_ga, x, bias, True, True)
+    for m in (*GRAPH_M, GRAPH_LARGE_M):
+        x = torch.randn(m, k0, device="cuda", dtype=dtype)
+        bias = torch.randn(n0, device="cuda", dtype=dtype)
+        _graph_replay(layer_ga, x, bias, True, True)
 
 
 def main() -> None:
-    gpu = require_gpus(1)[0]
+    """Exercise the patched NVFP4 linear scheme on the small-CUDA test GPU (allocations stay well under 4 GB)."""
+    gpu = require_gpus(1)[-1]
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA required")
@@ -277,20 +300,23 @@ def main() -> None:
 
     if mode() == "stock":
         raise RuntimeError("expected default-on Marlin routing")
-
+    stock_ok = torch.cuda.get_device_capability()[0] >= 10
     seed = 42
     with gpu_flock([gpu]):
-        _run_dtype(torch.bfloat16, seed)
-        _run_dtype(torch.float16, seed + 100, shapes=((100, 256),))
+        _run_dtype(torch.bfloat16, seed, stock_ok=stock_ok)
+        _run_dtype(torch.float16, seed + 100, shapes=((100, 256),), stock_ok=stock_ok)
+        if stock_ok:
+            _max_rows_override(torch.bfloat16, seed + 200)
         n0, k0 = SHAPES[0]
         layer, raw = _build(True, n0, k0, seed + 50, torch.float16, False)
         y, x, bias = _apply(layer, 1, n0, k0, torch.float16, seed, True)
-        ref = _reference_fp32(
-            x, raw["weight_packed"], raw["weight_scale"], raw["weight_global_scale"], bias
-        )
+        ref = _reference_fp32(x, raw["weight_packed"], raw["weight_scale"], raw["weight_global_scale"], bias)
         if not _within_tol(y, ref):
             raise RuntimeError("fp16 spot check failed")
-    print("stage1_layer ok")
+        peak = torch.cuda.max_memory_allocated() / 2**30
+        if peak > 4.0:
+            raise RuntimeError(f"stage1_layer peak CUDA allocation {peak:.2f} GiB exceeds 4 GiB")
+    print(f"stage1_layer ok stock_paths={'checked' if stock_ok else 'skipped (cc<10)'} peak_gib={peak:.2f}")
 
 
 if __name__ == "__main__":
