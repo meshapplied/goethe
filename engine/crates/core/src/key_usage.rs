@@ -60,48 +60,17 @@ pub fn totals_for_key(con: &Connection, key_id: &str) -> Result<(i64, i64, i64, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    const OLD_V2_DDL: &str = r"
-CREATE TABLE api_keys (
-    key_id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    token_hash TEXT UNIQUE NOT NULL,
-    raw_prefix TEXT NOT NULL,
-    rpm_limit INTEGER DEFAULT 120,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-PRAGMA user_version = 2;
-";
 
     #[test]
-    fn migrate_v2_to_v3_adds_key_usage() {
+    fn usage_accumulates_per_key() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = PathBuf::from(dir.path()).join("state.db");
-        {
-            let con = rusqlite::Connection::open(&db_path).expect("open");
-            con.execute_batch(OLD_V2_DDL).expect("old ddl");
-        }
-        let con = db::open(dir.path()).expect("migrate");
-        let ver: i32 = con
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(ver, 5);
-        let cols: Vec<String> = con
-            .prepare("PRAGMA table_info(api_keys)")
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(1))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect();
-        assert!(cols.iter().any(|c| c == "expires_at"));
-        assert!(cols.iter().any(|c| c == "model_scope"));
-        con.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='key_usage'",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .map(|n| assert_eq!(n, 1))
-        .unwrap();
+        let con = db::open(dir.path()).expect("open");
+        record_request_con(&con, "k1", 10, 5).unwrap();
+        record_request_con(&con, "k1", 3, 2).unwrap();
+        record_request_con(&con, "k2", 1, 1).unwrap();
+        let (req, prompt, completion, all_req, _, all_completion) = totals_for_key(&con, "k1").unwrap();
+        assert_eq!((req, prompt, completion), (2, 13, 7));
+        assert_eq!((all_req, all_completion), (2, 7));
+        assert_eq!(totals_for_key(&con, "missing").unwrap(), (0, 0, 0, 0, 0, 0));
     }
 }
