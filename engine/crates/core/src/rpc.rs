@@ -29,6 +29,7 @@ pub struct RpcReply {
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
+    pub result: Value,
 }
 
 pub fn daemon_unavailable_message() -> &'static str {
@@ -63,55 +64,60 @@ pub fn parse_load_instance_id(stdout: &str) -> Option<String> {
 }
 
 pub fn call(method: &str, params: Value) -> Result<RpcReply, String> {
-    call_inner(method, params, 0)
+    // One request per connection; load and unload are never re-sent after an I/O error or timeout.
+    let resend = !matches!(method, "load" | "unload");
+    let mut attempt = 0;
+    loop {
+        match exchange(method, &params) {
+            Ok(reply) => return Ok(reply),
+            Err((true, _)) if resend && attempt < 3 => attempt += 1,
+            Err((true, e)) if !resend => {
+                return Err(format!(
+                    "goethed connection lost during {method} ({e}); it may still complete, check `goethe ps` before retrying"
+                ))
+            }
+            Err((_, e)) => return Err(e),
+        }
+    }
 }
 
-fn call_inner(method: &str, params: Value, attempt: u32) -> Result<RpcReply, String> {
+fn exchange(method: &str, params: &Value) -> Result<RpcReply, (bool, String)> {
+    // Connect (retrying briefly while goethed starts), send one line, read one; true flags I/O errors after connect.
     use std::thread;
     use std::time::Duration;
     let sock_path = goethe_sock();
     let mut stream = None;
-    for i in 0..40 {
+    for _ in 0..40 {
         match UnixStream::connect(&sock_path) {
             Ok(s) => {
                 stream = Some(s);
                 break;
             }
-            Err(_e) => {
-                if i == 39 {
-                    return Err(daemon_unavailable_message().to_string());
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
+            Err(_) => thread::sleep(Duration::from_millis(50)),
         }
     }
-    let mut stream = stream.expect("connected");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(600)))
-        .ok();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(30)))
-        .ok();
+    let Some(mut stream) = stream else {
+        return Err((false, daemon_unavailable_message().to_string()));
+    };
+    stream.set_read_timeout(Some(Duration::from_secs(600))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
     let req = Request {
         method: method.to_string(),
         params: params.clone(),
     };
-    let line = serde_json::to_string(&req).map_err(|e| e.to_string())?;
-    if stream.write_all(line.as_bytes()).is_err() || stream.write_all(b"\n").is_err() {
-        if attempt < 3 {
-            return call_inner(method, params, attempt + 1);
-        }
-        return Err("goethed connection lost".to_string());
-    }
+    let mut line = serde_json::to_string(&req).map_err(|e| (false, e.to_string()))?;
+    line.push('\n');
+    stream
+        .write_all(line.as_bytes())
+        .map_err(|e| (true, e.to_string()))?;
     let mut reader = BufReader::new(stream);
     let mut resp_line = String::new();
-    if reader.read_line(&mut resp_line).is_err() {
-        if attempt < 3 {
-            return call_inner(method, params, attempt + 1);
-        }
-        return Err("goethed connection lost".to_string());
+    match reader.read_line(&mut resp_line) {
+        Ok(0) => return Err((true, "goethed closed the connection".to_string())),
+        Ok(_) => {}
+        Err(e) => return Err((true, e.to_string())),
     }
-    let resp: Response = serde_json::from_str(resp_line.trim()).map_err(|e| e.to_string())?;
+    let resp: Response = serde_json::from_str(resp_line.trim()).map_err(|e| (false, e.to_string()))?;
     if resp.ok {
         let mut stdout = String::new();
         if !resp.message.is_empty() {
@@ -121,16 +127,17 @@ fn call_inner(method: &str, params: Value, attempt: u32) -> Result<RpcReply, Str
         if resp.result != Value::Null {
             stdout.push_str(&serde_json::to_string(&resp.result).unwrap_or_default());
         }
-        Ok(RpcReply {
+        return Ok(RpcReply {
             code: 0,
             stdout,
             stderr: String::new(),
-        })
-    } else {
-        Ok(RpcReply {
-            code: if resp.code != 0 { resp.code } else { 1 },
-            stdout: resp.message.clone(),
-            stderr: resp.error,
-        })
+            result: resp.result,
+        });
     }
+    Ok(RpcReply {
+        code: if resp.code != 0 { resp.code } else { 1 },
+        stdout: resp.message,
+        stderr: resp.error,
+        result: resp.result,
+    })
 }
