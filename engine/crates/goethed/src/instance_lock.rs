@@ -1,11 +1,12 @@
-// Exclusive goethed instance lock and live socket check.
+// Exclusive goethed instance lock; holding it proves any previous daemon is gone and its socket stale.
 
 use goethe_core::paths::{goethe_home, goethe_sock};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
 
 pub struct InstanceLock {
     _file: File,
@@ -13,94 +14,52 @@ pub struct InstanceLock {
 
 impl InstanceLock {
     pub fn acquire() -> Result<Self, String> {
+        // flock first (no truncate before it); only the holder may clear a stale socket and write its pid.
         let home = goethe_home();
+        std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
         let path = home.join("goethed.lock");
-        let sock = goethe_sock();
-        if sock.exists() {
-            if let Some(pid) = read_lock_pid(&path) {
-                if pid_alive(pid) {
-                    return Err(format!("goethed already running (pid {pid})"));
-                }
-            }
-            reclaim_stale(&home, &path);
-        } else if let Some(pid) = read_lock_pid(&path) {
-            if pid_alive(pid) {
-                return Err(format!("goethed already running (pid {pid})"));
-            }
-            reclaim_stale(&home, &path);
-        }
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .mode(0o600)
             .open(&path)
-            .map_err(|e| e.to_string())?;
-        let fd = file.as_raw_fd();
-        let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-        if rc != 0 {
-            if let Some(pid) = read_lock_pid(&path) {
-                if pid_alive(pid) {
-                    return Err(format!("goethed already running (pid {pid})"));
-                }
-                reclaim_stale(&home, &path);
-                let mut file = OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&path)
-                    .map_err(|e| e.to_string())?;
-                let fd = file.as_raw_fd();
-                if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-                    return Err("goethed already running".to_string());
-                }
-                write_pid(&mut file)?;
-                return Ok(Self { _file: file });
+            .map_err(|e| format!("open {}: {e}", path.display()))?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                return Err(format!("lock {}: {err}", path.display()));
             }
-            return Err("goethed already running".to_string());
+            return Err(match read_lock_pid(&path) {
+                Some(pid) => format!("goethed already running (pid {pid})"),
+                None => "goethed already running".to_string(),
+            });
         }
-        write_pid(&mut file)?;
+        clear_stale_socket(&goethe_sock())?;
+        file.set_len(0).map_err(|e| e.to_string())?;
+        file.write_all(format!("{}\n", std::process::id()).as_bytes())
+            .map_err(|e| e.to_string())?;
         Ok(Self { _file: file })
     }
 }
 
-fn write_pid(file: &mut File) -> Result<(), String> {
-    let pid = std::process::id();
-    file.set_len(0).map_err(|e| e.to_string())?;
-    file.write_all(format!("{pid}\n").as_bytes())
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn read_lock_pid(path: &PathBuf) -> Option<u32> {
+fn read_lock_pid(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path)
         .ok()
-        .and_then(|s| s.lines().next()?.parse().ok())
+        .and_then(|s| s.lines().next()?.trim().parse().ok())
 }
 
-fn pid_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-}
-
-fn reclaim_stale(home: &Path, lock: &PathBuf) {
-    let sock = goethe_sock();
-    if sock.exists() {
-        if let Some(pid) = read_lock_pid(lock) {
-            if !pid_alive(pid) {
-                let _ = std::fs::remove_file(&sock);
-            }
-        } else {
-            let _ = std::fs::remove_file(&sock);
-        }
+fn clear_stale_socket(sock: &Path) -> Result<(), String> {
+    // Remove a leftover socket; refuse if something still answers on it (another home sharing GOETHE_SOCK).
+    let Ok(meta) = std::fs::symlink_metadata(sock) else {
+        return Ok(());
+    };
+    if !meta.file_type().is_socket() {
+        return Err(format!("{} exists and is not a socket", sock.display()));
     }
-    if lock.is_file() {
-        if let Some(pid) = read_lock_pid(lock) {
-            if !pid_alive(pid) {
-                let _ = std::fs::remove_file(lock);
-            }
-        }
+    if UnixStream::connect(sock).is_ok() {
+        return Err(format!("goethed already running ({} answers)", sock.display()));
     }
-    let _ = home;
+    std::fs::remove_file(sock).map_err(|e| format!("remove stale {}: {e}", sock.display()))
 }
