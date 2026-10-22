@@ -17,6 +17,7 @@ pub fn wait_after_load_stdout(stdout: &str, no_wait: bool) -> Result<(), String>
 }
 
 pub fn wait_for_instance(instance_id: &str, timeout: Duration) -> Result<(), String> {
+    // Poll ps until the instance is RUNNING, printing its notices; a final status or a vanished row ends the wait.
     let deadline = Instant::now() + timeout;
     let mut printed_notices = 0usize;
     while Instant::now() < deadline {
@@ -24,6 +25,9 @@ pub fn wait_for_instance(instance_id: &str, timeout: Duration) -> Result<(), Str
         if ps.code == 0 {
             if let Ok(rows) = serde_json::from_str::<serde_json::Value>(&ps.stdout) {
                 if let Some(arr) = rows.as_array() {
+                    if !arr.iter().any(|r| r.get("instance_id").and_then(|v| v.as_str()) == Some(instance_id)) {
+                        return Err(format!("instance {instance_id} no longer exists (unloaded or stopped)"));
+                    }
                     for row in arr {
                         if row.get("instance_id").and_then(|v| v.as_str()) != Some(instance_id) {
                             continue;
