@@ -511,51 +511,15 @@ fn check_tls(home: &Path) -> Check {
     check("tls", "OK", end)
 }
 
-fn check_hf(home: &Path) -> Check {
+fn check_hf(_home: &Path) -> Check {
+    // Anonymous reachability of the Hub; goethe never logs in.
     if hf::offline_mode() {
-        return Check {
-            name: "huggingface".into(),
-            status: "INFO".into(),
-            hint: "HF_HUB_OFFLINE=1".into(),
-        };
+        return check("huggingface", "INFO", "HF_HUB_OFFLINE=1");
     }
-    let endpoint = hf::hf_endpoint();
-    let url = format!("{endpoint}/api/whoami-v2");
-    let token = hf::resolve_token(home);
-    let req = crate::net::agent()
-        .get(&url)
-        .timeout(Duration::from_secs(3));
-    let req = if let Some(t) = token.as_ref() {
-        req.set("Authorization", &format!("Bearer {t}"))
-    } else {
-        req
-    };
-    match req.call() {
-        Ok(r) if r.status() == 200 => Check {
-            name: "huggingface".into(),
-            status: "OK".into(),
-            hint: "reachable, logged in".into(),
-        },
-        Ok(r) if r.status() == 401 && token.is_none() => Check {
-            name: "huggingface".into(),
-            status: "OK".into(),
-            hint: "reachable, not logged in".into(),
-        },
-        Ok(r) if r.status() == 401 || r.status() == 403 => Check {
-            name: "huggingface".into(),
-            status: "WARN".into(),
-            hint: format!("reachable but token rejected (HTTP {})", r.status()),
-        },
-        Ok(r) => Check {
-            name: "huggingface".into(),
-            status: "INFO".into(),
-            hint: format!("HTTP {}", r.status()),
-        },
-        Err(e) => Check {
-            name: "huggingface".into(),
-            status: "WARN".into(),
-            hint: format!("unreachable: {e}"),
-        },
+    let url = format!("{}/api/models?limit=1", hf::hf_endpoint());
+    match crate::net::agent().get(&url).timeout(Duration::from_secs(3)).call() {
+        Ok(_) | Err(ureq::Error::Status(..)) => check("huggingface", "OK", "reachable (anonymous; gated repos need a manual download)"),
+        Err(e) => check("huggingface", "WARN", format!("unreachable: {e}")),
     }
 }
 
