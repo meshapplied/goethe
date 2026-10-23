@@ -815,7 +815,7 @@ pub fn slot_has_running_instance(slot_or_model: &str) -> bool {
     .is_ok()
 }
 
-pub(crate) fn append_goethed_log(home: &Path, line: &str) {
+pub fn append_goethed_log(home: &Path, line: &str) {
     let path = home.join("logs/goethed.log");
     let _ = std::fs::OpenOptions::new()
         .create(true)

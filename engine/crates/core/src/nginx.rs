@@ -9,7 +9,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 use std::{fs, io, thread};
 
@@ -598,27 +598,6 @@ fn reap_orphans(home: &Path) {
     }
 }
 
-fn spawn_on_keeper(cmd: Command) -> io::Result<Child> {
-    // Spawn from one long-lived thread: PR_SET_PDEATHSIG fires when the spawning thread exits, not the process.
-    type Job = (Command, mpsc::Sender<io::Result<Child>>);
-    static KEEPER: OnceLock<mpsc::Sender<Job>> = OnceLock::new();
-    let keeper = KEEPER.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<Job>();
-        let _ = thread::Builder::new()
-            .name("goethe-nginx-keeper".into())
-            .spawn(move || {
-                for (mut cmd, reply) in rx {
-                    let _ = reply.send(cmd.spawn());
-                }
-            });
-        tx
-    });
-    let gone = || io::Error::other("nginx keeper thread is gone");
-    let (reply_tx, reply_rx) = mpsc::channel();
-    keeper.send((cmd, reply_tx)).map_err(|_| gone())?;
-    reply_rx.recv().map_err(|_| gone())?
-}
-
 fn child_alive() -> bool {
     master_slot()
         .as_mut()
@@ -678,11 +657,10 @@ fn spawn_private(home: &Path) -> Result<(), String> {
     unsafe {
         cmd.pre_exec(|| {
             libc::setpgid(0, 0);
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
             Ok(())
         });
     }
-    let child = spawn_on_keeper(cmd).map_err(|e| {
+    let child = cmd.spawn().map_err(|e| {
         let msg = format!("nginx spawn failed: {e}");
         log_gateway(home, &msg);
         msg
@@ -771,12 +749,25 @@ pub fn stop(home: &Path) {
 }
 
 fn start_locked(home: &Path) -> Result<(), String> {
-    // Render configs, then hot-reload our own live master or spawn a fresh one.
+    // Render configs, then hot-reload a verified live master (ours, or one a previous goethed left) or spawn one.
     write_configs(home, &nginx_bin(home))?;
-    if child_alive() && verified_master(home).is_some() {
+    if verified_master(home).is_some() {
         return apply_locked(home);
     }
     spawn_private(home)
+}
+
+pub fn master_running(home: &Path) -> bool {
+    verified_master(home).is_some()
+}
+
+pub fn stop_left_gateway(home: &Path) -> bool {
+    // With no goethed running, stop a verified nginx master that a previous goethed left serving.
+    if verified_master(home).is_none() {
+        return false;
+    }
+    stop(home);
+    true
 }
 
 pub fn ensure_running() -> Result<(), String> {
