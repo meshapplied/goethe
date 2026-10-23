@@ -1,128 +1,127 @@
 #!/usr/bin/env python3
-"""Stage 6 CDN signature and checksum verification gate."""
+"""Stage 6 CDN signature and checksum verification gate (packaging keygen/sign scripts and install.sh)."""
 
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import subprocess
-import time
 from pathlib import Path
 
-from lib.goethe_test import GOETHE_PKG, Proc, Skip, free_port, main_exit, spawn, temp_home
+from lib.goethe_test import GOETHE_PKG, Proc, free_port, main_exit, run_temp_prefix, sign_cdn_tree, spawn, temp_home
+
+ARCH = "aarch64" if platform.machine() in ("aarch64", "arm64") else platform.machine()
+LOCK = "requirements.aarch64.lock" if ARCH == "aarch64" else "requirements.lock"
+PACKAGING = GOETHE_PKG / "packaging"
 
 
-def _sign_tree(cdn: Path, key: Path) -> None:
-    """Write VERSION, SHA256SUMS, and SHA256SUMS.sig for cdn."""
-    ver = (GOETHE_PKG / "crates" / "goethe" / "Cargo.toml").read_text().split('version = "', 1)[1].split('"', 1)[0]
-    (cdn / "VERSION").write_text(ver + "\n")
-    lines: list[str] = []
-    for path in sorted(p for p in cdn.rglob("*") if p.is_file() and p.name not in ("SHA256SUMS", "SHA256SUMS.sig")):
-        rel = path.relative_to(cdn).as_posix()
-        digest = subprocess.check_output(["sha256sum", str(path)], text=True).split()[0]
-        lines.append(f"{digest}  {rel}")
-    (cdn / "SHA256SUMS").write_text("\n".join(lines) + "\n")
-    subprocess.run(
-        ["openssl", "dgst", "-sha256", "-sign", str(key), "-out", str(cdn / "SHA256SUMS.sig"), str(cdn / "SHA256SUMS")],
-        check=True,
-    )
+def _sh(*cmd: str | Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([str(c) for c in cmd], capture_output=True, text=True, timeout=60)
 
 
-def _mini_cdn(root: Path, pub: Path) -> Path:
-    """Build a minimal CDN directory under root and return its path."""
-    cdn = root / "cdn"
-    cdn.mkdir(parents=True)
+def _mini_cdn(cdn: Path, pub: Path) -> None:
+    """A CDN tree with real pyenv files, stub binaries and an install.sh embedding pub."""
     shutil.copytree(GOETHE_PKG / "cdn" / "v1", cdn / "v1")
     (cdn / "pyenv").mkdir()
-    shutil.copy2(GOETHE_PKG / "pyenv" / "requirements.lock", cdn / "pyenv" / "requirements.lock")
-    shutil.copy2(GOETHE_PKG / "pyenv" / "bootstrap.sh", cdn / "pyenv" / "bootstrap.sh")
-    bindir = cdn / "bin" / "linux-x86_64"
+    for name in ("requirements.lock", "requirements.aarch64.lock", "bootstrap.sh"):
+        shutil.copy2(GOETHE_PKG / "pyenv" / name, cdn / "pyenv" / name)
+    bindir = cdn / "bin" / f"linux-{ARCH}"
     bindir.mkdir(parents=True)
     for name in ("goethe", "goethed", "uv"):
-        exe = bindir / name
-        exe.write_bytes(b"#!/bin/sh\necho stub\n")
-        exe.chmod(0o755)
-    subst = GOETHE_PKG / "packaging" / "subst_install_pubkey.sh"
-    subprocess.run(["bash", str(subst), str(GOETHE_PKG / "cdn" / "install.sh"), str(pub), str(cdn / "install.sh")], check=True)
-    return cdn
+        (bindir / name).write_bytes(b"#!/bin/sh\necho stub\n")
+        (bindir / name).chmod(0o755)
+    rr = _sh("bash", PACKAGING / "subst_install_pubkey.sh", GOETHE_PKG / "cdn" / "install.sh", pub, cdn / "install.sh")
+    if rr.returncode != 0:
+        raise RuntimeError(f"subst_install_pubkey failed: {rr.stderr}")
 
 
-def _run_install(install_sh: Path, pkg_url: str, home: Path, extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    """Run install.sh against pkg_url into home."""
-    env = {"GOETHE_HOME": str(home), "GOETHE_PKG_URL": pkg_url, "GOETHE_NO_LINK": "1", "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
-    if extra:
-        env.update(extra)
-    return subprocess.run(["bash", str(install_sh)], env=env, capture_output=True, text=True, timeout=120)
+def _install(install_sh: Path, pkg_url: str, home: Path, extra: dict[str, str] | None = None) -> str:
+    """Run install.sh against pkg_url into home; return rc-prefixed combined output."""
+    env = {
+        "GOETHE_HOME": str(home / "g"), "GOETHE_PKG_URL": pkg_url, "GOETHE_NO_LINK": "1",
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home), **(extra or {}),
+    }
+    rr = subprocess.run(["bash", str(install_sh)], env=env, capture_output=True, text=True, timeout=120,
+                        stdin=subprocess.DEVNULL)
+    return f"rc={rr.returncode}\n{rr.stdout}{rr.stderr}"
+
+
+def _variant(root: Path, name: str, cdn: Path) -> Path:
+    """Copy of the signed CDN under root/name for a negative case."""
+    out = root / name
+    shutil.copytree(cdn, out)
+    return out
 
 
 def main() -> None:
-    """Exercise signed CDN verification paths in install.sh."""
-    keygen = GOETHE_PKG / "packaging" / "keygen.sh"
-    if not keygen.is_file():
-        raise Skip("packaging/keygen.sh missing")
-    root = Path(f"/tmp/goethe-test-{os.environ.get('GOETHE_GATE_RUN_ID', os.getpid())}-integrity")
+    """Exercise keygen, sign_cdn.sh and the signed-CDN verification paths in install.sh."""
+    root = Path(f"/tmp/{run_temp_prefix('integrity')}root")
     shutil.rmtree(root, ignore_errors=True)
     root.mkdir(parents=True)
-    subprocess.run(["bash", str(keygen), str(root)], check=True)
-    key = root / "release.key"
-    pub = root / "release_pub.pem"
-    cdn = _mini_cdn(root, pub)
-    _sign_tree(cdn, key)
-    port = free_port()
-    srv: Proc = spawn(
-        [os.environ.get("GOETHE_PYTHON", "python3"), "-m", "http.server", str(port), "--bind", "127.0.0.1"],
-        cwd=str(root),
-        label="integrity-cdn",
-    )
-    pkg_url = f"http://127.0.0.1:{port}/cdn"
-    marker = cdn / "pyenv" / "bootstrap.ran"
-    time.sleep(0.3)
+    srv: Proc | None = None
     try:
-        with temp_home(stub_python=False, tag="integrity") as home:
-            rr = _run_install(cdn / "install.sh", pkg_url, home, {"GOETHE_VERIFY_ONLY": "1"})
-            if rr.returncode != 0:
-                raise RuntimeError(f"valid verify failed: {rr.stderr[-400:]}")
-        tampered = root / "cdn-tamper"
-        shutil.copytree(cdn, tampered)
+        keys, other = root / "keys", root / "other-keys"
+        for d in (keys, other):
+            if _sh("bash", PACKAGING / "keygen.sh", d).returncode != 0:
+                raise RuntimeError("keygen.sh failed")
+        if _sh("bash", PACKAGING / "keygen.sh", keys).returncode == 0:
+            raise RuntimeError("keygen.sh overwrote an existing key")
+        if (keys / "release.key").stat().st_mode & 0o077:
+            raise RuntimeError("release.key is readable by group or others")
+        cdn = root / "cdn"
+        _mini_cdn(cdn, keys / "release_pub.pem")
+        wrong = _variant(root, "cdn-wrongkey", cdn)
+        rr = _sh("bash", PACKAGING / "sign_cdn.sh", wrong, other / "release.key")
+        if rr.returncode == 0 or "does not match" not in rr.stderr:
+            raise RuntimeError(f"sign_cdn.sh accepted a key that differs from install.sh's: {rr.stderr}")
+        rr = _sh("bash", PACKAGING / "sign_cdn.sh", cdn, keys / "release.key")
+        if rr.returncode != 0:
+            raise RuntimeError(f"sign_cdn.sh failed: {rr.stderr}")
+        tampered = _variant(root, "cdn-tamper", cdn)
+        marker = root / "bootstrap.ran"
         boot = tampered / "pyenv" / "bootstrap.sh"
-        boot.write_text(boot.read_text() + '\necho ran >"' + str(marker) + '"\n')
-        with temp_home(stub_python=False, tag="integrity-tamper") as home:
-            rr = _run_install(tampered / "install.sh", f"http://127.0.0.1:{port}/cdn-tamper", home)
-            if rr.returncode == 0:
-                raise RuntimeError("tampered bootstrap should fail")
-            if "checksum mismatch" not in (rr.stderr + rr.stdout):
-                raise RuntimeError(f"expected checksum mismatch: {rr.stderr[-400:]}")
-            if marker.exists():
-                raise RuntimeError("bootstrap executed after checksum failure")
-        badsums = root / "cdn-badsums"
-        shutil.copytree(cdn, badsums)
+        boot.write_text(boot.read_text() + f'\necho ran >"{marker}"\n')
+        badsums = _variant(root, "cdn-badsums", cdn)
         text = (badsums / "SHA256SUMS").read_text()
         (badsums / "SHA256SUMS").write_text(text.replace("a", "b", 1))
-        with temp_home(stub_python=False, tag="integrity-sig") as home:
-            rr = _run_install(badsums / "install.sh", f"http://127.0.0.1:{port}/cdn-badsums", home, {"GOETHE_VERIFY_ONLY": "1"})
-            if rr.returncode == 0 or "signature verification failed" not in (rr.stderr + rr.stdout):
-                raise RuntimeError(f"expected signature failure: {rr.stderr[-400:]}")
-        unsigned = root / "cdn-unsigned"
-        shutil.copytree(cdn, unsigned)
+        nolock = _variant(root, "cdn-nolock", cdn)
+        (nolock / "pyenv" / LOCK).unlink()
+        sign_cdn_tree(nolock, keys / "release.key")
+        unsigned = _variant(root, "cdn-unsigned", cdn)
         for name in ("SHA256SUMS", "SHA256SUMS.sig", "VERSION"):
-            (unsigned / name).unlink(missing_ok=True)
-        subst = GOETHE_PKG / "packaging" / "subst_install_pubkey.sh"
-        subprocess.run(["bash", str(subst), str(GOETHE_PKG / "cdn" / "install.sh"), str(pub), str(unsigned / "install.sh")], check=True)
-        with temp_home(stub_python=False, tag="integrity-unsigned") as home:
-            rr = _run_install(unsigned / "install.sh", f"http://127.0.0.1:{port}/cdn-unsigned", home, {"GOETHE_VERIFY_ONLY": "1"})
-            if rr.returncode == 0:
-                raise RuntimeError("unsigned install should fail without GOETHE_INSECURE")
-        with temp_home(stub_python=False, tag="integrity-insecure") as home:
-            rr = _run_install(
-                unsigned / "install.sh",
-                f"http://127.0.0.1:{port}/cdn-unsigned",
-                home,
-                {"GOETHE_INSECURE": "1", "GOETHE_VERIFY_ONLY": "1"},
-            )
-            if rr.returncode != 0:
-                raise RuntimeError(f"GOETHE_INSECURE should proceed: {rr.stderr[-400:]}")
+            (unsigned / name).unlink()
+        shutil.copy2(GOETHE_PKG / "cdn" / "install.sh", unsigned / "install.sh")
+        port = free_port()
+        srv = spawn(
+            [os.environ.get("GOETHE_PYTHON", "python3"), "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+            cwd=root,
+            label="integrity-cdn",
+        )
+        base = f"http://127.0.0.1:{port}"
+        verify = {"GOETHE_VERIFY_ONLY": "1"}
+        cases = [
+            ("valid", cdn, verify, "rc=0", "verified CDN artifacts"),
+            ("tampered", tampered, {}, "checksum mismatch", None),
+            ("bad sums", badsums, verify, "signature verification failed", None),
+            ("missing lock", nolock, verify, f"CDN missing pyenv/{LOCK}", None),
+            ("unsigned", unsigned, verify, "unsigned install.sh", None),
+            ("insecure", unsigned, {**verify, "GOETHE_INSECURE": "1"}, "rc=0", "GOETHE_INSECURE=1 skips"),
+        ]
+        with temp_home(stub_python=False, tag="integrity", pyenv=False) as home:
+            for name, tree, extra, want, also in cases:
+                out = ""
+                for _ in range(20):
+                    out = _install(tree / "install.sh", f"{base}/{tree.name}", home / name.replace(" ", "-"), extra)
+                    if "Connection refused" not in out:
+                        break
+                if want not in out or (also and also not in out) or (want != "rc=0" and out.startswith("rc=0")):
+                    raise RuntimeError(f"{name}: expected {want!r}: {out[-500:]}")
+            if marker.exists():
+                raise RuntimeError("bootstrap executed after checksum failure")
     finally:
-        srv.stop()
+        if srv is not None:
+            srv.stop()
         shutil.rmtree(root, ignore_errors=True)
     print("stage6_integrity ok")
 

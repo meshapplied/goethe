@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import os
 import re
-from pathlib import Path
 
 from lib.goethe_test import main_exit, require_cli, resolve_python, run_goethe, temp_home
 

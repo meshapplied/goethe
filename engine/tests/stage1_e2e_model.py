@@ -15,6 +15,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from lib.goethe_test import dev_home, dev_python, free_port, test_gpus
+
 PROMPTS = [
     ("capital", "What is the capital of France? Answer in one word.", ["Paris"]),
     ("arith", "What is 12 times 13? Reply with the number only.", ["156"]),
@@ -25,8 +27,8 @@ PROMPTS = [
 ]
 
 NEW_TOKENS = 64
-PORT = int(os.environ.get("GOETHE_TEST_E2E_PORT", "30142"))
-GPU = os.environ.get("GOETHE_TEST_GPUS", "2,3").split(",")[0].strip()
+PORT = free_port()
+GPU = str(test_gpus()[0])
 
 
 def _skip(msg: str) -> None:
@@ -222,8 +224,8 @@ def main() -> None:
     if os.environ.get("GOETHE_TEST_REAL", "") != "1":
         _skip("set GOETHE_TEST_REAL=1 to run real-model gate")
 
-    goethe_home = Path(os.environ.get("GOETHE_HOME", "/scratch/ternary-flash/goethe-home"))
-    py = goethe_home / "py-env/bin/python"
+    goethe_home = dev_home()
+    py = dev_python()
     if not py.is_file():
         print("missing py-env", file=sys.stderr)
         sys.exit(1)

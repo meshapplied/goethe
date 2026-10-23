@@ -78,7 +78,7 @@ def main() -> None:
                 )
                 load_env = {**env, "CUDA_VISIBLE_DEVICES": str(gpu_idx)}
                 rr_load = run(
-                    [str(goethe), "load", "gp", "--gpus", str(gpu_idx)],
+                    [str(goethe), "load", "gp", "--gpus", str(gpu_idx), "--yes"],
                     env=load_env,
                     timeout=60,
                 )

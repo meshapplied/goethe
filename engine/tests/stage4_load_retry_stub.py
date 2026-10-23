@@ -6,37 +6,38 @@ from __future__ import annotations
 import json
 import os
 import signal
-import sqlite3
 import subprocess
 import time
 from pathlib import Path
 
 from lib.goethe_test import (
     Proc,
-    _acquire_gpu_flocks,
     assert_no_stub_engines,
+    gpu_flock,
     home_goethe_env,
     main_exit,
+    pid_alive,
     require_cli,
-    require_gpus,
     run,
     run_goethe,
     seed_installed_model,
-    spawn,
+    sqlite_query,
+    start_goethed,
+    stub_engine_pids,
+    stub_launch,
+    stub_load_gpu,
     temp_home,
     wait_until,
+    write_card,
 )
 
 
-def _pgrep_stub(home: Path, model_rel: str = "models/org__retry") -> list[int]:
-    needle = str(home / model_rel)
-    proc = subprocess.run(["pgrep", "-f", needle], capture_output=True, text=True)
-    if proc.returncode != 0:
-        return []
-    return [int(x) for x in proc.stdout.split() if x.strip().isdigit()]
+def _stubs(home: Path) -> list[int]:
+    return stub_engine_pids(home / "models" / "org__retry")
 
 
 def _index_lines(home: Path) -> int:
+    """Number of engine spawns logged in logs/index.jsonl."""
     idx = home / "logs" / "index.jsonl"
     if not idx.is_file():
         return 0
@@ -44,122 +45,91 @@ def _index_lines(home: Path) -> int:
 
 
 def _run_registry(home: Path) -> list[Path]:
-    d = home / "run"
-    if not d.is_dir():
-        return []
-    return sorted(d.glob("*.json"))
+    return sorted((home / "run").glob("*.json")) if (home / "run").is_dir() else []
 
 
 def main() -> None:
     """Exercise shortfall retries, CLI notices, cancel, and orphan reap."""
     goethe = require_cli("goethe")
-    require_cli("goethed")
-    gpu = require_gpus(1)[0]
-    release = _acquire_gpu_flocks([gpu])
-    dev_py = Path(os.environ.get("GOETHE_DEV_HOME", "/scratch/ternary-flash/goethe-home")) / "py-env" / "bin" / "python"
+    gpu = stub_load_gpu()
     md: Proc | None = None
-    try:
-        with temp_home(stub_python=True, real_python=dev_py if dev_py.is_file() else None) as home:
-            model = home / "models" / "org__retry"
-            model.mkdir(parents=True)
-            (model / "goethe_card.toml").write_text(
-                'model_id="retry"\ncontext_length=4096\nmax_running_requests=4\n',
-                encoding="utf-8",
-            )
-            (model / "stub_shortfall_fail.txt").write_text("2", encoding="utf-8")
-            (model / "stub_shortfall_gb.txt").write_text("4.7", encoding="utf-8")
-            seed_installed_model(home, "retry", str(model.relative_to(home)), 5.0, 1000, 4096, 4, 1)
-            goethed = spawn([str(require_cli("goethed"))], env=home_goethe_env(home), label="goethed")
-            md = goethed
-            if not wait_until(lambda: (home / "goethe.sock").is_socket(), timeout=20.0):
-                raise RuntimeError("goethed sock")
-            env = {**home_goethe_env(home), "CUDA_VISIBLE_DEVICES": str(gpu)}
-            rr = run(
-                [str(goethe), "load", "retry", "--gpus", str(gpu)],
-                env=env,
-                timeout=120,
-            )
-            if rr.returncode != 0:
-                raise RuntimeError(f"load failed: {rr.stderr[-400:]}")
-            out = rr.stdout + rr.stderr
-            if "engine needed" not in out or "retried" not in out:
-                raise RuntimeError("missing retry notice in CLI output")
-            if out.count("retried") != 2:
-                raise RuntimeError("expected two retry notices")
-            n_inst = sqlite3.connect(home / "state.db").execute(
-                "SELECT COUNT(*) FROM loaded_instances WHERE model_id='retry'"
-            ).fetchone()[0]
-            if n_inst != 1:
-                raise RuntimeError(f"expected one instance row got {n_inst}")
-            idx_n = _index_lines(home)
-            if idx_n != 3:
-                raise RuntimeError(f"expected 3 spawns in index got {idx_n}")
-            run_goethe([str(goethe), "unload", "retry"], env=env)
-            time.sleep(2)
-            if _pgrep_stub(home) or _run_registry(home):
-                raise RuntimeError("orphan after unload")
-            (model / "stub_shortfall_seen.txt").unlink(missing_ok=True)
-            rr2 = run(
-                [str(goethe), "load", "retry", "--gpus", str(gpu), "--no-wait"],
-                env=env,
-                timeout=60,
-            )
-            if rr2.returncode != 0:
-                raise RuntimeError("no-wait load failed")
-            time.sleep(1.0)
-            run_goethe([str(goethe), "unload", "retry"], env=env, timeout=60)
-            time.sleep(2)
-            if _pgrep_stub(home):
-                raise RuntimeError("stub survived unload during retry window")
-            if _run_registry(home):
-                raise RuntimeError("run registry left after cancel unload")
-            (model / "stub_shortfall_seen.txt").unlink(missing_ok=True)
-            load_proc = subprocess.Popen(
-                [str(goethe), "load", "retry", "--gpus", str(gpu)],
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            time.sleep(2.5)
-            orphan_pids = _pgrep_stub(home)
-            if not orphan_pids:
-                load_proc.kill()
-                raise RuntimeError("expected stub during mid-load")
-            os.kill(goethed.popen.pid, signal.SIGKILL)
-            goethed.popen.wait(timeout=5)
+    with gpu_flock([gpu]), temp_home(stub_python=True) as home:
+        model = home / "models" / "org__retry"
+        write_card(model, "retry")
+        (model / "stub_shortfall_fail.txt").write_text("2", encoding="utf-8")
+        (model / "stub_shortfall_gb.txt").write_text("4.7", encoding="utf-8")
+        seed_installed_model(home, "retry", "models/org__retry", 5.0, 1000, 4096, 4, 1)
+        md = start_goethed(home)
+        env = home_goethe_env(home)
+        load = [str(goethe), "load", "retry", "--gpus", str(gpu), "--yes"]
+        rr = run(load, env=env, timeout=120)
+        if rr.returncode != 0:
+            raise RuntimeError(f"load failed: {rr.stderr[-400:]}")
+        out = rr.stdout + rr.stderr
+        if "engine needed" not in out or out.count("retried") != 2:
+            raise RuntimeError(f"expected two retry notices in CLI output: {out[-400:]}")
+        n_inst = sqlite_query(home / "state.db", "SELECT COUNT(*) FROM loaded_instances WHERE model_id='retry'")[0][0]
+        if n_inst != 1:
+            raise RuntimeError(f"expected one instance row got {n_inst}")
+        if _index_lines(home) != 3:
+            raise RuntimeError(f"expected 3 spawns in index got {_index_lines(home)}")
+        run_goethe([str(goethe), "unload", "retry"], env=env)
+        if not wait_until(lambda: not _stubs(home) and not _run_registry(home), timeout=5):
+            raise RuntimeError("orphan engine or run registry entry after unload")
+        (model / "stub_shortfall_seen.txt").unlink(missing_ok=True)
+        if run([*load, "--no-wait"], env=env, timeout=60).returncode != 0:
+            raise RuntimeError("no-wait load failed")
+        time.sleep(1.0)
+        run_goethe([str(goethe), "unload", "retry"], env=env, timeout=60)
+        if not wait_until(lambda: not _stubs(home), timeout=5):
+            raise RuntimeError("stub survived unload during retry window")
+        if not wait_until(lambda: not _run_registry(home), timeout=5):
+            raise RuntimeError("run registry left after cancel unload")
+        for name in ("stub_shortfall_seen.txt", "stub_shortfall_fail.txt", "stub_launch_argv.json"):
+            (model / name).unlink(missing_ok=True)
+        (model / "stub_health_mode.txt").write_text("503", encoding="utf-8")
+        load_proc = subprocess.Popen(load, env={**os.environ, **env}, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            launched = model / "stub_launch_argv.json"
+            if not wait_until(lambda: launched.is_file() and bool(_stubs(home)), timeout=60):
+                raise RuntimeError("expected an (unhealthy) stub during mid-load")
+            orphan_pids = _stubs(home)
+            os.kill(md.popen.pid, signal.SIGKILL)
+            md.popen.wait(timeout=5)
+            md.stop()
             time.sleep(0.5)
-            if not any(_pid_alive(p) for p in orphan_pids):
-                load_proc.kill()
-                raise RuntimeError("stub died before reap test")
-            reap = spawn([str(require_cli("goethed"))], env=home_goethe_env(home), label="reap_goethed")
-            md = reap
-            if not wait_until(lambda: (home / "goethe.sock").is_socket(), timeout=20.0):
-                raise RuntimeError("reap goethed sock")
-            time.sleep(2)
-            if any(_pid_alive(p) for p in orphan_pids):
-                load_proc.kill()
+            if not any(pid_alive(p) for p in orphan_pids):
+                raise RuntimeError("stub died with goethed; nothing left to reap")
+            md = start_goethed(home, label="reap_goethed")
+            if not wait_until(lambda: run([str(goethe), "ps"], env=env, timeout=10).returncode == 0, timeout=30):
+                raise RuntimeError("goethed did not come back over the stale socket of the killed daemon")
+            if not wait_until(lambda: not any(pid_alive(p) for p in orphan_pids), timeout=10):
                 raise RuntimeError("orphan engine not reaped on goethed start")
+        finally:
             load_proc.kill()
             load_proc.wait(timeout=5)
-            reap.stop()
-            assert_no_stub_engines(home)
+        run([str(goethe), "unload", "--all"], env=env, timeout=60)
+        (model / "stub_health_mode.txt").unlink(missing_ok=True)
+        run_goethe(load, env=env, timeout=120)
+        healthy = int(stub_launch(model)["pid"])
+        os.kill(md.popen.pid, signal.SIGKILL)
+        md.popen.wait(timeout=5)
+        md.stop()
+        md = start_goethed(home, label="adopt_goethed")
+        if not wait_until(lambda: run([str(goethe), "ps"], env=env, timeout=10).returncode == 0, timeout=30):
+            raise RuntimeError("goethed did not come back after the second SIGKILL")
+        time.sleep(3)
+        rows = json.loads(run_goethe([str(goethe), "ps", "--json"], env=env).stdout or "[]")
+        adopted = pid_alive(healthy) and any(
+            int(r.get("pid", 0)) == healthy and r.get("status") == "RUNNING" for r in rows
+        )
+        run([str(goethe), "unload", "--all"], env=env, timeout=60)
+        md.stop()
+        assert_no_stub_engines(home)
+        if not adopted:
+            raise RuntimeError(f"healthy verified engine {healthy} was not adopted after goethed SIGKILL: {rows}")
         print("stage4_load_retry_stub ok")
-    finally:
-        try:
-            if md is not None:
-                md.stop()
-        except Exception:
-            pass
-        release()
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
 
 
 if __name__ == "__main__":

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import stat
 import subprocess
@@ -43,11 +42,11 @@ def _write_fake_crontab(bin_dir: Path, cron_file: Path) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def _write_fake_systemctl(bin_dir: Path) -> None:
-    """Force service.rs to skip systemd --user."""
-    script = "#!/usr/bin/env bash\nif [[ \"$1\" == \"--user\" && \"$2\" == \"status\" ]]; then exit 1; fi\nexit 0\n"
+def _write_fake_systemctl(bin_dir: Path, log: Path, user_ok: bool) -> None:
+    """Fake systemctl that logs every call; user_ok decides whether systemd --user looks available."""
+    status = "exit 0" if user_ok else 'if [[ "$1" == "--user" && "$2" == "status" ]]; then exit 1; fi'
     path = bin_dir / "systemctl"
-    path.write_text(script, encoding="utf-8")
+    path.write_text(f'#!/usr/bin/env bash\necho "$*" >>"{log}"\n{status}\nexit 0\n', encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
@@ -64,7 +63,7 @@ def _run_crontab_scenario(goethe: Path, goethed: Path) -> None:
             encoding="utf-8",
         )
         _write_fake_crontab(fake_bin, cron_file)
-        _write_fake_systemctl(fake_bin)
+        _write_fake_systemctl(fake_bin, home / "systemctl.log", user_ok=False)
         env = {
             **home_goethe_env(home),
             "HOME": str(home),
@@ -113,38 +112,38 @@ def main() -> None:
         unit_dir.mkdir()
         cron_file = home / "crontab.txt"
         cron_file.write_text("", encoding="utf-8")
+        fake_bin = home / "fake-bin"
+        fake_bin.mkdir()
+        log = home / "systemctl.log"
+        _write_fake_crontab(fake_bin, cron_file)
+        _write_fake_systemctl(fake_bin, log, user_ok=True)
         env = {
             **home_goethe_env(home),
             "HOME": str(home),
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
             "GOETHE_SYSTEMD_USER_UNIT_DIR": str(unit_dir),
             "GOETHE_CRONTAB_FILE": str(cron_file),
         }
-        rr = run_goethe([str(goethe), "service", "enable"], env=env)
-        if rr.returncode != 0:
-            raise RuntimeError(f"service enable failed: {rr.stderr}")
+        run_goethe([str(goethe), "service", "enable"], env=env)
         unit = unit_dir / "goethed.service"
-        has_unit = unit.is_file()
-        has_cron = "# goethe-goethed-reboot" in cron_file.read_text(encoding="utf-8")
-        if not has_unit and not has_cron:
-            raise RuntimeError("enable did not install user unit or crontab entry")
-        st = run_goethe([str(goethe), "service", "status"], env=env)
-        if st.returncode != 0:
-            raise RuntimeError(f"service status failed: {st.stderr}")
-        out = st.stdout
-        if "boot method:" not in out or "goethed:" not in out:
+        if not unit.is_file():
+            raise RuntimeError("enable with systemd --user available did not write the user unit")
+        if f"GOETHE_HOME={home}" not in unit.read_text(encoding="utf-8"):
+            raise RuntimeError("user unit does not pin this GOETHE_HOME")
+        out = run_goethe([str(goethe), "service", "status"], env=env).stdout
+        if "boot method:" not in out or "goethed:" not in out or "systemd" not in out:
             raise RuntimeError(f"unexpected status output: {out!r}")
-        if has_unit and "systemd" not in out:
-            raise RuntimeError("expected systemd method in status")
-        if has_cron and not has_unit and "crontab" not in out:
-            raise RuntimeError("expected crontab method in status")
-        rr2 = run_goethe([str(goethe), "service", "enable"], env=env)
-        if rr2.returncode != 0:
-            raise RuntimeError("second enable should be idempotent")
+        run_goethe([str(goethe), "service", "enable"], env=env)
         run_goethe([str(goethe), "service", "disable"], env=env)
         if unit.is_file():
             raise RuntimeError("user unit not removed on disable")
         if "# goethe-goethed-reboot" in cron_file.read_text(encoding="utf-8"):
             raise RuntimeError("crontab marker not removed on disable")
+        calls = log.read_text(encoding="utf-8").splitlines()
+        if not any("enable --now goethed.service" in c for c in calls) or not any("disable" in c for c in calls):
+            raise RuntimeError(f"systemctl enable/disable not issued: {calls}")
+        if any(not c.startswith("--user") for c in calls):
+            raise RuntimeError(f"service touched the system manager instead of --user: {calls}")
         off = subprocess.run(
             [str(goethe), "service", "restore", "--off"],
             env=env,

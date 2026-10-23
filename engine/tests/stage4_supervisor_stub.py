@@ -9,31 +9,47 @@ import re
 import signal
 import subprocess
 import time
-from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from lib.goethe_test import (
     Proc,
     Skip,
     _acquire_gpu_flocks,
+    assert_alive,
     assert_no_stub_engines,
+    assert_no_zombies,
+    clean_test_gpu,
     foreign_gpu_process,
+    goethe_rpc,
+    gpu_compute_pids,
+    gpu_pids,
     home_goethe_env,
+    home_process_tree,
+    kill_engine_group,
     main_exit,
+    pid_alive,
     require_cli,
-    require_gpus,
+    roomy_test_gpus,
     run,
     run_goethe,
     seed_installed_model,
-    spawn,
     sqlite_query,
+    start_goethed,
+    stub_launch,
+    stub_load_gpu,
     temp_home,
     test_gpus,
     vram_per_gpu_gb,
+    wait_gpu_pid,
     wait_until,
+    write_card,
 )
 
 ASSERTS = 0
+SOFT: list[str] = []
+NOT_RUN: list[str] = []
+FOREIGN_MB = 3072
 
 
 def check(cond: bool, msg: str) -> None:
@@ -44,10 +60,18 @@ def check(cond: bool, msg: str) -> None:
         raise RuntimeError(msg)
 
 
+def soft(cond: bool, msg: str) -> None:
+    """Record an assertion whose failure is reported at the end without stopping later scenarios."""
+    global ASSERTS
+    ASSERTS += 1
+    if not cond:
+        SOFT.append(msg)
+        print(f"SOFT FAIL: {msg}", flush=True)
+
+
 def _hw_fixture(home: Path, gpu_index: int, free_gb: float = 90.0) -> None:
     """Write hardware_state.json with VRAM numbers for budget tests."""
     total_mb = int((free_gb / 0.85) * 1024)
-    used_mb = total_mb - int(free_gb * 1024)
     payload = {
         "profiled_at": "test",
         "driver": "test",
@@ -58,7 +82,7 @@ def _hw_fixture(home: Path, gpu_index: int, free_gb: float = 90.0) -> None:
                 "name": "TestGPU",
                 "compute_capability": "12.0",
                 "vram_total_mb": total_mb,
-                "vram_used_mb": used_mb,
+                "vram_used_mb": total_mb - int(free_gb * 1024),
                 "vram_free_mb": int(free_gb * 1024),
                 "pcie_gen": 4,
                 "pcie_width": 16,
@@ -70,547 +94,403 @@ def _hw_fixture(home: Path, gpu_index: int, free_gb: float = 90.0) -> None:
     (home / "hardware_state.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _gpu_used_mb(gpu_index: int) -> float:
-    """Return used VRAM MiB for a GPU index."""
-    proc = subprocess.run(
-        [
-            "nvidia-smi",
-            f"--id={gpu_index}",
-            "--query-gpu=memory.used",
-            "--format=csv,noheader,nounits",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        return 0.0
-    return float(proc.stdout.strip())
-
-
 def _live_free_gb(gpu_index: int) -> float:
     """Query NVML free VRAM for mem_fraction_static checks."""
-    proc = subprocess.run(
-        [
-            "nvidia-smi",
-            f"--id={gpu_index}",
-            "--query-gpu=memory.free",
-            "--format=csv,noheader,nounits",
-        ],
+    out = subprocess.run(
+        ["nvidia-smi", f"--id={gpu_index}", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
         capture_output=True,
         text=True,
-        check=False,
+        check=True,
     )
-    if proc.returncode != 0:
-        raise RuntimeError(f"nvidia-smi free query failed: {proc.stderr}")
-    return float(proc.stdout.strip()) / 1024.0
-
-
-def _read_stub_argv(model_dir: Path) -> dict:
-    """Load stub launch argv json from a model directory."""
-    return json.loads((model_dir / "stub_launch_argv.json").read_text(encoding="utf-8"))
+    return float(out.stdout.strip()) / 1024.0
 
 
 def _clean_goethed_stale(home: Path) -> None:
     """Remove goethe.sock and goethed.lock after a controlled goethed stop."""
     for name in ("goethe.sock", "goethed.lock"):
-        p = home / name
-        if p.exists():
+        (home / name).unlink(missing_ok=True)
+
+
+def _clear_stub_files(*dirs: Path) -> None:
+    for model_dir in dirs:
+        for p in model_dir.glob("stub_*"):
             p.unlink()
 
 
-def _start_goethed(home: Path) -> Proc:
-    """Start goethed against a temp GOETHE_HOME."""
-    goethed = require_cli("goethed")
-    proc = spawn([str(goethed)], env=home_goethe_env(home), label="goethed")
-    if not wait_until(lambda: (home / "goethe.sock").is_socket(), timeout=20.0):
-        raise RuntimeError("goethed did not create goethe.sock")
-    return proc
+class Sup:
+    """One goethed under a temp home plus helpers for the supervisor scenarios."""
+
+    def __init__(self, home: Path, goethe: Path) -> None:
+        self.home = home
+        self.goethe = goethe
+        self.env = home_goethe_env(home)
+        self.db = home / "state.db"
+        self.md: Proc = start_goethed(home)
+
+    def goethe_ok(self, *args: str, timeout: float = 300) -> str:
+        """Run goethe, require success, return stdout plus stderr."""
+        rr = run_goethe([str(self.goethe), *args], env=self.env, timeout=timeout)
+        return rr.stdout + rr.stderr
+
+    def load(self, mid: str, gpus: str, *extra: str, timeout: float = 300) -> str:
+        """Load with --yes (the alien processes on GPU 2 would otherwise exit 3)."""
+        return self.goethe_ok("load", mid, "--gpus", gpus, "--yes", *extra, timeout=timeout)
+
+    def ps(self) -> list[dict[str, Any]]:
+        return json.loads(self.goethe_ok("ps", "--json").strip() or "[]")
+
+    def status_is(self, mid: str, want: set[str], timeout: float) -> bool:
+        """Wait until the newest ps row of mid has a status in want."""
+
+        def ok() -> bool:
+            rows = [r for r in self.ps() if r.get("model_id") == mid]
+            return bool(rows) and rows[-1].get("status") in want
+
+        return wait_until(ok, timeout=timeout)
+
+    def restarts_at_least(self, mid: str, n: int) -> bool:
+        """True once mid shows n restarts in ps or the DB."""
+        if any(r.get("model_id") == mid and int(r.get("restarts", 0)) >= n for r in self.ps()):
+            return True
+        q = "SELECT COALESCE(restart_count,0) FROM loaded_instances WHERE model_id=?1 ORDER BY rowid DESC LIMIT 1"
+        row = sqlite_query(self.db, q, (mid,))
+        return bool(row) and int(row[0][0]) >= n
+
+    def kill_engine(self, mid: str) -> None:
+        """SIGKILL the newest engine group of mid after checking it belongs to this home."""
+        q = "SELECT pgid FROM loaded_instances WHERE model_id=?1 ORDER BY rowid DESC LIMIT 1"
+        kill_engine_group(self.home, int(sqlite_query(self.db, q, (mid,))[0][0]))
+
+    def restart(self) -> None:
+        """Stop goethed (SIGTERM via Proc.stop, a no-op once it exited) and start a new one."""
+        self.md.stop()
+        _clean_goethed_stale(self.home)
+        self.md = start_goethed(self.home)
+
+    def count(self, sql: str) -> int:
+        return int(sqlite_query(self.db, sql)[0][0])
 
 
-def _nginx_pid(home: Path) -> int | None:
-    """Return nginx master pid from GOETHE_HOME when present."""
-    path = home / "nginx" / "nginx.pid"
-    if not path.is_file():
-        return None
+def _foreign_scenario(sup: Sup, model_a: Path) -> None:
+    """Unmanaged GPU process: exit 3 with the contractual notice, structured RPC result, --yes loads alongside."""
+    clean = clean_test_gpu()
+    host = clean if clean is not None else stub_load_gpu(20.0)
+    foreign = foreign_gpu_process(host, mb=FOREIGN_MB)
     try:
-        return int(path.read_text(encoding="utf-8").strip())
-    except ValueError:
-        return None
-
-
-def _pid_alive(pid: int) -> bool:
-    """Return true when pid responds to signal 0."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
-def _wait_dead(pids: list[int | None], timeout: float) -> bool:
-    """Return true when every pid in the list has exited."""
-    tracked = [p for p in pids if p is not None and p > 0]
-
-    def gone() -> bool:
-        return all(not _pid_alive(p) for p in tracked)
-
-    return wait_until(gone, timeout=timeout)
-
-
-def _no_defunct_children() -> bool:
-    """Return true when no defunct children belong to this test tree."""
-    proc = subprocess.run(["ps", "-eo", "stat,pid,ppid="], capture_output=True, text=True)
-    if proc.returncode != 0:
-        return True
-    my = os.getpid()
-    for line in proc.stdout.splitlines():
-        parts = line.split()
-        if len(parts) < 3 or "Z" not in parts[0]:
-            continue
-        if int(parts[2]) == my:
-            return False
-    return True
+        check(wait_gpu_pid(host, foreign.popen.pid, int(FOREIGN_MB * 0.9), timeout=60), "foreign VRAM visible")
+        strict = {p for p, _mb in gpu_pids(host)} == {foreign.popen.pid}
+        rr = run([str(sup.goethe), "load", "a", "--gpus", str(host)], env=sup.env, timeout=120)
+        text = rr.stderr + rr.stdout
+        check(rr.returncode == 3, f"foreign load exit {rr.returncode}, want 3: {text[-300:]}")
+        listed = {int(p) for p in re.findall(r"unmanaged process PID (\d+)", text)}
+        on_gpu = {p for p, _mb in gpu_pids(host)}
+        if strict:
+            check(foreign.popen.pid in listed, f"notice names our foreign PID {foreign.popen.pid}: {text[-300:]}")
+        else:
+            check(bool(listed) and listed <= on_gpu, f"notice names a real foreign PID on GPU {host}: {listed}")
+        params = {
+            "model_id": "a", "gpus": str(host), "ctx": None, "max_conc": None, "tp": None, "force": False,
+            "yes": False, "is_tty": True, "extra_sglang_args": [], "async_finish": True,
+        }
+        t0 = time.time()
+        reply = goethe_rpc(sup.home, "load", params, timeout=30)
+        check(time.time() - t0 < 25, "daemon answered the foreign load without waiting on a prompt")
+        soft(reply.get("code") == 3, f"RPC foreign code {reply.get('code')} want 3 (daemon must never prompt)")
+        soft(f"unmanaged process PID {foreign.popen.pid}" in str(reply.get("message", "")), "RPC message names PID")
+        rows = (reply.get("result") or {}).get("foreign") or []
+        soft(
+            any(int(r.get("pid", -1)) == foreign.popen.pid and int(r.get("gpu", -1)) == host for r in rows),
+            f"RPC result.foreign lists gpu {host} pid {foreign.popen.pid}: {reply.get('result')}",
+        )
+        soft(
+            "Re-run with --yes" in text and f"kill {foreign.popen.pid}" in text,
+            "notice suggests --yes and the user's own kill command",
+        )
+        check(pid_alive(foreign.popen.pid), "goethe never stops the foreign process")
+        sup.load("a", str(host))
+        check(pid_alive(foreign.popen.pid), "foreign process still alive after loading alongside it")
+    finally:
+        foreign.stop()
+    sup.goethe_ok("unload", "--all")
+    _clear_stub_files(model_a)
 
 
 def main() -> None:
-    """Exercise goethe load, co-residency, foreign PID, and unload with stub engines."""
+    """Exercise goethe load, co-residency, foreign PID, unload and watchdog paths with stub engines."""
     goethe = require_cli("goethe")
     require_cli("goethed")
-    gpus = require_gpus(1)
-    gpu = gpus[0]
-    static_w = 10.0
-    kv_bytes = 1000
-    ctx = 4096
-    max_conc = 4
-    dev_py = Path(os.environ.get("GOETHE_DEV_HOME", "/scratch/ternary-flash/goethe-home")) / "py-env" / "bin" / "python"
-    with temp_home(stub_python=True, real_python=dev_py if dev_py.is_file() else None) as home:
-        _hw_fixture(home, gpu, free_gb=90.0)
-        model_a = home / "models" / "org__model_a"
-        model_b = home / "models" / "org__model_b"
-        model_a.mkdir(parents=True)
-        model_b.mkdir(parents=True)
-        (model_a / "goethe_card.toml").write_text(
-            f'model_id="a"\ncontext_length={ctx}\nmax_running_requests={max_conc}\n',
-            encoding="utf-8",
-        )
-        (model_b / "goethe_card.toml").write_text(
-            'model_id="b"\ncontext_length=4096\nmax_running_requests=4\n',
-            encoding="utf-8",
-        )
-        seed_installed_model(home, "a", str(model_a.relative_to(home)), static_w, kv_bytes, ctx, max_conc, 1)
-        seed_installed_model(home, "b", str(model_b.relative_to(home)), static_w, kv_bytes, ctx, max_conc, 1)
-        ternary_root = home / "goethe" / "ternary-kernels"
-        ternary_root.mkdir(parents=True, exist_ok=True)
-        model_t = home / "models" / "org__ternary_t"
-        model_t.mkdir(parents=True)
-        (model_t / "goethe_card.toml").write_text(
-            f'model_id="t"\nruntime="ternary"\npack_id="p"\nbase_model_id="b"\n'
-            f'context_length=512\nmax_running_requests=2\n'
-            f'pythonpath=["{home}/goethe/ternary-kernels"]\n'
-            f'TERNARY_PACK_DIR="{home}/models/pack"\n'
-            f'TERNARY_MODEL_DIR="{home}/models/base"\n',
-            encoding="utf-8",
-        )
-        seed_installed_model(home, "t", str(model_t.relative_to(home)), 5.0, 512, 512, 2, 1)
-        goethed = _start_goethed(home)
-        env = {**home_goethe_env(home), "CUDA_VISIBLE_DEVICES": str(gpu)}
-
-        def _ps_json() -> list[dict]:
-            rr = run_goethe([str(goethe), "ps", "--json"], env=env)
-            raw = rr.stdout.strip() or "[]"
-            return json.loads(raw)
-
-        def _wait_model_status(mid: str, want: set[str], timeout: float) -> bool:
-            def ok() -> bool:
-                for row in _ps_json():
-                    if row.get("model_id") == mid:
-                        return row.get("status") in want
-                return False
-
-            return wait_until(ok, timeout=timeout)
-
-        def _kill_engine(mid: str) -> None:
-            row = sqlite_query(
-                home / "state.db",
-                "SELECT pid, pgid FROM loaded_instances WHERE model_id=?1 ORDER BY rowid DESC LIMIT 1",
-                (mid,),
-            )
-            if not row:
-                return
-            pid, pgid = int(row[0][0]), int(row[0][1])
-            target = pgid if pgid > 0 else pid
-            if target > 0:
-                os.killpg(target, signal.SIGKILL)
-
-        def _restarts_at_least(mid: str, n: int) -> bool:
-            for row in _ps_json():
-                if row.get("model_id") == mid and int(row.get("restarts", 0)) >= n:
-                    return True
-            db_n = sqlite_query(
-                home / "state.db",
-                "SELECT COALESCE(restart_count,0) FROM loaded_instances WHERE model_id=?1 ORDER BY rowid DESC LIMIT 1",
-                (mid,),
-            )
-            return bool(db_n) and int(db_n[0][0]) >= n
-
-        release_gpu: Callable[[], None] = lambda: None
-        release_gpu = _acquire_gpu_flocks([gpu])
-        try:
-            rr = run_goethe(
-                [str(goethe), "load", "a", "--gpus", str(gpu), "--ctx", str(ctx), "--max-conc", str(max_conc)],
-                env=env,
-                timeout=300,
-            )
-            check(rr.returncode == 0, "load a rc")
-            rows = sqlite_query(
-                home / "state.db",
-                "SELECT pid, pgid, internal_port, gpu_indices, status FROM loaded_instances WHERE model_id='a'",
-            )
-            check(len(rows) == 1, "one instance a")
-            pid, pgid, port, gpu_indices, status = rows[0]
-            check(int(pid) > 0 and int(pgid) == int(pid), "pgid==pid")
-            check(30001 <= int(port) <= 30099, "engine port in range")
-            port_a = int(port)
-            check(str(gpu) in str(gpu_indices), "gpu_indices")
-            check(status == "RUNNING", "status RUNNING")
-            desired = sqlite_query(home / "state.db", "SELECT COUNT(*) FROM desired_loads")[0][0]
-            check(int(desired) >= 1, "desired load row")
-            stub = _read_stub_argv(model_a)
-            parsed = stub["parsed"]
-            b_gb = vram_per_gpu_gb(static_w, ctx, kv_bytes, max_conc, 1)
-            free_gb = _live_free_gb(gpu)
-            check(abs(float(parsed["mem_fraction_static"]) - b_gb / free_gb) < 0.02, "mem_fraction_static")
-            check(parsed["host"] == "127.0.0.1", "host")
-            check(int(parsed["port"]) == int(port), "stub port")
-            check(int(parsed.get("tp_size", 1)) == 1, "tp-size")
-            check(int(parsed.get("context_length", 0)) == ctx, "context-length")
-            check(int(parsed.get("max_running_requests", 0)) == max_conc, "max-running-requests")
-            check(parsed.get("kv_cache_dtype"), "kv-cache-dtype")
-            check(stub["env"].get("CUDA_VISIBLE_DEVICES") == str(gpu), "cuda visible")
-            argv_s = " ".join(str(x) for x in stub.get("argv", []))
-            check("GOETHE_KERNEL_DIR" not in stub.get("env", {}), "no GOETHE_KERNEL_DIR")
-            check("--enable-goethe-fused-gemv" not in argv_s, "no goethe-fused-gemv flag")
-            rr2 = run_goethe([str(goethe), "load", "b", "--gpus", str(gpu)], env=env, timeout=300)
-            combined = rr2.stdout + rr2.stderr
-            check("currently hosts [" in combined, "co-residency notice")
-            check("Free VRAM:" in combined, "free vram notice")
-
-            def _two_ports() -> bool:
-                rows2 = sqlite_query(
-                    home / "state.db", "SELECT internal_port FROM loaded_instances ORDER BY internal_port"
-                )
-                return len(rows2) >= 2
-
-            check(wait_until(_two_ports, timeout=60.0), "two engine rows")
-            rows2 = sqlite_query(home / "state.db", "SELECT internal_port FROM loaded_instances ORDER BY internal_port")
-            ports = [int(r[0]) for r in rows2]
-            check(len(set(ports)) == len(ports), "unique ports")
-            check(all(30001 <= p <= 30099 for p in ports), "engine ports in range")
-            check(ports[1] != port_a, "second engine port distinct")
-            seed_installed_model(home, "a", str(model_a.relative_to(home)), 200.0, kv_bytes, 131072, 64, 1)
-            rr_budget = run(
-                [str(goethe), "load", "a", "--gpus", str(gpu), "--ctx", "131072", "--max-conc", "64"],
-                env=env,
-            )
-            check(rr_budget.returncode != 0, "budget abort rc")
-            budget_text = (rr_budget.stderr + rr_budget.stdout).lower()
-            check("missing" in budget_text, "missing text")
-            check(bool(re.search(r"\d+\.?\d*\s*gb", budget_text)), "gb figure")
-            seed_installed_model(home, "a", str(model_a.relative_to(home)), static_w, kv_bytes, ctx, max_conc, 1)
-            run_goethe([str(goethe), "unload", "--all"], env=env)
+    gpu = stub_load_gpu(30.0)
+    aliens = gpu_compute_pids(test_gpus())
+    static_w, kv_bytes, ctx, max_conc = 10.0, 1000, 4096, 4
+    release_gpu = _acquire_gpu_flocks([gpu])
+    try:
+        with temp_home(stub_python=True) as home:
+            _hw_fixture(home, gpu, free_gb=90.0)
+            model_a = home / "models" / "org__model_a"
+            model_b = home / "models" / "org__model_b"
+            model_t = home / "models" / "org__ternary_t"
             model_auto = home / "models" / "org__auto"
-            model_auto.mkdir(parents=True)
-            (model_auto / "goethe_card.toml").write_text(
-                f'model_id="auto"\ntp_size=0\npreferred_gpus=[]\ncontext_length={ctx}\n'
-                f"max_running_requests={max_conc}\n",
-                encoding="utf-8",
+            write_card(model_a, "a", ctx, max_conc)
+            write_card(model_b, "b", 4096, 4, extra='kv_cache_dtype="fp8_e4m3"')
+            seed_installed_model(home, "a", "models/org__model_a", static_w, kv_bytes, ctx, max_conc, 1)
+            seed_installed_model(home, "b", "models/org__model_b", static_w, kv_bytes, ctx, max_conc, 1)
+            (home / "goethe" / "ternary-kernels").mkdir(parents=True)
+            write_card(
+                model_t, "t", 512, 2,
+                extra=f'runtime="ternary"\npack_id="p"\nbase_model_id="b"\n'
+                f'pythonpath=["{home}/goethe/ternary-kernels"]\n'
+                f'TERNARY_PACK_DIR="{home}/models/pack"\nTERNARY_MODEL_DIR="{home}/models/base"',
             )
-            seed_installed_model(
-                home,
-                "auto",
-                str(model_auto.relative_to(home)),
-                5.0,
-                kv_bytes,
-                ctx,
-                max_conc,
-                0,
-                kv_elems=kv_bytes,
-                num_attention_heads=8,
-                num_kv_heads=2,
-            )
-            rr_auto = run_goethe([str(goethe), "load", "auto"], env=env, timeout=300)
-            check(rr_auto.returncode == 0, "auto load rc")
-            auto_text = rr_auto.stdout + rr_auto.stderr
-            check("auto:" in auto_text or "tp=" in auto_text, "auto decision message")
-            run_goethe([str(goethe), "unload", "auto"], env=env)
-            avail = test_gpus()
-            if len(avail) >= 2:
-                g0, g1 = avail[0], avail[1]
-                rr_tp2 = run_goethe(
-                    [str(goethe), "load", "auto", "--gpus", f"{g0},{g1}"],
-                    env={**env, "CUDA_VISIBLE_DEVICES": f"{g0},{g1}"},
-                    timeout=300,
-                )
-                check(rr_tp2.returncode == 0, "two gpu load rc")
-                combined2 = rr_tp2.stdout + rr_tp2.stderr
-                check("tp=2" in combined2, "gpus infer tp=2")
-                stub_auto = _read_stub_argv(model_auto)
-                check(int(stub_auto["parsed"].get("tp_size", 0)) == 2, "stub tp_size 2")
-                run_goethe([str(goethe), "unload", "auto"], env=env)
-            rr_conflict = run(
-                [str(goethe), "load", "auto", "--tp", "1", "--gpus", f"{gpu},{gpu}"],
-                env=env,
-            )
-            check(rr_conflict.returncode != 0, "tp gpu conflict rc")
-            check("disagrees" in (rr_conflict.stderr + rr_conflict.stdout).lower(), "tp conflict msg")
-            foreign = foreign_gpu_process(gpu, mb=10240)
+            seed_installed_model(home, "t", "models/org__ternary_t", 5.0, 512, 512, 2, 1)
+            sup = Sup(home, goethe)
             try:
-                check(
-                    wait_until(lambda: _gpu_used_mb(gpu) > 8000, timeout=20.0),
-                    "foreign vram allocated",
-                )
-                rr_f = run([str(goethe), "load", "a", "--gpus", str(gpu)], env=env)
-                check(rr_f.returncode == 3, "foreign exit 3")
-                foreign_text = rr_f.stderr + rr_f.stdout
-                check(
-                    f"unmanaged process PID {foreign.popen.pid}" in foreign_text
-                    or "VRAM not attributed to goethe" in foreign_text
-                    or "VRAM in use with no goethe engines" in foreign_text,
-                    "foreign msg",
-                )
-                run_goethe([str(goethe), "load", "a", "--gpus", str(gpu), "--force"], env=env)
+                _scenarios(sup, gpu, model_a, model_b, model_t, model_auto, static_w, kv_bytes, ctx, max_conc)
             finally:
-                foreign.stop()
-            t0 = time.time()
-            run_goethe([str(goethe), "unload", "--all"], env=env)
-            check(wait_until(lambda: _no_defunct_children(), timeout=3.0), "no zombies after unload")
-            check(time.time() - t0 < 3.5, "unload within 3s")
-            left = sqlite_query(home / "state.db", "SELECT COUNT(*) FROM loaded_instances")[0][0]
-            check(int(left) == 0, "unload all rows")
-            rr_ps = run_goethe([str(goethe), "ps", "--json"], env=env)
-            check(rr_ps.stdout.strip() in ("[]", ""), "goethe ps empty")
-            run_goethe([str(goethe), "load", "a", "--gpus", str(gpu)], env={**env, "STUB_IGNORE_SIGTERM": "1"}, timeout=300)
-            run_goethe([str(goethe), "load", "b", "--gpus", str(gpu)], env={**env, "STUB_IGNORE_SIGTERM": "1"}, timeout=300)
-            t1 = time.time()
-            run_goethe([str(goethe), "unload", "--all"], env={**env, "STUB_IGNORE_SIGTERM": "1"}, timeout=120)
-            check(wait_until(lambda: _no_defunct_children(), timeout=4.0), "sigkill unload no zombies")
-            check(time.time() - t1 < 4.5, "unload within 4s with STUB_IGNORE_SIGTERM")
-            run_goethe([str(goethe), "load", "t", "--gpus", str(gpu)], env=env, timeout=300)
-            stub_t = _read_stub_argv(model_t)
-            tenv = stub_t.get("env", {})
-            check("TERNARY_PACK_DIR" in tenv or "TERNARY_MODEL_DIR" in tenv, "ternary card env")
-            pyp = tenv.get("PYTHONPATH", "")
-            check("ternary-kernels" in pyp, "ternary PYTHONPATH")
-            check("GOETHE_KERNEL_DIR" not in tenv, "ternary no kernel dir")
-            run_goethe([str(goethe), "unload", "t"], env=env)
-            run_goethe(
-                [str(goethe), "load", "a", "--gpus", str(gpu), "--context-length", "4096"],
-                env=env,
-                timeout=300,
-            )
-            stub_s = _read_stub_argv(model_a)
-            check(stub_s.get("parsed", {}).get("context_length") == 4096, "load trailing sglang arg")
-            run_goethe([str(goethe), "unload", "a"], env=env)
-            run_goethe([str(goethe), "load", "a", "--gpus", str(gpu)], env=env, timeout=300)
-            check(_wait_model_status("a", {"RUNNING"}, timeout=60.0), "watchdog prekill RUNNING")
-            time.sleep(2.0)
-            _kill_engine("a")
-            check(
-                wait_until(lambda: _restarts_at_least("a", 1), timeout=120.0),
-                "watchdog restart count after SIGKILL",
-            )
-            run_goethe([str(goethe), "unload", "a"], env=env)
-            stub_s = _read_stub_argv(model_a)
-            check("TERNARY_PACK_DIR" not in stub_s.get("env", {}), "sglang no ternary env")
-            sglang_pyp = stub_s.get("env", {}).get("PYTHONPATH", "")
-            check("ternary-kernels" not in sglang_pyp, "sglang no ternary pythonpath")
-            health_timeout = os.environ.get("GOETHE_HEALTH_POLL_TIMEOUT_SEC")
-            if health_timeout and health_timeout.isdigit():
-                delay = float(health_timeout) + 2.0
-                run(
-                    [str(goethe), "load", "b", "--gpus", str(gpu)],
-                    env={**env, "STUB_START_DELAY": str(delay)},
-                    timeout=600,
-                )
-                st_row = sqlite_query(
-                    home / "state.db",
-                    "SELECT status FROM loaded_instances WHERE model_id='b' ORDER BY rowid DESC LIMIT 1",
-                )
-                check(bool(st_row) and st_row[0][0] == "FAILED", "health timeout FAILED")
-                run_goethe([str(goethe), "unload", "b"], env=env)
-            run_goethe([str(goethe), "load", "a", "--gpus", str(gpu)], env=env, timeout=300)
-            md_pid = goethed.popen.pid
-            os.kill(md_pid, signal.SIGTERM)
-            goethed.popen.wait(timeout=15)
-            goethed._stopped = True
-            goethed = _start_goethed(home)
-            check(
-                _wait_model_status("a", {"RUNNING", "STARTING"}, timeout=120.0),
-                "goethed SIGTERM restart restores desired load",
-            )
-            run_goethe([str(goethe), "unload", "a"], env=env)
-            desired_a = sqlite_query(
-                home / "state.db", "SELECT COUNT(*) FROM desired_loads WHERE model_id='a'"
-            )[0][0]
-            check(int(desired_a) == 0, "unload clears desired")
-            goethed.stop()
-            goethed = _start_goethed(home)
-            time.sleep(2.0)
-            left = sqlite_query(
-                home / "state.db", "SELECT COUNT(*) FROM loaded_instances WHERE model_id='a'"
-            )[0][0]
-            check(int(left) == 0, "unloaded model not restored after goethed restart")
-            run_goethe([str(goethe), "load", "a", "--gpus", str(gpu)], env=env, timeout=300)
-            rr_stop = run_goethe([str(goethe), "stop"], env=home_goethe_env(home))
-            check("goethed stopped" in rr_stop.stdout, "goethe stop message")
-            goethed._stopped = True
-            _clean_goethed_stale(home)
-            goethed = _start_goethed(home)
-            check(
-                _wait_model_status("a", {"RUNNING", "STARTING"}, timeout=120.0),
-                "goethe stop then start restores desired",
-            )
-            run_goethe([str(goethe), "unload", "--all"], env=env)
-            goethed.stop()
-            _clean_goethed_stale(home)
-            goethed = _start_goethed(home)
-            dup = subprocess.run(
-                [str(require_cli("goethed"))],
-                env=home_goethe_env(home),
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            check(dup.returncode == 1, "second goethed exit 1")
-            dup_msg = (dup.stderr + dup.stdout).lower()
-            check("already running" in dup_msg or "goethe.sock" in dup_msg, "second goethed refused")
-            run_goethe([str(goethe), "unload", "--all"], env=env)
-            slow_env = {**env, "STUB_START_DELAY": "25"}
-            run_goethe(
-                [str(goethe), "load", "a", "--gpus", str(gpu), "--no-wait"],
-                env=slow_env,
-                timeout=60,
-            )
-            t_ps = time.time()
-            rr_ps_load = run_goethe([str(goethe), "ps", "--json"], env=slow_env, timeout=30)
-            check(rr_ps_load.returncode == 0 and time.time() - t_ps < 10.0, "ps during load")
-            run_goethe([str(goethe), "unload", "a"], env=slow_env, timeout=120)
-            for p in (model_b / "stub_health_mode.txt", model_b / "stub_health_delay.txt"):
-                if p.is_file():
-                    p.unlink()
-            (model_b / "stub_health_mode.txt").write_text("late503", encoding="utf-8")
-            (model_b / "stub_health_delay.txt").write_text("20", encoding="utf-8")
-            run_goethe([str(goethe), "load", "b", "--gpus", str(gpu), "--no-wait"], env=env, timeout=60)
-            time.sleep(8.0)
-            row_b = next((r for r in _ps_json() if r.get("model_id") == "b"), None)
-            check(row_b is not None and row_b.get("status") == "STARTING", "late health stays STARTING")
-            check(goethed.popen.poll() is None, "goethed alive during late startup")
-            check(_wait_model_status("b", {"RUNNING"}, timeout=90.0), "late health reaches RUNNING")
-            run_goethe([str(goethe), "unload", "b"], env=env)
-            (model_b / "stub_health_mode.txt").write_text("warmup", encoding="utf-8")
-            (model_b / "stub_health_delay.txt").write_text("12", encoding="utf-8")
-            run_goethe([str(goethe), "load", "b", "--gpus", str(gpu), "--no-wait"], env=env, timeout=60)
-            time.sleep(2.0)
-            row_b = next((r for r in _ps_json() if r.get("model_id") == "b"), None)
-            check(row_b is not None and row_b.get("status") == "STARTING", "warmup not RUNNING early")
-            check(_wait_model_status("b", {"RUNNING"}, timeout=60.0), "warmup RUNNING after health")
-            run_goethe([str(goethe), "unload", "b"], env=env)
-            run_goethe([str(goethe), "unload", "--all"], env=env)
-            for model_dir in (model_a, model_b):
-                for p in model_dir.glob("stub_*"):
-                    if p.is_file():
-                        p.unlink()
-            run_goethe([str(goethe), "load", "a", "--gpus", str(gpu)], env=env, timeout=300)
-            spawns_before = 0
-            idx = home / "logs" / "index.jsonl"
-            if idx.is_file():
-                spawns_before = sum(1 for ln in idx.read_text(encoding="utf-8").splitlines() if ln.strip())
-            eng_pgid = int(
-                sqlite_query(
-                    home / "state.db",
-                    "SELECT pgid FROM loaded_instances WHERE model_id='a' LIMIT 1",
-                )[0][0]
-            )
-            check(eng_pgid != goethed.popen.pid, "engine pgid not goethed")
-            os.killpg(eng_pgid, signal.SIGKILL)
-            check(
-                wait_until(lambda: _restarts_at_least("a", 1), timeout=90.0),
-                "single restart after kill -9",
-            )
-            check(_wait_model_status("a", {"RUNNING"}, timeout=120.0), "back running after kill")
-            spawns_after = sum(1 for ln in idx.read_text(encoding="utf-8").splitlines() if ln.strip())
-            check(spawns_after == spawns_before + 1, "exactly one extra spawn")
-            (model_b / "stub_health_mode.txt").write_text("burst503", encoding="utf-8")
-            (model_b / "stub_health_burst_delay.txt").write_text("2", encoding="utf-8")
-            (model_b / "stub_health_burst_sec.txt").write_text("8", encoding="utf-8")
-            run_goethe([str(goethe), "load", "b", "--gpus", str(gpu)], env=env, timeout=300)
-            check(_wait_model_status("b", {"RUNNING"}, timeout=60.0), "burst503 load RUNNING")
-            time.sleep(3.0)
-            row_b = next(r for r in _ps_json() if r.get("model_id") == "b")
-            check(row_b.get("status") == "RUNNING" and int(row_b.get("restarts", 0)) == 0, "burst active")
-            time.sleep(9.0)
-            row_b = next(r for r in _ps_json() if r.get("model_id") == "b")
-            check(row_b.get("status") == "RUNNING" and int(row_b.get("restarts", 0)) == 0, "burst503 survives")
-            run_goethe([str(goethe), "unload", "b"], env=env)
-            (model_b / "stub_cheap_mode.txt").write_text("503_after", encoding="utf-8")
-            run_goethe([str(goethe), "load", "b", "--gpus", str(gpu)], env=env, timeout=300)
-            t_h = time.time()
-            check(
-                wait_until(lambda: _restarts_at_least("b", 1), timeout=120.0),
-                "sustained cheap probe restart",
-            )
-            check(time.time() - t_h >= 25.0, "restart after sustained cheap fail")
-            run_goethe([str(goethe), "unload", "b"], env=env, timeout=120)
-            check(goethed.popen.poll() is None, "goethed alive after hung probe")
-            run_goethe([str(goethe), "unload", "--all"], env=env, timeout=120)
-            run_goethe([str(goethe), "load", "a", "--gpus", str(gpu)], env=env, timeout=300)
-            run_goethe([str(goethe), "load", "a", "--gpus", str(gpu)], env=env, timeout=300)
-            check(
-                sum(
-                    1
-                    for r in _ps_json()
-                    if r.get("model_id") == "a" and r.get("status") == "RUNNING"
-                )
-                >= 2,
-                "two RUNNING instances",
-            )
-            check(
-                int(
-                    sqlite_query(
-                        home / "state.db",
-                        "SELECT COUNT(*) FROM desired_loads WHERE model_id='a'",
-                    )[0][0]
-                )
-                == 2,
-                "two desired slots",
-            )
-            goethed.stop()
-            _clean_goethed_stale(home)
-            goethed = _start_goethed(home)
-            check(
-                wait_until(
-                    lambda: sum(
-                        1 for r in _ps_json() if r.get("model_id") == "a" and r.get("status") == "RUNNING"
-                    )
-                    >= 2,
-                    timeout=300.0,
-                ),
-                "restore both slots",
-            )
-            run_goethe([str(goethe), "unload", "a"], env=env, timeout=120)
-            left_inst = sqlite_query(
-                home / "state.db", "SELECT COUNT(*) FROM loaded_instances WHERE model_id='a'"
-            )[0][0]
-            left_des = sqlite_query(
-                home / "state.db", "SELECT COUNT(*) FROM desired_loads WHERE model_id='a'"
-            )[0][0]
-            check(int(left_inst) == 0 and int(left_des) == 0, "unload all slots of model")
-        finally:
-            release_gpu()
-            goethed.stop()
+                sup.md.stop()
             assert_no_stub_engines(home)
+            check(wait_until(lambda: not home_process_tree(home), timeout=10), "no process left under the home")
+    finally:
+        release_gpu()
+    assert_alive(aliens, "alien GPU processes")
+    if SOFT:
+        raise RuntimeError(f"{len(SOFT)} contract checks failed: " + " | ".join(SOFT) + f" | not run: {NOT_RUN}")
+    if NOT_RUN:
+        raise Skip(f"all other scenarios passed ({ASSERTS} assertions); not run: {NOT_RUN}")
     print(f"stage4_supervisor_stub ok assertions={ASSERTS}")
+
+
+def _scenarios(
+    sup: Sup, gpu: int, model_a: Path, model_b: Path, model_t: Path, model_auto: Path,
+    static_w: float, kv_bytes: int, ctx: int, max_conc: int,
+) -> None:
+    """Run the supervisor scenarios in order against one goethed."""
+    home = sup.home
+    sup.load("a", str(gpu), "--ctx", str(ctx), "--max-conc", str(max_conc))
+    rows = sqlite_query(sup.db, "SELECT pid, pgid, internal_port, gpu_indices, status FROM loaded_instances")
+    check(len(rows) == 1, "one instance a")
+    pid, pgid, port, gpu_indices, status = rows[0]
+    check(int(pid) > 0 and int(pgid) == int(pid), "pgid==pid")
+    check(30001 <= int(port) <= 30099, "engine port in range")
+    check(str(gpu) in str(gpu_indices) and status == "RUNNING", "gpu_indices and RUNNING")
+    check(sup.count("SELECT COUNT(*) FROM desired_loads") >= 1, "desired load row")
+    stub = stub_launch(model_a)
+    parsed = stub["parsed"]
+    b_gb = vram_per_gpu_gb(static_w, ctx, kv_bytes, max_conc, 1)
+    check(abs(float(parsed["mem_fraction_static"]) - b_gb / _live_free_gb(gpu)) < 0.02, "mem_fraction_static")
+    check(parsed["host"] == "127.0.0.1" and int(parsed["port"]) == int(port), "host and port")
+    check(int(parsed["tp_size"]) == 1 and int(parsed["context_length"]) == ctx, "tp-size and context-length")
+    check(int(parsed["max_running_requests"]) == max_conc, "max-running-requests")
+    soft("--kv-cache-dtype" not in stub["argv"], "card without kv_cache_dtype must not pass --kv-cache-dtype")
+    check(stub["env"].get("CUDA_VISIBLE_DEVICES") == str(gpu), "cuda visible")
+    check("GOETHE_KERNEL_DIR" not in stub["env"], "no GOETHE_KERNEL_DIR")
+    check("--enable-goethe-fused-gemv" not in stub["argv"], "no goethe-fused-gemv flag")
+    soft(bool(stub["env"].get("GOETHE_INSTANCE_ID")), "engine env carries GOETHE_INSTANCE_ID")
+    soft(stub["env"].get("SPT_NOENV") == "1", "engine env carries SPT_NOENV=1")
+    soft(not any(k.startswith(("GOETHE_SOCK", "GOETHE_MUX", "GOETHE_PUBLIC")) for k in stub["env_keys"]),
+         "goethed's own environment does not leak into the engine")
+    combined = sup.load("b", str(gpu))
+    check("currently hosts [" in combined and "Free VRAM:" in combined, "co-residency notice")
+    check(stub_launch(model_b)["parsed"].get("kv_cache_dtype") == "fp8_e4m3", "card kv_cache_dtype passed")
+    ports = [int(r[0]) for r in sqlite_query(sup.db, "SELECT internal_port FROM loaded_instances")]
+    check(len(ports) == 2 and len(set(ports)) == 2, "two engines on distinct ports")
+    check(all(30001 <= p <= 30099 for p in ports), "engine ports in range")
+    seed_installed_model(home, "a", "models/org__model_a", 200.0, kv_bytes, 131072, 64, 1)
+    on_gpu = {p for p, _mb in gpu_pids(gpu)}
+    rr = run(
+        [str(sup.goethe), "load", "a", "--gpus", str(gpu), "--ctx", "131072", "--max-conc", "64", "--yes"],
+        env=sup.env,
+    )
+    budget_text = (rr.stderr + rr.stdout).lower()
+    check(rr.returncode != 0, "budget abort fails")
+    soft(rr.returncode == 1, f"budget abort exit {rr.returncode}, want 1")
+    check("missing" in budget_text and bool(re.search(r"\d+\.?\d*\s*gb", budget_text)), "missing GB figure")
+    if on_gpu:
+        soft("unmanaged process pid" in budget_text, "budget abort lists the foreign processes holding VRAM")
+    seed_installed_model(home, "a", "models/org__model_a", static_w, kv_bytes, ctx, max_conc, 1)
+    sup.goethe_ok("unload", "--all")
+    write_card(model_auto, "auto", ctx, max_conc, extra="tp_size=0\npreferred_gpus=[]")
+    seed_installed_model(
+        home, "auto", "models/org__auto", 5.0, kv_bytes, ctx, max_conc, 0,
+        kv_elems=kv_bytes, num_attention_heads=8, num_kv_heads=2,
+    )
+    if clean_test_gpu() is None:
+        NOT_RUN.append("auto placement (every test GPU hosts foreign processes and the chooser skips those)")
+    else:
+        auto_text = sup.goethe_ok("load", "auto", "--yes")
+        check("auto:" in auto_text or "tp=" in auto_text, "auto decision message")
+        sup.goethe_ok("unload", "auto")
+    avail = roomy_test_gpus(10.0)
+    if len(avail) < 2:
+        NOT_RUN.append(f"tp=2 scenario (test GPUs with 10 GiB free: {avail})")
+    else:
+        two = f"{avail[0]},{avail[1]}"
+        out2 = sup.load("auto", two)
+        check("tp=2" in out2, "gpus infer tp=2")
+        launch = stub_launch(model_auto)
+        check(int(launch["parsed"]["tp_size"]) == 2 and len(launch["tp_pids"]) == 1, "stub tp_size 2 with one rank")
+        check(sup.count("SELECT COUNT(*) FROM loaded_instances WHERE model_id='auto'") == 1, "one TP instance")
+        sup.goethe_ok("unload", "auto")
+        check(not any(pid_alive(p) for p in [launch["pid"], *launch["tp_pids"]]), "TP leader and rank gone")
+    rr_conflict = run([str(sup.goethe), "load", "auto", "--tp", "1", "--gpus", f"{gpu},{gpu}", "--yes"], env=sup.env)
+    check(rr_conflict.returncode != 0, "tp gpu conflict rc")
+    check("disagrees" in (rr_conflict.stderr + rr_conflict.stdout).lower(), "tp conflict msg")
+    _foreign_scenario(sup, model_a)
+    check(sup.count("SELECT COUNT(*) FROM loaded_instances") == 0, "unload all rows")
+    check(sup.goethe_ok("ps", "--json").strip() in ("[]", ""), "goethe ps empty")
+    sup.load("a", str(gpu))
+    t0 = time.time()
+    sup.goethe_ok("unload", "--all")
+    soft(time.time() - t0 < 3.5, f"unload within 3.5s ({time.time() - t0:.1f}s)")
+    assert_no_zombies(home)
+    write_card(model_a, "a", ctx, max_conc, env={"STUB_IGNORE_SIGTERM": "1"})
+    write_card(model_b, "b", 4096, 4, env={"STUB_IGNORE_SIGTERM": "1"})
+    sup.load("a", str(gpu))
+    sup.load("b", str(gpu))
+    term_pids = [stub_launch(m)["pid"] for m in (model_a, model_b)]
+    check(all(stub_launch(m)["knobs"].get("STUB_IGNORE_SIGTERM") == "1" for m in (model_a, model_b)), "knob active")
+    t1 = time.time()
+    sup.goethe_ok("unload", "--all", timeout=120)
+    dt = time.time() - t1
+    soft(dt < 4.5, f"TERM-ignoring unload --all within 4s grace ({dt:.1f}s)")
+    check(not any(pid_alive(p) for p in term_pids), "TERM-ignoring engines killed")
+    assert_no_zombies(home, timeout=4.0)
+    write_card(model_a, "a", ctx, max_conc)
+    write_card(model_b, "b", 4096, 4, extra='kv_cache_dtype="fp8_e4m3"')
+    _clear_stub_files(model_a, model_b)
+    sup.load("t", str(gpu))
+    tenv = stub_launch(model_t)["env"]
+    check("TERNARY_PACK_DIR" in tenv or "TERNARY_MODEL_DIR" in tenv, "ternary card env")
+    check("ternary-kernels" in tenv.get("PYTHONPATH", ""), "ternary PYTHONPATH")
+    check("GOETHE_KERNEL_DIR" not in tenv, "ternary no kernel dir")
+    sup.goethe_ok("unload", "t")
+    sup.load("a", str(gpu), "--chunked-prefill-size", "4096")
+    argv = stub_launch(model_a)["argv"]
+    check("--chunked-prefill-size" in argv and argv[argv.index("--chunked-prefill-size") + 1] == "4096",
+          "load passes trailing SGLang args through")
+    for owned in (["--context-length", "4096"], ["--port=31999"], ["--tp", "2"], ["--api-key", "x"]):
+        load_owned = [str(sup.goethe), "load", "a", "--gpus", str(gpu), "--yes", "--no-wait", *owned]
+        rr_owned = run(load_owned, env=sup.env, timeout=60)
+        soft(rr_owned.returncode == 2, f"load rejects owned flag {owned[0]} with exit 2 (got {rr_owned.returncode})")
+    sup.goethe_ok("unload", "--all", timeout=120)
+    sup.goethe_ok("unload", "a")
+    sup.load("a", str(gpu))
+    check(sup.status_is("a", {"RUNNING"}, timeout=60.0), "watchdog prekill RUNNING")
+    time.sleep(2.0)
+    sup.kill_engine("a")
+    check(wait_until(lambda: sup.restarts_at_least("a", 1), timeout=120.0), "watchdog restart count after SIGKILL")
+    sup.goethe_ok("unload", "a")
+    stub_s = stub_launch(model_a)
+    check("TERNARY_PACK_DIR" not in stub_s["env"], "sglang no ternary env")
+    check("ternary-kernels" not in stub_s["env"].get("PYTHONPATH", ""), "sglang no ternary pythonpath")
+    health_timeout = os.environ.get("GOETHE_HEALTH_POLL_TIMEOUT_SEC")
+    if health_timeout and health_timeout.isdigit():
+        write_card(model_b, "b", 4096, 4, env={"STUB_START_DELAY": str(float(health_timeout) + 2.0)})
+        run([str(sup.goethe), "load", "b", "--gpus", str(gpu), "--yes"], env=sup.env, timeout=600)
+        q = "SELECT status FROM loaded_instances WHERE model_id='b' ORDER BY rowid DESC LIMIT 1"
+        st_row = sqlite_query(sup.db, q)
+        check(bool(st_row) and st_row[0][0] == "FAILED", "health timeout FAILED")
+        sup.goethe_ok("unload", "b")
+        write_card(model_b, "b", 4096, 4, extra='kv_cache_dtype="fp8_e4m3"')
+    sup.load("a", str(gpu))
+    os.kill(sup.md.popen.pid, signal.SIGTERM)
+    sup.md.popen.wait(timeout=30)
+    sup.restart()
+    check(sup.status_is("a", {"RUNNING", "STARTING"}, timeout=120.0), "goethed SIGTERM restart restores desired load")
+    sup.goethe_ok("unload", "a")
+    check(sup.count("SELECT COUNT(*) FROM desired_loads WHERE model_id='a'") == 0, "unload clears desired")
+    sup.restart()
+    time.sleep(2.0)
+    check(sup.count("SELECT COUNT(*) FROM loaded_instances WHERE model_id='a'") == 0, "unloaded model not restored")
+    sup.load("a", str(gpu))
+    check("goethed stopped" in sup.goethe_ok("stop"), "goethe stop message")
+    sup.md.popen.wait(timeout=30)
+    sup.restart()
+    check(sup.status_is("a", {"RUNNING", "STARTING"}, timeout=120.0), "goethe stop then start restores desired")
+    sup.goethe_ok("unload", "--all")
+    sup.restart()
+    dup = run([str(require_cli("goethed"))], env=sup.env, timeout=10)
+    check(dup.returncode == 1, "second goethed exit 1")
+    dup_msg = (dup.stderr + dup.stdout).lower()
+    check("already running" in dup_msg or "goethe.sock" in dup_msg, "second goethed refused")
+    write_card(model_a, "a", ctx, max_conc, env={"STUB_START_DELAY": "25"})
+    _clear_stub_files(model_a)
+    sup.load("a", str(gpu), "--no-wait", timeout=60)
+    t_ps = time.time()
+    run_goethe([str(sup.goethe), "ps", "--json"], env=sup.env, timeout=30)
+    check(time.time() - t_ps < 10.0, "ps during load")
+    check(wait_until(lambda: (model_a / "stub_launch_argv.json").is_file(), timeout=15), "delayed stub started")
+    check(stub_launch(model_a)["knobs"].get("STUB_START_DELAY") == "25", "start delay knob active")
+    sup.goethe_ok("unload", "a", timeout=120)
+    write_card(model_a, "a", ctx, max_conc)
+    _clear_stub_files(model_a, model_b)
+    (model_b / "stub_health_mode.txt").write_text("late503", encoding="utf-8")
+    (model_b / "stub_health_delay.txt").write_text("20", encoding="utf-8")
+    sup.load("b", str(gpu), "--no-wait", timeout=60)
+    time.sleep(8.0)
+    row_b = next((r for r in sup.ps() if r.get("model_id") == "b"), None)
+    check(row_b is not None and row_b.get("status") == "STARTING", "late health stays STARTING")
+    check(sup.md.popen.poll() is None, "goethed alive during late startup")
+    check(sup.status_is("b", {"RUNNING"}, timeout=90.0), "late health reaches RUNNING")
+    sup.goethe_ok("unload", "b")
+    (model_b / "stub_health_mode.txt").write_text("warmup", encoding="utf-8")
+    (model_b / "stub_health_delay.txt").write_text("12", encoding="utf-8")
+    sup.load("b", str(gpu), "--no-wait", timeout=60)
+    time.sleep(2.0)
+    row_b = next((r for r in sup.ps() if r.get("model_id") == "b"), None)
+    check(row_b is not None and row_b.get("status") == "STARTING", "warmup not RUNNING early")
+    check(sup.status_is("b", {"RUNNING"}, timeout=60.0), "warmup RUNNING after health")
+    sup.goethe_ok("unload", "--all")
+    _clear_stub_files(model_a, model_b)
+    sup.load("a", str(gpu))
+    idx = home / "logs" / "index.jsonl"
+    spawns_before = sum(1 for ln in idx.read_text(encoding="utf-8").splitlines() if ln.strip())
+    eng_pgid = int(sqlite_query(sup.db, "SELECT pgid FROM loaded_instances WHERE model_id='a' LIMIT 1")[0][0])
+    check(eng_pgid != sup.md.popen.pid, "engine pgid not goethed")
+    kill_engine_group(home, eng_pgid)
+    check(wait_until(lambda: sup.restarts_at_least("a", 1), timeout=90.0), "single restart after kill -9")
+    check(sup.status_is("a", {"RUNNING"}, timeout=120.0), "back running after kill")
+    spawns_after = sum(1 for ln in idx.read_text(encoding="utf-8").splitlines() if ln.strip())
+    check(spawns_after == spawns_before + 1, "exactly one extra spawn")
+    (model_b / "stub_health_mode.txt").write_text("burst503", encoding="utf-8")
+    (model_b / "stub_health_burst_delay.txt").write_text("2", encoding="utf-8")
+    (model_b / "stub_health_burst_sec.txt").write_text("8", encoding="utf-8")
+    sup.load("b", str(gpu))
+    check(sup.status_is("b", {"RUNNING"}, timeout=60.0), "burst503 load RUNNING")
+    time.sleep(3.0)
+    row_b = next(r for r in sup.ps() if r.get("model_id") == "b")
+    check(row_b.get("status") == "RUNNING" and int(row_b.get("restarts", 0)) == 0, "burst active")
+    time.sleep(9.0)
+    row_b = next(r for r in sup.ps() if r.get("model_id") == "b")
+    check(row_b.get("status") == "RUNNING" and int(row_b.get("restarts", 0)) == 0, "burst503 survives")
+    sup.goethe_ok("unload", "b")
+    _clear_stub_files(model_b)
+    (model_b / "stub_cheap_mode.txt").write_text("503_after", encoding="utf-8")
+    sup.load("b", str(gpu))
+    t_h = time.time()
+    check(wait_until(lambda: sup.restarts_at_least("b", 1), timeout=120.0), "sustained cheap probe restart")
+    check(time.time() - t_h >= 25.0, "restart after sustained cheap fail")
+    sup.goethe_ok("unload", "b", timeout=120)
+    check(sup.md.popen.poll() is None, "goethed alive after hung probe")
+    sup.goethe_ok("unload", "--all", timeout=120)
+    _clear_stub_files(model_b)
+    sup.load("a", str(gpu))
+    sup.load("a", str(gpu))
+    running_a = sum(1 for r in sup.ps() if r.get("model_id") == "a" and r.get("status") == "RUNNING")
+    check(running_a >= 2, "two RUNNING instances")
+    check(sup.count("SELECT COUNT(*) FROM desired_loads WHERE model_id='a'") == 2, "two desired slots")
+    sup.restart()
+    check(
+        wait_until(
+            lambda: sum(1 for r in sup.ps() if r.get("model_id") == "a" and r.get("status") == "RUNNING") >= 2,
+            timeout=300.0,
+        ),
+        "restore both slots",
+    )
+    sup.goethe_ok("unload", "a", timeout=120)
+    left_inst = sup.count("SELECT COUNT(*) FROM loaded_instances WHERE model_id='a'")
+    left_des = sup.count("SELECT COUNT(*) FROM desired_loads WHERE model_id='a'")
+    check(left_inst == 0 and left_des == 0, "unload all slots of model")
+    assert_no_zombies(home)
 
 
 if __name__ == "__main__":

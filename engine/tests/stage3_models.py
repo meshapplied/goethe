@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -198,37 +197,26 @@ def main() -> None:
                 'model_id = "local/test-a"\ncontext_length = 512\n',
                 encoding="utf-8",
             )
-            seed_installed_model(
-                home,
-                "local/test-a",
-                str(model_path.relative_to(home)),
-                0.1,
-                100,
-                512,
-                1,
-                1,
-            )
-            rr_list = run_goethe(
-                [str(goethe), "models", "--json", "--installed"],
-                env={"GOETHE_HOME": str(home), "GOETHE_REGISTRY_URL": f"file://{reg}", "HF_HUB_OFFLINE": "1"},
-                timeout=30,
-            )
-            rows = json.loads(rr_list.stdout)
+            seed_installed_model(home, "local/test-a", "models/local__test-a", 0.1, 100, 512, 1, 1, managed=0)
+            managed_path = home / "models" / "org__managed-b"
+            managed_path.mkdir(parents=True)
+            (managed_path / "config.json").write_text("{}", encoding="utf-8")
+            seed_installed_model(home, "org/managed-b", "models/org__managed-b", 0.1, 100, 512, 1, 1, managed=1)
+            env = {"GOETHE_HOME": str(home), "GOETHE_REGISTRY_URL": f"file://{reg}", "HF_HUB_OFFLINE": "1"}
+            rows = json.loads(run_goethe([str(goethe), "models", "--json", "--installed"], env=env, timeout=30).stdout)
             row_a = next((r for r in rows if r.get("id") == "local/test-a"), None)
             if row_a is None or row_a.get("status") != "installed" or not row_a.get("custom"):
                 raise RuntimeError("models --installed missing seeded custom model")
-            rr_rm = run_goethe(
-                [str(goethe), "remove", "local/test-a", "--yes"],
-                env={"GOETHE_HOME": str(home), "HF_HUB_OFFLINE": "1"},
-                timeout=30,
-            )
-            if rr_rm.returncode != 0:
-                raise RuntimeError(rr_rm.stderr)
-            n = sqlite_query(home / "state.db", "SELECT COUNT(*) FROM installed_models")[0][0]
-            if int(n) != 0:
-                raise RuntimeError("remove did not clear installed_models")
+            rr_rm = run_goethe([str(goethe), "remove", "local/test-a", "--yes"], env=env, timeout=30)
             if not model_path.exists():
-                raise RuntimeError("remove deleted local model files on disk")
+                raise RuntimeError("remove deleted the files of an unmanaged (in-place) model")
+            rr_m = run_goethe([str(goethe), "remove", "org/managed-b", "--yes"], env=env, timeout=30)
+            if managed_path.exists():
+                raise RuntimeError(f"remove kept the files of a managed model: {rr_m.stdout}")
+            if sqlite_query(home / "state.db", "SELECT COUNT(*) FROM installed_models")[0][0] != 0:
+                raise RuntimeError("remove did not clear installed_models")
+            if f"rm -rf '{model_path}'" not in rr_rm.stdout + rr_rm.stderr:
+                raise RuntimeError(f"unmanaged remove must print rm -rf '<path>': {rr_rm.stdout[-300:]}")
     finally:
         shutil.rmtree(bad_dir, ignore_errors=True)
 

@@ -279,7 +279,8 @@ def _run_fused(
 
 
 def main() -> None:
-    gpu = require_gpus(1)[0]
+    """Compare the fused Marlin MoE against dense Marlin and an fp32 dequant reference on the small-CUDA GPU."""
+    gpu = require_gpus(1)[-1]
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA required")
@@ -315,8 +316,11 @@ def main() -> None:
                 stats.append((batch, seed, rl_m, cos_m, rl_d, cos_d))
                 if rl_m > REL_L2_MAX or cos_m < COS_MIN:
                     raise RuntimeError(
-                        f"fused vs dense Marlin fail M={batch} seed={seed} "
-                        f"rel_l2={rl_m:.4f} cos={cos_m:.6f}"
+                        f"fused vs dense Marlin fail M={batch} seed={seed} rel_l2={rl_m:.4f} cos={cos_m:.6f}"
+                    )
+                if rl_d > REL_L2_MAX or cos_d < COS_MIN:
+                    raise RuntimeError(
+                        f"fused vs fp32 dequant reference fail M={batch} seed={seed} rel_l2={rl_d:.4f} cos={cos_d:.6f}"
                     )
 
     for batch, seed, rl_m, cos_m, rl_d, cos_d in stats:
