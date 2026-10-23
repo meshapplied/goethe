@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -83,6 +84,12 @@ def main() -> None:
         lst_adm = run_goethe([str(goethe), "key", "list"], env=env).stdout
         if "adm" not in lst_adm or "ADMIN=yes" not in lst_adm:
             raise RuntimeError(f"admin list missing: {lst_adm}")
+        out_id = run_goethe([str(goethe), "key", "create", "--name", "idcheck"], env=env).stdout
+        tok_id = re.search(r"goethe_sk_[A-Za-z0-9_-]+", out_id)
+        q_id = "SELECT key_id FROM api_keys WHERE token_hash=?"
+        db_id = sqlite_query(home / "state.db", q_id, (sha256_hex(tok_id.group(0)),)) if tok_id else []
+        if not db_id or str(db_id[0][0]) not in out_id:
+            raise RuntimeError(f"key create without --raw must print the stored key id {db_id}: {out_id}")
         tok_use = key("--name", "use", "--raw")
         st, _, _ = _mux_post(home, {**CHAT, "max_tokens": 2}, tok_use)
         if st != 200:
