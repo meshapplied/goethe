@@ -174,6 +174,7 @@ async fn main() {
                 let h = home_rot.clone();
                 tokio::task::spawn_blocking(move || {
                     supervisor::watchdog_tick();
+                    goethe_core::proc_ident::reap_deferred();
                     if let Err(e) = goethe_core::nginx::ensure_gateway_running(&h) {
                         eprintln!("gateway check: {e}");
                     }
