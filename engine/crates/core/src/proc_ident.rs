@@ -230,6 +230,9 @@ fn wait_gone(ids: &[Identity], procs: &[(usize, i32, u64)], until: Instant) -> b
             reap_leader(id);
         }
         if !procs.iter().any(|&(_, p, t)| running(p, t)) {
+            for id in ids {
+                reap_leader(id);
+            }
             return true;
         }
         if Instant::now() >= until {
@@ -348,6 +351,35 @@ mod tests {
         assert!(exited(&mut member));
         stranger.kill().expect("kill own stranger");
         stranger.wait().expect("wait stranger");
+    }
+
+    fn setsid_sleep_ignoring_term() -> Child {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30").env_remove(INSTANCE_ENV);
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        cmd.spawn().expect("spawn sleep")
+    }
+
+    #[test]
+    fn terminate_reaps_killed_leaders() {
+        let children: Vec<Child> = (0..16).map(|_| setsid_sleep_ignoring_term()).collect();
+        let ids: Vec<Identity> = children
+            .iter()
+            .enumerate()
+            .map(|(n, c)| capture(&format!("inst-test-reap-{n}"), c.id() as i32).expect("identity"))
+            .collect();
+        let stopped = terminate(&ids);
+        assert!(stopped.survivors.is_empty());
+        for id in &ids {
+            let left = read_stat(id.pid).is_some_and(|s| s.start_ticks == id.start_ticks);
+            assert!(!left, "leader {} was left behind (alive or zombie)", id.pid);
+        }
     }
 
     #[test]
