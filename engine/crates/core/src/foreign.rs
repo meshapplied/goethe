@@ -219,10 +219,11 @@ mod tests {
     }
 
     fn wait_exec(pid: u32) {
-        // Until a spawned child has exec'd, /proc shows the parent's environment; wait for it to become sleep.
+        // exec sets the name before the new environment is mapped, so wait until sleep's environment is readable too.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
-            if std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "sleep") {
+            let named = std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "sleep");
+            if named && std::fs::read(format!("/proc/{pid}/environ")).is_ok_and(|e| !e.is_empty()) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
