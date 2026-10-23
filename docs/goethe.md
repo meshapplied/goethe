@@ -190,7 +190,7 @@ GOETHE_HOME/
 - **Aliases:** `goethe alias set chat org/model` lets clients use a short name. A real model id always wins over an alias spelled the same.
 - **Guided access setup:** `goethe configure api` asks whether clients are local, on a VPN or on a public network, then sets the bind address and allowlist to match:
   - VPN mode listens only on the VPN address and allows the VPN's range (all of `100.64.0.0/10` for Tailscale).
-  - Public mode warns first, binds every interface, and allows only the client IPs you name. It refuses `0.0.0.0/0` unless you confirm on a terminal.
+  - Public mode warns first and shows this machine's public IP with the API URL on it (looked up at api.ipify.org; `GOETHE_PUBLIC_IP` names it, `GOETHE_PUBLIC_IP_LOOKUP=0` turns the lookup off). It says when the machine is behind NAT and needs a port forward. Then it binds every interface and allows only the client IPs you name. It refuses `0.0.0.0/0` unless you confirm on a terminal.
 - **TLS and binding:**
   - TLS uses a self-signed certificate by default.
   - The gateway listens on 127.0.0.1. Use `goethe gateway bind 0.0.0.0` (plus an allowlist entry) to serve other machines.
