@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub const INSTANCE_ENV: &str = "GOETHE_INSTANCE_ID";
@@ -229,20 +229,38 @@ pub fn instance_pids(id: &Identity) -> Vec<i32> {
 }
 
 fn wait_gone(ids: &[Identity], procs: &[(usize, i32, u64)], until: Instant) -> bool {
+    // Gone means no member runs and every leader was reaped: a multi-threaded leader shows Z before it is reapable.
     loop {
         for id in ids {
             reap_leader(id);
         }
-        if !procs.iter().any(|&(_, p, t)| running(p, t)) {
-            for id in ids {
-                reap_leader(id);
-            }
+        let pending = procs.iter().any(|&(_, p, t)| running(p, t)) || ids.iter().any(leader_present);
+        if !pending {
             return true;
         }
         if Instant::now() >= until {
             return false;
         }
         std::thread::sleep(POLL);
+    }
+}
+
+fn leader_present(id: &Identity) -> bool {
+    read_stat(id.pid).is_some_and(|s| s.start_ticks == id.start_ticks)
+}
+
+fn deferred() -> &'static Mutex<Vec<Identity>> {
+    static DEFERRED: OnceLock<Mutex<Vec<Identity>>> = OnceLock::new();
+    DEFERRED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+pub fn reap_deferred() {
+    // Watchdog backstop: keep reaping leaders whose threads were still exiting when terminate returned.
+    if let Ok(mut list) = deferred().lock() {
+        list.retain(|id| {
+            reap_leader(id);
+            leader_present(id)
+        });
     }
 }
 
@@ -272,6 +290,9 @@ pub fn terminate(ids: &[Identity]) -> Stopped {
         signal(&ids[n], p, libc::SIGKILL);
     }
     wait_gone(ids, &left, Instant::now() + KILL_WAIT);
+    if let Ok(mut list) = deferred().lock() {
+        list.extend(ids.iter().filter(|id| leader_present(id)).cloned());
+    }
     let mut seen: HashSet<i32> = first.iter().map(|m| m.1).collect();
     seen.extend(left.iter().map(|m| m.1));
     Stopped {
