@@ -44,7 +44,7 @@ print(reply.choices[0].message.content)
 
 - Linux on x86_64 or ARM64.
 - An NVIDIA GPU:
-  - Blackwell: GeForce RTX 5090, RTX PRO 6000 Blackwell, or DGX Spark (GB10);
+  - Blackwell: B100, B200, B300, GeForce RTX 5090, RTX PRO 6000 Blackwell, or DGX Spark (GB10);
   - or Ampere with compute capability 8.6: GeForce RTX 3090, RTX A6000, and similar.
 - NVIDIA driver 580 or newer.
 - The CUDA 13.0 toolkit, used to build GPU kernels on the first model load ([install steps](docs/user-guide.md#install)).

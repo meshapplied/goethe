@@ -394,6 +394,8 @@ Models that were loaded when Goethe stopped come back by themselves when it star
 |---|---|---|---|
 | Blackwell (consumer and workstation) | GeForce RTX 5090, RTX PRO 6000 Blackwell | 12.0 | Supported and tested |
 | Blackwell (DGX Spark) | GB10 | 12.1 | Supported |
+| Blackwell data center | B100, B200, GB200 | 10.0 | Supported |
+| Blackwell Ultra data center | B300, GB300 | 10.3 | Supported |
 | Ampere | GeForce RTX 3090, RTX A6000 | 8.6 | Supported |
 
 - **Several GPUs:** a model can be split across several GPUs in one machine (`--tp`), and mixture-of-experts models can also use expert parallelism (`--ep`).
@@ -425,7 +427,7 @@ Dense, mixture-of-experts, hybrid (linear attention and Mamba) and vision-langua
 | Format | Typical use | GPUs |
 |---|---|---|
 | BF16 / FP16 | Original model weights | All supported GPUs |
-| **NVFP4** (NVIDIA ModelOpt, compressed-tensors) | 4-bit, about 4x smaller than BF16 | All supported GPUs, with Goethe's fast kernels |
+| **NVFP4** (NVIDIA ModelOpt, compressed-tensors) | 4-bit, about 4x smaller than BF16 | All supported GPUs: native FP4 on B100/B200/B300, Goethe's fast kernels on RTX Blackwell and Ampere |
 | FP8 (ModelOpt, compressed-tensors, block FP8) | 8-bit, about 2x smaller | Native on Blackwell; Ampere runs it more slowly |
 | MXFP4 | GPT-OSS models | Blackwell |
 | AWQ, GPTQ | 4-bit community quantizations | All supported GPUs |
