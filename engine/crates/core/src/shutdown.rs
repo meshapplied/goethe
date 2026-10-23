@@ -42,7 +42,11 @@ pub fn stop_daemon(keep_engines: bool) -> Result<(), String> {
     let sock = goethe_sock();
     let home = goethe_home();
     if !sock.exists() {
-        println!("goethed not running");
+        if !keep_engines && crate::nginx::stop_left_gateway(&home) {
+            println!("goethed not running; stopped the gateway a previous goethed left running");
+        } else {
+            println!("goethed not running");
+        }
         return Ok(());
     }
     match rpc::call("shutdown", json!({ "keep_engines": keep_engines })) {
@@ -59,7 +63,8 @@ pub fn stop_daemon(keep_engines: bool) -> Result<(), String> {
         }
         Ok(_) => {}
     }
-    for _ in 0..150 {
+    let polls = if keep_engines { 450 } else { 150 };
+    for _ in 0..polls {
         if !sock.exists() && daemon_released(&home) {
             let kept = if keep_engines { "; engines left running for the next goethed to adopt" } else { "" };
             println!("goethed stopped{kept}");
@@ -67,7 +72,7 @@ pub fn stop_daemon(keep_engines: bool) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Err("goethed did not stop within 15s".to_string())
+    Err(format!("goethed did not stop within {}s", polls / 10))
 }
 
 fn daemon_released(home: &Path) -> bool {
@@ -81,7 +86,10 @@ fn daemon_released(home: &Path) -> bool {
 pub fn shutdown_daemon(home: &Path, sock: &Path, keep_engines: bool) {
     // A plain stop tears engines down and keeps desired slots; keep_engines touches no engine, row or run entry.
     if keep_engines {
-        crate::supervisor::append_goethed_log(home, "goethed stopping with keep_engines: engines left for adoption\n");
+        crate::supervisor::append_goethed_log(
+            home,
+            "goethed stopping with keep_engines: engines and the gateway left for adoption\n",
+        );
     } else {
         let _ = crate::supervisor::graceful_shutdown(home);
         crate::nginx::stop(home);

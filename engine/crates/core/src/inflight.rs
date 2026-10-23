@@ -39,6 +39,10 @@ pub fn instance_count(instance_id: &str) -> usize {
     counts().instances.get(instance_id).copied().unwrap_or(0)
 }
 
+pub fn total() -> usize {
+    counts().models.values().sum()
+}
+
 impl InflightGuard {
     pub fn pick(&mut self, instances: &[&str]) -> Option<usize> {
         // Count this request against the least busy instance; ties rotate so idle replicas share traffic.
