@@ -2,7 +2,7 @@
 
 use crate::paths::goethe_home;
 use std::io::Write;
-use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -183,6 +183,106 @@ pub fn public_bind(home: &Path) -> String {
     "127.0.0.1".to_string()
 }
 
+pub fn set_public_bind(home: &Path, addr: &str) -> Result<String, String> {
+    // Persist the listen address and apply it: hot reload when old and new sockets cannot clash, else a restart.
+    let ip: IpAddr = addr
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid address {addr:?}: use 0.0.0.0, 127.0.0.1 or an IP address of this host"))?;
+    if !ip.is_unspecified() && !is_local_address(ip) {
+        return Err(format!("{ip} is not an address of this host"));
+    }
+    let lock = gateway_lock(home)?;
+    let previous = public_bind(home);
+    store_public_bind(home, &ip.to_string())?;
+    let Some(master) = verified_master(home) else {
+        return Ok(format!("gateway bind set to {ip}; it applies when goethed starts the gateway"));
+    };
+    let listening = || format!("gateway listens on {ip} port {}", public_port_u16(home));
+    let bin = proc_exe(master).filter(|p| p.is_file()).unwrap_or_else(|| nginx_bin(home));
+    let prefix = nginx_prefix(home);
+    let checked = write_configs(home, &bin).and_then(|_| nginx_test(home, &bin, &prefix, &prefix.join("nginx.conf")));
+    if let Err(e) = checked {
+        store_public_bind(home, &previous)?;
+        let _ = write_configs(home, &bin);
+        return Err(format!("{e}; the gateway bind stays {previous}"));
+    }
+    if !binds_clash(&previous, ip) {
+        let before = worker_pids(master);
+        apply_locked(home).map_err(|e| format!("{e}; the bind {ip} applies when the gateway restarts"))?;
+        if previous == ip.to_string() || worker_pids(master).iter().any(|p| !before.contains(p)) {
+            return Ok(listening());
+        }
+    }
+    log_gateway(home, &format!("restarting nginx to move the listener from {previous} to {ip}"));
+    stop_master(home);
+    drop(lock);
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while Instant::now() < deadline {
+        if verified_master(home).is_some() && gateway_listening(home) {
+            return Ok(format!("{} (restarted)", listening()));
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(format!(
+        "the gateway did not come back on {ip} within 25 s; goethed restarts it (check goethe gateway status and goethe logs --gateway)"
+    ))
+}
+
+fn is_local_address(ip: IpAddr) -> bool {
+    // An interface of this host carries the address; a bind test alone passes everything under ip_nonlocal_bind.
+    let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut ifap) } != 0 {
+        return TcpListener::bind((ip, 0)).is_ok();
+    }
+    let mut found = ip.is_loopback();
+    let mut cur = ifap;
+    while !cur.is_null() {
+        let ifa = unsafe { &*cur };
+        let addr = match unsafe { ifa.ifa_addr.as_ref() }.map(|a| i32::from(a.sa_family)) {
+            Some(libc::AF_INET) => {
+                let sin = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in) };
+                Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))))
+            }
+            Some(libc::AF_INET6) => {
+                let sin6 = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in6) };
+                Some(IpAddr::V6(Ipv6Addr::from(sin6.sin6_addr.s6_addr)))
+            }
+            _ => None,
+        };
+        found |= addr == Some(ip);
+        cur = ifa.ifa_next;
+    }
+    unsafe { libc::freeifaddrs(ifap) };
+    found
+}
+
+fn binds_clash(previous: &str, next: IpAddr) -> bool {
+    // A wildcard listener and any other listener on the same port cannot coexist during a hot reload on Linux.
+    previous.parse::<IpAddr>().map_or(true, |p| p != next && (p.is_unspecified() || next.is_unspecified()))
+}
+
+fn store_public_bind(home: &Path, value: &str) -> Result<(), String> {
+    let con = crate::db::open(home).map_err(|e| e.to_string())?;
+    con.execute(
+        "INSERT OR REPLACE INTO goethe_settings (key, value) VALUES ('public_bind', ?1)",
+        [value],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+pub fn gateway_connect_addr(home: &Path) -> SocketAddr {
+    // Where local clients reach the gateway: loopback for a wildcard bind, else the bound address.
+    let ip = match public_bind(home).parse::<IpAddr>() {
+        Ok(IpAddr::V4(a)) if a.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Ok(IpAddr::V6(a)) if a.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        Ok(ip) => ip,
+        Err(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+    };
+    SocketAddr::new(ip, public_port_u16(home))
+}
+
 fn quote(path: &Path) -> String {
     let s = path.display().to_string();
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
@@ -290,15 +390,11 @@ pub fn format_gateway_line(home: &Path) -> Option<String> {
     if gateway_down_reason().is_some() || verified_master(home).is_none() || !gateway_listening(home) {
         return None;
     }
-    Some(format!(
-        "gateway: https://127.0.0.1:{}",
-        public_port_u16(home)
-    ))
+    Some(format!("gateway: https://{}", gateway_connect_addr(home)))
 }
 
 pub fn gateway_listening(home: &Path) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], public_port_u16(home)));
-    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+    TcpStream::connect_timeout(&gateway_connect_addr(home), Duration::from_millis(200)).is_ok()
 }
 
 pub fn log_gateway(home: &Path, msg: &str) {
@@ -349,8 +445,7 @@ pub fn test_config(home: &Path) -> Result<(), String> {
 }
 
 fn wait_public_port(home: &Path, timeout: Duration) -> Result<(), String> {
-    let port = public_port_u16(home);
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = gateway_connect_addr(home);
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
@@ -358,10 +453,7 @@ fn wait_public_port(home: &Path, timeout: Duration) -> Result<(), String> {
         }
         thread::sleep(Duration::from_millis(50));
     }
-    Err(format!(
-        "gateway did not listen on 127.0.0.1:{port} within {}s",
-        timeout.as_secs()
-    ))
+    Err(format!("gateway did not listen on {addr} within {}s", timeout.as_secs()))
 }
 
 struct MasterRecord {
@@ -616,7 +708,7 @@ fn spawn_private(home: &Path) -> Result<(), String> {
     })?;
     log_gateway(
         home,
-        &format!("listening on 127.0.0.1:{} (master pid {pid})", public_port_u16(home)),
+        &format!("listening on {} (master pid {pid})", gateway_connect_addr(home)),
     );
     clear_gateway_down();
     Ok(())
@@ -767,11 +859,14 @@ mod tests {
         assert!(mode == 0o700 || mode == 0o711);
     }
 
+    static REAL_NGINX: Mutex<()> = Mutex::new(());
+
     #[test]
     fn respawn_reaps_workers_of_a_killed_master() {
         let Some(bin) = std::env::var_os("NGINX_BIN").map(PathBuf::from).filter(|p| p.is_file()) else {
             return;
         };
+        let _serial = REAL_NGINX.lock().unwrap_or_else(|e| e.into_inner());
         let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
@@ -796,6 +891,53 @@ mod tests {
         assert_ne!(respawned, master);
         assert!(workers.iter().all(|&w| proc_stat(w).is_none_or(|s| s.0 == 'Z')), "orphans were stopped");
         assert!(gateway_listening(home));
+        stop(home);
+        assert_eq!(verified_master(home), None);
+    }
+
+    #[test]
+    fn bind_is_validated_and_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        assert!(set_public_bind(home, "nope").unwrap_err().contains("invalid address"));
+        assert!(set_public_bind(home, "192.0.2.77").unwrap_err().contains("not an address of this host"));
+        assert!(is_local_address(IpAddr::V4(Ipv4Addr::LOCALHOST)) && is_local_address("127.0.0.2".parse().unwrap()));
+        assert!(set_public_bind(home, "0.0.0.0").unwrap().contains("applies when goethed starts"));
+        assert_eq!(public_bind(home), "0.0.0.0");
+        assert_eq!(gateway_connect_addr(home), "127.0.0.1:8443".parse::<SocketAddr>().unwrap());
+        set_public_bind(home, "::").unwrap();
+        assert_eq!(gateway_connect_addr(home), "[::1]:8443".parse::<SocketAddr>().unwrap());
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert!(binds_clash("127.0.0.1", ip("0.0.0.0")));
+        assert!(binds_clash("0.0.0.0", ip("127.0.0.1")));
+        assert!(!binds_clash("0.0.0.0", ip("0.0.0.0")));
+        assert!(!binds_clash("127.0.0.1", ip("127.0.0.2")));
+    }
+
+    #[test]
+    fn bind_change_between_addresses_hot_reloads() {
+        let Some(bin) = std::env::var_os("NGINX_BIN").map(PathBuf::from).filter(|p| p.is_file()) else {
+            return;
+        };
+        let _serial = REAL_NGINX.lock().unwrap_or_else(|e| e.into_inner());
+        let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let port = free();
+        fs::create_dir_all(home.join("nginx")).unwrap();
+        fs::write(home.join("nginx/mux_port"), format!("{}\n", free())).unwrap();
+        fs::write(home.join("nginx/public_port"), format!("{port}\n")).unwrap();
+        write_configs(home, &bin).unwrap();
+        spawn_private(home).unwrap();
+        let master = verified_master(home).expect("our master is verified");
+        let msg = set_public_bind(home, "127.0.0.2").unwrap();
+        assert!(msg.contains(&format!("listens on 127.0.0.2 port {port}")), "{msg}");
+        assert_eq!(verified_master(home), Some(master), "a hot reload keeps the master");
+        let conf = fs::read_to_string(home.join("nginx/goethe_gateway.conf")).unwrap();
+        assert!(conf.contains(&format!("listen 127.0.0.2:{port}")), "{conf}");
+        assert!(TcpStream::connect(("127.0.0.2", port)).is_ok());
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+        assert_eq!(format_gateway_line(home), Some(format!("gateway: https://127.0.0.2:{port}")));
         stop(home);
         assert_eq!(verified_master(home), None);
     }

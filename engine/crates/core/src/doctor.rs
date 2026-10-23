@@ -168,8 +168,8 @@ fn check_nvidia_driver() -> Check {
 fn probe_public_reachability(home: &Path) {
     use std::io::Read;
     let bind = crate::nginx::public_bind(home);
-    if bind == "127.0.0.1" {
-        println!("gateway is loopback only");
+    if bind.parse::<std::net::IpAddr>().map_or(true, |ip| ip.is_loopback()) {
+        println!("public probe: {}", crate::host::public_access_hint(&bind));
         return;
     }
     let ip = match crate::domain::public_ipv4() {
@@ -383,10 +383,11 @@ fn check_cloud(home: &Path) -> Check {
     // Provider-specific reachability hints for the public gateway port.
     let port = crate::nginx::public_port_u16(home);
     let env = crate::host::probe_environment(port);
+    let access = crate::host::public_access_hint(&crate::nginx::public_bind(home));
     let hints = if env.public_endpoints.is_empty() {
-        String::new()
+        format!("; {access}")
     } else {
-        format!("; endpoints: {}", env.public_endpoints.join(", "))
+        format!("; endpoints: {}; {access}", env.public_endpoints.join(", "))
     };
     match env.cloud.as_str() {
         "none" => check("cloud", "INFO", "no cloud provider detected"),

@@ -72,6 +72,7 @@ For gated or private repos, accept the license on Hugging Face, download with yo
     goethe config <model_id> --ctx 32768 --max-conc 4
     goethe logs <model_id> [-f] [-n 200]  # also --daemon, --gateway, --prune
     goethe doctor [--json] [--probe-public]  # checks with a fix hint each; probe-public needs GOETHE_CANARY_URL for a real answer
+    goethe gateway bind 0.0.0.0 | status  # where the public gateway listens (default 127.0.0.1)
     goethe service enable                 # start goethed at boot (systemd, systemd --user, or cron)
     goethe stop                           # stop daemon and engines (loaded models return on next start)
     goethe update [--check] [--engine]    # signed self-update
@@ -85,13 +86,14 @@ Loaded models are restored after a daemon restart or reboot unless you unloaded 
 
 `goethe hw profile` and `goethe doctor` report the container (Docker, Podman, Kubernetes, LXC), whether systemd runs, and the cloud: RunPod, Vast.ai, Lambda, AWS, GCP, Azure, OCI, CoreWeave or Paperspace, from environment variables and DMI only (no network calls).
 
-- RunPod and Vast.ai: state goes to `/workspace/.goethe` on the persistent volume, and Goethe prints the public endpoint for the gateway port (`https://<pod>-<port>.proxy.runpod.net`, or the Vast port mapping).
+- RunPod and Vast.ai: state goes to `/workspace/.goethe` on the persistent volume, and Goethe prints the public endpoint for the gateway port (`https://<pod>-<port>.proxy.runpod.net`, or the Vast port mapping). Remote clients need `goethe gateway bind 0.0.0.0` and an allowlist entry for the address they connect from.
 - No systemd as PID 1: `goethe service enable` uses `nohup` and cron instead of a unit.
 - `doctor` warns when `state.db` sits on a network filesystem, when free RAM is low for models that offload to host memory, and when disk is short for the installed models.
 
 ## Security
 
 - The public gateway (nginx, TLS, self-signed by default) allows only addresses added with `goethe allowlist add|remove|list`.
+- It listens on 127.0.0.1 unless you run `goethe gateway bind 0.0.0.0` (or one IP address of this host); `goethe gateway bind 127.0.0.1` closes it again and `goethe gateway status` shows bind, port, URL and allowlist size. Moving between loopback and 0.0.0.0 restarts nginx (a few seconds without the gateway); `goethe domain add` also binds 0.0.0.0.
 - API keys: `goethe key create --name N [--rpm N] [--expires 30d] [--models a,b] [--admin]`, `goethe key list`, `goethe key revoke <id>`. Keys are stored hashed; usage per key is counted.
 - A key with `--models` sees only those models in `/v1/models`. Requests for any other model, or for a model that is not loaded, get 404 `Model Not Found`.
 - Health: `/health` (public), `/health/ready?model=<id>` (200 only when that model's engine answers), `/health/admin` (admin key only; other callers get 404) returns GPU VRAM, instances with in-flight counts, and inactive models.

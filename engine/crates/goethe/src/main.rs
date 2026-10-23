@@ -182,6 +182,11 @@ enum Commands {
         #[arg(long = "probe-public", help = "Probe public gateway reachability.")]
         probe_public: bool,
     },
+    #[command(about = "Show or change where the public gateway listens.")]
+    Gateway {
+        #[command(subcommand)]
+        cmd: GatewayCommands,
+    },
     #[command(about = "Configure a public DNS name and TLS certificate.")]
     Domain {
         #[command(subcommand)]
@@ -236,6 +241,20 @@ enum Commands {
     Alias {
         #[command(subcommand)]
         cmd: AliasCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum GatewayCommands {
+    #[command(about = "Listen address: 127.0.0.1 (default, this host only), 0.0.0.0 (all addresses) or one IP of this host.")]
+    Bind {
+        #[arg(help = "0.0.0.0, 127.0.0.1 or an IP address of this host.")]
+        addr: String,
+    },
+    #[command(about = "Show the bind address, port, URL, state and allowlist size.")]
+    Status {
+        #[arg(long, help = "Emit JSON.")]
+        json: bool,
     },
 }
 
@@ -617,6 +636,10 @@ fn main() {
             }
         },
         Commands::Doctor { json, probe_public } => goethe_core::doctor::run(json, probe_public),
+        Commands::Gateway { cmd } => match cmd {
+            GatewayCommands::Bind { addr } => do_gateway_bind(&addr),
+            GatewayCommands::Status { json } => do_gateway_status(json),
+        },
         Commands::Domain { cmd } => match cmd {
             DomainCommands::Add { domain } => match goethe_core::domain::add(&domain) {
                 Ok(url) => {
@@ -947,6 +970,59 @@ fn do_ps(json: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn do_gateway_bind(addr: &str) -> Result<(), String> {
+    // Validate the address, persist it and apply it to the running gateway; remind about the allowlist.
+    let ip: std::net::IpAddr = addr
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| usage(format!("invalid address {addr:?}: use 0.0.0.0, 127.0.0.1 or an IP address of this host")));
+    let home = goethe_home();
+    ensure_layout(&home).map_err(|e| format!("layout: {e}"))?;
+    println!("{}", nginx::set_public_bind(&home, &ip.to_string())?);
+    if !ip.is_loopback() && security::allowlist_list()?.is_empty() {
+        println!("the allowlist is empty, so every client is refused: goethe allowlist add <client-ip>/32");
+    }
+    Ok(())
+}
+
+fn do_gateway_status(json: bool) -> Result<(), String> {
+    // Bind, port, local URL, whether our nginx serves, allowlist size and provider endpoint hints.
+    let home = goethe_home();
+    let bind = nginx::public_bind(&home);
+    let port = nginx::public_port_u16(&home);
+    let url = format!("https://{}", nginx::gateway_connect_addr(&home));
+    let running = nginx::format_gateway_line(&home).is_some();
+    let allowlist = security::allowlist_list()?.len();
+    let endpoints = goethe_core::host::probe_environment(port).public_endpoints;
+    if json {
+        let row = json!({"bind": bind, "port": port, "url": url, "running": running,
+            "allowlist_entries": allowlist, "endpoints": endpoints});
+        println!("{row}");
+        return Ok(());
+    }
+    print!("{}", gateway_status_text(&bind, port, &url, running, allowlist, &endpoints));
+    Ok(())
+}
+
+fn gateway_status_text(bind: &str, port: u16, url: &str, running: bool, allowlist: usize, endpoints: &[String]) -> String {
+    let loopback = bind.parse::<std::net::IpAddr>().map_or(true, |ip| ip.is_loopback());
+    let scope = if loopback {
+        "this host only; `goethe gateway bind 0.0.0.0` accepts remote clients"
+    } else {
+        "remote clients reach it when allowlisted"
+    };
+    let state = if running { "running" } else { "not running (goethed starts it; see goethe logs --gateway)" };
+    let list = match allowlist {
+        0 => "empty, every client is refused (goethe allowlist add <client-ip>/32)".to_string(),
+        n => format!("{n} entr{}", if n == 1 { "y" } else { "ies" }),
+    };
+    let mut out = format!("bind: {bind} ({scope})\nport: {port}\nurl: {url}\nstate: {state}\nallowlist: {list}\n");
+    for e in endpoints {
+        out.push_str(&format!("endpoint: {e}\n"));
+    }
+    out
+}
+
 fn print_gateway_line() {
     if let Some(line) = nginx::format_gateway_line(&goethe_home()) {
         println!("{line}");
@@ -1014,6 +1090,18 @@ fn fail(msg: String) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_status_explains_scope_and_allowlist() {
+        let local = gateway_status_text("127.0.0.1", 8443, "https://127.0.0.1:8443", true, 0, &[]);
+        assert!(local.starts_with("bind: 127.0.0.1 (this host only; `goethe gateway bind 0.0.0.0`"), "{local}");
+        assert!(local.contains("port: 8443\nurl: https://127.0.0.1:8443\nstate: running\n"), "{local}");
+        assert!(local.contains("allowlist: empty, every client is refused"), "{local}");
+        let open = gateway_status_text("0.0.0.0", 9443, "https://127.0.0.1:9443", false, 2, &["tcp://1.2.3.4:4000 -> port 9443".into()]);
+        assert!(open.contains("bind: 0.0.0.0 (remote clients reach it when allowlisted)"), "{open}");
+        assert!(open.contains("state: not running"), "{open}");
+        assert!(open.contains("allowlist: 2 entries\nendpoint: tcp://1.2.3.4:4000 -> port 9443\n"), "{open}");
+    }
 
     #[test]
     fn key_create_raw_is_only_the_token() {
