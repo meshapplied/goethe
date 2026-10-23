@@ -695,14 +695,91 @@ fn load_installed(model_id: &str, opts: &InstallOpts) -> Result<(), String> {
         "extra_sglang_args": Vec::<String>::new(),
         "async_finish": true,
     });
-    let stdout = send_load(params)?;
-    if !stdout.is_empty() {
-        print!("{stdout}");
-    }
-    crate::load_wait::wait_after_load_stdout(&stdout, opts.no_wait)
+    run_load(params, opts.no_wait, false)
 }
 
-pub fn send_load(mut params: Value) -> Result<String, String> {
+pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), String> {
+    // Send the load, show the plan, wait for this instance, and end with one RUNNING or STARTING line (or JSON).
+    let started = std::time::Instant::now();
+    let model_id = params.get("model_id").and_then(Value::as_str).unwrap_or_default().to_string();
+    let reply = send_load(params)?;
+    let message = reply_message(&reply);
+    if is_already_loaded(&reply) {
+        let fallback = format!("{model_id} is already loaded; add --replica to start another instance");
+        println!("{}", if message.is_empty() { fallback } else { message });
+        return Ok(());
+    }
+    if !message.is_empty() {
+        if json_out {
+            eprintln!("{message}");
+        } else {
+            println!("{message}");
+        }
+    }
+    let iid = reply
+        .result
+        .get("instance_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "load did not return instance_id".to_string())?
+        .to_string();
+    if !no_wait {
+        crate::load_wait::wait_for_instance(&iid, crate::load_wait::DEFAULT_LOAD_WAIT)?;
+    }
+    let row = instance_row(&iid);
+    if json_out {
+        let out = if no_wait { &reply.result } else { row.as_ref().unwrap_or(&reply.result) };
+        println!("{out}");
+    } else {
+        let secs = (!no_wait).then(|| started.elapsed().as_secs_f64());
+        println!("{}", load_status_line(&model_id, &iid, row.as_ref(), &reply.result, secs));
+    }
+    Ok(())
+}
+
+fn reply_message(reply: &crate::rpc::RpcReply) -> String {
+    // The daemon's human lines: stdout without the trailing result JSON.
+    let json = serde_json::to_string(&reply.result).unwrap_or_default();
+    let text = if reply.result.is_null() { reply.stdout.as_str() } else { reply.stdout.strip_suffix(&json).unwrap_or(&reply.stdout) };
+    text.trim().to_string()
+}
+
+pub fn is_already_loaded(reply: &crate::rpc::RpcReply) -> bool {
+    // Contract C-A: a plain load of a loaded model answers already_loaded instead of adding a replica.
+    let r = &reply.result;
+    r.get("already_loaded").and_then(Value::as_bool) == Some(true)
+        || r.get("status").and_then(Value::as_str) == Some("already_loaded")
+        || r.as_str() == Some("already_loaded")
+}
+
+fn instance_row(instance_id: &str) -> Option<Value> {
+    let ps = crate::rpc::call("ps", Value::Null).ok()?;
+    let rows: Value = serde_json::from_str(ps.stdout.trim()).ok()?;
+    rows.as_array()?
+        .iter()
+        .find(|r| r.get("instance_id").and_then(Value::as_str) == Some(instance_id))
+        .cloned()
+}
+
+pub fn load_status_line(model_id: &str, iid: &str, row: Option<&Value>, result: &Value, secs: Option<f64>) -> String {
+    // RUNNING: <id> instance <iid> on GPU <g> port <p> (<t> s), or STARTING for --no-wait.
+    let gpus = row
+        .and_then(|r| r.get("gpu_indices"))
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_u64).map(|g| g.to_string()).collect::<Vec<_>>().join(","))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "?".into());
+    let port = row
+        .and_then(|r| r.get("internal_port"))
+        .or_else(|| result.get("port"))
+        .and_then(Value::as_u64)
+        .map_or_else(|| "?".to_string(), |p| p.to_string());
+    match secs {
+        Some(s) => format!("RUNNING: {model_id} instance {iid} on GPU {gpus} port {port} ({s:.1} s)"),
+        None => format!("STARTING: {model_id} instance {iid} on GPU {gpus} port {port} (goethe ps shows when it is RUNNING)"),
+    }
+}
+
+pub fn send_load(mut params: Value) -> Result<crate::rpc::RpcReply, String> {
     // Load RPC; on a foreign-process notice (code 3) ask on a terminal and resend with yes=true, else exit 3.
     params["is_tty"] = json!(false);
     let call = |p: &Value| crate::rpc::call("load", p.clone()).map_err(crate::paths::daemon_err);
@@ -723,11 +800,11 @@ pub fn send_load(mut params: Value) -> Result<String, String> {
         params["yes"] = json!(true);
         reply = call(&params)?;
     }
-    if reply.code != 0 {
+    if reply.code != 0 && !is_already_loaded(&reply) {
         print_reply_text(&reply);
         std::process::exit(reply.code);
     }
-    Ok(reply.stdout)
+    Ok(reply)
 }
 
 fn print_reply_text(reply: &crate::rpc::RpcReply) {
@@ -744,6 +821,25 @@ fn print_reply_text(reply: &crate::rpc::RpcReply) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_lines_and_already_loaded() {
+        let row = json!({"instance_id": "i1", "gpu_indices": [2, 3], "internal_port": 30005, "status": "RUNNING"});
+        let result = json!({"instance_id": "i1", "port": 30005, "status": "STARTING"});
+        assert_eq!(
+            load_status_line("org/m", "i1", Some(&row), &result, Some(23.04)),
+            "RUNNING: org/m instance i1 on GPU 2,3 port 30005 (23.0 s)"
+        );
+        let starting = load_status_line("org/m", "i1", None, &result, None);
+        assert!(starting.starts_with("STARTING: org/m instance i1 on GPU ? port 30005"), "{starting}");
+        let reply = |result: Value, stdout: &str| crate::rpc::RpcReply { code: 0, stdout: stdout.into(), stderr: String::new(), result };
+        assert!(is_already_loaded(&reply(json!({"already_loaded": true}), "")));
+        assert!(is_already_loaded(&reply(json!({"status": "already_loaded"}), "")));
+        assert!(!is_already_loaded(&reply(result.clone(), "")));
+        let both = reply(result.clone(), &format!("auto: tp=1 on GPU 2\n{}", serde_json::to_string(&result).unwrap()));
+        assert_eq!(reply_message(&both), "auto: tp=1 on GPU 2");
+        assert_eq!(reply_message(&reply(Value::Null, "org/m is already loaded\n")), "org/m is already loaded");
+    }
 
     #[test]
     fn kv_bytes_follow_card_dtype() {

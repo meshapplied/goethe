@@ -17,6 +17,29 @@ pub struct ConfigOpts {
     pub clear_sglang_args: bool,
 }
 
+pub fn validate_limits(home: &Path, model_id: &str, ctx: Option<u64>, max_conc: Option<u64>) -> Result<(), String> {
+    // --ctx must lie between 1 and the installed model's max_ctx, and --max-conc must be at least 1.
+    if ctx == Some(0) {
+        return Err("--ctx must be at least 1".into());
+    }
+    if max_conc == Some(0) {
+        return Err("--max-conc must be at least 1".into());
+    }
+    let Some(ctx) = ctx.filter(|_| home.join("state.db").is_file()) else {
+        return Ok(());
+    };
+    let con = db::open(home).map_err(|e| format!("state.db: {e}"))?;
+    let max: Option<i64> = con
+        .query_row("SELECT max_ctx FROM installed_models WHERE model_id = ?1", [model_id], |r| r.get(0))
+        .optional()
+        .map_err(|e| format!("state.db: {e}"))?
+        .flatten();
+    match max.filter(|m| *m > 0) {
+        Some(m) if ctx > m as u64 => Err(format!("--ctx {ctx} is above the maximum context of {model_id} ({m} tokens)")),
+        _ => Ok(()),
+    }
+}
+
 pub fn run(opts: ConfigOpts) -> Result<(), String> {
     // Update card fields atomically, then mirror the load defaults into installed_models.
     validate_model_id(&opts.model_id)?;
@@ -110,4 +133,30 @@ fn find_model_dir(home: &Path, model_id: &str) -> Result<PathBuf, String> {
         }
     }
     Err(format!("model {model_id} is not installed"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limits_follow_the_installed_max_ctx() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        assert!(validate_limits(home, "org/m", Some(0), None).unwrap_err().contains("--ctx must be at least 1"));
+        assert!(validate_limits(home, "org/m", None, Some(0)).unwrap_err().contains("--max-conc must be at least 1"));
+        assert!(validate_limits(home, "org/m", Some(999_999_999), Some(1)).is_ok(), "no state.db yet");
+        let con = db::open(home).unwrap();
+        con.execute(
+            "INSERT INTO installed_models (model_id, local_path, architecture, static_vram_gb, kv_bytes_per_token,
+             default_ctx, default_max_conc, default_tp, max_ctx) VALUES ('org/m', 'models/org__m', 'dense', 1.0, 1000,
+             1024, 4, 1, 1024)",
+            [],
+        )
+        .unwrap();
+        assert!(validate_limits(home, "org/m", Some(1024), Some(4)).is_ok());
+        let err = validate_limits(home, "org/m", Some(999_999_999), None).unwrap_err();
+        assert!(err.contains("above the maximum context of org/m (1024 tokens)"), "{err}");
+        assert!(validate_limits(home, "org/other", Some(1 << 30), None).is_ok());
+    }
 }
