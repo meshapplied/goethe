@@ -74,7 +74,7 @@ if grep -nE '(^|[^_a-z])(kill|pkill|killall|fuser)([^_a-z]|$)' "${INSTALL}"; the
   echo "install.sh must never signal processes"
   exit 1
 fi
-if grep -nE 'NGINX_BIN\}?"? +-|nohup[^#]*nginx|nginx +-[cs] ' "${INSTALL}"; then
+if grep -nE '(nginx|NGINX_BIN\}?"?) +-[cps]( |$)|nohup[^#]*nginx' "${INSTALL}"; then
   echo "install.sh must not start or signal nginx (goethed manages it)"
   exit 1
 fi

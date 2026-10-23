@@ -4,27 +4,19 @@
 set -euo pipefail
 
 GOETHE_RELEASE_PUB_PEM='__GOETHE_RELEASE_PUB_PEM__'
+DEFAULT_PKG_URL="https://pkg.meshapplied.com"
 DRIVER_MIN=580
 GLIBC_MIN=2.30
 
-resolve_goethe_home() {
-  # GOETHE_HOME, else /workspace/.goethe (RunPod, Vast), else /var/lib/goethe (created for root), else ~/.goethe.
-  if [[ -n "${GOETHE_HOME:-}" ]]; then
-    echo "${GOETHE_HOME}"
-    return
-  fi
+default_home() {
+  # /workspace/.goethe (RunPod, Vast), else /var/lib/goethe for root or when writable, else ~/.goethe.
   if [[ -d /workspace && -w /workspace ]]; then
     echo "/workspace/.goethe"
-    return
-  fi
-  if [[ "$(id -u)" -eq 0 ]]; then
-    mkdir -p /var/lib/goethe
-  fi
-  if [[ -d /var/lib/goethe && -w /var/lib/goethe ]]; then
+  elif [[ "$(id -u)" -eq 0 || ( -d /var/lib/goethe && -w /var/lib/goethe ) ]]; then
     echo "/var/lib/goethe"
-    return
+  else
+    echo "${HOME}/.goethe"
   fi
-  echo "${HOME}/.goethe"
 }
 
 normalize_arch() {
@@ -279,26 +271,57 @@ install_binaries() {
   done
 }
 
+nginx_missing() {
+  echo "the gateway needs nginx: $1. Install it (apt-get install nginx-core) or set NGINX_BIN, then re-run" >&2
+  exit 1
+}
+
 resolve_nginx() {
-  # NGINX_BIN, then a system nginx, then a rootless nginx extracted under GOETHE_HOME; never started here.
-  local cand deb
+  # A working nginx: NGINX_BIN, a system nginx, else nginx, nginx-core or nginx-light extracted under GOETHE_HOME.
+  local cand pkg deb root="${GOETHE_HOME}/nginx-root"
   for cand in "${NGINX_BIN:-}" "$(command -v nginx 2>/dev/null || true)" /usr/sbin/nginx /usr/local/sbin/nginx \
-    "${GOETHE_HOME}/nginx-root/usr/sbin/nginx"; do
-    if [[ -n "${cand}" && -x "${cand}" ]]; then
+    "${root}/usr/sbin/nginx"; do
+    if [[ -n "${cand}" && -x "${cand}" ]] && "${cand}" -v >/dev/null 2>&1; then
       NGINX_BIN="${cand}"
       return
     fi
   done
   if ! command -v apt-get >/dev/null 2>&1 || ! command -v dpkg-deb >/dev/null 2>&1; then
-    echo "nginx not found: install nginx or set NGINX_BIN" >&2
-    exit 1
+    nginx_missing "none found and no apt-get/dpkg-deb to extract one"
   fi
-  mkdir -p "${GOETHE_HOME}/nginx/debs" "${GOETHE_HOME}/nginx-root"
-  (cd "${GOETHE_HOME}/nginx/debs" && apt-get download nginx nginx-common)
-  for deb in "${GOETHE_HOME}/nginx/debs"/*.deb; do
-    dpkg-deb -x "${deb}" "${GOETHE_HOME}/nginx-root"
+  mkdir -p "${GOETHE_HOME}/nginx/debs" "${root}"
+  NGINX_BIN="${root}/usr/sbin/nginx"
+  for pkg in nginx nginx-core nginx-light; do
+    (cd "${GOETHE_HOME}/nginx/debs" && apt-get download "${pkg}" nginx-common) >/dev/null 2>&1 || continue
+    for deb in "${GOETHE_HOME}/nginx/debs"/*.deb; do
+      dpkg-deb -x "${deb}" "${root}"
+    done
+    if [[ -x "${NGINX_BIN}" ]] && "${NGINX_BIN}" -v >/dev/null 2>&1; then
+      return
+    fi
   done
-  NGINX_BIN="${GOETHE_HOME}/nginx-root/usr/sbin/nginx"
+  nginx_missing "nginx, nginx-core and nginx-light extracted under ${root} gave no working ${NGINX_BIN}"
+}
+
+write_goethe_env() {
+  # Record the CDN (and its registry and token) in GOETHE_HOME/goethe.env, mode 0600, for the CLI and goethed.
+  local registry="${GOETHE_REGISTRY_URL:-}"
+  if [[ -z "${registry}" && "${CDN}" != "${DEFAULT_PKG_URL}" ]]; then
+    registry="${CDN}/v1/registry.json"
+  fi
+  (
+    umask 077
+    {
+      echo "GOETHE_PKG_URL=${CDN}"
+      if [[ -n "${registry}" && "${registry}" != "${DEFAULT_PKG_URL}/v1/registry.json" ]]; then
+        echo "GOETHE_REGISTRY_URL=${registry}"
+      fi
+      if [[ -n "${GOETHE_PKG_TOKEN:-}" ]]; then
+        echo "GOETHE_PKG_TOKEN=${GOETHE_PKG_TOKEN}"
+      fi
+    } >"${GOETHE_HOME}/goethe.env"
+  )
+  chmod 600 "${GOETHE_HOME}/goethe.env"
 }
 
 ensure_certs() {
@@ -353,10 +376,29 @@ wait_goethed() {
   exit 1
 }
 
-endpoint_hints() {
-  # Print where the gateway listens, including RunPod and Vast public mappings when present.
-  local port mapped
-  port="$(cat "${GOETHE_HOME}/nginx/public_port" 2>/dev/null || echo 8443)"
+wait_gateway() {
+  # Install only succeeds once nginx answers on the public port goethed chose.
+  local i port="" code=""
+  for ((i = 0; i < 60; i++)); do
+    port="$(cat "${GOETHE_HOME}/nginx/public_port" 2>/dev/null || true)"
+    if [[ -n "${port}" ]]; then
+      code="$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:${port}/health" || true)"
+      if [[ -n "${code}" && "${code}" != "000" ]]; then
+        return
+      fi
+    fi
+    sleep 0.5
+  done
+  tail -n 5 "${GOETHE_HOME}/logs/goethed.log" >&2 2>/dev/null || true
+  nginx_missing "the gateway did not answer on https://127.0.0.1:${port:-?} (see ${GOETHE_HOME}/logs)"
+}
+
+summary() {
+  # Ports, endpoints, cloud mappings and how the linked CLI finds a non-default home.
+  local port mux mapped
+  port="$(cat "${GOETHE_HOME}/nginx/public_port")"
+  mux="$(cat "${GOETHE_HOME}/nginx/mux_port" 2>/dev/null || echo "?")"
+  echo "Mux (loopback OpenAI router): http://127.0.0.1:${mux}"
   echo "Gateway: https://127.0.0.1:${port} (default-deny: goethe allowlist add <cidr>; goethe key create --name <n>)"
   mapped="RUNPOD_TCP_PORT_${port}"
   if [[ -n "${RUNPOD_POD_ID:-}" ]]; then
@@ -371,6 +413,10 @@ endpoint_hints() {
     echo "Vast public endpoint: https://${PUBLIC_IPADDR}:${!mapped}"
   elif [[ -n "${VAST_CONTAINERLABEL:-}" ]]; then
     echo "Vast: map container port ${port} (-p ${port}:${port}) to reach the gateway from outside"
+  fi
+  if [[ "${GOETHE_HOME}" != "$(default_home)" ]]; then
+    echo "GOETHE_HOME=${GOETHE_HOME} is not the default: ${GOETHE_HOME}/bin/goethe${LINK_DIR:+ and ${LINK_DIR}/goethe}" \
+      "find it from their own location, no export needed"
   fi
 }
 
@@ -403,7 +449,7 @@ main() {
   require_tool_version openssl 1.1.1 'openssl version'
   check_glibc
   check_nvidia_driver
-  GOETHE_HOME="$(resolve_goethe_home)"
+  GOETHE_HOME="${GOETHE_HOME:-$(default_home)}"
   export GOETHE_HOME
   mkdir -p "${GOETHE_HOME}/bin" "${GOETHE_HOME}/logs" "${GOETHE_HOME}/models" "${GOETHE_HOME}/nginx/certs" \
     "${GOETHE_HOME}/goethe"
@@ -416,11 +462,18 @@ main() {
   resolve_nginx
   export NGINX_BIN
   ensure_certs
+  write_goethe_env
   start_goethed
   wait_goethed
+  wait_gateway
   goethe hw profile || echo "WARNING: goethe hw profile failed" >&2
-  goethe recommend 2>/dev/null | head -n 20 || true
-  endpoint_hints
+  local rec
+  if rec="$(goethe recommend 2>&1)"; then
+    { printf '%s\n' "${rec}" | head -n 20; } || true
+  else
+    echo "WARNING: goethe recommend failed: $(printf '%s' "${rec}" | tail -n 2)" >&2
+  fi
+  summary
   if [[ -n "${LINK_DIR}" && ":${PATH}:" != *":${LINK_DIR}:"* ]]; then
     echo "Add ${LINK_DIR} to PATH to use goethe"
   fi

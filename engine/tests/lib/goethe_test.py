@@ -845,28 +845,29 @@ def make_tls_certs(home: Path) -> None:
     )
 
 
+def _nginx_runs(binary: Path) -> bool:
+    return binary.is_file() and subprocess.run([str(binary), "-v"], capture_output=True, timeout=30).returncode == 0
+
+
 def ensure_nginx(home: Path) -> Path:
-    """Return nginx binary, extracting rootless nginx into GOETHE_HOME if needed."""
+    """A working nginx: NGINX_BIN, else nginx, nginx-core or nginx-light extracted rootless under GOETHE_HOME."""
     env_bin = os.environ.get("NGINX_BIN")
-    if env_bin and Path(env_bin).is_file():
+    if env_bin and _nginx_runs(Path(env_bin)):
         return Path(env_bin)
-    rootless = home / "nginx-root" / "usr" / "sbin" / "nginx"
-    if rootless.is_file():
-        return rootless
-    cache = home / "nginx-root"
-    deb_dir = cache / "debs"
-    deb_dir.mkdir(parents=True, exist_ok=True)
-    for pkg in ("nginx", "nginx-common"):
-        matches = sorted(deb_dir.glob(f"{pkg}_*.deb"))
-        if not matches:
-            subprocess.run(["apt-get", "download", pkg], cwd=str(deb_dir), check=True, capture_output=True, timeout=120)
-            matches = sorted(deb_dir.glob(f"{pkg}_*.deb"))
-        if not matches:
-            raise RuntimeError(f"apt-get download missing deb for {pkg}")
-        subprocess.run(["dpkg-deb", "-x", str(matches[0]), str(cache)], check=True, capture_output=True, timeout=60)
-    if not rootless.is_file():
-        raise RuntimeError("rootless nginx extraction failed")
-    return rootless
+    root = home / "nginx-root"
+    binary = root / "usr" / "sbin" / "nginx"
+    if _nginx_runs(binary):
+        return binary
+    debs = root / "debs"
+    debs.mkdir(parents=True, exist_ok=True)
+    for pkg in ("nginx", "nginx-core", "nginx-light"):
+        if subprocess.run(["apt-get", "download", pkg, "nginx-common"], cwd=str(debs), capture_output=True).returncode:
+            continue
+        for deb in sorted(debs.glob("*.deb")):
+            subprocess.run(["dpkg-deb", "-x", str(deb), str(root)], check=True, capture_output=True, timeout=60)
+        if _nginx_runs(binary):
+            return binary
+    raise RuntimeError("no working nginx: set NGINX_BIN or install nginx-core")
 
 
 def _ssl_ctx() -> ssl.SSLContext:
