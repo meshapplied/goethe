@@ -96,8 +96,12 @@ def main() -> None:
             if not wait_until(lambda: bool(sqlite_query(home / "state.db", q, (MODEL,))), timeout=20, interval=0.05):
                 raise RuntimeError("no instance row appeared")
             port = int(sqlite_query(home / "state.db", q, (MODEL,))[0][0])
-            squatter = ThreadingHTTPServer(("127.0.0.1", port), _Squatter)
-            threading.Thread(target=squatter.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+            try:
+                squatter = ThreadingHTTPServer(("127.0.0.1", port), _Squatter)
+            except OSError:
+                print(f"port {port} is already held for the instance; nothing can squat it")
+            if squatter is not None:
+                threading.Thread(target=squatter.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
             deadline = time.time() + 90
             while load.poll() is None and time.time() < deadline:
                 rows = sqlite_query(home / "state.db", "SELECT status, internal_port FROM loaded_instances")
@@ -107,15 +111,16 @@ def main() -> None:
                 load.kill()
                 raise RuntimeError("load neither failed nor became RUNNING within 90 s")
             out, err = load.communicate(timeout=10)
-            if any(s == "RUNNING" and p == port for s, p in seen):
+            squatted = squatter is not None
+            if squatted and any(s == "RUNNING" and p == port for s, p in seen):
                 raise RuntimeError(f"instance went RUNNING on {port} while only the squatter answered: {seen[-5:]}")
             if load.returncode == 0:
                 final = sqlite_query(home / "state.db", "SELECT status, internal_port FROM loaded_instances")
-                launch = stub_launch(model_dir)
-                if final != [("RUNNING", int(launch["parsed"]["port"]))] or int(launch["parsed"]["port"]) == port:
-                    raise RuntimeError(f"RUNNING must mean our engine on another port: {final}, stub port {launch}")
-            elif str(port) not in err + out and "port" not in (err + out).lower():
-                raise RuntimeError(f"a failed load must name the port or its holder: {(err + out)[-300:]}")
+                stub_port = int(stub_launch(model_dir)["parsed"]["port"])
+                if final != [("RUNNING", stub_port)] or (squatted and stub_port == port):
+                    raise RuntimeError(f"RUNNING must mean our own engine on its port: {final}, stub port {stub_port}")
+            elif not squatted or (str(port) not in err + out and "port" not in (err + out).lower()):
+                raise RuntimeError(f"a failed load must be caused by the squatter and name it: {(err + out)[-300:]}")
         finally:
             if load.poll() is None:
                 load.kill()
@@ -125,7 +130,7 @@ def main() -> None:
                 squatter.server_close()
             subprocess.run([str(goethe), "unload", "--all"], env=env, stdin=subprocess.DEVNULL, capture_output=True)
             md.stop()
-    print(f"stage4_port_squat_stub ok rc={load.returncode} squatted={port}")
+    print(f"stage4_port_squat_stub ok rc={load.returncode} port={port} squatted={squatted}")
 
 
 if __name__ == "__main__":
