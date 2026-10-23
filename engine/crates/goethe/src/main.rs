@@ -447,6 +447,23 @@ fn usage(msg: impl std::fmt::Display) -> ! {
     std::process::exit(2);
 }
 
+fn installed_id(id: &str, strict: bool) -> String {
+    // The installed model id the user meant (any case or its folder name); strict callers stop on an unknown id.
+    match models::resolve_installed_id(&goethe_home(), checked_id(id)) {
+        Ok(found) => {
+            if found != id {
+                eprintln!("using installed model {found}");
+            }
+            found
+        }
+        Err(e) if strict => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        Err(_) => id.to_string(),
+    }
+}
+
 fn checked_id(id: &str) -> &str {
     if let Err(e) = validate_model_id(id) {
         usage(e);
@@ -575,7 +592,7 @@ fn main() {
             model_id,
             yes,
             force,
-        } => models::run_remove(checked_id(&model_id), yes, force),
+        } => models::run_remove(&installed_id(&model_id, false), yes, force),
         Commands::Config {
             model_id,
             ctx,
@@ -593,11 +610,12 @@ fn main() {
             if let Some(msg) = goethe_core::sglang_infer::reserved_flag_error(&sglang_arg) {
                 usage(msg);
             }
-            if let Err(e) = config::validate_limits(&goethe_home(), checked_id(&model_id), ctx, max_conc) {
+            let model_id = installed_id(&model_id, true);
+            if let Err(e) = config::validate_limits(&goethe_home(), &model_id, ctx, max_conc) {
                 usage(e);
             }
             config::run(ConfigOpts {
-                model_id: checked_id(&model_id).to_string(),
+                model_id,
                 ctx,
                 max_conc,
                 tp,
@@ -620,7 +638,7 @@ fn main() {
             json,
             extra,
         } => do_load(DoLoadArgs {
-            model_id,
+            model_id: installed_id(&model_id, true),
             gpus,
             ctx,
             max_conc,
@@ -634,10 +652,9 @@ fn main() {
             json,
         }),
         Commands::Unload { model_id, all, force } => {
+            let model_id = model_id.map(|id| installed_id(&id, false));
             match (&model_id, all) {
-                (Some(id), false) => {
-                    checked_id(id);
-                }
+                (Some(_), false) => {}
                 (None, false) => usage("give a model id or --all"),
                 (Some(_), true) => usage("give either a model id or --all, not both"),
                 (None, true) => {}
@@ -917,21 +934,20 @@ fn do_gpu_list(json: bool) -> Result<(), String> {
         );
         return Ok(());
     }
-    println!(
-        "INDEX\tNAME\tCC\tVRAM_TOTAL_MB\tMANAGED_MB\tFOREIGN_MB\tSTATUS"
-    );
+    let mut table = goethe_core::term::Table::new(&["GPU", "NAME", "SM", "VRAM TOTAL", "GOETHE", "FOREIGN", "STATUS"]);
+    let gb = |mb: u64| format!("{:.1} GB", mb as f64 / 1024.0);
     for r in rows {
-        println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            r.index,
-            r.name,
-            r.compute_capability,
-            r.vram_total_mb,
-            r.managed_mb,
-            r.foreign_mb,
-            r.status
-        );
+        table.row(vec![
+            format!("gpu{}", r.index),
+            r.name.clone(),
+            r.compute_capability.clone(),
+            gb(r.vram_total_mb),
+            gb(r.managed_mb),
+            gb(r.foreign_mb),
+            goethe_core::term::status(&r.status),
+        ]);
     }
+    table.print();
     Ok(())
 }
 
@@ -1038,15 +1054,17 @@ fn ps_status(row: &Value, now: i64) -> String {
 }
 
 fn print_ps_table(rows: &[Value]) {
+    // Loaded instances as an aligned table with colored status, or a hint when nothing is loaded.
     if rows.is_empty() {
+        println!("no models loaded (goethe load <model> starts one; goethe models lists installed models)");
         return;
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
-    println!(
-        "INSTANCE\tMODEL\tSLOT\tSTATUS\tGPUS\tPORT\tVRAM_GB\tRESTARTS\tIN_FLIGHT\tTOK_PER_S"
-    );
+    let mut table = goethe_core::term::Table::new(&[
+        "INSTANCE", "MODEL", "SLOT", "STATUS", "GPUS", "PORT", "VRAM_GB", "RESTARTS", "IN_FLIGHT", "TOK_PER_S",
+    ]);
     for row in rows {
         let inst = row.get("instance_id").and_then(|v| v.as_str()).unwrap_or("");
         let model = row.get("model_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -1064,10 +1082,20 @@ fn print_ps_table(rows: &[Value]) {
             .get("tokens_per_s_1m")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
-        println!(
-            "{inst}\t{model}\t{slot}\t{status}\t{gpus}\t{port}\t{vram:.2}\t{restarts}\t{inflight}\t{tps:.1}"
-        );
+        table.row(vec![
+            inst.to_string(),
+            model.to_string(),
+            slot.to_string(),
+            goethe_core::term::status(&status),
+            gpus,
+            port.to_string(),
+            format!("{vram:.2}"),
+            restarts.to_string(),
+            inflight.to_string(),
+            format!("{tps:.1}"),
+        ]);
     }
+    table.print();
 }
 
 fn do_ps(json: bool) -> Result<(), String> {

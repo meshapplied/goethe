@@ -440,30 +440,48 @@ fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::rename(tmp, path)
 }
 
+fn gb(mb: u64) -> String {
+    format!("{:.1} GB", mb as f64 / 1024.0)
+}
+
+fn gpu_table(gpus: &[GpuState]) -> crate::term::Table {
+    // One row per GPU: name with SM, NUMA and unified memory below it, VRAM, PCIe, and its processes stacked in one cell.
+    use crate::term::{paint, Color};
+    let pid_width = gpus.iter().flat_map(|g| &g.running_processes).map(|p| p.pid.to_string().len()).max().unwrap_or(0);
+    let mut table = crate::term::Table::new(&["GPU", "NAME", "VRAM TOTAL", "VRAM FREE", "PCIe NOW/MAX", "PROCESSES"]);
+    for gpu in gpus {
+        let mut notes = vec![format!("SM {}", gpu.compute_capability)];
+        notes.extend(gpu.numa_node.map(|n| format!("NUMA {n}")));
+        if gpu.unified_memory {
+            notes.push("unified memory".to_string());
+        }
+        let procs: Vec<String> = gpu
+            .running_processes
+            .iter()
+            .map(|p| {
+                let (name, user, _) = crate::foreign::process_owner(p.pid as i32);
+                let pad = " ".repeat(pid_width - p.pid.to_string().len());
+                let pid = paint(&format!("PID {}", p.pid), Color::Red);
+                format!("{pid}{pad}  {:>8}  {name} ({user})", gb(p.used_vram_mb))
+            })
+            .collect();
+        table.row(vec![
+            format!("gpu{}", gpu.index),
+            format!("{}\n{}", gpu.name, notes.join(", ")),
+            gb(gpu.vram_total_mb),
+            gb(gpu.vram_free_mb),
+            format!("gen {}/{} x{}", gpu.pcie_gen, gpu.pcie_gen_max, gpu.pcie_width),
+            if procs.is_empty() { "-".to_string() } else { procs.join("\n") },
+        ]);
+    }
+    table
+}
+
 fn print_summary(state: &HardwareState) {
     // GPUs, links, then host and environment lines.
     println!("Goethe hardware profile at {}", state.profiled_at);
     println!("Driver: {}", state.driver);
-    for gpu in &state.gpus {
-        let um = if gpu.unified_memory { " unified memory" } else { "" };
-        let numa = gpu.numa_node.map(|n| format!(" NUMA {n}")).unwrap_or_default();
-        println!(
-            "GPU {}: {} ({}){}{} {} GB total, {} GB free, PCIe gen {}/{} x{}",
-            gpu.index,
-            gpu.name,
-            gpu.compute_capability,
-            um,
-            numa,
-            gpu.vram_total_mb / 1024,
-            gpu.vram_free_mb / 1024,
-            gpu.pcie_gen,
-            gpu.pcie_gen_max,
-            gpu.pcie_width
-        );
-        for proc in &gpu.running_processes {
-            println!("  PID {} using {} MB", proc.pid, proc.used_vram_mb);
-        }
-    }
+    gpu_table(&state.gpus).print();
     for link in &state.links {
         println!("Link GPU {} - GPU {}: {} ({})", link.a, link.b, link.link_type, link.topo);
     }

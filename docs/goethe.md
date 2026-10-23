@@ -116,6 +116,7 @@ GOETHE_HOME/
   - `goethe scan` finds it and checks that it can be served. It needs a known architecture, complete safetensors, a supported quantization that the GPUs can run, and a size that fits.
   - It then asks `Model found: <name> ... Add to goethe? [y/N]`, or explains why a folder is not supported.
 - Local folders: `goethe install ./dir` registers a folder in place, or copies it with `--copy`.
+- Model names: commands that take an installed model match its id exactly, ignoring case, or by its folder name (`Qwen__Qwen3-0.6B` means `Qwen/Qwen3-0.6B`). A typo gets a suggestion, for example `did you mean Qwen/Qwen3-0.6B?`.
 - Model cards: each model has a `goethe_card.toml` with its default context, concurrency, tensor parallelism, GPUs and extra SGLang flags.
   - Goethe infers the engine flags for you: quantization is detected by SGLang, Qwen3-family models get their reasoning and tool-call parsers, and repos that ship their own Python code need `--trust-remote-code`.
   - Flags that Goethe controls itself (host, port, tensor parallel size, context length, max running requests, memory fraction, API key, served name) are refused in extra flags.
@@ -208,6 +209,8 @@ GOETHE_HOME/
   - `goethe uninstall` refuses to delete anything that does not look like a Goethe home.
 
 ## CLI reference
+
+Tables are aligned, with statuses in color (green OK, RUNNING and ALLOWED; yellow WARN and STARTING; red FAIL and DENIED) when the output is a terminal. Set `NO_COLOR=1` to turn color off; piped output never has color. Most listing commands also take `--json`.
 
 Exit codes: `0` success, `1` error, `2` usage error, `3` confirmation needed but no terminal (use `--yes`).
 

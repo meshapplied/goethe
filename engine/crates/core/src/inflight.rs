@@ -107,7 +107,7 @@ mod tests {
     fn ties_rotate_between_idle_replicas() {
         let ids = ["rot-a", "rot-b", "rot-c"];
         let mut seen = std::collections::HashSet::new();
-        for _ in 0..ids.len() {
+        for _ in 0..30 {
             let mut g = track("rot-model");
             seen.insert(g.pick(&ids).unwrap());
         }

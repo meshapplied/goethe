@@ -87,20 +87,24 @@ fn user_name(uid: u32) -> String {
         .into_owned()
 }
 
+pub fn process_owner(pid: i32) -> (String, String, Option<u32>) {
+    // Command name, owning user name and uid of a process from /proc ("unknown" when it is gone or hidden).
+    let argv0 = std::fs::read(format!("/proc/{pid}/cmdline")).ok().and_then(|raw| {
+        let first = raw.split(|b| *b == 0).next().map(|a| String::from_utf8_lossy(a).into_owned())?;
+        let base = first.split_whitespace().next()?.rsplit('/').next()?.to_string();
+        (!base.is_empty()).then(|| base.chars().take(32).collect::<String>())
+    });
+    let name = argv0
+        .or_else(|| std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|s| s.trim().to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+    let uid = std::fs::metadata(format!("/proc/{pid}")).map(|m| m.uid()).ok();
+    (name, uid.map(user_name).unwrap_or_else(|| "unknown".to_string()), uid)
+}
+
 fn describe(gpu: u32, pid: i32, used_mb: u64) -> Foreign {
     // Name, owner and VRAM of one process from /proc and NVML.
-    let name = std::fs::read_to_string(format!("/proc/{pid}/comm"))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
-    let uid = std::fs::metadata(format!("/proc/{pid}")).map(|m| m.uid()).ok();
-    Foreign {
-        gpu,
-        pid,
-        name,
-        user: uid.map(user_name).unwrap_or_else(|| "unknown".to_string()),
-        used_mb,
-        same_user: uid == Some(unsafe { libc::geteuid() }),
-    }
+    let (name, user, uid) = process_owner(pid);
+    Foreign { gpu, pid, name, user, used_mb, same_user: uid == Some(unsafe { libc::geteuid() }) }
 }
 
 pub fn foreign_on(
