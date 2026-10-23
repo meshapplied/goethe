@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Stage 6 install.sh end-to-end gate: signed CDN into a throwaway home, gateway answers, idempotent re-install."""
+"""Stage 6 install.sh end-to-end gate: signed CDN into a throwaway home, gateway, in-place upgrade, re-install."""
 
 from __future__ import annotations
 
 import json
 import os
+import platform
+import re
 import shutil
 import signal
 import socket
@@ -26,18 +28,21 @@ from lib.goethe_test import (
     http_get,
     http_post,
     main_exit,
+    require_cli,
     roomiest_test_gpu,
     run,
     run_goethe,
     run_temp_prefix,
     sha256_file,
     spawn,
+    sqlite_query,
     temp_home,
     test_public_port,
     wait_until,
     write_stub_python,
 )
 
+ARCH = "aarch64" if platform.machine() in ("aarch64", "arm64") else platform.machine()
 _CFG = {
     "architectures": ["LlamaForCausalLM"],
     "model_type": "llama",
@@ -50,8 +55,8 @@ _CFG = {
 }
 
 
-def _install(install_sh: Path, env: dict[str, str], late: list[str]) -> float:
-    """Run install.sh like `curl | bash` would (stdin closed), note a failed recommend, return the duration."""
+def _install(install_sh: Path, env: dict[str, str], late: list[str]) -> tuple[float, str]:
+    """Run install.sh like `curl | bash` would (stdin closed), note a failed recommend; duration and output."""
     t0 = time.time()
     rr = subprocess.run(
         ["bash", str(install_sh)], env=env, capture_output=True, text=True, timeout=1800, stdin=subprocess.DEVNULL
@@ -60,7 +65,7 @@ def _install(install_sh: Path, env: dict[str, str], late: list[str]) -> float:
         raise RuntimeError(f"install.sh failed rc={rr.returncode}: {(rr.stdout + rr.stderr)[-1500:]}")
     if "goethe recommend failed" in rr.stdout + rr.stderr:
         late.append(f"the installer's recommend failed: {rr.stderr[-300:]}")
-    return time.time() - t0
+    return time.time() - t0, rr.stdout + rr.stderr
 
 
 def _check_goethe_env(home: Path, goethe: str, env: dict[str, str], pkg_url: str, late: list[str]) -> None:
@@ -76,28 +81,65 @@ def _check_goethe_env(home: Path, goethe: str, env: dict[str, str], pkg_url: str
         late.append(f"recommend with only goethe.env failed (exit {rec.returncode}): {rec.stderr[-300:]}")
 
 
-def _cdn_with_ternary(src: Path, root: Path) -> Path:
-    """A copy of the signed CDN plus a tiny ternary pack, re-signed with a throwaway key embedded in its install.sh."""
-    cdn = root / "cdn"
-    shutil.copytree(src, cdn)
+def _sh(*cmd: str | Path) -> None:
+    """Run a packaging script, failing with its stderr."""
+    rr = subprocess.run([str(c) for c in cmd], capture_output=True, text=True, timeout=120)
+    if rr.returncode != 0:
+        raise RuntimeError(f"{Path(str(cmd[1])).name} failed: {rr.stderr[-300:]}")
+
+
+def _older(binary: bytes, commit: str) -> bytes:
+    """The same binary claiming commit 0000000, so it is a different, older-looking build to upgrade from."""
+    if commit and commit.encode() in binary:
+        return binary.replace(commit.encode(), b"0" * len(commit))
+    return binary + b"\0goethe-e2e-older-build\0"
+
+
+def _cdns(src: Path, root: Path) -> tuple[Path, Path]:
+    """CDN copies with a tiny ternary pack signed by one throwaway key: an older build and the build under test."""
     pack = root / "pack" / "ternary-kernels"
     pack.mkdir(parents=True)
     (pack / "README").write_text("e2e ternary pack\n", encoding="utf-8")
-    (cdn / "goethe").mkdir(exist_ok=True)
-    tarball = cdn / "goethe" / "ternary-kernels.tar.zst"
+    tarball = root / "pack" / "ternary-kernels.tar.zst"
     subprocess.run(["tar", "--zstd", "-C", str(pack.parent), "-cf", str(tarball), "ternary-kernels"], check=True)
     keys, packaging = root / "keys", GOETHE_PKG / "packaging"
-    steps = [
-        ["bash", str(packaging / "keygen.sh"), str(keys)],
-        ["bash", str(packaging / "subst_install_pubkey.sh"), str(GOETHE_PKG / "cdn" / "install.sh"),
-         str(keys / "release_pub.pem"), str(cdn / "install.sh")],
-        ["bash", str(packaging / "sign_cdn.sh"), str(cdn), str(keys / "release.key")],
-    ]
-    for cmd in steps:
-        rr = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if rr.returncode != 0:
-            raise RuntimeError(f"{Path(cmd[1]).name} failed: {rr.stderr[-300:]}")
-    return cdn
+    _sh("bash", packaging / "keygen.sh", keys)
+    bins = [require_cli("goethe"), require_cli("goethed")]
+    found = re.search(r"commit ([^,)\s]+)", run([str(bins[0]), "--version"]).stdout)
+    for name in ("cdn-old", "cdn-new"):
+        cdn = root / name
+        shutil.copytree(src, cdn)
+        (cdn / "goethe").mkdir(exist_ok=True)
+        shutil.copy2(tarball, cdn / "goethe" / tarball.name)
+        for b in bins:
+            data = b.read_bytes()
+            dest = cdn / "bin" / f"linux-{ARCH}" / b.name
+            dest.write_bytes(_older(data, found.group(1) if found else "") if name == "cdn-old" else data)
+            dest.chmod(0o755)
+        _sh("bash", packaging / "subst_install_pubkey.sh", GOETHE_PKG / "cdn" / "install.sh",
+            keys / "release_pub.pem", cdn / "install.sh")
+        _sh("bash", packaging / "sign_cdn.sh", cdn, keys / "release.key")
+    return root / "cdn-old", root / "cdn-new"
+
+
+def _chat_ok(base: str, body: str, auth: dict[str, str]) -> bool:
+    return http_post(f"{base}/v1/chat/completions", body.encode(), headers=auth)[0] == 200
+
+
+def _engine(home: Path) -> list[tuple[int, str]]:
+    return [(int(p), str(s)) for p, s in sqlite_query(home / "state.db", "SELECT pid, status FROM loaded_instances")]
+
+
+def _check_upgrade(home: Path, new: Path, out: str, before: list[tuple[int, str]], late: list[str]) -> None:
+    """The re-install swapped in the new build, said so, and kept the RUNNING engine (C-D: stop --keep-engines)."""
+    for name in ("goethe", "goethed"):
+        if sha256_file(home / "bin" / name) != sha256_file(new / "bin" / f"linux-{ARCH}" / name):
+            raise RuntimeError(f"re-installing a newer build did not replace bin/{name}: {out[-500:]}")
+    line = next((ln for ln in out.splitlines() if ln.startswith("upgraded goethe ")), "")
+    if " -> " not in line:
+        raise RuntimeError(f"the installer must print upgraded goethe <old> -> <new>: {out[-500:]}")
+    if _engine(home) != before or "engines kept serving" not in line:
+        late.append(f"the upgrade must keep engine {before} RUNNING, got {_engine(home)}: {line}")
 
 
 def _check_ternary(home: Path, goethe: str, env: dict[str, str], cdn: Path, late: list[str]) -> None:
@@ -154,14 +196,14 @@ def main() -> None:
         raise RuntimeError(f"GOETHE_TEST_E2E=1 needs a signed CDN at {src} (packaging/build_cdn.sh)")
     root = Path(tempfile.mkdtemp(prefix=run_temp_prefix("e2ecdn"), dir="/tmp"))
     try:
-        cdn = _cdn_with_ternary(src, root)
-        _serve_and_install(cdn)
+        old, new = _cdns(src, root)
+        _serve_and_install(old, new)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
 
-def _serve_and_install(cdn: Path) -> None:
-    """Serve cdn over local HTTP and run the install, gateway, ternary and re-install checks against it."""
+def _serve_and_install(cdn: Path, new: Path) -> None:
+    """Serve both CDNs over local HTTP: install the older build, serve a chat, upgrade in place, re-install."""
     port = free_port()
     srv: Proc = spawn(
         [os.environ.get("GOETHE_PYTHON", "python3"), "-m", "http.server", str(port), "--bind", "127.0.0.1"],
@@ -185,7 +227,7 @@ def _serve_and_install(cdn: Path) -> None:
             env.pop("GOETHE_PYTHON", None)
             env.pop("GOETHE_REGISTRY_URL", None)
             try:
-                timings.append(f"install={_install(cdn / 'install.sh', env, late):.0f}s")
+                timings.append(f"install={_install(cdn / 'install.sh', env, late)[0]:.0f}s")
                 prefix = run([str(home / "py-env" / "bin" / "python"), "-c", "import sys; print(sys.prefix)"]).stdout
                 if Path(prefix.strip()).resolve() != (home / "py-env").resolve():
                     raise RuntimeError(f"installer py-env is not a venv in the temp home: {prefix.strip()}")
@@ -220,12 +262,19 @@ def _serve_and_install(cdn: Path) -> None:
                 code, reply = http_post(f"{base}/v1/chat/completions", body.encode(), headers=auth)
                 if code != 200 or b"choices" not in reply:
                     raise RuntimeError(f"completion through the gateway failed: code={code} body={reply[:200]!r}")
+                before = _engine(home)
+                env = {**env, "GOETHE_PKG_URL": f"http://127.0.0.1:{port}/{new.name}"}
+                secs, out = _install(new / "install.sh", env, late)
+                timings.append(f"upgrade={secs:.0f}s")
+                _check_upgrade(home, new, out, before, late)
+                if not wait_until(lambda: _chat_ok(base, body, auth), timeout=90):
+                    raise RuntimeError(f"the gateway does not serve after the upgrade: {_engine(home)}")
                 run_goethe([goethe, "unload", "--all"], env=env)
                 _stop_installed_daemon(home, env)
                 (home / "nginx" / "mux_port").unlink(missing_ok=True)
                 busy = _port_busy(30000)
                 reinstall_env = {k: v for k, v in env.items() if k not in ("GOETHE_MUX_PORT", "GOETHE_SOCK")}
-                timings.append(f"reinstall={_install(cdn / 'install.sh', reinstall_env, late):.0f}s")
+                timings.append(f"reinstall={_install(new / 'install.sh', reinstall_env, late)[0]:.0f}s")
                 mux = int((home / "nginx" / "mux_port").read_text(encoding="utf-8").strip())
                 if (busy and not 30100 <= mux <= 30199) or (not busy and mux != 30000):
                     raise RuntimeError(f"mux port {mux} after re-install (30000 busy={busy})")

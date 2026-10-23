@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import fcntl
 import hashlib
 import http.client
@@ -731,15 +732,19 @@ def write_stub_python(pyenv_bin: Path, real: Path) -> None:
 
 
 def _shutdown_home_daemon(home: Path) -> None:
-    """Ask the goethed serving this temp home, if any, to shut down (it stops its engines and nginx too)."""
+    """Stop this temp home's goethed (engines and nginx with it), else the verified nginx a killed goethed left."""
     sock = home / "goethe.sock"
-    if not sock.exists():
-        return
-    try:
-        goethe_rpc(home, "shutdown", None, timeout=10.0)
-    except (OSError, ValueError):
-        return
-    wait_until(lambda: not sock.exists(), timeout=15.0, interval=0.1)
+    if sock.exists():
+        try:
+            goethe_rpc(home, "shutdown", None, timeout=10.0)
+            wait_until(lambda: not sock.exists(), timeout=15.0, interval=0.1)
+        except (OSError, ValueError):
+            pass
+    if (home / "nginx" / "nginx.pid").is_file():
+        try:
+            run([str(require_cli("goethe")), "stop"], env=home_goethe_env(home), timeout=30)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            pass
 
 
 def _teardown_home(td: Path, strict: bool) -> None:
@@ -1122,12 +1127,24 @@ def isolated_real_home(work: Path, scrub: Sequence[str]) -> dict[str, str]:
             dst.close()
             ro.close()
     mux, public = _allocate_mux_public_ports()
-    return {
+    env = {
         "GOETHE_HOME": str(work),
         "GOETHE_MUX_PORT": str(mux),
         "GOETHE_PUBLIC_PORT": str(public),
         "GOETHE_SOCK": str(work / "goethe.sock"),
     }
+    _profile_hardware(work, src, env)
+    return env
+
+
+def _profile_hardware(work: Path, src: Path, env: dict[str, str]) -> None:
+    """hardware_state.json for a real-engine home (budgets need it): goethe hw profile, else the dev home's copy."""
+    rr = run([str(require_cli("goethe")), "hw", "profile"], env={**os.environ, **env}, timeout=120)
+    if rr.returncode == 0 and (work / "hardware_state.json").is_file():
+        return
+    if not (src / "hardware_state.json").is_file():
+        raise RuntimeError(f"no hardware profile for {work}: goethe hw profile exit {rr.returncode} {rr.stderr[-200:]}")
+    shutil.copy2(src / "hardware_state.json", work / "hardware_state.json")
 
 
 def make_release_key(dirpath: Path) -> tuple[Path, Path]:
@@ -1200,6 +1217,19 @@ def reap_run_artifacts(session_pgid: int | None = None) -> tuple[list[str], list
     return leftovers, pids
 
 
+def _end_leaked(leaked: list[tuple[int, str]]) -> None:
+    """Stop processes this gate run leaked (their command line names its temp paths) so later tests start clean."""
+    for pid, cmd in leaked:
+        if pid_alive(pid) and _cmdline(pid) == cmd:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGTERM)
+    if not wait_until(lambda: not any(pid_alive(p) for p, _ in leaked), timeout=5.0, interval=0.1):
+        for pid, cmd in leaked:
+            if pid_alive(pid) and _cmdline(pid) == cmd:
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGKILL)
+
+
 def post_test_hygiene(
     gpu_indices: Sequence[int],
     pre_mem: dict[int, int],
@@ -1211,9 +1241,10 @@ def post_test_hygiene(
     marker = run_temp_marker()
     tset = set(test_pids or []) | set(_spawned_pids)
     table = process_table()
-    for pid, st in table.items():
-        if st[0] != "Z" and pid not in tset and marker in _cmdline(pid):
-            raise RuntimeError(f"leftover process {pid}: {_cmdline(pid)[:200]}")
+    leaked = [(p, _cmdline(p)) for p, st in table.items() if st[0] != "Z" and p not in tset and marker in _cmdline(p)]
+    if leaked:
+        _end_leaked(leaked)
+        raise RuntimeError(f"leftover process {leaked[0][0]}: {leaked[0][1][:200]} ({len(leaked)} in all, now stopped)")
     for zpid, st in table.items():
         if st[0] != "Z":
             continue

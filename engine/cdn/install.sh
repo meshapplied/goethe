@@ -250,14 +250,35 @@ install_ternary() {
   rm -f "${tar}.part"
 }
 
+binary_current() {
+  # True when bin/<name> already matches the CDN's signed sha256 (never true without a signed SHA256SUMS).
+  local want
+  if [[ "${SECURE}" -ne 1 || ! -x "${GOETHE_HOME}/bin/$1" ]]; then
+    return 1
+  fi
+  want="$(awk -v p="bin/linux-${ARCH}/$1" '$2 == p { print $1; exit }' "${SUMS_FILE}")"
+  [[ -n "${want}" && "$(sha256sum "${GOETHE_HOME}/bin/$1" | awk '{print $1}')" == "${want}" ]]
+}
+
 install_binaries() {
-  # Fetch goethe and goethed, and link the CLI into a PATH directory unless GOETHE_NO_LINK is set.
+  # Stage goethe and goethed (verified) when missing or different from the CDN's; link the CLI unless GOETHE_NO_LINK.
   local bin dir
+  STAGED=()
   for bin in goethe goethed; do
-    if [[ ! -x "${GOETHE_HOME}/bin/${bin}" ]]; then
-      fetch "bin/linux-${ARCH}/${bin}" "${GOETHE_HOME}/bin/${bin}"
-      chmod +x "${GOETHE_HOME}/bin/${bin}"
+    if binary_current "${bin}"; then
+      continue
     fi
+    fetch "bin/linux-${ARCH}/${bin}" "${GOETHE_HOME}/bin/.${bin}.new"
+    chmod +x "${GOETHE_HOME}/bin/.${bin}.new"
+    if [[ "${bin}" == goethe ]] && ! "${GOETHE_HOME}/bin/.goethe.new" --version >/dev/null; then
+      echo "the downloaded goethe does not run on this host; nothing was replaced" >&2
+      exit 1
+    fi
+    if [[ -x "${GOETHE_HOME}/bin/${bin}" ]] && cmp -s "${GOETHE_HOME}/bin/.${bin}.new" "${GOETHE_HOME}/bin/${bin}"; then
+      rm -f "${GOETHE_HOME}/bin/.${bin}.new"
+      continue
+    fi
+    STAGED+=("${bin}")
   done
   if [[ -n "${GOETHE_NO_LINK:-}" ]]; then
     return
@@ -350,24 +371,40 @@ system_unit_home() {
   printf '%s\n' "${pinned#GOETHE_HOME=}"
 }
 
+systemd_root() {
+  [[ "$(id -u)" -eq 0 && "$(ps -p 1 -o comm= 2>/dev/null || true)" == "systemd" ]]
+}
+
+write_system_unit() {
+  # Write and load this home's goethed system unit; fails without writing when another home owns the unit.
+  local other
+  other="$(system_unit_home)"
+  if [[ -n "${other}" && "${other}" != "${GOETHE_HOME}" ]]; then
+    return 1
+  fi
+  fetch "goethed.service" "${GOETHE_HOME}/goethed.service"
+  sed "s|__GOETHE_HOME__|${GOETHE_HOME}|g" "${GOETHE_HOME}/goethed.service" >/etc/systemd/system/goethed.service
+  mkdir -p /etc/goethe
+  printf 'NGINX_BIN=%s\n' "${NGINX_BIN}" >/etc/goethe/goethe.env
+  systemctl daemon-reload
+}
+
 start_goethed() {
   # systemd unit for root on systemd hosts unless another home owns it, else a detached nohup goethed.
   local other
+  if [[ "${STARTED:-0}" -eq 1 ]]; then
+    return
+  fi
   if goethed_answers; then
     echo "goethed already running for ${GOETHE_HOME}"
     return
   fi
-  if [[ "$(id -u)" -eq 0 && "$(ps -p 1 -o comm= 2>/dev/null || true)" == "systemd" ]]; then
-    other="$(system_unit_home)"
-    if [[ -z "${other}" || "${other}" == "${GOETHE_HOME}" ]]; then
-      fetch "goethed.service" "${GOETHE_HOME}/goethed.service"
-      sed "s|__GOETHE_HOME__|${GOETHE_HOME}|g" "${GOETHE_HOME}/goethed.service" >/etc/systemd/system/goethed.service
-      mkdir -p /etc/goethe
-      printf 'NGINX_BIN=%s\n' "${NGINX_BIN}" >/etc/goethe/goethe.env
-      systemctl daemon-reload
+  if systemd_root; then
+    if write_system_unit; then
       systemctl enable --now goethed.service
       return
     fi
+    other="$(system_unit_home)"
     echo "goethed.service already starts goethed for ${other}; this home starts now but gets no autostart." >&2
     echo "To move autostart here: GOETHE_HOME=${other} goethe service disable, then goethe service enable." >&2
   fi
@@ -377,6 +414,45 @@ start_goethed() {
   fi
   NGINX_BIN="${NGINX_BIN}" "${launcher[@]}" "${GOETHE_HOME}/bin/goethed" </dev/null \
     >>"${GOETHE_HOME}/logs/goethed.log" 2>&1 &
+}
+
+apply_binaries() {
+  # Move staged binaries into place; a running goethed is stopped first, keeping its engines when it can.
+  local bin rc=0 old="" new unit=0
+  UPGRADE_NOTE=""
+  STARTED=0
+  if [[ ${#STAGED[@]} -eq 0 ]]; then
+    return
+  fi
+  if [[ -x "${GOETHE_HOME}/bin/goethe" ]]; then
+    old="$("${GOETHE_HOME}/bin/goethe" --version 2>/dev/null || echo "goethe unknown build")"
+  fi
+  if [[ -n "${old}" && " ${STAGED[*]} " == *" goethed "* ]] && goethed_answers; then
+    if systemd_root && write_system_unit; then
+      unit=1
+    fi
+    "${GOETHE_HOME}/bin/goethe" stop --keep-engines || rc=$?
+    if [[ ${rc} -eq 2 ]]; then
+      "${GOETHE_HOME}/bin/goethe" stop
+      UPGRADE_NOTE="engines were stopped (this goethed cannot hand them over); the new goethed restores them"
+    elif [[ ${rc} -ne 0 ]]; then
+      echo "could not stop goethed for the upgrade (exit ${rc}); nothing was replaced" >&2
+      exit 1
+    else
+      UPGRADE_NOTE="engines kept serving; the new goethed adopts them"
+    fi
+  fi
+  for bin in "${STAGED[@]}"; do
+    mv -f "${GOETHE_HOME}/bin/.${bin}.new" "${GOETHE_HOME}/bin/${bin}"
+  done
+  if [[ ${unit} -eq 1 ]]; then
+    systemctl restart goethed.service
+    STARTED=1
+  fi
+  if [[ -n "${old}" ]]; then
+    new="$("${GOETHE_HOME}/bin/goethe" --version)"
+    UPGRADE_NOTE="upgraded goethe ${old#goethe } -> ${new#goethe }${UPGRADE_NOTE:+; ${UPGRADE_NOTE}}"
+  fi
 }
 
 wait_goethed() {
@@ -480,8 +556,12 @@ main() {
   export NGINX_BIN
   ensure_certs
   write_goethe_env
+  apply_binaries
   start_goethed
   wait_goethed
+  if [[ -n "${UPGRADE_NOTE}" ]]; then
+    echo "${UPGRADE_NOTE}"
+  fi
   wait_gateway
   goethe hw profile || echo "WARNING: goethe hw profile failed" >&2
   local rec
