@@ -80,8 +80,11 @@ def lint_python(path: Path, text: str) -> None:
             flag(path, tok.start[0], f"comment: {tok.string[:50]}")
 
 
-def strip_strings(line: str) -> str:
-    """Remove string literals for comment scanning."""
+RUST_CHAR = re.compile(r"'(\\.[^']*|[^\\'])'")
+
+
+def strip_strings(line: str, rust: bool = False) -> str:
+    """Remove string literals for comment scanning; in Rust a quote only opens a char literal, never a lifetime."""
     out, i, q = [], 0, None
     while i < len(line):
         c = line[i]
@@ -92,6 +95,14 @@ def strip_strings(line: str) -> str:
             if c == q:
                 q = None
             i += 1
+            continue
+        if rust and c == "'":
+            m = RUST_CHAR.match(line, i)
+            if m:
+                i = m.end()
+            else:
+                out.append(c)
+                i += 1
             continue
         if c in "\"'":
             q = c
@@ -119,7 +130,7 @@ def lint_clike(path: Path, lines: list[str], marker: str) -> None:
     pending_sig = None
     for i, raw in enumerate(lines):
         s = raw.strip()
-        code = strip_strings(raw)
+        code = strip_strings(raw, rust=path.suffix == ".rs")
         is_comment_line = (i == 0 and s.startswith("#!")) is False and (
             s.startswith(marker) or s.startswith("/*") or (marker == "//" and s.startswith("*"))
         )
