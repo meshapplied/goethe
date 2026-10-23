@@ -68,7 +68,7 @@ fn combos(n: usize, k: usize) -> Vec<Vec<usize>> {
 }
 
 pub fn rank_sets(inputs: &[GpuPlacementInput], hw: Option<&HardwareState>, tp: usize) -> Vec<SetRank> {
-    // Every tp-sized GPU set, best first: fewest GPUs with foreign processes, best link, most free VRAM, lowest ids.
+    // Every tp-sized GPU set, best first: fewest GPUs with foreign processes, most free VRAM, best link, lowest ids.
     let mut sorted: Vec<&GpuPlacementInput> = inputs.iter().collect();
     sorted.sort_by_key(|g| g.index);
     let mut out: Vec<SetRank> = combos(sorted.len(), tp)
@@ -83,7 +83,7 @@ pub fn rank_sets(inputs: &[GpuPlacementInput], hw: Option<&HardwareState>, tp: u
             }
         })
         .collect();
-    out.sort_by_key(|s| (s.foreign, s.link, Reverse(s.min_free_mb), s.gpus.clone()));
+    out.sort_by_key(|s| (s.foreign, Reverse(s.min_free_mb), s.link, s.gpus.clone()));
     out
 }
 
@@ -108,6 +108,29 @@ pub fn placement_inputs(
 pub fn load_hw(home: &Path) -> Option<HardwareState> {
     let text = std::fs::read_to_string(home.join("hardware_state.json")).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+pub fn ensure_hw_profile(home: &Path) -> Result<bool, String> {
+    // Write hardware_state.json when it is missing or older than this boot; true when a new profile was written.
+    let booted = std::fs::read_to_string("/proc/stat").ok().as_deref().and_then(boot_epoch).unwrap_or(0);
+    if profile_since(home, booted) {
+        return Ok(false);
+    }
+    let state = hw::profile(home)?;
+    hw::write_state(home, &state)?;
+    Ok(true)
+}
+
+fn profile_since(home: &Path, booted: u64) -> bool {
+    std::fs::metadata(home.join("hardware_state.json"))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .is_some_and(|d| d.as_secs() >= booted)
+}
+
+fn boot_epoch(stat: &str) -> Option<u64> {
+    stat.lines().find_map(|l| l.strip_prefix("btime "))?.trim().parse().ok()
 }
 
 pub fn format_gpu_list(gpus: &[u32]) -> String {
@@ -208,6 +231,20 @@ mod tests {
     }
 
     #[test]
+    fn hardware_profile_is_stale_when_missing_or_older_than_boot() {
+        assert_eq!(boot_epoch("cpu  1 2 3\nbtime 1729700000\nprocesses 9\n"), Some(1729700000));
+        let td = tempfile::tempdir().unwrap();
+        assert!(!profile_since(td.path(), 0), "a missing profile is stale");
+        let path = td.path().join("hardware_state.json");
+        std::fs::write(&path, "{}").unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert!(profile_since(td.path(), now - 60));
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1000);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        assert!(!profile_since(td.path(), now - 60), "a profile from before this boot is stale");
+    }
+
+    #[test]
     fn combos_enumerates_all_subsets() {
         assert_eq!(combos(4, 2).len(), 6);
         assert_eq!(combos(3, 3), vec![vec![0, 1, 2]]);
@@ -232,12 +269,17 @@ mod tests {
     }
 
     #[test]
+    fn free_vram_outranks_link_on_this_hosts_shape() {
+        let gpus = [inp(0, true, 4300), inp(1, true, 4300), inp(2, true, 75 * 1024), inp(3, true, 90 * 1024)];
+        let r = rank_sets(&gpus, Some(&host_hw()), 2);
+        assert_eq!(r[0].gpus, vec![2, 3], "most free VRAM beats the PHB pair");
+        assert_eq!(r[1].gpus, vec![0, 1], "among equally full sets the better link breaks the tie");
+    }
+
+    #[test]
     fn placement_inputs_drop_denied_and_subtract_ledger() {
-        let snap = vec![
-            GpuLive { index: 2, free_mb: 20480, procs: vec![(i32::MAX - 7, 100)] },
-            GpuLive { index: 3, free_mb: 20480, procs: Vec::new() },
-            GpuLive { index: 4, free_mb: 20480, procs: Vec::new() },
-        ];
+        let live = |index, procs| GpuLive { index, name: "g".to_string(), cc_major: 12, free_mb: 20480, procs };
+        let snap = vec![live(2, vec![(i32::MAX - 7, 100)]), live(3, Vec::new()), live(4, Vec::new())];
         let denied = HashSet::from([4u32]);
         let got = placement_inputs(&snap, &HashSet::new(), &HashSet::new(), &denied, |g| if g == 3 { 5.0 } else { 0.0 });
         assert_eq!(got, vec![inp(2, true, 20480), inp(3, false, 15360)]);
