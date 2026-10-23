@@ -229,7 +229,7 @@ Exit codes: `0` success, `1` error, `2` usage error, `3` confirmation needed but
 
 | Command | Description | Arguments |
 |---|---|---|
-| `goethe recommend` | List known models that fit this machine | `--json` |
+| `goethe recommend` | List catalog models that fit this machine now, with their raw size | `--json` (full placement plan) |
 | `goethe install` | Download or register a model; optionally load it | `MODEL_ID` (repo id or local path), `--ctx N`, `--max-conc N`, `--tp N`, `--gpus LIST`, `--load`, `--no-load`, `--no-wait`, `--yes`, `--force`, `--reset`, `--trust-remote-code`, `--no-verify`, `--name ID`, `--copy`, `--sglang-arg FLAG` |
 | `goethe scan` | Register model folders you moved into `GOETHE_HOME/models` | `[DIR]`, `--yes`, `--json` |
 | `goethe models` (alias `list`) | List installed and available models with fit and load state | `--json`, `--installed`, `--available` |
