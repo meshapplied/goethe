@@ -120,6 +120,7 @@ fn desired_rows(con: &Connection) -> Result<Vec<LoadParams>, String> {
                 yes: true,
                 restart_count: None,
                 slot_key: r.get(6)?,
+                replica: false,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -142,6 +143,7 @@ mod tests {
             yes: false,
             restart_count: None,
             slot_key: Some(slot.to_string()),
+            replica: false,
         }
     }
 

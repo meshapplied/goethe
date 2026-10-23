@@ -16,12 +16,14 @@ const OWNED_FLAGS: &[&str] = &[
     "--api-key",
     "--served-model-name",
 ];
+const QUIET_PATHS: &[&str] = &["/health", "/v1/models", "/get_model_info"];
 const ENV_KEEP: &[&str] = &["PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "LD_LIBRARY_PATH"];
 const ENV_KEEP_PREFIX: &[&str] = &["LC_", "HF_", "CUDA_", "NCCL_", "NVIDIA_"];
 
 pub struct EngineSpec<'a> {
     pub home: &'a Path,
     pub instance_id: &'a str,
+    pub served_name: &'a str,
     pub engine_key: &'a str,
     pub model_path: &'a Path,
     pub card: &'a toml::Value,
@@ -145,7 +147,7 @@ fn card_env(spec: &EngineSpec) -> Vec<(String, String)> {
 }
 
 pub fn command(spec: &EngineSpec) -> Command {
-    // Goethe flags, then checked card and load extras, in a cleared env (SPT_NOENV keeps the tag readable).
+    // Goethe flags, then checked card and load extras, in a cleared env; probe paths stay out of the access log.
     let mut cmd = Command::new(resolve_python(spec.home));
     cmd.arg("-m")
         .arg("sglang.launch_server")
@@ -162,7 +164,11 @@ pub fn command(spec: &EngineSpec) -> Command {
         .arg("--max-running-requests")
         .arg(spec.max_conc.to_string())
         .arg("--mem-fraction-static")
-        .arg(format!("{:.6}", spec.mem_frac));
+        .arg(format!("{:.6}", spec.mem_frac))
+        .arg("--served-model-name")
+        .arg(spec.served_name)
+        .arg("--uvicorn-access-log-exclude-prefixes")
+        .args(QUIET_PATHS);
     let extras: Vec<String> = card_extra_args(spec.card).into_iter().chain(spec.load_extra.iter().cloned()).collect();
     if !multi_tokenizer(&extras) {
         cmd.arg("--api-key").arg(spec.engine_key);
@@ -178,9 +184,6 @@ pub fn command(spec: &EngineSpec) -> Command {
     let custom_all_reduce = spec.card.get("custom_all_reduce").and_then(|v| v.as_bool()) == Some(true);
     if spec.tp > 1 && !custom_all_reduce {
         cmd.arg("--disable-custom-all-reduce");
-    }
-    if let Some(name) = spec.card.get("model_id").and_then(|v| v.as_str()) {
-        cmd.arg("--served-model-name").arg(name);
     }
     cmd.args(&extras);
     let gpus: Vec<String> = spec.gpus.iter().map(|g| g.to_string()).collect();
@@ -209,6 +212,7 @@ mod tests {
         let spec = EngineSpec {
             home: Path::new("/h"),
             instance_id: "inst-x",
+            served_name: "org/m",
             engine_key: "k".repeat(32).leak(),
             model_path: Path::new("/h/models/m"),
             card: &card,
@@ -244,6 +248,16 @@ mod tests {
             assert!(err.contains("not allowed"), "{bad}: {err}");
         }
         check_extra_args(&strs(&["--chunked-prefill-size", "4096", "--host-ip-check", "--ep-size", "2", "--"])).unwrap();
+    }
+
+    #[test]
+    fn serves_the_installed_id_and_keeps_probes_out_of_the_access_log() {
+        let a = args(&spec_cmd("model_id = \"card-name\"", 1));
+        let n = a.iter().position(|x| x == "--served-model-name").unwrap();
+        assert_eq!(a[n + 1], "org/m");
+        let q = a.iter().position(|x| x == "--uvicorn-access-log-exclude-prefixes").unwrap();
+        assert_eq!(&a[q + 1..q + 4], ["/health", "/v1/models", "/get_model_info"]);
+        assert!(a[q + 4].starts_with("--"));
     }
 
     #[test]

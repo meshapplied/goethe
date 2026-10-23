@@ -1,13 +1,15 @@
 // goethed load, unload, adoption and watchdog supervision of SGLang engines.
 
 use crate::autostart;
-use crate::calc::{mem_fraction_from_free, missing_gb, static_weight_gb};
+use crate::calc::{self, mem_fraction_from_free, shortfall, static_weight_gb, Need};
 use crate::chooser::{self, ChooserInput, LoadPlan};
 use crate::coordinator;
 use crate::db;
 use crate::engine_cmd::{self, EngineSpec};
+use crate::engine_overhead::{Kind, Learned};
 use crate::foreign::{self, Foreign};
 use crate::hw::HardwareState;
+use crate::listener::{self, PortOwner};
 use crate::load_slot;
 use crate::paths::{ensure_layout, goethe_home};
 use crate::placement;
@@ -30,6 +32,7 @@ use std::time::{Duration, Instant};
 
 static SLOT_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 static WATCHDOG_TICK_LOCK: Mutex<()> = Mutex::new(());
+static NEXT_ATTEMPT: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
 
 const LIVE: &str = "('STARTING', 'RUNNING', 'RESTARTING', 'DRAINING', 'STOPPING')";
 const GPU_RELEASE_WAIT: Duration = Duration::from_secs(2);
@@ -71,6 +74,8 @@ pub struct LoadParams {
     pub restart_count: Option<u64>,
     #[serde(default)]
     pub slot_key: Option<String>,
+    #[serde(default)]
+    pub replica: bool,
 }
 
 struct InstRow {
@@ -111,7 +116,8 @@ struct Starting {
     port: u16,
     log_path: PathBuf,
     log_offset: u64,
-    budget_gb: f64,
+    need: Need,
+    learned: Learned,
     gpu_name: String,
     tp: u64,
     model_path: PathBuf,
@@ -137,6 +143,7 @@ struct Inst {
 
 enum Step {
     Started(Box<Starting>, String),
+    Loaded(Value, String),
     Wait(Vec<u32>),
 }
 
@@ -144,6 +151,7 @@ enum Startup {
     Ready,
     Cancelled,
     Failed,
+    PortTaken(String),
 }
 
 fn insts(con: &Connection, filter: &str, args: &[&dyn ToSql]) -> rusqlite::Result<Vec<Inst>> {
@@ -225,6 +233,7 @@ pub fn handle_load(params: LoadParams) -> Result<(Value, String), LoadErr> {
         };
         match step {
             Step::Started(starting, notices) => return Ok(launch_finish(*starting, notices)),
+            Step::Loaded(result, message) => return Ok((result, message)),
             Step::Wait(gpus) if req.params.slot_key.is_none() && Instant::now() >= deadline => {
                 return Err(err1(format!(
                     "GPU {} is still starting another engine after {}s; load not started, retry when it is RUNNING",
@@ -238,15 +247,25 @@ pub fn handle_load(params: LoadParams) -> Result<(Value, String), LoadErr> {
 }
 
 fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
-    // Under the planning lock: refuse a slot that is already live, plan on live VRAM, then fit, notice and gate.
+    // Under the planning lock: slot and replica checks, plan on live VRAM, then fit, notice and gate.
+    let model_id = &req.params.model_id;
     if let Some(slot) = req.params.slot_key.as_deref() {
-        let live = format!("SELECT 1 FROM loaded_instances WHERE slot_key = ?1 AND status IN {LIVE}");
+        let live = format!("SELECT 1 FROM loaded_instances WHERE slot_key = ?1 AND status IN {LIVE} AND pid > 0");
         if con.query_row(&live, [slot], |_| Ok(())).is_ok() {
             return Err(err1(format!("slot {slot} already has a live instance; not starting a second one")));
         }
         if !autostart::desired_exists(con, slot) {
             return Err(err1(format!("slot {slot} is no longer desired; not starting it")));
         }
+    }
+    let copies = copies_of(con, model_id);
+    if let (None, false, Some(first)) = (&req.params.slot_key, req.params.replica, copies.first()) {
+        let message = format!(
+            "already loaded: {} on GPU {} (port {}); use --replica to start another copy",
+            first.0, first.2, first.3
+        );
+        let result = json!({"instance_id": first.0, "status": first.1, "already_loaded": true});
+        return Ok(Step::Loaded(result, message));
     }
     let snap = foreign::snapshot().map_err(err1)?;
     if let Some(g) = req.pinned.iter().find(|g| !snap.iter().any(|s| s.index == **g)) {
@@ -281,35 +300,62 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
         .collect();
     let gpu_name = gpu_name(req.hw.as_ref(), plan.gpus[0]);
     let input = chooser_input(req, &plan.gpus, plan.ctx, plan.max_conc);
-    let budget = chooser::per_gpu_budget_gb(&input, plan.tp)
-        + crate::engine_overhead::read_learned_extra_gb(con, &req.params.model_id, &gpu_name, plan.tp as u64);
+    let learned = crate::engine_overhead::read_learned(con, model_id, &gpu_name, plan.tp as u64);
+    let need = with_learned(chooser::need(&input, plan.tp), learned);
     let found = foreign::foreign_on(&snap, &plan.gpus, &managed, &live);
-    let short = plan.gpus.iter().map(|g| (*g, free[g])).find(|(_, f)| missing_gb(budget, *f) > 0.0);
-    if let (Some((g, f)), false) = (short, busy) {
-        return Err(missing_error(
-            format!(
-                "VRAM budget {budget:.2} GB exceeds free {f:.2} GB on GPU {g}; missing {:.2} GB",
-                missing_gb(budget, f)
-            ),
-            &found,
-        ));
+    let short = plan.gpus.iter().find_map(|g| shortfall(&need, *g, free[g]));
+    if let (Some(why), false) = (short, busy) {
+        return Err(missing_error(why, &found));
     }
     if !found.is_empty() && !(req.params.force || req.params.yes) {
-        return Err((3, foreign::notice(&found, &free, budget), json!({ "foreign": found })));
+        return Err((3, foreign::notice(&found, &free, need.total()), json!({ "foreign": found })));
     }
     if busy {
         return Ok(Step::Wait(plan.gpus));
     }
-    let mut notices = format!("{}\n", plan.message);
+    let auto = pinned.is_none() && tp.is_none();
+    let mut notices = format!(
+        "{}tp={} on GPUs {}: {}\n",
+        if auto { "auto: " } else { "" },
+        plan.tp,
+        gpu_csv(&plan.gpus),
+        calc::describe(&need)
+    );
+    if !copies.is_empty() {
+        let list: Vec<String> = copies.iter().map(|c| format!("{} on GPU {} (port {})", c.0, c.2, c.3)).collect();
+        notices.push_str(&format!("another replica of {model_id}; already loaded: {}\n", list.join(", ")));
+    }
     for &g in &plan.gpus {
-        if let Some(line) = co_residency_notice(con, g, &req.params.model_id, free[&g]) {
+        if let Some(line) = co_residency_notice(con, g, model_id, free[&g]) {
             notices.push_str(&line);
             notices.push('\n');
         }
     }
     let min_free = free.values().copied().fold(f64::INFINITY, f64::min);
-    let starting = start_engine(req, con, &plan, budget, min_free, gpu_name)?;
+    let starting = start_engine(req, con, &plan, need, learned, min_free, gpu_name)?;
     Ok(Step::Started(Box::new(starting), notices))
+}
+
+fn with_learned(base: Need, learned: Learned) -> Need {
+    // Fold what this model taught us on this GPU and tp into the budget parts: static extra and non-static overhead.
+    Need {
+        weights: base.weights + learned.static_gb,
+        kv: base.kv,
+        overhead: base.overhead + learned.overhead_gb,
+    }
+}
+
+fn copies_of(con: &Connection, model_id: &str) -> Vec<(String, String, String, i64)> {
+    // STARTING or RUNNING instances of a model (RUNNING first): id, status, GPUs, port.
+    let Ok(mut stmt) = con.prepare(
+        "SELECT instance_id, status, gpu_indices, internal_port FROM loaded_instances
+         WHERE model_id = ?1 AND status IN ('STARTING', 'RUNNING') ORDER BY status = 'RUNNING' DESC, rowid",
+    ) else {
+        return Vec::new();
+    };
+    stmt.query_map([model_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
 }
 
 fn missing_error(message: String, holders: &[Foreign]) -> LoadErr {
@@ -322,7 +368,8 @@ fn start_engine(
     req: &LoadReq,
     con: &Connection,
     plan: &LoadPlan,
-    budget: f64,
+    need: Need,
+    learned: Learned,
     min_free: f64,
     gpu_name: String,
 ) -> Result<Starting, LoadErr> {
@@ -341,12 +388,14 @@ fn start_engine(
         .unwrap_or_else(|| crate::slots::slot_key(model_id, &plan.gpus, ordinal));
     let instance_id = format!("inst-{}", uuid_simple());
     let engine_key = engine_cmd::new_engine_key().map_err(err1)?;
-    let mem_frac = mem_fraction_from_free(budget, min_free).map_err(err1)?;
+    let budget = need.total();
+    let mem_frac = mem_fraction_from_free(&need, min_free).map_err(err1)?;
     let log_path = req.home.join("logs").join(format!("{instance_id}.log"));
     let tp = plan.tp as u64;
     let spec = EngineSpec {
         home: &req.home,
         instance_id: &instance_id,
+        served_name: model_id,
         engine_key: &engine_key,
         model_path: &req.model_path,
         card: &req.card,
@@ -363,7 +412,8 @@ fn start_engine(
     params.slot_key = Some(slot_key.clone());
     let recorded = con
         .execute(
-            "DELETE FROM loaded_instances WHERE slot_key = ?1 AND status IN ('FAILED', 'CANCELLED')",
+            "DELETE FROM loaded_instances
+             WHERE slot_key = ?1 AND (status IN ('FAILED', 'CANCELLED') OR (status = 'RESTARTING' AND pid = 0))",
             [&slot_key],
         )
         .and_then(|_| {
@@ -412,7 +462,8 @@ fn start_engine(
         port,
         log_path,
         log_offset,
-        budget_gb: budget,
+        need,
+        learned,
         gpu_name,
         tp,
         model_path: req.model_path.clone(),
@@ -477,12 +528,33 @@ fn launch_finish(starting: Starting, notices: String) -> (Value, String) {
 }
 
 fn startup(s: &mut Starting) {
-    // Drive a STARTING engine to RUNNING, CANCELLED or FAILED, retrying twice with a larger budget on a VRAM shortfall.
-    let mut mem_retries = 0;
+    // STARTING to RUNNING, CANCELLED or FAILED: two retries after a VRAM shortfall, three on a new port if ours is held.
+    let (mut mem_retries, mut port_retries) = (0, 0);
     loop {
         match wait_engine_ready(s) {
-            Startup::Ready => return mark_running(s),
+            Startup::Ready => {
+                if mark_running(s) {
+                    learn_overhead(s);
+                }
+                return;
+            }
             Startup::Cancelled => return cancel_engine(s),
+            Startup::PortTaken(why) if port_retries < 3 => {
+                port_retries += 1;
+                match respawn(s, s.need, true) {
+                    Ok(()) => {
+                        load_slot::push_instance_notice(&s.instance_id, &format!("{why}; retried on port {}", s.port));
+                        continue;
+                    }
+                    Err(_) if load_slot::is_cancelled(&s.cancel) => return cancel_engine(s),
+                    Err(e) => load_slot::push_instance_notice(&s.instance_id, &format!("{why}; {e}")),
+                }
+                return fail_engine(s);
+            }
+            Startup::PortTaken(why) => {
+                load_slot::push_instance_notice(&s.instance_id, &why);
+                return fail_engine(s);
+            }
             Startup::Failed => {}
         }
         if load_slot::is_cancelled(&s.cancel) {
@@ -490,14 +562,18 @@ fn startup(s: &mut Starting) {
         }
         let log = crate::engine_overhead::read_log_since(&s.log_path, s.log_offset);
         if let Some(extra) = crate::engine_overhead::parse_shortfall_gb(&log) {
+            s.learned.static_gb += extra;
             if let Ok(con) = db::open(&s.home) {
-                let model = &s.params.model_id;
-                let _ = crate::engine_overhead::store_learned_extra_gb(&con, model, &s.gpu_name, s.tp, extra);
+                let (model, learned) = (&s.params.model_id, s.learned.static_gb);
+                let _ = crate::engine_overhead::store_learned(&con, model, &s.gpu_name, s.tp, Kind::Static, learned);
             }
             if mem_retries < 2 {
-                match retry_with_budget(s, extra) {
+                let bigger = Need { weights: s.need.weights + extra, ..s.need };
+                match respawn(s, bigger, false) {
                     Ok(()) => {
                         mem_retries += 1;
+                        let notice = format!("engine needed {extra:.1} GB more than estimated, retried");
+                        load_slot::push_instance_notice(&s.instance_id, &notice);
                         continue;
                     }
                     Err(_) if load_slot::is_cancelled(&s.cancel) => return cancel_engine(s),
@@ -510,7 +586,7 @@ fn startup(s: &mut Starting) {
 }
 
 fn wait_engine_ready(s: &Starting) -> Startup {
-    // Poll health every 500 ms; a gone leader, a stalled log or the hard cap fail the start.
+    // Ready needs every listener on the port to be ours, /health to answer and /v1/models to list our model.
     let hard_cap = crate::startup_stall::hard_cap_secs_from_env();
     let mut tracker = crate::startup_stall::StallTracker::new(now_epoch_secs(), log_file_len(&s.log_path));
     loop {
@@ -518,12 +594,17 @@ fn wait_engine_ready(s: &Starting) -> Startup {
             return Startup::Cancelled;
         }
         let alive = proc_ident::leader_alive(&s.identity);
+        let ready = match listener::port_owner(&s.identity, s.port) {
+            owner @ PortOwner::Foreign { .. } => return Startup::PortTaken(owner.describe(s.port)),
+            PortOwner::Ours => alive && health_ok(s.port, &s.engine_key) && serves(s.port, &s.engine_key, &s.params.model_id),
+            PortOwner::Nobody => false,
+        };
         let step = crate::startup_stall::poll_startup_step(
             &mut tracker,
             now_epoch_secs(),
             alive,
             log_file_len(&s.log_path),
-            alive && health_ok(s.port, &s.engine_key),
+            ready,
             hard_cap,
         );
         match step {
@@ -534,13 +615,44 @@ fn wait_engine_ready(s: &Starting) -> Startup {
     }
 }
 
-fn mark_running(s: &Starting) {
-    // STARTING to RUNNING and the desired slot in one transaction, so a concurrent unload can never resurrect it.
-    let Ok(mut con) = db::open(&s.home) else {
+fn learn_overhead(s: &Starting) {
+    // Measure what the engine really holds per GPU (NVML, our pids, max over GPUs); beyond the budget, learn it.
+    let pids = proc_ident::instance_pids(&s.identity);
+    let Ok(snap) = foreign::snapshot() else {
         return;
     };
-    let Ok(tx) = con.transaction_with_behavior(TransactionBehavior::Immediate) else {
+    let used_mb = s
+        .gpus
+        .iter()
+        .filter_map(|g| snap.iter().find(|x| x.index == *g))
+        .map(|g| g.procs.iter().filter(|(p, _)| pids.contains(p)).map(|(_, mb)| *mb).sum::<u64>())
+        .max()
+        .unwrap_or(0);
+    let used = used_mb as f64 / 1024.0;
+    let Some(overhead) = calc::learned_overhead(used, &s.need, s.learned.overhead_gb) else {
         return;
+    };
+    if let Ok(con) = db::open(&s.home) {
+        let model = &s.params.model_id;
+        let _ = crate::engine_overhead::store_learned(&con, model, &s.gpu_name, s.tp, Kind::Overhead, overhead);
+    }
+    append_goethed_log(
+        &s.home,
+        &format!(
+            "{}: engine uses {used:.1} GB per GPU, budget was {:.1} GB; overhead learned\n",
+            s.instance_id,
+            s.need.total()
+        ),
+    );
+}
+
+fn mark_running(s: &Starting) -> bool {
+    // STARTING to RUNNING and the desired slot in one transaction, so a concurrent unload can never resurrect it.
+    let Ok(mut con) = db::open(&s.home) else {
+        return false;
+    };
+    let Ok(tx) = con.transaction_with_behavior(TransactionBehavior::Immediate) else {
+        return false;
     };
     let changed = tx
         .execute(
@@ -551,7 +663,7 @@ fn mark_running(s: &Starting) {
     if changed == 1 {
         let _ = autostart::mark_desired(&tx, &s.params);
     }
-    let _ = tx.commit();
+    tx.commit().is_ok() && changed == 1
 }
 
 fn cancel_engine(s: &Starting) {
@@ -607,36 +719,48 @@ fn stop_one(home: &Path, id: &Identity) -> bool {
     gone
 }
 
-fn retry_with_budget(s: &mut Starting, extra: f64) -> Result<(), String> {
-    // Stop the short engine, re-check live VRAM for the larger budget and respawn under the same instance id.
-    let budget = s.budget_gb + extra;
+fn respawn(s: &mut Starting, need: Need, move_port: bool) -> Result<(), String> {
+    // Stop the current engine (verified) and start it again under the same instance id, with a new budget or port.
     let stopped = proc_ident::terminate(std::slice::from_ref(&s.identity));
     foreign::wait_released(&s.gpus, &stopped.pids, GPU_RELEASE_WAIT);
     if !stopped.survivors.is_empty() {
-        return Err("the short engine survived SIGKILL; not respawning over it".to_string());
+        return Err("the previous engine survived SIGKILL; not respawning over it".to_string());
     }
     let snap = foreign::snapshot()?;
-    let free = s
+    let free_of = |g: u32| snap.iter().find(|x| x.index == g).map_or(0.0, |x| x.free_mb as f64 / 1024.0);
+    let (tight, free) = s
         .gpus
         .iter()
-        .map(|g| snap.iter().find(|x| x.index == *g).map(|x| x.free_mb as f64 / 1024.0).unwrap_or(0.0))
-        .fold(f64::INFINITY, f64::min);
-    let missing = missing_gb(budget, free);
-    if missing > 0.0 {
-        return Err(format!(
-            "VRAM budget {budget:.2} GB exceeds free GPU headroom ({free:.2} GB free); missing {missing:.2} GB"
-        ));
+        .map(|g| (*g, free_of(*g)))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .ok_or("no GPU")?;
+    if let Some(why) = shortfall(&need, tight, free) {
+        return Err(why);
     }
     if load_slot::is_cancelled(&s.cancel) {
         return Err("load cancelled during the retry".to_string());
     }
-    load_slot::push_instance_notice(
-        &s.instance_id,
-        &format!("engine needed {extra:.1} GB more than estimated, retried"),
-    );
+    let con = db::open(&s.home).map_err(|e| e.to_string())?;
+    if move_port {
+        let _plan = coordinator::plan_lock();
+        let (lo, hi) = crate::ports::engine_port_range()?;
+        let port = next_port(&con, lo, hi)?;
+        let moved = con
+            .execute(
+                "UPDATE loaded_instances SET internal_port = ?2 WHERE instance_id = ?1 AND status = 'STARTING'",
+                rusqlite::params![s.instance_id, port as i64],
+            )
+            .map_err(|e| e.to_string())?;
+        if moved != 1 {
+            return Err("instance left STARTING during the retry".to_string());
+        }
+        s.port = port;
+    }
+    let mem_frac = mem_fraction_from_free(&need, free)?;
     let spec = EngineSpec {
         home: &s.home,
         instance_id: &s.instance_id,
+        served_name: &s.params.model_id,
         engine_key: &s.engine_key,
         model_path: &s.model_path,
         card: &s.card,
@@ -644,27 +768,25 @@ fn retry_with_budget(s: &mut Starting, extra: f64) -> Result<(), String> {
         ctx: s.ctx,
         max_conc: s.max_conc,
         tp: s.tp,
-        mem_frac: budget / free,
+        mem_frac,
         gpus: &s.gpus,
         load_extra: &s.params.extra_sglang_args,
     };
     let (identity, offset) = spawn_engine(&spec, &s.log_path)?;
-    let changed = db::open(&s.home)
-        .and_then(|con| {
-            con.execute(
-                "UPDATE loaded_instances SET pid = ?1, pgid = ?1, boot_id = ?2, start_ticks = ?3,
-                 allocated_vram_gb_per_gpu = ?4, mem_fraction_static = ?5
-                 WHERE instance_id = ?6 AND status = 'STARTING'",
-                rusqlite::params![
-                    identity.pid as i64,
-                    identity.boot_id,
-                    identity.start_ticks as i64,
-                    budget,
-                    budget / free,
-                    s.instance_id,
-                ],
-            )
-        })
+    let changed = con
+        .execute(
+            "UPDATE loaded_instances SET pid = ?1, pgid = ?1, boot_id = ?2, start_ticks = ?3,
+             allocated_vram_gb_per_gpu = ?4, mem_fraction_static = ?5
+             WHERE instance_id = ?6 AND status = 'STARTING'",
+            rusqlite::params![
+                identity.pid as i64,
+                identity.boot_id,
+                identity.start_ticks as i64,
+                need.total(),
+                mem_frac,
+                s.instance_id,
+            ],
+        )
         .unwrap_or(0);
     if changed != 1 {
         stop_one(&s.home, &identity);
@@ -672,8 +794,8 @@ fn retry_with_budget(s: &mut Starting, extra: f64) -> Result<(), String> {
     }
     s.identity = identity;
     s.log_offset = offset;
-    s.budget_gb = budget;
-    s.hold.resize(budget);
+    s.need = need;
+    s.hold.resize(need.total());
     if let Err(e) = crate::logs::append_spawn_index(&s.home, &s.instance_id, &s.params.model_id, &s.log_path) {
         eprintln!("append_spawn_index({}): {e}", s.instance_id);
     }
@@ -814,7 +936,10 @@ fn claim_for_unload(con: &mut Connection, model: Option<&str>, next: &str) -> ru
     let only = "(?1 IS NULL OR model_id = ?1)";
     tx.execute(&format!("DELETE FROM desired_loads WHERE {only}"), [model])?;
     tx.execute(
-        &format!("DELETE FROM loaded_instances WHERE status IN ('FAILED', 'CANCELLED') AND {only}"),
+        &format!(
+            "DELETE FROM loaded_instances
+             WHERE (status IN ('FAILED', 'CANCELLED') OR (status = 'RESTARTING' AND pid = 0)) AND {only}"
+        ),
         [model],
     )?;
     let list = insts(&tx, &format!("status IN {LIVE} AND {only}"), &[&model])?;
@@ -880,7 +1005,7 @@ pub fn handle_unload(
 }
 
 pub fn handle_ps() -> Result<Value, (i32, String)> {
-    // Every instance row (tombstones included) with notices, in-flight count and token rate.
+    // Every instance row (tombstones included) with notices, in-flight count, token rate and next restart attempt.
     let home = goethe_home();
     let con = db::open(&home).map_err(|e| (1, e.to_string()))?;
     let mut stmt = con
@@ -919,6 +1044,10 @@ pub fn handle_ps() -> Result<Value, (i32, String)> {
             v["in_flight"] = json!(crate::inflight::count(&mid));
             v["tokens_per_s_1m"] = json!(crate::metrics::model_tokens_per_s_1m(&mid));
         }
+        if v["status"] == "RESTARTING" {
+            let at = v["slot_key"].as_str().and_then(|sk| next_attempts().get(sk).copied());
+            v["next_attempt_at"] = json!(at);
+        }
         out.push(v);
     }
     Ok(Value::Array(out))
@@ -938,14 +1067,17 @@ pub fn reconcile_on_start() -> Result<(), String> {
     for i in rows {
         let verified = i.identity.clone().filter(proc_ident::leader_alive);
         let _ = con.execute("DELETE FROM watchdog_probe_state WHERE instance_id = ?1", [&i.instance_id]);
-        let answers = || (0..3).any(|n| {
-            if n > 0 {
-                thread::sleep(Duration::from_secs(1));
-            }
-            cheap_probe_ok(i.port, &i.engine_key)
-        });
+        let answers = |id: &Identity| {
+            owns_port(Some(id), i.port)
+                && (0..3).any(|n| {
+                    if n > 0 {
+                        thread::sleep(Duration::from_secs(1));
+                    }
+                    serves(i.port, &i.engine_key, &i.model_id)
+                })
+        };
         match verified {
-            Some(id) if i.status == "RUNNING" && answers() => {
+            Some(id) if i.status == "RUNNING" && answers(&id) => {
                 let _ = run_registry::register(&home, &id);
                 append_goethed_log(&home, &format!("adopted instance {} pid {}\n", i.instance_id, id.pid));
                 adopted.insert(i.instance_id);
@@ -1108,21 +1240,21 @@ fn gpu_csv(gpus: &[u32]) -> String {
 }
 
 fn co_residency_notice(con: &Connection, gpu: u32, model_id: &str, free_gb: f64) -> Option<String> {
-    // Name the other live Goethe instances on this GPU and its free VRAM.
+    // Name every live Goethe engine on this GPU (replicas of this model included) and its free VRAM.
     let mut stmt = con
         .prepare(&format!(
             "SELECT model_id, allocated_vram_gb_per_gpu, gpu_indices FROM loaded_instances
-             WHERE status IN {LIVE} AND model_id != ?1 ORDER BY rowid"
+             WHERE status IN {LIVE} AND pid > 0 ORDER BY rowid"
         ))
         .ok()?;
     let hosts: Vec<String> = stmt
-        .query_map([model_id], |r| {
+        .query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?, r.get::<_, String>(2)?))
         })
         .ok()?
         .filter_map(|r| r.ok())
         .filter(|(_, _, csv)| parse_gpu_csv(csv).contains(&gpu))
-        .map(|(m, gb, _)| format!("{m}: {gb:.1} GB"))
+        .map(|(m, gb, _)| format!("{m}: {gb:.1} GB{}", if m == model_id { " (replica)" } else { "" }))
         .collect();
     if hosts.is_empty() {
         return None;
@@ -1150,8 +1282,8 @@ fn next_port(con: &Connection, lo: u16, hi: u16) -> Result<u16, String> {
     Err(format!("no free engine port in {lo}-{hi}; set GOETHE_ENGINE_PORTS=<lo>-<hi>"))
 }
 
-fn http_ok(port: u16, path: &str, key: &str, timeout_secs: u64) -> bool {
-    // GET a loopback engine path with the engine key; only 200 counts.
+fn get(port: u16, path: &str, key: &str, timeout_secs: u64) -> Option<ureq::Response> {
+    // GET a loopback engine path with the engine key; only a 200 answer counts.
     let agent = ureq::AgentBuilder::new()
         .timeout_read(Duration::from_secs(timeout_secs))
         .timeout_connect(Duration::from_secs(2))
@@ -1160,17 +1292,23 @@ fn http_ok(port: u16, path: &str, key: &str, timeout_secs: u64) -> bool {
     if !key.is_empty() {
         req = req.set("Authorization", &format!("Bearer {key}"));
     }
-    req.call().is_ok_and(|r| r.status() == 200)
+    req.call().ok().filter(|r| r.status() == 200)
 }
 
-fn cheap_probe_ok(port: u16, key: &str) -> bool {
-    ["/v1/models", "/get_model_info"]
-        .iter()
-        .any(|p| http_ok(port, p, key, 2))
+fn serves(port: u16, key: &str, model_id: &str) -> bool {
+    // /v1/models with the engine key must list our served name; a bare 200 from any listener is not enough.
+    get(port, "/v1/models", key, 2)
+        .and_then(|r| r.into_string().ok())
+        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+        .is_some_and(|v| v["data"].as_array().is_some_and(|a| a.iter().any(|m| m["id"].as_str() == Some(model_id))))
+}
+
+fn owns_port(identity: Option<&Identity>, port: u16) -> bool {
+    identity.is_some_and(|id| listener::port_owner(id, port) == PortOwner::Ours)
 }
 
 fn health_ok(port: u16, key: &str) -> bool {
-    http_ok(port, "/health", key, HTTP_PROBE_SECS)
+    get(port, "/health", key, HTTP_PROBE_SECS).is_some()
 }
 
 fn log_file_len(path: &Path) -> u64 {
@@ -1201,9 +1339,10 @@ pub fn watchdog_tick() {
     let now = now_epoch_secs();
     for i in insts(&con, "status = 'RUNNING'", &[]).unwrap_or_default() {
         let alive = i.identity.as_ref().is_some_and(proc_ident::leader_alive);
+        let owned = alive && owns_port(i.identity.as_ref(), i.port);
         let mut state = load_probe_state(&con, &i.instance_id, now);
-        let cheap = alive && cheap_probe_ok(i.port, &i.engine_key);
-        let deep = watchdog_liveness::deep_due(&state, now).then(|| health_ok(i.port, &i.engine_key));
+        let cheap = owned && serves(i.port, &i.engine_key, &i.model_id);
+        let deep = watchdog_liveness::deep_due(&state, now).then(|| owned && health_ok(i.port, &i.engine_key));
         let action = watchdog_liveness::step(
             &mut state,
             ProbeInput {
@@ -1231,16 +1370,19 @@ pub fn watchdog_tick() {
                 [&i.instance_id],
             )
             .unwrap_or(0);
-        if claimed == 1 && tombstone(&con, &home, &i, "RESTARTING") {
-            if let Some(params) = load_params_for_slot(&con, &i.slot_key, &i.model_id) {
-                schedule_restart(params, i.restarts);
-            }
+        if claimed != 1 {
+            continue;
+        }
+        let params = load_params_for_slot(&con, &i.slot_key, &i.model_id);
+        let to = if params.is_some() { "RESTARTING" } else { "FAILED" };
+        if let (true, Some(params)) = (retire(&con, &home, &i, "RESTARTING", to), params) {
+            schedule_restart(params, i.restarts);
         }
     }
 }
 
-fn tombstone(con: &Connection, home: &Path, i: &Inst, from: &str) -> bool {
-    // Stop a claimed instance (verified) and keep a FAILED row with pid 0 for ps; false if its processes survived.
+fn retire(con: &Connection, home: &Path, i: &Inst, from: &str, to: &str) -> bool {
+    // Stop a claimed instance (verified) and keep its row as `to` with pid 0 for ps; STOPPING if processes survived.
     if !stop_processes(home, std::slice::from_ref(i)).is_empty() {
         let _ = con.execute(
             "UPDATE loaded_instances SET status = 'STOPPING' WHERE instance_id = ?1 AND status = ?2",
@@ -1249,8 +1391,8 @@ fn tombstone(con: &Connection, home: &Path, i: &Inst, from: &str) -> bool {
         return false;
     }
     let _ = con.execute(
-        "UPDATE loaded_instances SET status = 'FAILED', pid = 0, pgid = 0 WHERE instance_id = ?1 AND status = ?2",
-        [&i.instance_id, from],
+        "UPDATE loaded_instances SET status = ?3, pid = 0, pgid = 0 WHERE instance_id = ?1 AND status = ?2",
+        [i.instance_id.as_str(), from, to],
     );
     let _ = con.execute("DELETE FROM watchdog_probe_state WHERE instance_id = ?1", [&i.instance_id]);
     load_slot::clear_instance_notices(&i.instance_id);
@@ -1266,28 +1408,43 @@ fn fail_running(con: &Connection, home: &Path, i: &Inst) {
         )
         .unwrap_or(0);
     if claimed == 1 {
-        tombstone(con, home, i, "STOPPING");
+        retire(con, home, i, "STOPPING", "FAILED");
     }
 }
 
+fn next_attempts() -> std::sync::MutexGuard<'static, HashMap<String, i64>> {
+    NEXT_ATTEMPT
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 fn schedule_restart(mut params: LoadParams, restarts: i64) {
-    // After the backoff, re-check the desired slot and shutdown under the slot lock, then relaunch outside it.
+    // RESTARTING with a next attempt time; after the backoff re-check under the slot lock, relaunch, FAILED on error.
     let slot = params.slot_key.clone().unwrap_or_default();
+    let backoff = crate::watchdog_policy::restart_backoff_secs(restarts);
+    next_attempts().insert(slot.clone(), now_epoch_secs() + backoff as i64);
     thread::spawn(move || {
-        thread::sleep(Duration::from_secs(crate::watchdog_policy::restart_backoff_secs(restarts)));
-        {
+        thread::sleep(Duration::from_secs(backoff));
+        let go = {
             let lock = slot_lock(&slot);
             let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
             let desired = db::open(&goethe_home())
                 .map(|c| autostart::desired_exists(&c, &slot))
                 .unwrap_or(false);
-            if shutdown_requested() || !desired {
-                return;
-            }
-        }
+            !shutdown_requested() && desired
+        };
         params.restart_count = Some(restarts.max(0) as u64 + 1);
-        if let Err((code, msg, _)) = handle_load(params) {
+        let failed = go.then(|| handle_load(params).err()).flatten();
+        next_attempts().remove(&slot);
+        if let Some((code, msg, _)) = failed {
             eprintln!("watchdog restart of {slot} failed ({code}): {msg}");
+            if let Ok(con) = db::open(&goethe_home()) {
+                let _ = con.execute(
+                    "UPDATE loaded_instances SET status = 'FAILED' WHERE slot_key = ?1 AND status = 'RESTARTING' AND pid = 0",
+                    [&slot],
+                );
+            }
         }
     });
 }
@@ -1390,6 +1547,7 @@ fn load_params_for_slot(con: &Connection, slot_key: &str, model_id: &str) -> Opt
         yes: true,
         restart_count: None,
         slot_key: Some(slot_key.to_string()),
+        replica: false,
     })
 }
 
@@ -1441,14 +1599,16 @@ mod tests {
         (child, ticks)
     }
 
-    fn ok_server() -> u16 {
+    fn models_server() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         thread::spawn(move || {
             for mut s in listener.incoming().flatten() {
                 let mut buf = [0u8; 1024];
                 let _ = s.read(&mut buf);
-                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+                let body = r#"{"data":[{"id":"m"}]}"#;
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = s.write_all(format!("{head}{body}").as_bytes());
             }
         });
         port
@@ -1484,14 +1644,16 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_adopts_only_verified_and_healthy_engines() {
+    fn reconcile_adopts_only_engines_that_own_their_port() {
         with_temp_home(|home, con| {
-            let port = ok_server();
-            let (mut good, good_ticks) = sleeper();
+            let port = models_server();
+            let squatted = models_server();
+            let me = proc_ident::capture("i-good", std::process::id() as i32).unwrap();
             let (mut stale, stale_ticks) = sleeper();
-            insert_running(con, "i-good", good.id() as i32, good_ticks, port);
+            let (mut squat, squat_ticks) = sleeper();
+            insert_running(con, "i-good", me.pid, me.start_ticks, port);
             insert_running(con, "i-stale", stale.id() as i32, stale_ticks + 9, port + 1);
-            con.execute("UPDATE loaded_instances SET slot_key = 'm|0|1' WHERE instance_id = 'i-stale'", []).unwrap();
+            insert_running(con, "i-squat", squat.id() as i32, squat_ticks, squatted);
             let stale_id = Identity {
                 instance_id: "i-orphan".to_string(),
                 pid: stale.id() as i32,
@@ -1508,27 +1670,19 @@ mod tests {
                 .filter_map(|r| r.ok())
                 .collect();
             assert_eq!(rows, vec![("i-good".to_string(), "RUNNING".to_string())]);
-            assert!(good.try_wait().unwrap().is_none() && stale.try_wait().unwrap().is_none());
+            assert!(stale.try_wait().unwrap().is_none(), "an unverified pid is never signaled");
+            assert_ne!(proc_ident::start_ticks(squat.id() as i32), Some(squat_ticks), "port squatted: stopped");
             assert!(run_registry::list_entries(home).iter().all(|e| e.instance_id == "i-good"));
-            for c in [&mut good, &mut stale] {
-                c.kill().unwrap();
-                c.wait().unwrap();
-            }
+            stale.kill().unwrap();
+            stale.wait().unwrap();
+            let _ = squat.wait();
         });
     }
 
     #[test]
     fn restore_refuses_a_slot_that_is_already_live() {
         with_temp_home(|home, con| {
-            let dir = home.join("models/m");
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("goethe_card.toml"), "model_id = \"m\"\n").unwrap();
-            con.execute(
-                "INSERT INTO installed_models (model_id, local_path, architecture, static_vram_gb, kv_bytes_per_token,
-                 default_ctx, default_max_conc, default_tp) VALUES ('m', 'models/m', 'dense', 1.0, 100, 4096, 4, 1)",
-                [],
-            )
-            .unwrap();
+            install_m(home, con);
             con.execute("INSERT INTO desired_loads (slot_key, model_id) VALUES ('m|0|0', 'm')", []).unwrap();
             insert_running(con, "i-live", i32::MAX, 1, 30001);
             con.execute("UPDATE loaded_instances SET status = 'STARTING'", []).unwrap();
@@ -1543,6 +1697,7 @@ mod tests {
                 yes: true,
                 restart_count: Some(1),
                 slot_key: Some("m|0|0".to_string()),
+                replica: false,
             };
             let (code, msg, _) = handle_load(params).unwrap_err();
             assert_eq!(code, 1);
@@ -1581,6 +1736,85 @@ mod tests {
             assert_eq!(left, 0);
             let _ = child.wait();
         });
+    }
+
+    fn install_m(home: &Path, con: &Connection) {
+        let dir = home.join("models/m");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("goethe_card.toml"), "model_id = \"m\"\n").unwrap();
+        con.execute(
+            "INSERT INTO installed_models (model_id, local_path, architecture, static_vram_gb, kv_bytes_per_token,
+             default_ctx, default_max_conc, default_tp) VALUES ('m', 'models/m', 'dense', 1.0, 100, 4096, 4, 1)",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn user_load(replica: bool) -> LoadParams {
+        LoadParams {
+            model_id: "m".to_string(),
+            gpus: Some("0".to_string()),
+            extra_sglang_args: Vec::new(),
+            ctx: None,
+            max_conc: None,
+            tp: None,
+            force: false,
+            yes: false,
+            restart_count: None,
+            slot_key: None,
+            replica,
+        }
+    }
+
+    #[test]
+    fn second_load_without_replica_reports_the_running_copy() {
+        with_temp_home(|home, con| {
+            install_m(home, con);
+            insert_running(con, "i-first", i32::MAX, 1, 30007);
+            let (result, message) = handle_load(user_load(false)).expect("already loaded is not an error");
+            assert_eq!(message, "already loaded: i-first on GPU 0 (port 30007); use --replica to start another copy");
+            assert_eq!(result, json!({"instance_id": "i-first", "status": "RUNNING", "already_loaded": true}));
+        });
+    }
+
+    #[test]
+    fn crash_backoff_shows_restarting_then_failed_when_the_attempt_fails() {
+        with_temp_home(|_home, con| {
+            let (mut child, ticks) = sleeper();
+            let pid = child.id() as i32;
+            child.kill().unwrap();
+            child.wait().unwrap();
+            insert_running(con, "i-crash", pid, ticks, 30001);
+            con.execute("INSERT INTO desired_loads (slot_key, model_id) VALUES ('m|0|0', 'm')", []).unwrap();
+            watchdog_tick();
+            let row = |c: &Connection| -> (String, i64) {
+                c.query_row("SELECT status, pid FROM loaded_instances WHERE instance_id = 'i-crash'", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap()
+            };
+            assert_eq!(row(con), ("RESTARTING".to_string(), 0));
+            let ps = handle_ps().unwrap();
+            let next = ps[0]["next_attempt_at"].as_i64().expect("next attempt time in ps");
+            assert!(next >= now_epoch_secs());
+            let failed = (0..60).any(|_| {
+                thread::sleep(Duration::from_millis(250));
+                row(con).0 == "FAILED"
+            });
+            assert!(failed, "a failed restart attempt leaves FAILED");
+        });
+    }
+
+    #[test]
+    fn identity_probe_needs_our_model_name() {
+        let port = models_server();
+        assert!(serves(port, "k", "m"));
+        assert!(!serves(port, "k", "other"));
+        assert!(!serves(free_port(), "k", "m"));
+    }
+
+    fn free_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 
     #[test]
