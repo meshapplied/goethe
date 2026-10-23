@@ -402,20 +402,42 @@ fn check_cloud(home: &Path) -> Check {
 }
 
 fn check_pyenv(home: &Path) -> Check {
-    // The hermetic py-env exists and imports sglang.
-    let py = home.join("py-env/bin/python");
-    if !py.is_file() {
+    // The hermetic py-env has a python and an installed sglang distribution, read from disk (importing takes seconds).
+    let env = home.join("py-env");
+    if !env.join("bin/python").is_file() {
         return check("py-env", "FAIL", "run the installer or goethe update --engine");
     }
-    let out = std::process::Command::new(&py)
-        .args(["-c", "import sglang; print(getattr(sglang, '__version__', 'ok'))"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
-    match out {
-        Ok(o) if o.status.success() => check("py-env", "OK", format!("sglang {}", String::from_utf8_lossy(&o.stdout).trim())),
-        _ => check("py-env", "FAIL", "py-env present but sglang import failed; run goethe update --engine"),
+    match pyenv_versions(&env) {
+        (python, Some(sglang)) => check("py-env", "OK", format!("sglang {sglang}, python {python}")),
+        (python, None) => check(
+            "py-env",
+            "FAIL",
+            format!("python {python} but no sglang distribution in site-packages; run goethe update --engine"),
+        ),
     }
+}
+
+fn pyenv_versions(env: &Path) -> (String, Option<String>) {
+    // Python version from pyvenv.cfg and the sglang version from its dist-info METADATA.
+    let cfg = fs::read_to_string(env.join("pyvenv.cfg")).unwrap_or_default();
+    let python = cfg
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .find(|(k, _)| matches!(k.trim(), "version" | "version_info"))
+        .map_or_else(|| "unknown".to_string(), |(_, v)| v.trim().to_string());
+    let sglang = fs::read_dir(env.join("lib"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|d| fs::read_dir(d.path().join("site-packages")).ok())
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("sglang-") && e.file_name().to_string_lossy().ends_with(".dist-info"))
+        .find_map(|e| {
+            let meta = fs::read_to_string(e.path().join("METADATA")).ok()?;
+            meta.lines().find_map(|l| l.strip_prefix("Version:")).map(|v| v.trim().to_string())
+        });
+    (python, sglang)
 }
 
 fn check_ports(home: &Path) -> Check {
@@ -549,7 +571,10 @@ fn check_registry(home: &Path) -> Check {
         Err(e) => Check {
             name: "registry".into(),
             status: "WARN".into(),
-            hint: format!("unreachable: {e}"),
+            hint: format!(
+                "{} unreachable ({e}); check network access, or set GOETHE_REGISTRY_URL (file:// works) in the environment or in GOETHE_HOME/goethe.env",
+                registry_url()
+            ),
         },
     }
 }
@@ -585,4 +610,21 @@ fn available_gb(path: &Path) -> Result<f64, String> {
         return Err("statvfs failed".into());
     }
     Ok((stat.f_bavail as u64 * stat.f_frsize as u64) as f64 / 1e9)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pyenv_versions_are_read_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = dir.path();
+        assert_eq!(pyenv_versions(env), ("unknown".to_string(), None));
+        fs::write(env.join("pyvenv.cfg"), "home = /usr/bin\nimplementation = CPython\nversion_info = 3.12.3\n").unwrap();
+        let dist = env.join("lib/python3.12/site-packages/sglang-0.5.3.dist-info");
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(dist.join("METADATA"), "Metadata-Version: 2.1\nName: sglang\nVersion: 0.5.3+goethe\n").unwrap();
+        assert_eq!(pyenv_versions(env), ("3.12.3".to_string(), Some("0.5.3+goethe".to_string())));
+    }
 }

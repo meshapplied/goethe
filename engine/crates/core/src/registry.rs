@@ -185,10 +185,9 @@ fn fetch_http_cached(url: &str) -> Result<Registry, String> {
             parse_registry(&c.body)
         }
         Err(e) if offline => {
+            let text = std::fs::read_to_string(&cache_path)
+                .map_err(|_| format!("registry unreachable ({e}) and no registry.cache.json"))?;
             eprintln!("warning: registry fetch failed ({e}); using cached registry");
-            let text = std::fs::read_to_string(&cache_path).map_err(|_| {
-                "registry unreachable and no registry.cache.json".to_string()
-            })?;
             let c: RegistryCache =
                 serde_json::from_str(&text).map_err(|e| format!("registry cache: {e}"))?;
             parse_registry(&c.body)
