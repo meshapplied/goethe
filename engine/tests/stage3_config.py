@@ -22,7 +22,7 @@ def main() -> None:
         card = home / "models" / "org__demo" / "goethe_card.toml"
         card.parent.mkdir(parents=True)
         card.write_text('model_id = "demo"\ncontext_length = 1024\nmax_running_requests = 4\n', encoding="utf-8")
-        seed_installed_model(home, "demo", "models/org__demo", 1.0, 1000, 1024, 4, 1)
+        seed_installed_model(home, "demo", "models/org__demo", 1.0, 1000, 1024, 4, 1, max_ctx=4096)
         env = {"GOETHE_HOME": str(home)}
         run_goethe([str(goethe), "config", "demo", "--ctx", "2048", "--max-conc", "8"], env=env)
         text1 = card.read_text(encoding="utf-8")
