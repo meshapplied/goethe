@@ -118,7 +118,11 @@ mod tests {
         assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
         assert!(!daemon_released(td.path()), "a live daemon holds the lock");
         drop(held);
-        assert!(daemon_released(td.path()));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !daemon_released(td.path()) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(daemon_released(td.path()), "the lock frees once every fork that inherited it has exec'd");
     }
 
     #[test]
