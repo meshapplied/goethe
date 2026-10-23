@@ -50,12 +50,14 @@ def main() -> None:
         t0 = time.time()
         for attempt in range(3):
             try:
-                run_goethe([str(goethe), "install", tiny, "--no-load"], env=env, timeout=600)
+                first_rr = run_goethe([str(goethe), "install", tiny, "--no-load"], env=env, timeout=600)
                 break
             except RuntimeError as exc:
                 if attempt >= 2 or "cannot reach" not in str(exc).lower():
                     raise
                 time.sleep(5.0)
+        if first_rr.stderr.strip():
+            raise RuntimeError(f"anonymous install must keep stderr empty (no HF_TOKEN hint): {first_rr.stderr[-99:]}")
         first = time.time() - t0
         mdir = next((home / "models").glob("*__*"))
         if not (mdir / "config.json").is_file() or not list(mdir.glob("*.safetensors")):

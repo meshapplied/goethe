@@ -54,13 +54,15 @@ def _per_instance(goethe: str, env: dict[str, str], home_mux: int, token: str) -
         FAILS.append(f"one stream across two replicas must count on one instance only: in_flight {busy or seen[-3:]}")
 
 
-def _models_line(goethe: str, env: dict[str, str]) -> None:
-    """The fit column of a loaded model shows its loaded state instead of judging whether another copy fits."""
+def _models_line(goethe: str, env: dict[str, str], gpu: int) -> None:
+    """The fit column of a loaded model lists its instances instead of judging whether another copy fits."""
     text = run_goethe([goethe, "models"], env=env).stdout
-    cols = next((ln.split("\t") for ln in text.splitlines() if ln.split("\t")[0] == "r"), [])
-    fit = cols[3].lower() if len(cols) > 3 else ""
-    if not ("loaded" in fit or "running" in fit) or "does not fit" in fit:
-        FAILS.append(f"models must show the loaded state, not a fit judgment, for a loaded model: {cols}")
+    rows = {ln.split("\t")[0]: ln.split("\t") for ln in text.splitlines()}
+    want = {"r": f"2 instances: GPU {gpu} RUNNING, GPU {gpu} RUNNING", "s": f"1 instance: GPU {gpu} RUNNING"}
+    for model, prefix in want.items():
+        cols = rows.get(model, [])
+        if len(cols) < 4 or cols[1] != "loaded" or not cols[3].startswith(prefix):
+            FAILS.append(f"models must show {model}'s instances ({prefix!r}), not a fit judgment: {cols}")
 
 
 def main() -> None:
@@ -71,16 +73,19 @@ def main() -> None:
         env = home_goethe_env(home)
         write_card(home / "models" / "org__r", "r", 512, 2, env={"STUB_TOKEN_INTERVAL": "1.0"})
         seed_installed_model(home, "r", "models/org__r", 5.0, 512, 512, 2, 1)
+        write_card(home / "models" / "org__s", "s", 512, 2)
+        seed_installed_model(home, "s", "models/org__s", 5.0, 512, 512, 2, 1)
         run_goethe([goethe, "hw", "profile"], env=env, timeout=120)
         md = start_goethed(home)
         try:
             load = [goethe, "load", "r", "--gpus", str(gpu), "--yes"]
             run_goethe(load, env=env, timeout=120)
             run_goethe([*load, "--replica"], env=env, timeout=120)
+            run_goethe([goethe, "load", "s", "--gpus", str(gpu), "--yes"], env=env, timeout=120)
             out = run_goethe([goethe, "key", "create", "--name", "ps", "--raw"], env=env).stdout
             token = next(ln for ln in out.splitlines() if ln.startswith("goethe_sk_"))
             _per_instance(goethe, env, test_mux_port(home), token)
-            _models_line(goethe, env)
+            _models_line(goethe, env, gpu)
         finally:
             run([goethe, "unload", "--all"], env=env, timeout=60)
             md.stop()
