@@ -121,35 +121,20 @@ pub fn pid_alive(pid: i64) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
-pub fn stop_goethed(keep_engines: bool) -> Result<(), String> {
-    // Ask goethed to exit (contract C-D: keep_engines leaves engines serving) and wait until it is gone.
-    let reply = crate::rpc::call("shutdown", serde_json::json!({ "keep_engines": keep_engines }))
-        .map_err(crate::paths::daemon_err)?;
-    if reply.code != 0 {
-        return Err(if reply.stderr.is_empty() { reply.stdout } else { reply.stderr });
-    }
-    for _ in 0..300 {
-        if !goethed_running() {
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    Err("goethed did not stop within 30 s".to_string())
-}
-
-pub fn stop_keeping_engines() -> Result<String, String> {
-    // Stop goethed with keep_engines and report how many engines still serve.
+pub fn stop_keeping_engines() -> Result<(), String> {
+    // shutdown::stop_daemon(true) (contract C-D), then say how many RUNNING engines are still alive.
     let before = live_engine_pids();
-    stop_goethed(true)?;
+    crate::shutdown::stop_daemon(true)?;
     let kept = before.iter().filter(|p| pid_alive(**p)).count();
-    Ok(if kept == before.len() {
-        format!("goethed stopped; {kept} engine(s) keep serving and the next goethed adopts them")
-    } else {
-        format!(
-            "goethed stopped; {kept} of {} engine(s) still run (the old goethed did not keep them; the next goethed restores loaded models)",
+    if kept < before.len() {
+        println!(
+            "{kept} of {} engine(s) still run: the stopped goethed tore the rest down; the next goethed restores them",
             before.len()
-        )
-    })
+        );
+    } else if kept > 0 {
+        println!("{kept} engine(s) kept serving");
+    }
+    Ok(())
 }
 
 pub fn wait_goethed(timeout: std::time::Duration) -> Result<(), String> {
