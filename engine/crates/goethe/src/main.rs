@@ -131,7 +131,10 @@ enum Commands {
         #[arg(long, help = "Clear stored extra SGLang args.")]
         clear_sglang_args: bool,
     },
-    #[command(about = "Load a model onto GPUs and wait until this instance is ready.")]
+    #[command(
+        about = "Load a model onto GPUs and wait until this instance is ready.",
+        after_help = "Extra SGLang flags go after --, for example: goethe load org/model --ctx 32768 -- --chunked-prefill-size 4096"
+    )]
     Load {
         #[arg(help = "Model id to load.")]
         model_id: String,
@@ -149,10 +152,14 @@ enum Commands {
         force: bool,
         #[arg(long, help = "Confirm foreign GPU use without prompting.")]
         yes: bool,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, help = "Extra SGLang args after --.")]
-        extra: Vec<String>,
+        #[arg(long, help = "Start another instance even when the model is already loaded.")]
+        replica: bool,
         #[arg(long, help = "Return after spawn without waiting for RUNNING.")]
         no_wait: bool,
+        #[arg(long, help = "Print the instance as JSON instead of status lines.")]
+        json: bool,
+        #[arg(last = true, help = "Extra SGLang flags, only after --.")]
+        extra: Vec<String>,
     },
     #[command(about = "Stop instances and clear desired load rows for a model.")]
     Unload {
@@ -575,6 +582,9 @@ fn main() {
             if let Some(msg) = goethe_core::sglang_infer::reserved_flag_error(&sglang_arg) {
                 usage(msg);
             }
+            if let Err(e) = config::validate_limits(&goethe_home(), checked_id(&model_id), ctx, max_conc) {
+                usage(e);
+            }
             config::run(ConfigOpts {
                 model_id: checked_id(&model_id).to_string(),
                 ctx,
@@ -594,8 +604,10 @@ fn main() {
             ep,
             force,
             yes,
-            extra,
+            replica,
             no_wait,
+            json,
+            extra,
         } => do_load(DoLoadArgs {
             model_id,
             gpus,
@@ -605,8 +617,10 @@ fn main() {
             ep,
             force,
             yes,
+            replica,
             extra,
             no_wait,
+            json,
         }),
         Commands::Unload { model_id, all, force } => {
             match (&model_id, all) {
@@ -780,8 +794,10 @@ struct DoLoadArgs {
     ep: Option<u64>,
     force: bool,
     yes: bool,
+    replica: bool,
     extra: Vec<String>,
     no_wait: bool,
+    json: bool,
 }
 
 fn do_load(args: DoLoadArgs) -> Result<(), String> {
@@ -789,6 +805,9 @@ fn do_load(args: DoLoadArgs) -> Result<(), String> {
     checked_id(&args.model_id);
     if matches!(args.ep, Some(0)) {
         usage("--ep must be at least 1");
+    }
+    if let Err(e) = config::validate_limits(&goethe_home(), &args.model_id, args.ctx, args.max_conc) {
+        usage(e);
     }
     if let (Some(ep), Some(tp)) = (args.ep, args.tp) {
         if ep > 0 && tp % ep != 0 {
@@ -808,7 +827,7 @@ fn do_load(args: DoLoadArgs) -> Result<(), String> {
             extra.push(ep.to_string());
         }
     }
-    let stdout = install::send_load(json!({
+    let params = json!({
         "model_id": args.model_id,
         "gpus": args.gpus,
         "ctx": args.ctx,
@@ -816,13 +835,11 @@ fn do_load(args: DoLoadArgs) -> Result<(), String> {
         "tp": args.tp,
         "force": args.force,
         "yes": args.yes,
+        "replica": args.replica,
         "extra_sglang_args": extra,
         "async_finish": true,
-    }))?;
-    if !stdout.is_empty() {
-        print!("{stdout}");
-    }
-    goethe_core::load_wait::wait_after_load_stdout(&stdout, args.no_wait)
+    });
+    install::run_load(params, args.no_wait, args.json)
 }
 
 fn key_create_stdout(token: &str, name: &str, raw: bool) -> String {

@@ -63,7 +63,7 @@ For gated or private repos, accept the license on Hugging Face, download with yo
 
 ## Daily use
 
-    goethe load <model_id> [--gpus csv] [--tp N] [--ep N] [--ctx N] [--max-conc N] [--no-wait]
+    goethe load <model_id> [--gpus csv] [--tp N] [--ep N] [--ctx N] [--max-conc N] [--replica] [--no-wait] [--json] [-- <sglang flags>]
     goethe unload <model_id> [--force] | --all  # drains in-flight requests (new ones get 503), then unloads; --force cuts them
     goethe list                               # alias of goethe models
     goethe alias set <alias> <model_id> | list | remove <alias>
@@ -80,7 +80,7 @@ For gated or private repos, accept the license on Hugging Face, download with yo
 
 Boot entries belong to one home: `service disable` and `uninstall` remove only the unit or cron line that names this `GOETHE_HOME`, and `service enable` refuses when the systemd unit already starts another home.
 
-Loaded models are restored after a daemon restart or reboot unless you unloaded them, in the order they were first loaded, one engine per GPU at a time. A blocking `goethe load` waits until the instance from that command is RUNNING (or FAILED). Crashed engines are restarted with backoff. If goethed itself crashes or is restarted without `goethe stop`, healthy engines keep serving and are adopted when it starts again. Every engine carries an identity (boot id, start time, instance tag) that is checked before Goethe signals it, so a reused PID is never signaled.
+Loaded models are restored after a daemon restart or reboot unless you unloaded them, in the order they were first loaded, one engine per GPU at a time. A blocking `goethe load` waits until the instance from that command is RUNNING (or FAILED) and ends with `RUNNING: <model> instance <id> on GPU <g> port <p> (<t> s)`; `--json` prints the instance row instead. Loading a model that is already loaded reports it and exits 0; `--replica` starts another instance. SGLang flags for one run go after `--`; anything else unknown is a usage error (exit 2). Crashed engines are restarted with backoff. If goethed itself crashes or is restarted without `goethe stop`, healthy engines keep serving and are adopted when it starts again. Every engine carries an identity (boot id, start time, instance tag) that is checked before Goethe signals it, so a reused PID is never signaled.
 
 ## Cloud and containers
 
