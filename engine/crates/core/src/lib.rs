@@ -56,3 +56,4 @@ pub mod proc_ident;
 pub mod scan;
 pub mod term;
 pub mod configure;
+pub mod gpu_arch;

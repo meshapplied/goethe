@@ -693,7 +693,7 @@ pub fn infer_one_entry(
         kv_bytes_per_token: None,
         kv_elems_per_token: Some(facts.kv_elems_per_token),
         min_total_vram_gb: None,
-        supported_sm: vec!["8.6".into(), "12.0".into(), "12.1".into()],
+        supported_sm: crate::gpu_arch::supported_list(),
         default_ctx: None,
         max_ctx: Some(facts.max_ctx),
         default_max_conc: None,
