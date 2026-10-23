@@ -215,6 +215,23 @@ async fn main() {
         }
     }
     shutdown::request_shutdown();
-    shutdown::shutdown_daemon(&home, &sock, shutdown::keep_engines_requested());
+    let keep = shutdown::keep_engines_requested();
+    if keep {
+        mux.abort();
+        drain_mux(&home).await;
+    }
+    shutdown::shutdown_daemon(&home, &sock, keep);
     std::process::exit(exit_code);
+}
+
+async fn drain_mux(home: &std::path::Path) {
+    // Upgrade restart: the mux no longer accepts, so let requests already in flight finish for up to 30 s.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let waiting = goethe_core::inflight::total();
+    if waiting > 0 {
+        supervisor::append_goethed_log(home, &format!("keep_engines: draining {waiting} in-flight request(s)\n"));
+    }
+    while goethe_core::inflight::total() > 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
