@@ -147,14 +147,25 @@ def main() -> None:
             if rr_inst.returncode != 0:
                 raise RuntimeError(rr_inst.stderr or rr_inst.stdout)
             link = home / "models" / "local__test-model"
-            if not link.is_symlink() or not (model_src / "config.json").is_file():
-                raise RuntimeError(f"expected an in-place symlink at {link} with the source intact")
+            card = link / "goethe_card.toml"
+            if not link.is_dir() or link.is_symlink() or not card.is_file() or card.is_symlink():
+                raise RuntimeError(f"expected a directory of symlinks with goethe's own card at {link}")
+            for name in ("config.json", "w.safetensors"):
+                entry = link / name
+                if not entry.is_symlink() or entry.resolve() != (model_src / name).resolve():
+                    raise RuntimeError(f"{entry} must be a symlink to the source file")
+            if (model_src / "goethe_card.toml").exists() or sorted(p.name for p in model_src.iterdir()) != [
+                "config.json", "w.safetensors"
+            ]:
+                raise RuntimeError("in-place install modified the user's source folder")
             managed = sqlite_query(home / "state.db", "SELECT managed FROM installed_models")
             rr_rm = run([str(goethe), "remove", "local/test-model", "--yes"], env=env, timeout=30)
             if rr_rm.returncode != 0:
                 raise RuntimeError(rr_rm.stderr or rr_rm.stdout)
-            if not (model_src / "w.safetensors").is_file():
+            if not (model_src / "w.safetensors").is_file() or not (model_src / "config.json").is_file():
                 raise RuntimeError("remove deleted files of a model registered in place")
+            if link.exists() or link.is_symlink():
+                raise RuntimeError("remove left goethe's link directory behind")
             if sqlite_query(home / "state.db", "SELECT COUNT(*) FROM installed_models")[0][0] != 0:
                 raise RuntimeError("remove did not unregister the model")
             if managed != [(0,)]:

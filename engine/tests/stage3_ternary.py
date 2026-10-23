@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from pathlib import Path
 
 from lib.goethe_test import main_exit, require_cli, resolve_python, run_goethe, temp_home
 
@@ -67,11 +68,17 @@ def main() -> None:
             env={"GOETHE_HOME": str(home), "GOETHE_REGISTRY_URL": f"file://{reg}"},
             timeout=600,
         )
-        cards = list((home / "models").glob("*__*"))
-        if len(cards) < 2:
-            raise RuntimeError("expected pack and base under models/")
-        card_path = next(p for p in cards if (p / "goethe_card.toml").is_file())
-        card = _parse_card((card_path / "goethe_card.toml").read_text(encoding="utf-8"))
+        card_file = home / "models" / model_id.replace("/", "__") / "goethe_card.toml"
+        if not card_file.is_file():
+            raise RuntimeError(f"ternary card missing at {card_file}")
+        card_path = card_file.parent
+        card = _parse_card(card_file.read_text(encoding="utf-8"))
+        for key in ("TERNARY_PACK_DIR", "TERNARY_MODEL_DIR"):
+            tree = Path(card.get(key, "").replace("$GOETHE_HOME", str(home)))
+            if not str(tree).startswith(str(home / "models")) or not (tree / "config.json").is_file():
+                raise RuntimeError(f"card {key} does not point at a downloaded checkpoint: {card.get(key)}")
+            if not list(tree.glob("*.safetensors")):
+                raise RuntimeError(f"{key} tree {tree} has no weights")
         for key in ("runtime", "pack_id", "base_model_id"):
             if card.get(key) in (None, ""):
                 raise RuntimeError(f"goethe_card missing {key}")
