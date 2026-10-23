@@ -422,7 +422,7 @@ summary() {
 
 main() {
   # Verify prerequisites and the signed CDN, install everything under GOETHE_HOME, start goethed and wait for it.
-  CDN="${GOETHE_PKG_URL:-https://pkg.meshapplied.com}"
+  CDN="${GOETHE_PKG_URL:-${DEFAULT_PKG_URL}}"
   CDN="${CDN%/}"
   ARCH="$(normalize_arch "${GOETHE_ARCH:-$(uname -m)}")"
   if [[ "${ARCH}" != "x86_64" && "${ARCH}" != "aarch64" ]]; then

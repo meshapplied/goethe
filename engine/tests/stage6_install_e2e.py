@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -45,15 +46,30 @@ _CFG = {
 }
 
 
-def _install(install_sh: Path, env: dict[str, str]) -> float:
-    """Run install.sh like `curl | bash` would (stdin closed) and return its duration."""
+def _install(install_sh: Path, env: dict[str, str], late: list[str]) -> float:
+    """Run install.sh like `curl | bash` would (stdin closed), note a failed recommend, return the duration."""
     t0 = time.time()
     rr = subprocess.run(
         ["bash", str(install_sh)], env=env, capture_output=True, text=True, timeout=1800, stdin=subprocess.DEVNULL
     )
     if rr.returncode != 0 or "Goethe install complete" not in rr.stdout:
         raise RuntimeError(f"install.sh failed rc={rr.returncode}: {(rr.stdout + rr.stderr)[-1500:]}")
+    if "goethe recommend failed" in rr.stdout + rr.stderr:
+        late.append(f"the installer's recommend failed: {rr.stderr[-300:]}")
     return time.time() - t0
+
+
+def _check_goethe_env(home: Path, goethe: str, env: dict[str, str], pkg_url: str, late: list[str]) -> None:
+    """goethe.env pins the local CDN and its registry (0600), and the CLI honours it without those variables."""
+    path = home / "goethe.env"
+    lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    want = [f"GOETHE_PKG_URL={pkg_url}", f"GOETHE_REGISTRY_URL={pkg_url}/v1/registry.json"]
+    if any(w not in lines for w in want) or stat.S_IMODE(path.stat().st_mode) != 0o600:
+        raise RuntimeError(f"goethe.env must hold {want} with mode 0600: {lines}")
+    bare = {k: v for k, v in env.items() if k not in ("GOETHE_PKG_URL", "GOETHE_REGISTRY_URL")}
+    rec = run([goethe, "recommend"], env=bare, timeout=120)
+    if rec.returncode != 0 or not rec.stdout.strip():
+        late.append(f"recommend with only goethe.env failed (exit {rec.returncode}): {rec.stderr[-300:]}")
 
 
 def _port_busy(port: int) -> bool:
@@ -106,6 +122,7 @@ def main() -> None:
     gpu = clean_test_gpu()
     gpu = gpu if gpu is not None else roomiest_test_gpu(8.0)
     timings: list[str] = []
+    late: list[str] = []
     try:
         if not wait_until(lambda: http_get(f"{pkg_url}/VERSION")[0] == 200, timeout=10):
             raise RuntimeError("local CDN server did not come up")
@@ -116,8 +133,9 @@ def main() -> None:
                 "UV_PYTHON_INSTALL_DIR": str(Path.home() / ".local" / "share" / "uv" / "python"),
             }
             env.pop("GOETHE_PYTHON", None)
+            env.pop("GOETHE_REGISTRY_URL", None)
             try:
-                timings.append(f"install={_install(cdn / 'install.sh', env):.0f}s")
+                timings.append(f"install={_install(cdn / 'install.sh', env, late):.0f}s")
                 prefix = run([str(home / "py-env" / "bin" / "python"), "-c", "import sys; print(sys.prefix)"]).stdout
                 if Path(prefix.strip()).resolve() != (home / "py-env").resolve():
                     raise RuntimeError(f"installer py-env is not a venv in the temp home: {prefix.strip()}")
@@ -132,6 +150,7 @@ def main() -> None:
                 (bin_dir / "python-real").symlink_to(os.readlink(bin_dir / "python"))
                 write_stub_python(bin_dir, bin_dir / "python-real")
                 goethe = str(home / "bin" / "goethe")
+                _check_goethe_env(home, goethe, env, pkg_url, late)
                 src = home / "src-model"
                 src.mkdir()
                 (src / "config.json").write_text(json.dumps(_CFG), encoding="utf-8")
@@ -155,7 +174,7 @@ def main() -> None:
                 (home / "nginx" / "mux_port").unlink(missing_ok=True)
                 busy = _port_busy(30000)
                 reinstall_env = {k: v for k, v in env.items() if k not in ("GOETHE_MUX_PORT", "GOETHE_SOCK")}
-                timings.append(f"reinstall={_install(cdn / 'install.sh', reinstall_env):.0f}s")
+                timings.append(f"reinstall={_install(cdn / 'install.sh', reinstall_env, late):.0f}s")
                 mux = int((home / "nginx" / "mux_port").read_text(encoding="utf-8").strip())
                 if (busy and not 30100 <= mux <= 30199) or (not busy and mux != 30000):
                     raise RuntimeError(f"mux port {mux} after re-install (30000 busy={busy})")
@@ -169,6 +188,8 @@ def main() -> None:
                     _stop_installed_daemon(home, env)
     finally:
         srv.stop()
+    if late:
+        raise RuntimeError(" | ".join(late))
     print(f"stage6_install_e2e ok gpu={gpu} {' '.join(timings)}")
 
 
