@@ -181,8 +181,8 @@ run_one() {
   note=""
   case ${rc} in
     0) status=PASS ;;
-    75) status=SKIP; note="$(head -1 "${out}")" ;;
-    77) status=FAIL; note="PENDING (missing binary or subcommand): $(head -1 "${out}")" ;;
+    75) status=SKIP; note="$(awk 'NF { last = $0 } END { print last }' "${out}")" ;;
+    77) status=FAIL; note="PENDING (missing binary or subcommand): $(awk 'NF { last = $0 } END { print last }' "${out}")" ;;
     124 | 137) status=FAIL; note="TIMEOUT after ${TEST_TIMEOUT}s: $(tail -3 "${err}" | tr '\n' ' ')" ;;
     *) status=FAIL; note="$(tail -5 "${err}" | tr '\n' ' ')" ;;
   esac

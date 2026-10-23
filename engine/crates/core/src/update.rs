@@ -63,11 +63,7 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
         .ok()
         .and_then(|p| fs::read_to_string(p).ok())
         .and_then(|text| buildinfo_commit(&text, local_commit.trim_end_matches("-dirty").len()));
-    let published = match remote_commit {
-        Some(c) => build_label(&remote_ver, Some(&c)),
-        None if bins && order == Ordering::Equal => format!("{remote_ver} (another build)"),
-        None => remote_ver.clone(),
-    };
+    let published = published_label(&remote_ver, remote_commit.as_deref(), local_commit, bins && order == Ordering::Equal);
     let installed = if bins { build_label(&local_ver, Some(local_commit)) } else { published.clone() };
     let parts = [("goethe", Some(Delta::of(&installed, &published, bins))), ("engine", engine), ("ternary pack", ternary)];
     let pending: Vec<(&str, Delta)> = parts.into_iter().filter_map(|(what, d)| d.map(|d| (what, d))).collect();
@@ -130,6 +126,16 @@ fn buildinfo_commit(text: &str, len: usize) -> Option<String> {
 fn build_label(version: &str, commit: Option<&str>) -> String {
     match commit.filter(|c| !c.is_empty() && *c != "unknown") {
         Some(c) => format!("{version} (commit {c})"),
+        None => version.to_string(),
+    }
+}
+
+fn published_label(version: &str, commit: Option<&str>, local_commit: &str, rebuilt: bool) -> String {
+    // The published build's label; another build of the installed version says so, even at the same commit.
+    match commit {
+        Some(c) if rebuilt && c == local_commit => format!("{version} (commit {c}, another build)"),
+        Some(c) => build_label(version, Some(c)),
+        None if rebuilt => format!("{version} (another build)"),
         None => version.to_string(),
     }
 }
@@ -508,6 +514,10 @@ mod tests {
         assert_eq!(buildinfo_commit("release=1\n", 7), None);
         assert_eq!(build_label("0.1.0", Some("abc1234")), "0.1.0 (commit abc1234)");
         assert_eq!(build_label("0.1.0", Some("unknown")), "0.1.0");
+        assert_eq!(published_label("0.1.0", Some("abc1234"), "abc1234", true), "0.1.0 (commit abc1234, another build)");
+        assert_eq!(published_label("0.1.0", Some("def5678"), "abc1234", true), "0.1.0 (commit def5678)");
+        assert_eq!(published_label("0.1.0", None, "abc1234", true), "0.1.0 (another build)");
+        assert_eq!(published_label("0.2.0", None, "abc1234", false), "0.2.0");
         let d = Delta::of("0.1.0 (commit abc1234)", "0.1.0 (commit def5678)", true);
         assert_eq!(d.line("goethe"), "update available: goethe 0.1.0 (commit abc1234) -> 0.1.0 (commit def5678)");
     }

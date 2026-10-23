@@ -418,7 +418,7 @@ start_goethed() {
 
 apply_binaries() {
   # Move staged binaries into place; a running goethed is stopped first, keeping its engines when it can.
-  local bin rc=0 old="" new unit=0
+  local bin rc=0 old="" new unit=0 stop_err=""
   UPGRADE_NOTE=""
   STARTED=0
   if [[ ${#STAGED[@]} -eq 0 ]]; then
@@ -431,14 +431,16 @@ apply_binaries() {
     if systemd_root && write_system_unit; then
       unit=1
     fi
-    "${GOETHE_HOME}/bin/goethe" stop --keep-engines || rc=$?
+    { stop_err="$("${GOETHE_HOME}/bin/goethe" stop --keep-engines 2>&1 1>&3)"; } 3>&1 || rc=$?
     if [[ ${rc} -eq 2 ]]; then
       "${GOETHE_HOME}/bin/goethe" stop
       UPGRADE_NOTE="engines were stopped (this goethed cannot hand them over); the new goethed restores them"
     elif [[ ${rc} -ne 0 ]]; then
+      echo "${stop_err}" >&2
       echo "could not stop goethed for the upgrade (exit ${rc}); nothing was replaced" >&2
       exit 1
     else
+      [[ -z "${stop_err}" ]] || echo "${stop_err}" >&2
       UPGRADE_NOTE="engines kept serving; the new goethed adopts them"
     fi
   fi

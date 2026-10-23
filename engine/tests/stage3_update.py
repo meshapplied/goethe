@@ -49,6 +49,17 @@ def _same_version(goethe: Path, cdn: Path, key: Path, pub: Path, base: str) -> N
         rr = run([str(goethe), "update", "--check", "--yes"], env=env)
         if rr.returncode != 0 or want not in rr.stdout:
             raise RuntimeError(f"another build at the same version must read {want!r}: {rr.stdout} {rr.stderr}")
+        if commit == "unknown":
+            return
+        dirty = int(commit.endswith("-dirty"))
+        buildinfo = f"built_at=y\nengine_commit={commit.removesuffix('-dirty')}\nengine_dirty={dirty}\n"
+        (cdn / "BUILDINFO").write_text(buildinfo, encoding="utf-8")
+        _binaries(cdn, b"v4")
+        sign_cdn_tree(cdn, key, version)
+        want = f"update available: goethe {mine} -> {version} (commit {commit}, another build)"
+        rr = run([str(goethe), "update", "--check", "--yes"], env=env)
+        if rr.returncode != 0 or want not in rr.stdout:
+            raise RuntimeError(f"another build of the same commit must read {want!r}: {rr.stdout} {rr.stderr}")
 
 
 def main() -> None:
