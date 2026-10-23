@@ -1353,7 +1353,7 @@ pub fn watchdog_tick() {
         }
         let claimed = con
             .execute(
-                "UPDATE loaded_instances SET status = 'RESTARTING' WHERE instance_id = ?1 AND status = 'RUNNING'",
+                "UPDATE loaded_instances SET status = 'STOPPING' WHERE instance_id = ?1 AND status = 'RUNNING'",
                 [&i.instance_id],
             )
             .unwrap_or(0);
@@ -1361,9 +1361,16 @@ pub fn watchdog_tick() {
             continue;
         }
         let params = load_params_for_slot(&con, &i.slot_key, &i.model_id);
+        let backoff = crate::watchdog_policy::restart_backoff_secs(i.restarts);
+        if params.is_some() {
+            next_attempts().insert(i.slot_key.clone(), now_epoch_secs() + backoff as i64);
+        }
         let to = if params.is_some() { "RESTARTING" } else { "FAILED" };
-        if let (true, Some(params)) = (retire(&con, &home, &i, "RESTARTING", to), params) {
-            schedule_restart(params, i.restarts);
+        match (retire(&con, &home, &i, "STOPPING", to), params) {
+            (true, Some(params)) => schedule_restart(params, i.restarts, backoff),
+            _ => {
+                next_attempts().remove(&i.slot_key);
+            }
         }
     }
 }
@@ -1406,11 +1413,9 @@ fn next_attempts() -> std::sync::MutexGuard<'static, HashMap<String, i64>> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
-fn schedule_restart(mut params: LoadParams, restarts: i64) {
-    // RESTARTING with a next attempt time; after the backoff re-check under the slot lock, relaunch, FAILED on error.
+fn schedule_restart(mut params: LoadParams, restarts: i64, backoff: u64) {
+    // The row is already RESTARTING with its next attempt time; after the backoff re-check under the slot lock, relaunch.
     let slot = params.slot_key.clone().unwrap_or_default();
-    let backoff = crate::watchdog_policy::restart_backoff_secs(restarts);
-    next_attempts().insert(slot.clone(), now_epoch_secs() + backoff as i64);
     thread::spawn(move || {
         thread::sleep(Duration::from_secs(backoff));
         let go = {
