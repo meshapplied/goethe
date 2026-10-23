@@ -71,7 +71,11 @@ fn dispatch(req: Request) -> (bool, i32, String, String, Value) {
             Err((code, msg)) => (false, code, String::new(), msg, Value::Null),
         },
         "shutdown" => {
-            shutdown::request_shutdown();
+            if req.params.get("keep_engines").and_then(|v| v.as_bool()).unwrap_or(false) {
+                shutdown::request_shutdown_keeping_engines();
+            } else {
+                shutdown::request_shutdown();
+            }
             (true, 0, String::new(), String::new(), Value::Null)
         }
         other => (
@@ -211,6 +215,6 @@ async fn main() {
         }
     }
     shutdown::request_shutdown();
-    shutdown::shutdown_daemon(&home, &sock);
+    shutdown::shutdown_daemon(&home, &sock, shutdown::keep_engines_requested());
     std::process::exit(exit_code);
 }

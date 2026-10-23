@@ -815,7 +815,7 @@ pub fn slot_has_running_instance(slot_or_model: &str) -> bool {
     .is_ok()
 }
 
-fn append_goethed_log(home: &Path, line: &str) {
+pub(crate) fn append_goethed_log(home: &Path, line: &str) {
     let path = home.join("logs/goethed.log");
     let _ = std::fs::OpenOptions::new()
         .create(true)
@@ -1649,14 +1649,15 @@ mod tests {
             };
             run_registry::register(home, &stale_id).unwrap();
             reconcile_on_start().expect("reconcile");
-            let rows: Vec<(String, String)> = con
-                .prepare("SELECT instance_id, status FROM loaded_instances")
+            let rows: Vec<(String, String, i64, String, i64)> = con
+                .prepare("SELECT instance_id, status, internal_port, engine_key, pid FROM loaded_instances")
                 .unwrap()
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
                 .unwrap()
                 .filter_map(|r| r.ok())
                 .collect();
-            assert_eq!(rows, vec![("i-good".to_string(), "RUNNING".to_string())]);
+            let kept = ("i-good".to_string(), "RUNNING".to_string(), port as i64, "k".to_string(), me.pid as i64);
+            assert_eq!(rows, vec![kept], "adoption keeps pid, port and engine key, so the mux routes as before");
             assert!(stale.try_wait().unwrap().is_none(), "an unverified pid is never signaled");
             assert_ne!(proc_ident::start_ticks(squat.id() as i32), Some(squat_ticks), "port squatted: stopped");
             assert!(run_registry::list_entries(home).iter().all(|e| e.instance_id == "i-good"));
