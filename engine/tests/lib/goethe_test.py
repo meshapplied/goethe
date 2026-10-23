@@ -670,9 +670,16 @@ def home_zombies(home: Path) -> list[int]:
 
 
 def assert_no_zombies(home: Path, timeout: float = 3.0) -> None:
-    """Fail when the temp home's process tree still holds defunct processes after timeout."""
+    """Fail when the temp home's process tree still holds defunct processes after timeout, naming them."""
     if not wait_until(lambda: not home_zombies(home), timeout=timeout, interval=0.1):
-        raise RuntimeError(f"defunct processes under {home}: {home_zombies(home)}")
+        table = process_table()
+        named = [
+            f"{z} ({_proc_bytes(z, 'comm').decode(errors='replace').strip()}, parent {table[z][1]} "
+            f"{proc_cmdline(table[z][1])[:60]!r})"
+            for z in home_zombies(home)
+            if z in table
+        ]
+        raise RuntimeError(f"defunct processes under {home}: {named}")
 
 
 def home_goethe_env(home: Path) -> dict[str, str]:
