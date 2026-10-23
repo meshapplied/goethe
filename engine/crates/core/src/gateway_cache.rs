@@ -36,6 +36,10 @@ impl Snapshot {
     }
 
     pub fn resolve_model<'a>(&'a self, name: &'a str) -> &'a str {
+        // A real model id always wins over an alias spelled the same, so an alias can never hijack a model.
+        if self.is_known(name) {
+            return name;
+        }
         self.aliases.get(name).map(String::as_str).unwrap_or(name)
     }
 
@@ -358,6 +362,20 @@ mod tests {
         let snap = cache.exact();
         assert!(snap.routes("org/m").iter().all(|r| r.draining));
         assert!(snap.serving_models().is_empty());
+    }
+
+    #[test]
+    fn model_ids_win_over_aliases_with_the_same_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = db::open(dir.path()).unwrap();
+        insert_instance(&other, "inst-a", "org/big", 30001, "RUNNING", None);
+        insert_instance(&other, "inst-b", "org/small", 30002, "RUNNING", None);
+        other
+            .execute("INSERT INTO model_aliases (alias, model_id) VALUES ('org/small', 'org/big')", [])
+            .unwrap();
+        let snap = GatewayCache::open(dir.path()).exact();
+        assert_eq!(snap.resolve_model("org/small"), "org/small");
+        assert_eq!(snap.resolve_model("org/big"), "org/big");
     }
 
     #[test]
