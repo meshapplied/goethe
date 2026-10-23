@@ -420,7 +420,7 @@ fn unpack_ternary(home: &Path, archive: &Path) -> Result<(), String> {
 
 fn restart_goethed(home: &Path) -> Result<(), String> {
     // Engines keep serving: stop the old goethed with keep_engines, then start the new one (systemd for this home's unit).
-    println!("{}", crate::service::stop_keeping_engines()?);
+    crate::service::stop_keeping_engines()?;
     match crate::service::systemctl_restart_args() {
         Some(args) => {
             let ok = Command::new("systemctl").args(&args).status().map_err(|e| e.to_string())?.success();
