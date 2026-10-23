@@ -152,6 +152,7 @@ fn file_free_mb(g: &GpuState) -> u64 {
 }
 
 pub fn run(json_out: bool) -> Result<(), String> {
+    // Models that fit now with their raw weight size; --json keeps the full plan, manual and excluded lists.
     let home = goethe_home();
     let hw = crate::placement::load_hw(&home).ok_or("hardware_state.json missing; run goethe hw profile first")?;
     let reg = fetch(&registry_url())?;
@@ -160,21 +161,15 @@ pub fn run(json_out: bool) -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
         return Ok(());
     }
+    let mut table = crate::term::Table::new(&["MODEL", "SIZE"]);
     for item in &out.recommended {
-        println!(
-            "recommended {}: tp={} on GPU {} at ctx {}, {:.1} GB per GPU",
-            item.model_id,
-            item.tp,
-            format_gpu_list(&item.gpus),
-            item.ctx,
-            item.vram_per_gpu_gb
-        );
+        let gb = reg.models.iter().find(|m| m.id == item.model_id).map(|m| m.download_gb.unwrap_or(m.static_vram_gb));
+        table.row(vec![item.model_id.clone(), gb.map_or("?".to_string(), |g| format!("{g:.1} GB"))]);
     }
-    for item in &out.manual {
-        println!("manual download {}: {} ({})", item.model_id, item.reason, item.fit);
-    }
-    for item in &out.excluded {
-        println!("excluded {}: {}", item.model_id, item.reason);
+    if table.is_empty() {
+        println!("no catalog model fits the free GPU memory right now (goethe models shows why)");
+    } else {
+        table.print();
     }
     Ok(())
 }
