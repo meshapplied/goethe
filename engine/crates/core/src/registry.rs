@@ -330,7 +330,6 @@ fn online_checks(m: &RegistryModel, opts: &ValidateOpts, errors: &mut Vec<String
         }
     }
     let rev = m.revision.as_deref().unwrap_or("main");
-    let has_token = hf::resolve_token(&crate::paths::goethe_home()).is_some();
     match hf::preflight_model_opts(&m.id, Some(rev), true) {
         Err(e) => errors.push(format!("{}: {e}", m.id)),
         Ok(p) => {
@@ -338,11 +337,8 @@ fn online_checks(m: &RegistryModel, opts: &ValidateOpts, errors: &mut Vec<String
                 errors.push(format!("{}: repository has no model weight files", m.id));
             }
             let entry_gated = m.gated.unwrap_or(false);
-            if p.gated && entry_gated && !has_token {
-                eprintln!(
-                    "warning: {}: gated: config not verified without a token",
-                    m.id
-                );
+            if p.gated && entry_gated {
+                eprintln!("note: {}: gated; goethe does not log in, so its files are not checked", m.id);
             } else if p.gated && !entry_gated {
                 errors.push(format!(
                     "{}: Hugging Face reports gated but registry entry gated is not true",
@@ -597,9 +593,8 @@ pub fn infer_one_entry(
 ) -> Result<(RegistryModel, Vec<String>), String> {
     let rev = revision.unwrap_or("main");
     let pre = hf::preflight_model_opts(repo_id, Some(rev), true)?;
-    let has_token = hf::resolve_token(&crate::paths::goethe_home()).is_some();
-    if pre.gated && !has_token {
-        return Err("gated: config not verified without a token (run `goethe login`)".to_string());
+    if pre.gated {
+        return Err("gated on Hugging Face and goethe does not log in: write this entry by hand (set \"gated\": true)".to_string());
     }
     let sha = pre
         .sha

@@ -1,10 +1,10 @@
-// Hugging Face download, verify, and auth for goethe install.
+// Hugging Face download and verify for goethe install; goethe never logs in or sends credentials.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::io::{BufRead, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -51,108 +51,6 @@ pub fn hf_endpoint() -> String {
     std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".to_string())
 }
 
-pub fn resolve_token(home: &Path) -> Option<String> {
-    // HF_TOKEN env, goethe login, then the token files huggingface_hub itself reads.
-    for key in ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"] {
-        if let Ok(v) = std::env::var(key) {
-            if !v.trim().is_empty() {
-                return Some(v.trim().to_string());
-            }
-        }
-    }
-    let mut files = vec![home.join("hf_token")];
-    if let Some(p) = std::env::var_os("HF_TOKEN_PATH") {
-        files.push(PathBuf::from(p));
-    }
-    match std::env::var_os("HF_HOME") {
-        Some(h) => files.push(PathBuf::from(h).join("token")),
-        None => {
-            if let Some(h) = std::env::var_os("HOME") {
-                files.push(PathBuf::from(h).join(".cache/huggingface/token"));
-            }
-        }
-    }
-    files.iter().find_map(|p| {
-        fs::read_to_string(p)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    })
-}
-
-pub fn store_token(home: &Path, token: &str) -> Result<(), String> {
-    let path = home.join("hf_token");
-    fs::write(&path, format!("{token}\n")).map_err(|e| e.to_string())?;
-    fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).map_err(|e| e.to_string())
-}
-
-pub fn clear_token(home: &Path) -> Result<(), String> {
-    let path = home.join("hf_token");
-    if path.is_file() {
-        fs::remove_file(&path).map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-pub fn validate_token(token: &str) -> Result<(), String> {
-    let url = format!("{}/api/whoami-v2", hf_endpoint());
-    let resp = api_request("GET", &url, Some(token), None)?;
-    if resp.status >= 400 {
-        return Err("invalid Hugging Face token".to_string());
-    }
-    Ok(())
-}
-
-pub fn login(home: &Path, token: &str) -> Result<(), String> {
-    validate_token(token)?;
-    store_token(home, token)
-}
-
-pub fn read_token_stdin() -> Result<String, String> {
-    let mut buf = String::new();
-    std::io::stdin().read_line(&mut buf).map_err(|e| e.to_string())?;
-    let t = buf.trim().to_string();
-    if t.is_empty() {
-        return Err("empty token".to_string());
-    }
-    Ok(t)
-}
-
-pub fn read_token_tty() -> Result<String, String> {
-    use std::io::{self, IsTerminal, Write as _};
-    if !io::stdin().is_terminal() {
-        return Err("login requires a tty or --token-stdin".to_string());
-    }
-    print!("Hugging Face token: ");
-    io::stdout().flush().map_err(|e| e.to_string())?;
-    read_tty_secret()
-}
-
-fn read_tty_secret() -> Result<String, String> {
-    // Read one line from the terminal with echo off, restoring the mode afterwards.
-    let tty = fs::File::open("/dev/tty").map_err(|e| e.to_string())?;
-    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
-    if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut termios) } != 0 {
-        return Err("tcgetattr failed".to_string());
-    }
-    let saved = termios;
-    termios.c_lflag &= !(libc::ECHO);
-    if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &termios) } != 0 {
-        return Err("tcsetattr failed".to_string());
-    }
-    let mut reader = std::io::BufReader::new(tty);
-    let mut line = String::new();
-    let read = reader.read_line(&mut line);
-    let _ = unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &saved) };
-    println!();
-    read.map_err(|e| e.to_string())?;
-    let t = line.trim().to_string();
-    if t.is_empty() {
-        return Err("empty token".to_string());
-    }
-    Ok(t)
-}
-
 pub fn offline_mode() -> bool {
     std::env::var("HF_HUB_OFFLINE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -163,12 +61,16 @@ pub fn preflight_model(model_id: &str, revision: Option<&str>) -> Result<ModelPr
     preflight_model_opts(model_id, revision, false)
 }
 
-pub fn preflight_model_opts(
-    model_id: &str,
-    revision: Option<&str>,
-    allow_gated_without_token: bool,
-) -> Result<ModelPreflight, String> {
-    // Query the model API (at a revision when given) for gating, files, sizes, and the commit sha.
+pub fn gated_guidance(model_id: &str) -> String {
+    let dir = crate::paths::model_dir(&crate::paths::goethe_home(), model_id);
+    format!(
+        "{model_id} is gated (or private) on Hugging Face and goethe does not log in. Download it yourself after accepting its license, for example: hf download {model_id} --local-dir {} . Then run: goethe scan",
+        dir.display()
+    )
+}
+
+pub fn preflight_model_opts(model_id: &str, revision: Option<&str>, allow_gated: bool) -> Result<ModelPreflight, String> {
+    // Anonymous model API query (at a revision when given): gating, files, sizes, and the commit sha.
     if offline_mode() {
         return Ok(ModelPreflight {
             gated: false,
@@ -177,25 +79,16 @@ pub fn preflight_model_opts(
         });
     }
     let endpoint = hf_endpoint();
-    let token = resolve_token(&crate::paths::goethe_home());
     let url = match revision {
         Some(rev) => format!("{endpoint}/api/models/{model_id}/revision/{rev}?blobs=true"),
         None => format!("{endpoint}/api/models/{model_id}?blobs=true"),
     };
-    let resp = api_request("GET", &url, token.as_deref(), None)?;
-    let has_token = token.as_ref().is_some_and(|t| !t.is_empty());
+    let resp = api_get(&url)?;
     match resp.status {
-        401 | 403 if !has_token => {
-            return Err(format!(
-                "model {model_id} not found, or it is private (Hugging Face reports both as 401): check the id, or run `goethe login`"
-            ));
+        401 | 403 | 404 if !allow_gated => return Err(gated_guidance(model_id)),
+        401 | 403 | 404 => {
+            return Err(format!("{model_id}: not found, or private (goethe does not log in to Hugging Face)"))
         }
-        401 | 403 => {
-            return Err(format!(
-                "model {model_id} is private or access denied: run `goethe login` (or set HF_TOKEN)"
-            ));
-        }
-        404 => return Err(format!("model {model_id} not found on {endpoint} (check the id and revision)")),
         s if s >= 500 => return Err(format!("cannot reach {endpoint}: HTTP {s}")),
         s if s >= 400 => return Err(format!("HF API error for {model_id}: HTTP {s}")),
         _ => {}
@@ -206,19 +99,8 @@ pub fn preflight_model_opts(
         .get("gated")
         .map(|v| v.as_bool().unwrap_or(false) || v.as_str().is_some_and(|s| !s.is_empty()))
         .unwrap_or(false);
-    if gated && !has_token && !allow_gated_without_token {
-        return Err(format!(
-            "model {model_id} is gated: accept its license on huggingface.co/{model_id}, then run `goethe login`"
-        ));
-    }
-    if gated && has_token && !allow_gated_without_token {
-        let probe = format!("{endpoint}/{model_id}/resolve/{}/config.json", revision.unwrap_or("main"));
-        let r = api_request("GET", &probe, token.as_deref(), None)?;
-        if r.status == 401 || r.status == 403 {
-            return Err(format!(
-                "model {model_id} is gated and the Hugging Face token in use has no access: accept the license on huggingface.co/{model_id} with that account, or run `goethe login` with a token that has access"
-            ));
-        }
+    if gated && !allow_gated {
+        return Err(gated_guidance(model_id));
     }
     Ok(ModelPreflight {
         gated,
@@ -236,8 +118,7 @@ pub fn is_hf_organization(owner: &str) -> Result<bool, String> {
         return Ok(true);
     }
     let url = format!("{}/api/organizations/{owner}/overview", hf_endpoint());
-    let token = resolve_token(&crate::paths::goethe_home());
-    let resp = api_request("GET", &url, token.as_deref(), None)?;
+    let resp = api_get(&url)?;
     Ok(resp.status == 200)
 }
 
@@ -445,9 +326,7 @@ pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: 
     cmd.env("HF_XET_HIGH_PERFORMANCE", "1");
     cmd.env("HF_HUB_DISABLE_TELEMETRY", "1");
     cmd.env("PYTHONWARNINGS", "ignore::FutureWarning");
-    if let Some(t) = resolve_token(home) {
-        cmd.env("HF_TOKEN", t);
-    }
+    cmd.env_remove("HF_TOKEN").env_remove("HUGGING_FACE_HUB_TOKEN").env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1");
     cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     let status = cmd.status().map_err(|e| format!("hf download failed to start: {e}"))?;
     if !status.success() {
@@ -646,15 +525,15 @@ struct ApiResponse {
     body: String,
 }
 
-fn api_request(method: &str, url: &str, token: Option<&str>, body: Option<&str>) -> Result<ApiResponse, String> {
-    // Retry transient failures (network, 429, 5xx) with short backoff.
+fn api_get(url: &str) -> Result<ApiResponse, String> {
+    // Anonymous GET that retries transient failures (network, 429, 5xx) with short backoff.
     let delays = [0u64, 2, 5, 10];
     let mut last_err = String::new();
     for (i, delay) in delays.iter().enumerate() {
         if *delay > 0 {
             thread::sleep(Duration::from_secs(*delay));
         }
-        match api_request_once(method, url, token, body) {
+        match api_get_once(url) {
             Ok(r) if r.status == 429 || r.status >= 500 => last_err = format!("HTTP {}", r.status),
             Ok(r) => return Ok(r),
             Err(e) => {
@@ -671,21 +550,8 @@ fn api_request(method: &str, url: &str, token: Option<&str>, body: Option<&str>)
     ))
 }
 
-fn api_request_once(method: &str, url: &str, token: Option<&str>, body: Option<&str>) -> Result<ApiResponse, String> {
-    let mut req = match method {
-        "GET" => crate::net::agent().get(url),
-        "POST" => crate::net::agent().post(url),
-        _ => return Err(format!("unsupported HTTP method {method}")),
-    };
-    req = req.timeout(Duration::from_secs(30));
-    if let Some(t) = token {
-        req = req.set("Authorization", &format!("Bearer {t}"));
-    }
-    let result = match body {
-        Some(b) => req.send_string(b),
-        None => req.call(),
-    };
-    let resp = match result {
+fn api_get_once(url: &str) -> Result<ApiResponse, String> {
+    let resp = match crate::net::agent().get(url).timeout(Duration::from_secs(30)).call() {
         Ok(r) => r,
         Err(ureq::Error::Status(_code, r)) => r,
         Err(e) => return Err(e.to_string()),
@@ -700,9 +566,8 @@ fn api_request_once(method: &str, url: &str, token: Option<&str>, body: Option<&
 }
 
 fn fetch_repo_json(model_id: &str, revision: &str, file: &str) -> Result<serde_json::Value, String> {
-    let token = resolve_token(&crate::paths::goethe_home());
     let url = format!("{}/{model_id}/resolve/{revision}/{file}", hf_endpoint());
-    let resp = api_request("GET", &url, token.as_deref(), None)?;
+    let resp = api_get(&url)?;
     if resp.status == 404 {
         return Err(format!("{file} not found for {model_id}"));
     }
