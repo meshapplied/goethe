@@ -1,0 +1,163 @@
+name: release
+
+# Build, sign, verify and publish a Goethe release from main.
+# Start it by pushing a tag vX.Y.Z on a commit of main (the version must match engine/crates/goethe/Cargo.toml),
+# or run it by hand from the Actions tab on main.
+#
+# Repository settings it needs:
+#   secret   GOETHE_SIGN_KEY          contents of release.key (P-256 PEM private key)
+#   variable GOETHE_RELEASE_PUB_FPR   sha256 of the DER public key (printed by packaging/keygen.sh)
+#   environment "release"             add required reviewers so publishing waits for an approval
+# Optional upload to the package origin behind https://pkg.meshapplied.com (any S3-compatible store, e.g. S3 or R2):
+#   variable PKG_S3_BUCKET, variable PKG_S3_ENDPOINT (empty for AWS), secrets PKG_S3_ACCESS_KEY_ID and PKG_S3_SECRET_ACCESS_KEY
+#   variable SITE_S3_BUCKET           bucket that serves https://meshapplied.com/install.sh
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Release only from main
+        run: |
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not on main; releases are built from main only"
+            exit 1
+          fi
+      - id: version
+        name: Version from Cargo.toml (and the tag, when there is one)
+        run: |
+          v="$(sed -n 's/^version = "\(.*\)"/\1/p' engine/crates/goethe/Cargo.toml | head -n1)"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$v" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match engine/crates/goethe/Cargo.toml version $v"
+            exit 1
+          fi
+          echo "version=$v" >>"$GITHUB_OUTPUT"
+
+  ci:
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: [guard, ci]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patched SGLang source at the pinned commit
+        run: |
+          . engine/sglang/PIN
+          git clone --quiet --filter=blob:none --no-checkout "$SGLANG_REPO" sglang-fork
+          git -C sglang-fork checkout --quiet "$SGLANG_REV"
+      - name: Signed release build (x86_64 and aarch64)
+        env:
+          SGLANG_FORK_SRC: ${{ github.workspace }}/sglang-fork
+          GOETHE_RELEASE_PUB_FPR: ${{ vars.GOETHE_RELEASE_PUB_FPR }}
+          SIGN_KEY_PEM: ${{ secrets.GOETHE_SIGN_KEY }}
+        run: |
+          key="$RUNNER_TEMP/release.key"
+          umask 077
+          printf '%s\n' "$SIGN_KEY_PEM" >"$key"
+          trap 'shred -u "$key" 2>/dev/null || rm -f "$key"' EXIT
+          GOETHE_SIGN_KEY="$key" engine/packaging/build_cdn.sh --release
+      - name: Verify what will ship
+        run: |
+          cd engine/dist/cdn
+          grep -q "release=1" BUILDINFO
+          grep -q "fork_dirty=0" BUILDINFO
+          sha256sum -c SHA256SUMS
+          awk "/-----BEGIN PUBLIC KEY-----/,/-----END PUBLIC KEY-----/" install.sh \
+            | sed "s/^GOETHE_RELEASE_PUB_PEM='//; s/'\$//" >"$RUNNER_TEMP/embedded.pem"
+          openssl dgst -sha256 -verify "$RUNNER_TEMP/embedded.pem" -signature SHA256SUMS.sig SHA256SUMS
+          fpr="$(openssl pkey -pubin -in "$RUNNER_TEMP/embedded.pem" -outform DER | sha256sum | cut -d' ' -f1)"
+          [[ "$fpr" == "${{ vars.GOETHE_RELEASE_PUB_FPR }}" ]]
+          bash -n install.sh
+          bin/linux-x86_64/goethe --version
+          file bin/linux-aarch64/goethe | grep -q aarch64
+      - name: Archive
+        run: tar -C engine/dist -cf - cdn | zstd -19 -T0 -o "goethe-cdn-${{ needs.guard.outputs.version }}.tar.zst"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goethe-cdn
+          path: |
+            goethe-cdn-*.tar.zst
+            engine/dist/cdn/install.sh
+            engine/dist/cdn/SHA256SUMS
+            engine/dist/cdn/SHA256SUMS.sig
+          retention-days: 30
+
+  install-smoke:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: goethe-cdn
+      - name: Installer accepts the signed package in a clean Ubuntu 22.04 container
+        run: |
+          mkdir pkg && zstd -dc goethe-cdn-*.tar.zst | tar -C pkg -xf -
+          (cd pkg/cdn && python3 -m http.server 8999 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          sleep 1
+          docker run --rm --network host -e GOETHE_PKG_URL=http://127.0.0.1:8999 -e GOETHE_NO_AUTOSTART=1 ubuntu:22.04 bash -c '
+            set -e
+            apt-get update -qq && apt-get install -y -qq curl zstd openssl ca-certificates nginx-core >/dev/null
+            curl -fsSL http://127.0.0.1:8999/install.sh | bash
+            export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+            goethe --version
+            goethe doctor --json >/dev/null || true
+          '
+
+  publish:
+    needs: [guard, build, install-smoke]
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: goethe-cdn
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Goethe $VERSION" --generate-notes
+          fi
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
+            goethe-cdn-*.tar.zst engine/dist/cdn/install.sh engine/dist/cdn/SHA256SUMS engine/dist/cdn/SHA256SUMS.sig
+      - name: Upload to the package origin (versioned copy first, then the live paths, install.sh last)
+        if: ${{ vars.PKG_S3_BUCKET != '' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.PKG_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.PKG_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT: ${{ vars.PKG_S3_ENDPOINT }}
+          BUCKET: ${{ vars.PKG_S3_BUCKET }}
+          SITE_BUCKET: ${{ vars.SITE_S3_BUCKET }}
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          ep=()
+          [[ -n "$ENDPOINT" ]] && ep=(--endpoint-url "$ENDPOINT")
+          mkdir pkg && zstd -dc goethe-cdn-*.tar.zst | tar -C pkg -xf -
+          aws "${ep[@]}" s3 sync pkg/cdn "s3://$BUCKET/releases/$VERSION/" --only-show-errors
+          aws "${ep[@]}" s3 sync pkg/cdn "s3://$BUCKET/" --exclude install.sh --only-show-errors
+          aws "${ep[@]}" s3 cp pkg/cdn/install.sh "s3://$BUCKET/install.sh" --content-type text/x-shellscript
+          if [[ -n "$SITE_BUCKET" ]]; then
+            aws "${ep[@]}" s3 cp pkg/cdn/install.sh "s3://$SITE_BUCKET/install.sh" --content-type text/x-shellscript
+          fi

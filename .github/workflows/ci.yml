@@ -3,6 +3,12 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   python:
@@ -35,3 +41,51 @@ jobs:
           git -C ninfer checkout --quiet "$NINFER_REV"
           git -C ninfer apply --check "$GITHUB_WORKSPACE/nvfp4-kernels/patches/ninfer-dn-sched.patch"
           git -C ninfer apply --check "$GITHUB_WORKSPACE/nvfp4-kernels/patches/openai-tool-name-128.patch"
+
+  engine:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      - run: cargo build --release --locked
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - uses: astral-sh/setup-uv@v6
+      - name: Style lint (headers, function comments, no dashes or emojis, pinned ruff with the repo rules)
+        run: python3 tests/lint_style.py
+      - name: Shell syntax of installer and packaging scripts
+        run: for f in cdn/install.sh packaging/*.sh tests/gate.sh tests/*.sh; do bash -n "$f"; done
+      - name: CPU gates (harness self-test, package signing and verification)
+        env:
+          GOETHE_TEST_GPUS: ""
+          GOETHE_NO_AUTOSTART: "1"
+        run: |
+          bash tests/gate.sh 0
+          bash tests/gate.sh 6 --only stage6_integrity.py
+
+  package-smoke:
+    runs-on: ubuntu-24.04
+    needs: engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patched SGLang source at the pinned commit
+        run: |
+          . engine/sglang/PIN
+          git clone --quiet --filter=blob:none --no-checkout "$SGLANG_REPO" sglang-fork
+          git -C sglang-fork checkout --quiet "$SGLANG_REV"
+      - name: Unsigned x86_64 package build (binaries, patched wheel, locks)
+        env:
+          SGLANG_FORK_SRC: ${{ github.workspace }}/sglang-fork
+          GOETHE_ALLOW_UNSIGNED: "1"
+        run: engine/packaging/build_cdn.sh --arch x86_64
+      - name: The portable binaries run on a stock runner
+        run: |
+          engine/dist/cdn/bin/linux-x86_64/goethe --version
+          engine/dist/cdn/bin/linux-x86_64/goethe --help >/dev/null
