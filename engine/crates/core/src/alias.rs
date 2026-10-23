@@ -5,8 +5,18 @@ use crate::paths::goethe_home;
 use rusqlite::Connection;
 
 pub fn set(alias: &str, model_id: &str) -> Result<(), String> {
+    // Refuse an empty alias and one that would shadow an installed model id, then store it.
+    if alias.trim().is_empty() {
+        return Err("alias must not be empty".to_string());
+    }
     let home = goethe_home();
     let con = db::open(&home).map_err(|e| e.to_string())?;
+    let shadows: i64 = con
+        .query_row("SELECT COUNT(*) FROM installed_models WHERE model_id = ?1", [alias], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if shadows > 0 {
+        return Err(format!("{alias} is an installed model id; pick another alias name"));
+    }
     let n: i64 = con
         .query_row(
             "SELECT COUNT(*) FROM installed_models WHERE model_id = ?1",

@@ -325,6 +325,7 @@ pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: 
     }
     cmd.env("HF_XET_HIGH_PERFORMANCE", "1");
     cmd.env("HF_HUB_DISABLE_TELEMETRY", "1");
+    cmd.env("HF_HUB_VERBOSITY", "error");
     cmd.env("PYTHONWARNINGS", "ignore::FutureWarning");
     cmd.env_remove("HF_TOKEN").env_remove("HUGGING_FACE_HUB_TOKEN").env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1");
     cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());

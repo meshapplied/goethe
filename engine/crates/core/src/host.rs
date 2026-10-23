@@ -398,7 +398,7 @@ pub fn parse_nvidia_proc_version(text: &str) -> Option<String> {
         .map(String::from)
 }
 
-pub fn summary_lines(host: &HostInfo, env: &EnvironmentInfo) -> Vec<String> {
+pub fn summary_lines(host: &HostInfo, env: &EnvironmentInfo, bind: &str) -> Vec<String> {
     // Human-readable host and environment lines for goethe hw profile.
     let c = &host.cpu;
     let numa: Vec<String> = c.numa_nodes.iter().map(|n| format!("node{} cpus {}", n.node, n.cpus)).collect();
@@ -455,7 +455,21 @@ pub fn summary_lines(host: &HostInfo, env: &EnvironmentInfo) -> Vec<String> {
     for e in &env.public_endpoints {
         out.push(format!("Public endpoint hint: {e}"));
     }
+    if !env.public_endpoints.is_empty() {
+        out.push(format!("Public endpoint hint: {}", public_access_hint(bind)));
+    }
     out
+}
+
+pub fn public_access_hint(bind: &str) -> String {
+    // What remote clients still need before the gateway lets them in.
+    if bind.parse::<std::net::IpAddr>().map_or(true, |ip| ip.is_loopback()) {
+        format!(
+            "the gateway listens on {bind} only: run `goethe gateway bind 0.0.0.0`, then allow clients with `goethe allowlist add <client-ip>/32`"
+        )
+    } else {
+        format!("the gateway listens on {bind}; allow clients with `goethe allowlist add <client-ip>/32` (all other addresses are refused)")
+    }
 }
 
 pub fn confirm(question: &str, yes: bool) -> Result<(), String> {
