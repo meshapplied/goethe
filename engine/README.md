@@ -75,7 +75,7 @@ For gated or private repos, accept the license on Hugging Face, download with yo
     goethe gateway bind 0.0.0.0 | status  # where the public gateway listens (default 127.0.0.1)
     goethe service enable                 # start goethed at boot (systemd, systemd --user, or cron)
     goethe stop                           # stop daemon and engines (loaded models return on next start)
-    goethe update [--check] [--engine]    # signed self-update
+    goethe update [--check] [--engine] [--ternary]  # signed self-update; --check compares binaries, engine wheel, ternary pack
     goethe uninstall [--purge-models]
 
 Boot entries belong to one home: `service disable` and `uninstall` remove only the unit or cron line that names this `GOETHE_HOME`, and `service enable` refuses when the systemd unit already starts another home.
