@@ -2,6 +2,8 @@
 
 Serves LLMs on NVIDIA GPUs (SM86 and SM120) behind an OpenAI compatible API. Rust control plane (`goethe` CLI and `goethed` daemon), SGLang engines, nginx gateway. Linux only (glibc 2.30 or newer, x86_64 and aarch64).
 
+This README is for building and releasing Goethe. To install and use it, see the [user guide](../docs/user-guide.md).
+
 ## Install
 
     curl -fsSL https://meshapplied.com/install.sh | bash
