@@ -56,8 +56,9 @@ def main() -> None:
                 if attempt >= 2 or "cannot reach" not in str(exc).lower():
                     raise
                 time.sleep(5.0)
-        if first_rr.stderr.strip():
-            raise RuntimeError(f"anonymous install must keep stderr empty (no HF_TOKEN hint): {first_rr.stderr[-99:]}")
+        noise = [ln for ln in first_rr.stderr.splitlines() if ln.strip() and "Still waiting to acquire lock" not in ln]
+        if noise:
+            raise RuntimeError(f"anonymous install must keep stderr empty (no HF_TOKEN hint): {noise[-3:]}")
         first = time.time() - t0
         mdir = next((home / "models").glob("*__*"))
         if not (mdir / "config.json").is_file() or not list(mdir.glob("*.safetensors")):
