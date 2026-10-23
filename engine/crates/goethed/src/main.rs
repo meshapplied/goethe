@@ -71,7 +71,11 @@ fn dispatch(req: Request) -> (bool, i32, String, String, Value) {
             Err((code, msg)) => (false, code, String::new(), msg, Value::Null),
         },
         "shutdown" => {
-            shutdown::request_shutdown();
+            if req.params.get("keep_engines").and_then(|v| v.as_bool()).unwrap_or(false) {
+                shutdown::request_shutdown_keeping_engines();
+            } else {
+                shutdown::request_shutdown();
+            }
             (true, 0, String::new(), String::new(), Value::Null)
         }
         other => (
@@ -136,6 +140,11 @@ async fn main() {
         eprintln!("{e}");
         std::process::exit(1);
     });
+    match goethe_core::placement::ensure_hw_profile(&home) {
+        Ok(true) => eprintln!("hardware profile written (missing or older than this boot)"),
+        Ok(false) => {}
+        Err(e) => eprintln!("hardware profile: {e}"),
+    }
     let _ = supervisor::reconcile_on_start();
     security::sync_api_keys_conf(&home);
     let sock = goethe_sock();
@@ -206,6 +215,6 @@ async fn main() {
         }
     }
     shutdown::request_shutdown();
-    shutdown::shutdown_daemon(&home, &sock);
+    shutdown::shutdown_daemon(&home, &sock, shutdown::keep_engines_requested());
     std::process::exit(exit_code);
 }

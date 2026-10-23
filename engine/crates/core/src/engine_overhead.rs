@@ -4,6 +4,7 @@ use rusqlite::Connection;
 use std::path::Path;
 
 pub fn parse_shortfall_gb(log_text: &str) -> Option<f64> {
+    // GB an engine start lacked, from SGLang's memory errors; messages without a figure get a 4 GB step.
     for line in log_text.lines() {
         if let Some(rest) = line.split("total_rest_memory=").nth(1) {
             let num: String = rest
@@ -25,7 +26,7 @@ pub fn parse_shortfall_gb(log_text: &str) -> Option<f64> {
                 return Some(f * 0.05 + 1.0);
             }
         }
-        if line.contains("CUDA out of memory") {
+        if line.contains("CUDA out of memory") || line.contains("state cache is too small to serve any requests") {
             return Some(4.0);
         }
     }
@@ -128,6 +129,13 @@ mod tests {
         store_learned(&con, "m", "GPU", 1, Kind::Overhead, 1.0).unwrap();
         assert_eq!(read_learned(&con, "m", "GPU", 1), Learned { static_gb: 4.7, overhead_gb: 2.0 });
         assert_eq!(read_learned(&con, "m", "GPU", 2), Learned::default());
+    }
+
+    #[test]
+    fn hybrid_state_cache_too_small_triggers_a_retry() {
+        let log = "RuntimeError: Hybrid (mamba/linear-attention) state cache is too small to serve any requests. \
+                   max_mamba_cache_size=3, mamba_ratio=4, resulting max_num_reqs=0. Try: (1) reduce";
+        assert_eq!(parse_shortfall_gb(log), Some(4.0));
     }
 
     #[test]
