@@ -39,6 +39,7 @@ from lib.goethe_test import (
     sqlite_query,
     start_goethed,
     stub_launch,
+    stub_requests,
     temp_home,
     test_gpus,
     vram_per_gpu_gb,
@@ -51,6 +52,8 @@ ASSERTS = 0
 SOFT: list[str] = []
 NOT_RUN: list[str] = []
 FOREIGN_MB = 3072
+BASE_OVERHEAD_GB = 1.8
+BUDGET_PARTS = r"needs ([\d.]+) gb per gpu \(weights ([\d.]+) \+ kv ([\d.]+) \+ overhead ([\d.]+)\)"
 
 
 def check(cond: bool, msg: str) -> None:
@@ -207,6 +210,8 @@ def _foreign_scenario(sup: Sup, model_a: Path) -> None:
             "Re-run with --yes" in text and f"kill {foreign.popen.pid}" in text,
             "notice suggests --yes and the user's own kill command",
         )
+        them = "it" if len(listed) == 1 else "them"
+        check(f"Re-run with --yes to load alongside {them}." in text, f"{len(listed)} foreign: alongside {them}")
         check(pid_alive(foreign.popen.pid), "goethe never stops the foreign process")
         sup.load("a", str(host))
         check(pid_alive(foreign.popen.pid), "foreign process still alive after loading alongside it")
@@ -277,7 +282,15 @@ def _scenarios(
     stub = stub_launch(model_a)
     parsed = stub["parsed"]
     b_gb = vram_per_gpu_gb(static_w, ctx, kv_bytes, max_conc, 1)
-    check(abs(float(parsed["mem_fraction_static"]) - b_gb / _live_free_gb(gpu)) < 0.02, "mem_fraction_static")
+    static_pool = (b_gb - BASE_OVERHEAD_GB) / _live_free_gb(gpu)
+    check(abs(float(parsed["mem_fraction_static"]) - static_pool) < 0.02, "mem_fraction_static covers weights + KV")
+    check(parsed.get("served_model_name") == "a", f"engine serves the model id: {parsed.get('served_model_name')}")
+    engine_key = sqlite_query(sup.db, "SELECT engine_key FROM loaded_instances WHERE model_id='a'")[0][0]
+    probes = [r for r in stub_requests(model_a) if r["method"] == "GET" and r["path"] == "/v1/models"]
+    check(
+        any(r["headers"].get("authorization") == f"Bearer {engine_key}" and r["status"] == 200 for r in probes),
+        f"readiness asked /v1/models with the engine key ({len(probes)} probes)",
+    )
     check(parsed["host"] == "127.0.0.1" and int(parsed["port"]) == int(port), "host and port")
     check(int(parsed["tp_size"]) == 1 and int(parsed["context_length"]) == ctx, "tp-size and context-length")
     check(int(parsed["max_running_requests"]) == max_conc, "max-running-requests")
@@ -298,15 +311,18 @@ def _scenarios(
     seed_installed_model(home, "a", "models/org__model_a", 200.0, kv_bytes, 131072, 64, 1)
     on_gpu = {p for p, _mb in gpu_pids(gpu)}
     rr = run(
-        [str(sup.goethe), "load", "a", "--gpus", str(gpu), "--ctx", "131072", "--max-conc", "64", "--yes"],
+        [str(sup.goethe), "load", "a", "--gpus", str(gpu), "--ctx", "131072", "--max-conc", "64", "--yes", "--replica"],
         env=sup.env,
     )
     budget_text = (rr.stderr + rr.stdout).lower()
-    check(rr.returncode != 0, "budget abort fails")
-    soft(rr.returncode == 1, f"budget abort exit {rr.returncode}, want 1")
-    check("missing" in budget_text and bool(re.search(r"\d+\.?\d*\s*gb", budget_text)), "missing GB figure")
-    if on_gpu:
-        soft("unmanaged process pid" in budget_text, "budget abort lists the foreign processes holding VRAM")
+    soft(rr.returncode == 1, f"budget abort of a --replica exits 1 (got {rr.returncode}): {budget_text[-160:]}")
+    if rr.returncode != 0:
+        check("missing" in budget_text and bool(re.search(r"\d+\.?\d*\s*gb", budget_text)), "missing GB figure")
+        parts = re.search(BUDGET_PARTS, budget_text)
+        nums = [float(x) for x in parts.groups()] if parts else []
+        soft(bool(nums) and abs(sum(nums[1:]) - nums[0]) < 0.051, f"budget parts add up: {budget_text[-240:]}")
+        if on_gpu:
+            soft("unmanaged process pid" in budget_text, "budget abort lists the foreign processes holding VRAM")
     seed_installed_model(home, "a", "models/org__model_a", static_w, kv_bytes, ctx, max_conc, 1)
     sup.goethe_ok("unload", "--all")
     write_card(model_auto, "auto", ctx, max_conc, extra="tp_size=0\npreferred_gpus=[]")
@@ -366,20 +382,37 @@ def _scenarios(
     check("ternary-kernels" in tenv.get("PYTHONPATH", ""), "ternary PYTHONPATH")
     check("GOETHE_KERNEL_DIR" not in tenv, "ternary no kernel dir")
     sup.goethe_ok("unload", "t")
-    sup.load("a", str(gpu), "--chunked-prefill-size", "4096")
+    sup.load("a", str(gpu), "--", "--chunked-prefill-size", "4096")
     argv = stub_launch(model_a)["argv"]
     check("--chunked-prefill-size" in argv and argv[argv.index("--chunked-prefill-size") + 1] == "4096",
-          "load passes trailing SGLang args through")
-    for owned in (["--context-length", "4096"], ["--port=31999"], ["--tp", "2"], ["--api-key", "x"]):
-        load_owned = [str(sup.goethe), "load", "a", "--gpus", str(gpu), "--yes", "--no-wait", *owned]
-        rr_owned = run(load_owned, env=sup.env, timeout=60)
-        soft(rr_owned.returncode == 2, f"load rejects owned flag {owned[0]} with exit 2 (got {rr_owned.returncode})")
-    sup.goethe_ok("unload", "--all", timeout=120)
+          "load passes SGLang args after -- through")
     sup.goethe_ok("unload", "a")
+    base = [str(sup.goethe), "load", "a", "--gpus", str(gpu), "--yes", "--no-wait"]
+    for owned in (["--context-length", "4096"], ["--port=31999"], ["--tp", "2"], ["--api-key", "x"]):
+        rr_owned = run([*base, "--", *owned], env=sup.env, timeout=60)
+        soft(rr_owned.returncode == 2, f"load rejects owned flag {owned[0]} after -- ({rr_owned.returncode})")
+    for unknown in (["--bogus"], ["--gpu", str(gpu)], ["--yess"], ["--chunked-prefill-size", "4096"]):
+        rr_unknown = run([*base, *unknown], env=sup.env, timeout=60)
+        soft(rr_unknown.returncode == 2, f"load rejects unknown flag {unknown[0]} without -- ({rr_unknown.returncode})")
+    sup.goethe_ok("unload", "--all", timeout=120)
     sup.load("a", str(gpu))
     check(sup.status_is("a", {"RUNNING"}, timeout=60.0), "watchdog prekill RUNNING")
     time.sleep(2.0)
+    t_kill = time.time()
     sup.kill_engine("a")
+    backoff: list[dict[str, Any]] = []
+    texts: list[str] = []
+
+    def restarting() -> bool:
+        backoff.extend(r for r in sup.ps() if r.get("model_id") == "a" and r.get("status") == "RESTARTING")
+        if backoff:
+            texts.append(sup.goethe_ok("ps"))
+        return bool(backoff)
+
+    check(wait_until(restarting, timeout=60.0, interval=0.2), "ps shows RESTARTING during the crash backoff")
+    nxt = backoff[0].get("next_attempt_at")
+    check(isinstance(nxt, int) and t_kill - 1 <= nxt <= time.time() + 60, f"next_attempt_at in ps: {backoff[0]}")
+    check(bool(re.search(r"RESTARTING \(attempt \d+, next in \d+s\)", texts[0])), f"ps text backoff: {texts[0][-300:]}")
     check(wait_until(lambda: sup.restarts_at_least("a", 1), timeout=120.0), "watchdog restart count after SIGKILL")
     sup.goethe_ok("unload", "a")
     stub_s = stub_launch(model_a)
@@ -477,18 +510,23 @@ def _scenarios(
     sup.goethe_ok("unload", "--all", timeout=120)
     _clear_stub_files(model_b)
     sup.load("a", str(gpu))
-    sup.load("a", str(gpu))
+    again = run([str(sup.goethe), "load", "a", "--gpus", str(gpu), "--yes"], env=sup.env, timeout=120)
+    check(again.returncode == 0 and "already loaded:" in again.stdout + again.stderr,
+          f"plain re-load exits 0 with already loaded: {again.returncode} {(again.stdout + again.stderr)[-200:]}")
+    check(sup.count("SELECT COUNT(*) FROM loaded_instances WHERE model_id='a'") == 1, "plain re-load adds no replica")
+    rr_rep = run([str(sup.goethe), "load", "a", "--gpus", str(gpu), "--yes", "--replica"], env=sup.env, timeout=300)
     running_a = sum(1 for r in sup.ps() if r.get("model_id") == "a" and r.get("status") == "RUNNING")
-    check(running_a >= 2, "two RUNNING instances")
-    check(sup.count("SELECT COUNT(*) FROM desired_loads WHERE model_id='a'") == 2, "two desired slots")
-    sup.restart()
-    check(
-        wait_until(
-            lambda: sum(1 for r in sup.ps() if r.get("model_id") == "a" and r.get("status") == "RUNNING") >= 2,
-            timeout=300.0,
-        ),
-        "restore both slots",
-    )
+    soft(rr_rep.returncode == 0 and running_a == 2, f"--replica adds a second RUNNING instance ({running_a})")
+    if running_a == 2:
+        check(sup.count("SELECT COUNT(*) FROM desired_loads WHERE model_id='a'") == 2, "two desired slots")
+        sup.restart()
+        check(
+            wait_until(
+                lambda: sum(1 for r in sup.ps() if r.get("model_id") == "a" and r.get("status") == "RUNNING") >= 2,
+                timeout=300.0,
+            ),
+            "restore both slots",
+        )
     sup.goethe_ok("unload", "a", timeout=120)
     left_inst = sup.count("SELECT COUNT(*) FROM loaded_instances WHERE model_id='a'")
     left_des = sup.count("SELECT COUNT(*) FROM desired_loads WHERE model_id='a'")

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage 6 installer checks without network: tool, glibc and driver floors, truncation safety, no kills, no nginx start.
+# Stage 6 installer checks without network: version floors, truncation safety, no kills or nginx starts, unit owner.
 
 set -euo pipefail
 
@@ -74,7 +74,7 @@ if grep -nE '(^|[^_a-z])(kill|pkill|killall|fuser)([^_a-z]|$)' "${INSTALL}"; the
   echo "install.sh must never signal processes"
   exit 1
 fi
-if grep -nE 'NGINX_BIN\}?"? +-|nohup[^#]*nginx|nginx +-[cs] ' "${INSTALL}"; then
+if grep -nE '(nginx|NGINX_BIN\}?"?) +-[cps]( |$)|nohup[^#]*nginx' "${INSTALL}"; then
   echo "install.sh must not start or signal nginx (goethed manages it)"
   exit 1
 fi
@@ -118,5 +118,27 @@ for keep in $((LINES / 3)) $((LINES / 2)) $((LINES - 1)); do
     exit 1
   fi
 done
+
+UNITS="${WORK}/units"
+mkdir -p "${UNITS}"
+unit_home() {
+  # install.sh's system_unit_home run against the unit dir under WORK.
+  GOETHE_SYSTEMD_UNIT_DIR="${UNITS}" bash -c "$(sed -n '/^system_unit_home() {/,/^}/p' "${INSTALL}")"$'\n'system_unit_home
+}
+if [[ -n "$(unit_home)" ]]; then
+  echo "system_unit_home must be empty without a unit"
+  exit 1
+fi
+printf '[Service]\nEnvironment=GOETHE_HOME=/srv/a\nExecStart=/srv/a/bin/goethed\n' >"${UNITS}/goethed.service"
+if [[ "$(unit_home)" != "/srv/a" ]]; then
+  echo "system_unit_home misread the installer's unit: $(unit_home)"
+  exit 1
+fi
+printf '[Service]\nEnvironment="GOETHE_HOME=/srv/my home/.goethe"\nEnvironmentFile=-/srv/x/goethe.env\n' \
+  >"${UNITS}/goethed.service"
+if [[ "$(unit_home)" != "/srv/my home/.goethe" ]]; then
+  echo "system_unit_home misread goethe service enable's quoted unit: $(unit_home)"
+  exit 1
+fi
 
 echo "stage6_installer_checks ok"
