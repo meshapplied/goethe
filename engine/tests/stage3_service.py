@@ -207,6 +207,8 @@ def main() -> None:
         if list(units.values()) != [str(home)]:
             raise RuntimeError(f"enable with systemd --user must write one user unit pinning this home: {units}")
         unit = unit_dir / next(iter(units))
+        if "KillMode=process" not in unit.read_text(encoding="utf-8"):
+            raise RuntimeError("the generated unit must use KillMode=process so engines can outlive goethed")
         out = run_goethe([str(goethe), "service", "status"], env=env).stdout
         if "boot method:" not in out or "goethed:" not in out or "systemd" not in out:
             raise RuntimeError(f"unexpected status output: {out!r}")
