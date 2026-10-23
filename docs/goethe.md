@@ -310,16 +310,20 @@ Model card keys you may edit by hand in `goethe_card.toml`:
 
 ## Status and known limitations
 
-Verified on real hardware (RTX PRO 6000 Blackwell, SM120, x86_64, Ubuntu 24.04), next to other teams' GPU processes that were never touched:
-- install, upgrade and the Ubuntu 22.04 container install;
+Verified on real hardware (RTX PRO 6000 Blackwell Max-Q, SM120, x86_64, Ubuntu 24.04, driver 595), next to other teams' GPU processes that were never touched:
+- install, the Ubuntu 22.04 container install, and in-place upgrades;
 - model install, scan and remove;
 - the 27B NVFP4 model loading next to foreign processes, co-residency and replicas;
 - drain, force unload, crash recovery, and restore after restart;
 - every gateway and key check;
 - VRAM calibration;
-- the zero-downtime daemon restart.
+- the zero-downtime update:
+  - `goethe update` ran while the 27B served a live stream, and the stream completed normally;
+  - the engine kept its process and was not reloaded;
+  - clients saw 0.27 s of 502s.
+- An upgrade from a build older than zero-downtime restart reloads the models instead (about 70 s for the 27B).
 
-The automated gate (about 50 tests plus around 190 unit tests) passes.
+The automated gate (49 test files plus 194 unit tests) passes.
 
 Not yet verified on hardware:
 - SM86 GPUs, GB10, and aarch64 hosts;
