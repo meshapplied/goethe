@@ -742,7 +742,7 @@ def _shutdown_home_daemon(home: Path) -> None:
             pass
     if (home / "nginx" / "nginx.pid").is_file():
         try:
-            run([str(require_cli("goethe")), "stop"], env=home_goethe_env(home), timeout=30)
+            run([str(require_cli("goethe")), "down"], env=home_goethe_env(home), timeout=30)
         except (OSError, RuntimeError, subprocess.SubprocessError):
             pass
 

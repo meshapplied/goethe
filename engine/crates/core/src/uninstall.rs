@@ -20,7 +20,7 @@ pub fn run(opts: UninstallOpts) -> Result<(), String> {
     }
     plan.push("remove installer symlinks that point into GOETHE_HOME".to_string());
     crate::host::confirm(&format!("goethe uninstall will:\n  {}\nProceed?", plan.join("\n  ")), opts.yes)?;
-    shutdown::run_stop().map_err(|e| format!("could not stop goethed ({e}); stop it, then run goethe uninstall again"))?;
+    shutdown::run_down().map_err(|e| format!("could not stop goethed ({e}); stop it, then run goethe uninstall again"))?;
     crate::service::run_disable()?;
     remove_installer_symlinks(&home);
     remove_home_contents(&home, opts.purge_models)?;

@@ -72,9 +72,9 @@ class Keep:
         if stop == "rpc":
             goethe_rpc(self.home, "shutdown", {"keep_engines": True})
         else:
-            rr = run([self.goethe, "stop", "--keep-engines"], env=self.env, timeout=60)
+            rr = run([self.goethe, "down", "--keep-engines"], env=self.env, timeout=60)
             if rr.returncode != 0:
-                LATE.append(f"goethe stop --keep-engines exit {rr.returncode}: {(rr.stderr or rr.stdout)[-200:]}")
+                LATE.append(f"goethe down --keep-engines exit {rr.returncode}: {(rr.stderr or rr.stdout)[-200:]}")
                 return
         self.md.popen.wait(timeout=20)
         if self.md.popen.returncode != 0:
@@ -112,7 +112,7 @@ def _json(body: bytes) -> bool:
 
 
 def main() -> None:
-    """Adoption through the shutdown RPC, then through goethe stop --keep-engines, then a clean unload."""
+    """Adoption through the shutdown RPC, then through goethe down --keep-engines, then a clean unload."""
     goethe = str(require_cli("goethe"))
     gpu = roomiest_test_gpu()
     with gpu_flock([gpu]), temp_home(stub_python=True, tag="keep") as home:

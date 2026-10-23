@@ -111,6 +111,7 @@ GOETHE_HOME/
   - `goethe install org/model` downloads the repo, checks every weight file against its Hugging Face sha256, and registers it.
   - Interrupted downloads resume per file, and re-installs re-check only files that changed.
   - Duplicate weights and `original/` checkpoints are skipped, and free disk is checked first.
+- Model catalog: `goethe recommend` and `goethe models` use the published catalog, or the copy built into the binary when it cannot be reached.
 - Gated or private repos:
   - Goethe never logs in to Hugging Face. Download the model yourself and move the folder into `GOETHE_HOME/models`.
   - `goethe scan` finds it and checks that it can be served. It needs a known architecture, complete safetensors, a supported quantization that the GPUs can run, and a size that fits.
@@ -159,7 +160,7 @@ GOETHE_HOME/
 - **Crash recovery:** a crashed engine shows as RESTARTING and is restarted after 5, 15, then 45 seconds, up to 3 times in 10 minutes. After that it is stopped and marked FAILED.
 - **Startup watchdog:** an engine that writes no log for 180 s while starting, or takes more than 30 minutes in total, is stopped and marked FAILED.
 - **Restore:** after a daemon restart or a reboot, loaded models come back in the order they were first loaded, unless you unloaded them.
-- **Zero-downtime restart:** `goethe stop --keep-engines`, the installer and `goethe update` let engines and the gateway keep running while goethed is replaced.
+- **Zero-downtime restart:** `goethe down --keep-engines`, the installer and `goethe update` let engines and the gateway keep running while goethed is replaced.
   - In-flight requests get up to 30 s to finish.
   - The new goethed adopts the running engines after verifying them.
   - Requests that arrive in the short gap get a JSON 502 from nginx.
@@ -242,6 +243,7 @@ Exit codes: `0` success, `1` error, `2` usage error, `3` confirmation needed but
 | `goethe load` | Load a model and wait until it is RUNNING | `MODEL_ID`, `--gpus LIST`, `--tp N`, `--ep N`, `--ctx N`, `--max-conc N`, `--yes`, `--force`, `--replica`, `--no-wait`, `--json`, `-- EXTRA_SGLANG_FLAGS` |
 | `goethe unload` | Drain and stop a model's instances | `[MODEL_ID]`, `--all`, `--force` |
 | `goethe ps` | Show instances, GPUs, ports, status and the gateway URL | `--json` |
+| `goethe get api` | Print the API base URL and how to authenticate, then the loaded models | `--json` |
 | `goethe alias set` | Map a short name to an installed model | `ALIAS MODEL` |
 | `goethe alias list` | List aliases | none |
 | `goethe alias remove` | Remove an alias | `ALIAS` |
@@ -264,7 +266,8 @@ Exit codes: `0` success, `1` error, `2` usage error, `3` confirmation needed but
 
 | Command | Description | Arguments |
 |---|---|---|
-| `goethe stop` | Stop goethed (loaded models are restored on next start) | `--keep-engines` |
+| `goethe up` | Start goethed and the gateway; print the API URL | none |
+| `goethe down` | Stop goethed and its engines (loaded models come back on the next `goethe up`) | `--keep-engines` |
 | `goethe service enable` | Start goethed at boot (systemd, systemd user, or cron) | none |
 | `goethe service disable` | Remove this home's autostart | none |
 | `goethe service status` | Show autostart state | none |
@@ -279,6 +282,7 @@ Exit codes: `0` success, `1` error, `2` usage error, `3` confirmation needed but
 
 ```bash
 curl -fsSL https://meshapplied.com/install.sh | bash
+goethe up
 goethe hw profile
 goethe install Qwen/Qwen3-8B --load
 goethe allowlist add 127.0.0.1/32
@@ -288,7 +292,7 @@ curl -k https://127.0.0.1:8443/v1/chat/completions \
   -d '{"model":"Qwen/Qwen3-8B","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-`goethe ps` prints the real gateway URL when 8443 is taken.
+`goethe get api` prints the real API URL (the port moves when 8443 is taken) and the loaded models; `goethe down` stops everything.
 
 ## Configuration
 
