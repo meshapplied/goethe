@@ -705,7 +705,7 @@ fn load_installed(model_id: &str, opts: &InstallOpts) -> Result<(), String> {
 pub fn send_load(mut params: Value) -> Result<String, String> {
     // Load RPC; on a foreign-process notice (code 3) ask on a terminal and resend with yes=true, else exit 3.
     params["is_tty"] = json!(false);
-    let call = |p: &Value| crate::rpc::call("load", p.clone()).map_err(crate::rpc::map_daemon_err);
+    let call = |p: &Value| crate::rpc::call("load", p.clone()).map_err(crate::paths::daemon_err);
     let mut reply = call(&params)?;
     if reply.code == 3 {
         print_reply_text(&reply);

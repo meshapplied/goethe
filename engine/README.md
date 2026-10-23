@@ -6,7 +6,7 @@ Serves LLMs on NVIDIA GPUs (SM86 and SM120) behind an OpenAI compatible API. Rus
 
     curl -fsSL https://meshapplied.com/install.sh | bash
 
-The installer verifies a signed manifest, creates a Python environment with SGLang, installs `goethe` and `goethed`, starts the daemon and links `goethe` into `/usr/local/bin` (or `~/.local/bin`). No root needed. State lives in `$GOETHE_HOME`, else `/workspace/.goethe`, else `/var/lib/goethe`, else `~/.goethe`.
+The installer verifies a signed manifest, creates a Python environment with SGLang, installs `goethe` and `goethed`, starts the daemon and links `goethe` into `/usr/local/bin` (or `~/.local/bin`). No root needed. State lives in `$GOETHE_HOME`, else in the home whose `bin/` holds the running binary (links are followed, so the linked `goethe` finds a custom home), else `/workspace/.goethe`, else `/var/lib/goethe`, else `~/.goethe`.
 
 To install from a local release tree (testing before publishing):
 
@@ -124,6 +124,8 @@ Add models without writing numbers by hand:
 ## Environment
 
 `GOETHE_HOME`, `GOETHE_SOCK`, `GOETHE_MUX_PORT`, `GOETHE_PUBLIC_PORT`, `GOETHE_ENGINE_PORTS`, `GOETHE_DRAIN_SECS`, `GOETHE_MAX_BODY_MB`, `GOETHE_MARLIN`, `GOETHE_PKG_URL`, `GOETHE_PKG_TOKEN` (private packages), `GOETHE_REGISTRY_URL`, `HF_ENDPOINT`, `HF_HUB_OFFLINE`, `NGINX_BIN`, `GOETHE_REQUIRE_GPU`, `GOETHE_NO_LINK` (installer), `GOETHE_INSECURE` (installer, skips signature checks, development only).
+
+`$GOETHE_HOME/goethe.env` (written by the installer, `KEY=VALUE` lines) supplies `GOETHE_PKG_URL`, `GOETHE_REGISTRY_URL` and `GOETHE_PKG_TOKEN` when the environment does not set them (goethe reads no other keys from it); the systemd unit loads the same file.
 
 ## Building a release
 

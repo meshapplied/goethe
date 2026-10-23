@@ -120,8 +120,8 @@ pub struct ValidateOpts {
 }
 
 pub fn registry_url() -> String {
-    std::env::var("GOETHE_REGISTRY_URL")
-        .unwrap_or_else(|_| "https://pkg.meshapplied.com/v1/registry.json".to_string())
+    crate::paths::setting("GOETHE_REGISTRY_URL")
+        .unwrap_or_else(|| "https://pkg.meshapplied.com/v1/registry.json".to_string())
 }
 
 pub fn fetch(url: &str) -> Result<Registry, String> {

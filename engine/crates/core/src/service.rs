@@ -214,10 +214,10 @@ fn systemd_quote(s: &str) -> String {
 }
 
 pub fn unit_text(home: &Path, wanted_by: &str) -> String {
-    // Unit with quoted paths and an optional GOETHE_HOME/goethed.env for overrides such as ports.
+    // Unit with quoted paths and the installer's optional GOETHE_HOME/goethe.env.
     let h = home.display().to_string();
     format!(
-        "[Unit]\nDescription=Goethe control plane daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nEnvironment={}\nEnvironmentFile=-{h}/goethed.env\nExecStart={}\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy={wanted_by}\n",
+        "[Unit]\nDescription=Goethe control plane daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nEnvironment={}\nEnvironmentFile=-{h}/goethe.env\nExecStart={}\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy={wanted_by}\n",
         systemd_quote(&format!("GOETHE_HOME={h}")),
         systemd_quote(&format!("{h}/bin/goethed")),
     )
@@ -361,7 +361,7 @@ mod tests {
         let unit = unit_text(home, "default.target");
         assert!(unit.contains("Environment=\"GOETHE_HOME=/srv/my home/.goethe\""));
         assert!(unit.contains("ExecStart=\"/srv/my home/.goethe/bin/goethed\""));
-        assert!(unit.contains("EnvironmentFile=-/srv/my home/.goethe/goethed.env"));
+        assert!(unit.contains("EnvironmentFile=-/srv/my home/.goethe/goethe.env"));
         let cron = cron_line(Path::new("/srv/50%/.goethe"));
         assert_eq!(
             cron,

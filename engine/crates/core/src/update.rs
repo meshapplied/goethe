@@ -88,8 +88,8 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
 }
 
 pub fn pkg_base_url() -> String {
-    std::env::var("GOETHE_PKG_URL")
-        .unwrap_or_else(|_| "https://pkg.meshapplied.com".to_string())
+    crate::paths::setting("GOETHE_PKG_URL")
+        .unwrap_or_else(|| "https://pkg.meshapplied.com".to_string())
         .trim_end_matches('/')
         .to_string()
 }
@@ -144,10 +144,8 @@ fn fetch_pkg_file(base: &str, rel: &str, dest: &Path) -> Result<(), String> {
     // GET one CDN file, with GOETHE_PKG_TOKEN as a bearer token when set.
     let url = format!("{base}/{rel}");
     let mut req = crate::net::agent().get(&url).timeout(std::time::Duration::from_secs(60));
-    if let Ok(tok) = std::env::var("GOETHE_PKG_TOKEN") {
-        if !tok.trim().is_empty() {
-            req = req.set("Authorization", &format!("Bearer {}", tok.trim()));
-        }
+    if let Some(tok) = crate::paths::setting("GOETHE_PKG_TOKEN") {
+        req = req.set("Authorization", &format!("Bearer {}", tok.trim()));
     }
     let resp = req.call().map_err(|e| format!("fetch {rel}: {e}"))?;
     let mut buf = Vec::new();

@@ -814,7 +814,7 @@ fn key_create_stdout(token: &str, name: &str, raw: bool) -> String {
 }
 
 fn rpc_daemon_err(e: String) -> String {
-    rpc::map_daemon_err(e)
+    goethe_core::paths::daemon_err(e)
 }
 
 fn do_gpu_list(json: bool) -> Result<(), String> {
