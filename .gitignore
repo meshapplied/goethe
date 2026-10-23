@@ -22,3 +22,6 @@ build/
 *.local.toml
 docs/gpu-checks.md
 !engine/packaging/release_pub.pem
+
+# Developer docs (local only, never committed)
+docs/dev/
