@@ -34,7 +34,7 @@ To install from a local release tree (testing before publishing):
 - `--gpus 2,3` uses exactly those GPUs; tensor parallelism is the number listed.
 - `--tp N` alone picks N GPUs.
 - Neither: Goethe chooses the smallest valid TP that fits, preferring GPUs without foreign processes, then most free VRAM, then GPUs on the same NUMA node. If nothing fits it shrinks the context, then the concurrency, then fails with the exact shortfall.
-- The decision is printed, for example `auto: tp=2 on GPUs 2,3 (1 GPU needs 61.2 GB, best free 52.0 GB)`.
+- The decision is printed with the budget in parts, for example `auto: tp=2 on GPUs 2,3: 33.4 GB per GPU (weights 23.6 + KV 8.0 + overhead 1.8)`. `goethe hw pick-gpus --model <id> [--tp N]` shows where a load would go right now without loading anything.
 - Goethe never stops a process it did not start. When a target GPU runs other software, the load lists each process (PID, name, user, VRAM) with the command to stop it yourself, asks for confirmation on a terminal, and exits 3 without one. `--yes` loads alongside them; if they leave too little VRAM, the error says how much is missing and which processes hold it.
 
 ## Models
