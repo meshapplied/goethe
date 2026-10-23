@@ -138,7 +138,6 @@ fn choose_mode(vpns: &[VpnAddr]) -> Result<Mode, String> {
         Some(v) => format!("detected: {} {} on {}", v.kind, v.ip, v.name),
         None => "none detected; set up Tailscale or WireGuard first".to_string(),
     };
-    eprintln!("How should clients reach the API?");
     eprintln!("  1) Local only: programs on this machine");
     eprintln!("  2) VPN (recommended): devices on your private network ({detected})");
     eprintln!("  3) Public network (not recommended): any address that can reach this machine");
