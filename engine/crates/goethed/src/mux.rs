@@ -413,6 +413,8 @@ async fn proxy(
         inner: upstream,
         meter: UsageMeter::new(sse, finish.started),
         done: Some((finish, guard, code)),
+        sse,
+        cut: false,
     };
     Response::from_parts(parts, body.boxed())
 }
@@ -421,7 +423,11 @@ struct MeteredBody {
     inner: Incoming,
     meter: UsageMeter,
     done: Option<(Finish, inflight::InflightGuard, u16)>,
+    sse: bool,
+    cut: bool,
 }
+
+const STREAM_CUT_EVENT: &[u8] = b"data: {\"error\":{\"message\":\"the engine stopped during this stream (model unloaded or engine crashed)\",\"type\":\"unavailable_error\",\"code\":\"engine_stopped\"}}\n\ndata: [DONE]\n\n";
 
 impl MeteredBody {
     fn finish(&mut self) {
@@ -439,14 +445,22 @@ impl Body for MeteredBody {
     type Error = hyper::Error;
 
     fn poll_frame(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
-        // Frames pass through untouched while data is metered; end of stream or an error finalizes.
+        // Frames pass through while data is metered; a cut SSE stream ends with an OpenAI error event, not a reset.
         let this = self.get_mut();
+        if this.cut {
+            return Poll::Ready(None);
+        }
         let polled = Pin::new(&mut this.inner).poll_frame(cx);
         match &polled {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
                     this.meter.feed(data);
                 }
+            }
+            Poll::Ready(Some(Err(_))) if this.sse => {
+                this.finish();
+                this.cut = true;
+                return Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(STREAM_CUT_EVENT)))));
             }
             Poll::Ready(None) | Poll::Ready(Some(Err(_))) => this.finish(),
             Poll::Pending => {}
@@ -455,7 +469,7 @@ impl Body for MeteredBody {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        self.cut || self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> SizeHint {
