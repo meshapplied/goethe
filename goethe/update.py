@@ -17,7 +17,7 @@ def check(inst: Install, pin: dict[str, str]) -> list[Check]:
     rows = [_rev_row(rev, want)]
     rows += [_patch_row(src, patch, rev == want) for patch in sorted((inst.recipe / "patches").glob("*.patch"))]
     rows.append(Check("binary", "ok", str(inst.binary)) if inst.has_binary
-                else Check("binary", "fail", "ninfer-serve is not built", "run goethe serve"))
+                else Check("binary", "fail", "ninfer-serve is not built", "run goethe-lab serve"))
     rows.append(_model_row(inst, pin))
     if "GREEDY_DIGEST" in pin:
         rows.append(Check("digest", "ok", f"{pin['GREEDY_DIGEST']}, replay is not run here"))
@@ -33,7 +33,7 @@ def _rev(src: Path) -> str | None:
 
 def _rev_row(rev: str | None, want: str) -> Check:
     if rev is None:
-        return Check("engine", "fail", "NInfer source is not installed", "run goethe serve")
+        return Check("engine", "fail", "NInfer source is not installed", "run goethe-lab serve")
     if rev != want:
         return Check("engine", "fail", f"{rev[:12]}, pin is {want[:12]}")
     return Check("engine", "ok", rev[:12])
@@ -46,7 +46,7 @@ def _patch_row(src: Path, patch: Path, at_pin: bool) -> Check:
     if applied:
         return Check("patch", "ok", patch.name)
     if _apply_ok(src, patch, reverse=False):
-        return Check("patch", "fail", f"{patch.name} is not applied", "run goethe serve")
+        return Check("patch", "fail", f"{patch.name} is not applied", "run goethe-lab serve")
     return Check("patch", "fail", f"{patch.name} does not match this tree")
 
 
@@ -60,7 +60,7 @@ def _apply_ok(src: Path, patch: Path, reverse: bool) -> bool:
 def _model_row(inst: Install, pin: dict[str, str]) -> Check:
     path = inst.model_file
     if not path.is_file():
-        return Check("model", "fail", "not downloaded", "run goethe serve")
+        return Check("model", "fail", "not downloaded", "run goethe-lab serve")
     size = path.stat().st_size
     if size != int(pin["MODEL_BYTES"]):
         return Check("model", "fail", f"{size} bytes, pin says {pin['MODEL_BYTES']}")
@@ -69,7 +69,7 @@ def _model_row(inst: Install, pin: dict[str, str]) -> Check:
     if digest == pin["MODEL_PATCHED_SHA256"]:
         return Check("model", "ok", f"{digest[:12]}, patched")
     if digest == pin["MODEL_SHA256"]:
-        return Check("model", "fail", f"{digest[:12]}, the head patch is not applied", "run goethe serve")
+        return Check("model", "fail", f"{digest[:12]}, the head patch is not applied", "run goethe-lab serve")
     return Check("model", "fail", f"{digest[:12]} matches neither hash in the pin")
 
 

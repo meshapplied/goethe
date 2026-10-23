@@ -1,0 +1,382 @@
+--- a/python/sglang/srt/layers/quantization/goethe_marlin.py
++++ b/python/sglang/srt/layers/quantization/goethe_marlin.py
+@@ -0,0 +1,32 @@
++"""NVFP4 Marlin route selection for compressed-tensors layers, resolved once per layer at weight load."""
++
++import os
++
++import torch
++
++
++def _marlin_disabled() -> bool:
++    return os.environ.get("GOETHE_MARLIN", "1").strip().lower() in (
++        "0",
++        "false",
++        "no",
++        "off",
++    )
++
++
++def mode() -> str:
++    """Return stock, marlin_all, or marlin_small for the current device and environment."""
++    if _marlin_disabled():
++        return "stock"
++    if os.environ.get("GOETHE_FORCE_PATH", "").strip().lower() == "w4a16":
++        return "marlin_all"
++    if torch.cuda.is_available():
++        major, _minor = torch.cuda.get_device_capability()
++        if major < 10:
++            return "marlin_all"
++    return "marlin_small"
++
++
++def max_rows() -> int:
++    """Largest batch, in rows, that marlin_small sends to Marlin (GOETHE_MARLIN_MAX_ROWS, default 128)."""
++    return int(os.environ.get("GOETHE_MARLIN_MAX_ROWS", "128"))
+--- a/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4.py
++++ b/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4.py
+@@ -17,6 +17,7 @@
+     CompressedTensorsLinearScheme,
+ )
+ from sglang.srt.layers.quantization.fp4_utils import get_fp4_gemm_runner_backend
++from sglang.srt.layers.quantization.goethe_marlin import max_rows, mode
+ from sglang.srt.layers.quantization.modelopt_quant import (
+     enable_flashinfer_fp4_gemm,
+     fp4_gemm,
+@@ -29,12 +30,60 @@
+ __all__ = ["CompressedTensorsW4A4Fp4"]
+ 
+ 
++def _marlin_global_scale(stored_weight_global_scale: torch.Tensor) -> torch.Tensor:
++    """Compressed-tensors stores the reciprocal of Marlin's multiplier."""
++    return (1.0 / stored_weight_global_scale.to(torch.float32)).reshape(1)
++
++
++def _prepare_marlin_sidecar(
++    layer: torch.nn.Module,
++    raw_weight: torch.Tensor,
++    raw_scale: torch.Tensor,
++    stored_weight_global_scale: torch.Tensor,
++    prepare_nvfp4_layer_for_marlin: Callable[[torch.nn.Module], None],
++) -> None:
++    tmp = torch.nn.Module()
++    tmp.output_size_per_partition = layer.output_size_per_partition
++    tmp.input_size_per_partition = layer.input_size_per_partition
++    tmp.params_dtype = layer.params_dtype
++    tmp.weight = Parameter(raw_weight.clone(), requires_grad=False)
++    tmp.weight_scale = Parameter(raw_scale.clone(), requires_grad=False)
++    tmp.weight_global_scale = Parameter(
++        _marlin_global_scale(stored_weight_global_scale).to(
++            device=stored_weight_global_scale.device
++        ),
++        requires_grad=False,
++    )
++    prepare_nvfp4_layer_for_marlin(tmp)
++    layer.marlin_weight = tmp.weight
++    layer.marlin_scale = tmp.weight_scale
++    layer.marlin_global_scale = tmp.weight_global_scale
++    layer.marlin_workspace = tmp.workspace
++
++
++def _release_stock_nvfp4_tensors(layer: torch.nn.Module) -> None:
++    for name in (
++        "weight_packed",
++        "weight_scale",
++        "alpha",
++        "input_global_scale",
++        "weight_global_scale",
++    ):
++        if not hasattr(layer, name):
++            continue
++        param = getattr(layer, name)
++        if isinstance(param, Parameter):
++            param.data = torch.empty(0, dtype=param.dtype, device=param.data.device)
++
++
+ class CompressedTensorsW4A4Fp4(CompressedTensorsLinearScheme):
+     def __init__(self):
+         self.group_size = 16
+ 
+     @classmethod
+     def get_min_capability(cls) -> int:
++        if mode() != "stock":
++            return 80
+         return 100
+ 
+     def create_weights(
+@@ -50,6 +99,7 @@
+         layer.logical_widths = output_partition_sizes
+         layer.input_size_per_partition = input_size_per_partition
+         layer.output_size_per_partition = output_size_per_partition
++        layer.params_dtype = params_dtype
+ 
+         # Weight
+         weight = ModelWeightParameter(
+@@ -92,6 +142,22 @@
+         layer.register_parameter("input_global_scale", input_global_scale)
+ 
+     def process_weights_after_loading(self, layer) -> None:
++        route = mode()
++        layer.goethe_route = route
++        layer.goethe_max_rows = max_rows()
++        if route != "stock":
++            try:
++                from sglang.srt.layers.quantization.marlin_utils_fp4 import (
++                    apply_fp4_marlin_linear,
++                    prepare_nvfp4_layer_for_marlin,
++                )
++            except ImportError as exc:
++                raise RuntimeError(
++                    f"CompressedTensorsW4A4Fp4 route {route} needs SGLang's Marlin FP4 "
++                    "kernels (marlin_utils_fp4); set GOETHE_MARLIN=0 for the stock path."
++                ) from exc
++            layer.goethe_marlin_apply = apply_fp4_marlin_linear
++
+         global_input_scale = layer.input_global_scale.max().to(torch.float32)
+         layer.input_global_scale = Parameter(global_input_scale, requires_grad=False)
+ 
+@@ -99,6 +165,20 @@
+             layer.weight_global_scale.max().to(torch.float32), requires_grad=False
+         )
+ 
++        raw_weight = layer.weight_packed.data
++        raw_scale = layer.weight_scale.data.clone()
++
++        if route == "marlin_all":
++            _prepare_marlin_sidecar(
++                layer,
++                raw_weight,
++                raw_scale,
++                layer.weight_global_scale,
++                prepare_nvfp4_layer_for_marlin,
++            )
++            _release_stock_nvfp4_tensors(layer)
++            return
++
+         if get_fp4_gemm_runner_backend().is_flashinfer_trtllm():
+             # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
+             # FlashInfer provides nvfp4_quantize to quantize + shuffle the
+@@ -131,12 +211,48 @@
+             requires_grad=False,
+         )
+ 
++        if route == "marlin_small":
++            _prepare_marlin_sidecar(
++                layer,
++                raw_weight,
++                raw_scale,
++                layer.weight_global_scale,
++                prepare_nvfp4_layer_for_marlin,
++            )
++
++    def _apply_marlin(
++        self,
++        layer: torch.nn.Module,
++        x: torch.Tensor,
++        bias: Optional[torch.Tensor],
++    ) -> torch.Tensor:
++        out = layer.goethe_marlin_apply(
++            input=x,
++            weight=layer.marlin_weight,
++            weight_scale=layer.marlin_scale,
++            weight_global_scale=layer.marlin_global_scale,
++            workspace=layer.marlin_workspace,
++            size_n=layer.output_size_per_partition,
++            size_k=layer.input_size_per_partition,
++            bias=None,
++        )
++        if bias is not None:
++            out = out + bias
++        return out
++
+     def apply_weights(
+         self,
+         layer: torch.nn.Module,
+         x: torch.Tensor,
+         bias: Optional[torch.Tensor] = None,
+     ) -> torch.Tensor:
++        route = layer.goethe_route
++        if route == "marlin_all" or (
++            route == "marlin_small"
++            and x.numel() // x.shape[-1] <= layer.goethe_max_rows
++        ):
++            return self._apply_marlin(layer, x, bias)
++
+         output_dtype = x.dtype
+         w_n, _ = layer.weight_packed.shape
+         output_shape = [x.shape[0], w_n]
+--- a/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py
++++ b/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import importlib
+ import logging
+ from typing import TYPE_CHECKING
+ 
+@@ -10,12 +11,14 @@
+ from sglang.srt.layers.quantization.compressed_tensors.schemes import (
+     CompressedTensorsMoEScheme,
+ )
++from sglang.srt.layers.quantization.goethe_marlin import mode as goethe_marlin_mode
+ from sglang.srt.layers.quantization.utils import (
+     prepare_static_weights_for_trtllm_fp4_moe,
+     reorder_w1w3_to_w3w1,
+     replace_parameter,
+     swizzle_blockscale,
+ )
++from sglang.srt.layers.utils.common import copy_or_rebind_param
+ from sglang.srt.runtime_context import get_platform
+ from sglang.srt.utils import set_weight_attrs
+ 
+@@ -30,16 +33,26 @@
+     )
+ 
+ 
++def _goethe_moe_marlin() -> bool:
++    """Use Marlin MoE when goethe routing selects marlin_all (SM86 or GOETHE_FORCE_PATH)."""
++    return goethe_marlin_mode() == "marlin_all"
++
++
+ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
+     def __init__(self):
+-        if not get_platform().is_blackwell:
++        self._goethe_marlin = _goethe_moe_marlin()
++        if not self._goethe_marlin and not get_platform().is_blackwell:
+             raise ValueError(
+                 "Current platform does not support NVFP4"
+                 " quantization. Please use Blackwell and"
+                 " above."
+             )
+         self.group_size = 16
+-        self.use_flashinfer_trtllm = get_moe_runner_backend().is_flashinfer_trtllm()
++        self.use_flashinfer_trtllm = (
++            False
++            if self._goethe_marlin
++            else get_moe_runner_backend().is_flashinfer_trtllm()
++        )
+ 
+     @property
+     def load_up_proj_weight_first(self) -> bool:
+@@ -49,6 +62,8 @@
+     @classmethod
+     def get_min_capability(cls) -> int:
+         # Requires sm100(blackwell) architecture
++        if _goethe_moe_marlin():
++            return 80
+         return 100
+ 
+     def create_weights(
+@@ -175,6 +190,59 @@
+         )
+         delattr(layer, "w2_weight_packed")
+ 
++        if self._goethe_marlin:
++            try:
++                from sglang.srt.layers.quantization.marlin_utils_fp4 import (
++                    prepare_moe_nvfp4_layer_for_marlin,
++                )
++            except ImportError as exc:
++                raise RuntimeError(
++                    "CompressedTensorsW4A4Nvfp4MoE Marlin route needs SGLang's Marlin FP4 "
++                    "MoE kernels (marlin_utils_fp4); set GOETHE_MARLIN=0 for the stock path."
++                ) from exc
++
++            if not torch.allclose(
++                layer.w13_weight_global_scale[:, 0], layer.w13_weight_global_scale[:, 1]
++            ):
++                logger.warning_once(
++                    "w1_weight_global_scale must match w3_weight_global_scale. "
++                    "Accuracy may be affected."
++                )
++
++            layer.w13_weight_scale_2 = torch.nn.Parameter(
++                (1.0 / layer.w13_weight_global_scale[:, 0]).to(torch.float32),
++                requires_grad=False,
++            )
++            layer.w2_weight_scale_2 = torch.nn.Parameter(
++                (1.0 / layer.w2_weight_global_scale.data).to(torch.float32),
++                requires_grad=False,
++            )
++
++            moe_runner_config = layer.moe_runner_config
++            if moe_runner_config.is_gated:
++                if layer.w13_weight_scale_2.dim() == 1:
++                    w13_weight_scale_2 = layer.w13_weight_scale_2
++                else:
++                    w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
++            else:
++                w13_weight_scale_2 = layer.w13_weight_scale_2[:]
++            copy_or_rebind_param(
++                layer,
++                "w13_weight_scale_2",
++                w13_weight_scale_2.contiguous(),
++            )
++            if moe_runner_config.is_gated:
++                up_rows, gate_rows = layer.w13_weight.data.chunk(2, dim=1)
++                up_scales, gate_scales = layer.w13_weight_scale.data.chunk(2, dim=1)
++                layer.w13_weight = torch.nn.Parameter(
++                    torch.cat([gate_rows, up_rows], dim=1), requires_grad=False
++                )
++                layer.w13_weight_scale = torch.nn.Parameter(
++                    torch.cat([gate_scales, up_scales], dim=1), requires_grad=False
++                )
++            prepare_moe_nvfp4_layer_for_marlin(layer)
++            return
++
+         if self.use_flashinfer_trtllm:
+             w, s = reorder_w1w3_to_w3w1(
+                 layer.w13_weight.data, layer.w13_weight_scale.data, dim=-2
+@@ -277,10 +345,41 @@
+                 swizzle_blockscale(layer.w2_weight_scale), requires_grad=False
+             )
+ 
++    def get_marlin_quant_info(self, layer: torch.nn.Module):
++        """Marlin payload after prepare_moe_nvfp4_layer_for_marlin repack."""
++        from sglang.srt.layers.moe.moe_runner.marlin import MarlinMoeQuantInfo
++
++        expert_map = None
++        global_num_experts = -1
++        if hasattr(layer, "dispatcher") and hasattr(
++            layer.dispatcher, "local_expert_mapping"
++        ):
++            expert_map = layer.dispatcher.local_expert_mapping
++            if expert_map is not None:
++                global_num_experts = self.moe_runner_config.num_experts
++
++        return MarlinMoeQuantInfo(
++            w13_qweight=layer.w13_weight,
++            w2_qweight=layer.w2_weight,
++            w13_scales=layer.w13_weight_scale,
++            w2_scales=layer.w2_weight_scale,
++            w13_g_idx_sort_indices=None,
++            w2_g_idx_sort_indices=None,
++            weight_bits=4,
++            w13_global_scale=layer.w13_weight_scale_2,
++            w2_global_scale=layer.w2_weight_scale_2,
++            expert_map=expert_map,
++            global_num_experts=global_num_experts,
++        )
++
+     def create_moe_runner(
+         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
+     ):
+         self.moe_runner_config = moe_runner_config
++        if self._goethe_marlin:
++            importlib.import_module("sglang.srt.layers.moe.moe_runner.marlin")
++            self.runner = MoeRunner(MoeRunnerBackend.MARLIN, moe_runner_config)
++            return
+         if self.use_flashinfer_trtllm:
+             import sglang.srt.layers.moe.moe_runner.flashinfer_trtllm  # noqa: F401 – triggers @register_fused_func
+ 
+@@ -302,6 +401,10 @@
+ 
+         x = dispatch_output.hidden_states
+ 
++        if self._goethe_marlin:
++            quant_info = self.get_marlin_quant_info(layer)
++            return self.runner.run(dispatch_output, quant_info)
++
+         if self.use_flashinfer_trtllm:
+             from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
+                 FlashInferTrtllmFp4MoeQuantInfo,

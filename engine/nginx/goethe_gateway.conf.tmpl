@@ -1,0 +1,109 @@
+# goethe gateway nginx template
+limit_req_zone $binary_remote_addr zone=goethe_ip:10m rate=20r/s;
+limit_conn_zone $binary_remote_addr zone=goethe_conn:10m;
+
+upstream goethe_mux {
+    server 127.0.0.1:{{MUX_PORT}};
+    keepalive 64;
+    keepalive_timeout 5s;
+}
+
+server {
+    listen {{LISTEN}} ssl{{HTTP2_LISTEN}};
+{{HTTP2_ON}}
+    server_tokens off;
+    ssl_certificate {{CERT}};
+    ssl_certificate_key {{KEY}};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:goethe_tls:10m;
+    ssl_session_timeout 1h;
+
+    error_page 497 =444 @close;
+    error_page 403 @e403;
+    error_page 404 @e404;
+    error_page 413 @e413;
+    error_page 429 @e429;
+    error_page 502 @e502;
+    error_page 503 @e503;
+    error_page 504 @e504;
+
+    include {{ALLOWLIST}};
+    deny all;
+
+    limit_req zone=goethe_ip burst=40 nodelay;
+    limit_req_status 429;
+    limit_conn_status 429;
+
+    client_max_body_size {{MAX_BODY_MB}}m;
+    client_body_buffer_size 1m;
+    client_body_timeout 10s;
+
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
+
+    location = /health {
+        proxy_pass http://goethe_mux;
+    }
+
+    location = /health/ready {
+        proxy_pass http://goethe_mux;
+    }
+
+    location /health/admin {
+        proxy_pass http://goethe_mux;
+    }
+
+    location /v1/ {
+        limit_conn goethe_conn 32;
+        proxy_pass http://goethe_mux;
+    }
+
+    location / {
+        return 404;
+    }
+
+    location @close {
+        return 444;
+    }
+
+    location @e403 {
+        default_type application/json;
+        return 403 '{"error":{"message":"Forbidden","type":"forbidden","param":null,"code":"forbidden"}}';
+    }
+
+    location @e404 {
+        default_type application/json;
+        return 404 '{"error":{"message":"Not Found","type":"invalid_request_error","param":null,"code":"not_found"}}';
+    }
+
+    location @e413 {
+        default_type application/json;
+        return 413 '{"error":{"message":"Request body too large","type":"invalid_request_error","param":null,"code":"request_too_large"}}';
+    }
+
+    location @e429 {
+        default_type application/json;
+        return 429 '{"error":{"message":"Rate limit exceeded","type":"rate_limit_error","param":null,"code":"rate_limit_exceeded"}}';
+    }
+
+    location @e502 {
+        default_type application/json;
+        return 502 '{"error":{"message":"Gateway upstream unavailable","type":"upstream_error","param":null,"code":"bad_gateway"}}';
+    }
+
+    location @e503 {
+        default_type application/json;
+        return 503 '{"error":{"message":"Service unavailable","type":"unavailable_error","param":null,"code":"unavailable"}}';
+    }
+
+    location @e504 {
+        default_type application/json;
+        return 504 '{"error":{"message":"Gateway upstream timeout","type":"timeout_error","param":null,"code":"gateway_timeout"}}';
+    }
+}

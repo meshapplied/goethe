@@ -13,7 +13,7 @@ git -C "$SRC" fetch --quiet origin "$REF"
 git -C "$SRC" checkout --quiet --force FETCH_HEAD
 
 mkdir -p "$BIN"
-printf '#!/bin/sh\nexec env PYTHONPATH=%q python3 -m goethe "$@"\n' "$SRC" > "$BIN/goethe"
-chmod +x "$BIN/goethe"
-echo "installed $BIN/goethe"
+printf '#!/bin/sh\nexec env PYTHONPATH=%q python3 -m goethe "$@"\n' "$SRC" > "$BIN/goethe-lab"
+chmod +x "$BIN/goethe-lab"
+echo "installed $BIN/goethe-lab"
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "add $BIN to your PATH" ;; esac
