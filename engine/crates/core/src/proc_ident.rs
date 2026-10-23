@@ -224,6 +224,10 @@ fn members(ids: &[Identity]) -> Vec<(usize, i32, u64)> {
     out
 }
 
+pub fn instance_pids(id: &Identity) -> Vec<i32> {
+    members(std::slice::from_ref(id)).into_iter().map(|(_, p, _)| p).collect()
+}
+
 fn wait_gone(ids: &[Identity], procs: &[(usize, i32, u64)], until: Instant) -> bool {
     loop {
         for id in ids {
