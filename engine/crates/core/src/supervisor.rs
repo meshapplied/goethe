@@ -538,17 +538,20 @@ fn startup(s: &mut Starting) {
             Startup::Cancelled => return cancel_engine(s),
             Startup::PortTaken(why) if port_retries < 3 => {
                 port_retries += 1;
-                match respawn(s, s.need, true) {
-                    Ok(()) => {
-                        load_slot::push_instance_notice(&s.instance_id, &format!("{why}; retried on port {}", s.port));
-                        continue;
-                    }
+                let (outcome, retried) = match respawn(s, s.need, true) {
+                    Ok(()) => (format!("{why}; retried on port {}", s.port), true),
                     Err(_) if load_slot::is_cancelled(&s.cancel) => return cancel_engine(s),
-                    Err(e) => load_slot::push_instance_notice(&s.instance_id, &format!("{why}; {e}")),
+                    Err(e) => (format!("{why}; {e}"), false),
+                };
+                append_goethed_log(&s.home, &format!("{}: {outcome}\n", s.instance_id));
+                load_slot::push_instance_notice(&s.instance_id, &outcome);
+                if retried {
+                    continue;
                 }
                 return fail_engine(s);
             }
             Startup::PortTaken(why) => {
+                append_goethed_log(&s.home, &format!("{}: {why}; giving up after 3 ports\n", s.instance_id));
                 load_slot::push_instance_notice(&s.instance_id, &why);
                 return fail_engine(s);
             }
@@ -1002,7 +1005,7 @@ pub fn handle_unload(
 }
 
 pub fn handle_ps() -> Result<Value, (i32, String)> {
-    // Every instance row (tombstones included) with notices, in-flight count, token rate and next restart attempt.
+    // Every instance row (tombstones included) with notices, its own in-flight count, token rate and next attempt.
     let home = goethe_home();
     let con = db::open(&home).map_err(|e| (1, e.to_string()))?;
     let mut stmt = con
@@ -1037,8 +1040,10 @@ pub fn handle_ps() -> Result<Value, (i32, String)> {
                 v["notices"] = Value::Array(notices.into_iter().map(Value::String).collect());
             }
         }
+        if let Some(id) = v.get("instance_id").and_then(|x| x.as_str()).map(str::to_string) {
+            v["in_flight"] = json!(crate::inflight::instance_count(&id));
+        }
         if let Some(mid) = v.get("model_id").and_then(|x| x.as_str()).map(str::to_string) {
-            v["in_flight"] = json!(crate::inflight::count(&mid));
             v["tokens_per_s_1m"] = json!(crate::metrics::model_tokens_per_s_1m(&mid));
         }
         if v["status"] == "RESTARTING" {
@@ -1797,6 +1802,22 @@ mod tests {
 
     fn free_port() -> u16 {
         TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn ps_counts_in_flight_per_instance() {
+        with_temp_home(|_home, con| {
+            insert_running(con, "i-ps-a", i32::MAX, 1, 30001);
+            insert_running(con, "i-ps-b", i32::MAX - 1, 1, 30002);
+            let mut guard = crate::inflight::track("m");
+            assert_eq!(guard.pick(&["i-ps-a"]), Some(0));
+            let rows = handle_ps().unwrap();
+            let row = |id: &str| rows.as_array().unwrap().iter().find(|r| r["instance_id"] == id).cloned().unwrap();
+            let in_flight = |id: &str| row(id)["in_flight"].clone();
+            assert_eq!(in_flight("i-ps-a"), json!(1));
+            assert_eq!(in_flight("i-ps-b"), json!(0), "a replica of the same model shows only its own requests");
+            drop(guard);
+        });
     }
 
     #[test]
