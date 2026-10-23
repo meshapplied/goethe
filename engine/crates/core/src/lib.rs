@@ -54,3 +54,4 @@ pub mod host;
 pub mod listener;
 pub mod proc_ident;
 pub mod scan;
+pub mod term;

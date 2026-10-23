@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from typing import Any
 
@@ -57,7 +58,7 @@ def _per_instance(goethe: str, env: dict[str, str], home_mux: int, token: str) -
 def _models_line(goethe: str, env: dict[str, str], gpu: int) -> None:
     """The fit column of a loaded model lists its instances instead of judging whether another copy fits."""
     text = run_goethe([goethe, "models"], env=env).stdout
-    rows = {ln.split("\t")[0]: ln.split("\t") for ln in text.splitlines()}
+    rows = {cols[0]: cols for cols in (re.split(r"\s{2,}", ln.strip()) for ln in text.splitlines()) if cols}
     want = {"r": f"2 instances: GPU {gpu} RUNNING, GPU {gpu} RUNNING", "s": f"1 instance: GPU {gpu} RUNNING"}
     for model, prefix in want.items():
         cols = rows.get(model, [])

@@ -87,12 +87,76 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
     if json {
         println!("{}", serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?);
     } else {
-        println!("MODEL\tSTATUS\tSIZE\tFIT ON THIS MACHINE");
+        let mut table = crate::term::Table::new(&["MODEL", "STATUS", "SIZE", "FIT ON THIS MACHINE"]);
         for r in rows {
-            println!("{}\t{}\t{:.2} GB\t{}", r.id, r.status, r.gb, r.fit);
+            table.row(vec![r.id.clone(), crate::term::status(&r.status), format!("{:.2} GB", r.gb), fit_colored(&r.fit)]);
         }
+        table.print();
     }
     Ok(())
+}
+
+pub fn resolve_installed_id(home: &Path, id: &str) -> Result<String, String> {
+    // An installed model id for what the user typed: exact, any case, or its models/ folder name; else a suggestion.
+    let con = db::open(home).map_err(|e| e.to_string())?;
+    let mut stmt = con.prepare("SELECT model_id, local_path FROM installed_models").map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    match_installed(id, &rows).map_err(|near| not_installed_message(id, near.as_deref()))
+}
+
+fn match_installed(id: &str, rows: &[(String, String)]) -> Result<String, Option<String>> {
+    // Exact id, then case-insensitive id, then the folder name (org__name); Err carries the nearest id, if close.
+    let folder = |path: &str| Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let lower = id.to_lowercase();
+    let found = rows.iter().find(|(m, _)| m == id).or_else(|| rows.iter().find(|(m, _)| m.to_lowercase() == lower)).or_else(|| {
+        rows.iter().find(|(m, p)| folder(p).to_lowercase() == lower || m.to_lowercase() == lower.replacen("__", "/", 1))
+    });
+    if let Some((m, _)) = found {
+        return Ok(m.clone());
+    }
+    let near = rows
+        .iter()
+        .map(|(m, _)| (edit_distance(&lower, &m.to_lowercase()), m))
+        .filter(|(d, m)| *d <= (m.len() / 4).max(2))
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, m)| m.clone());
+    Err(near)
+}
+
+fn not_installed_message(id: &str, near: Option<&str>) -> String {
+    match near {
+        Some(m) => format!("model {id} is not installed; did you mean {m}? (goethe models lists installed models)"),
+        None => format!("model {id} is not installed (goethe models lists installed models; goethe install {id} adds it)"),
+    }
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    // Levenshtein distance over characters.
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            cur.push((prev[j] + usize::from(ca != *cb)).min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+fn fit_colored(fit: &str) -> String {
+    // The verdict word of a fit label in color: fits green, does not fit red; the details stay plain.
+    use crate::term::{paint, Color};
+    for (word, color) in [("does not fit", Color::Red), ("unsupported", Color::Red), ("fits", Color::Green)] {
+        if let Some(rest) = fit.strip_prefix(word) {
+            return format!("{}{rest}", paint(word, color));
+        }
+    }
+    fit.to_string()
 }
 
 fn fit_label(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<usize>, marlin_gb: Option<f64>) -> String {
@@ -447,6 +511,17 @@ pub fn installed_ids(home: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_ids_resolve_by_case_and_folder_or_suggest_the_nearest() {
+        let rows = vec![("Qwen/Qwen3-0.6B".to_string(), "models/Qwen__Qwen3-0.6B".to_string())];
+        assert_eq!(match_installed("Qwen/Qwen3-0.6B", &rows), Ok("Qwen/Qwen3-0.6B".to_string()));
+        assert_eq!(match_installed("qwen/qwen3-0.6b", &rows), Ok("Qwen/Qwen3-0.6B".to_string()));
+        assert_eq!(match_installed("Qwen__Qwen3-0.6B", &rows), Ok("Qwen/Qwen3-0.6B".to_string()));
+        assert_eq!(match_installed("Qwen/Qwen3-0.68", &rows), Err(Some("Qwen/Qwen3-0.6B".to_string())));
+        assert_eq!(match_installed("meta-llama/Llama-3.1-8B", &rows), Err(None));
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+    }
 
     fn home_with_db() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

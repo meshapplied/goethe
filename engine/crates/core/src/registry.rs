@@ -149,8 +149,36 @@ pub fn fetch(url: &str) -> Result<Registry, String> {
     Err(format!("unsupported registry URL scheme: {url}"))
 }
 
+const MISS_TTL_SECS: u64 = 300;
+
+fn recent_miss(miss: &Path, url: &str) -> bool {
+    // A failed fetch of this same URL within the last few minutes, so commands skip the slow retry.
+    let fresh = std::fs::metadata(miss)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() < MISS_TTL_SECS);
+    fresh && std::fs::read_to_string(miss).is_ok_and(|u| u.trim() == url)
+}
+
 fn fetch_http_cached(url: &str) -> Result<Registry, String> {
+    // Fetch with ETag revalidation; an unreachable or unparsable registry is remembered for a few minutes.
     let home = goethe_home();
+    let miss = home.join("registry.miss");
+    if recent_miss(&miss, url) {
+        return Err(format!("registry unreachable at {url} (last try under {} min ago)", MISS_TTL_SECS / 60));
+    }
+    let result = fetch_http_uncached(&home, url);
+    if result.is_err() {
+        let _ = std::fs::write(&miss, url);
+    } else {
+        let _ = std::fs::remove_file(&miss);
+    }
+    result
+}
+
+fn fetch_http_uncached(home: &Path, url: &str) -> Result<Registry, String> {
+    // One request: a 200 refreshes the cache, a 304 reuses it, and offline mode falls back to it.
     let cache_path = home.join("registry.cache.json");
     let offline = hf::offline_mode();
     let mut req = crate::net::agent().get(url).timeout(std::time::Duration::from_secs(10));

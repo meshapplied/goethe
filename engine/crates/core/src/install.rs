@@ -120,6 +120,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         return Err(format!("{}: no such directory", opts.model_id));
     }
     validate_model_id(&opts.model_id)?;
+    println!("looking up {} ...", opts.model_id);
     let entry = fetch(&registry_url())
         .ok()
         .and_then(|r| find_model(&r, &opts.model_id).cloned());

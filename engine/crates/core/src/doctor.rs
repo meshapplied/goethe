@@ -30,9 +30,11 @@ pub fn run(json: bool, probe_public: bool) -> Result<(), String> {
     if json {
         println!("{}", serde_json::to_string_pretty(&checks).map_err(|e| e.to_string())?);
     } else {
+        let mut table = crate::term::Table::new(&["CHECK", "STATUS", "DETAIL"]);
         for c in &checks {
-            println!("{}: {} - {}", c.name, c.status, c.hint);
+            table.row(vec![c.name.clone(), crate::term::status(&c.status), c.hint.clone()]);
         }
+        table.print();
     }
     if probe_public {
         probe_public_reachability(&home);
@@ -231,24 +233,32 @@ fn check_hardware(home: &Path) -> Check {
         .ok()
         .map(|con| crate::placement::managed_pids(&con))
         .unwrap_or_default();
-    let mut parts = Vec::new();
+    let mut lines = vec![format!("driver {}", hw.driver)];
+    let mut unsupported = 0;
     for g in &hw.gpus {
-        let ok_sm = ["8.6", "12.0", "12.1"]
-            .iter()
-            .any(|sm| g.compute_capability.starts_with(sm));
-        let foreign = g
-            .running_processes
-            .iter()
-            .filter(|p| !managed.contains(&(p.pid as i32)))
-            .count();
-        let status_tag = if ok_sm { "OK" } else { "WARN" };
-        let um = if g.unified_memory { " unified_memory" } else { "" };
-        parts.push(format!(
-            "gpu{} {status_tag} {} CC {} VRAM free/total {}/{} MB foreign_procs={foreign}{um}",
-            g.index, g.name, g.compute_capability, g.vram_free_mb, g.vram_total_mb
+        let ok_sm = ["8.6", "12.0", "12.1"].iter().any(|sm| g.compute_capability.starts_with(sm));
+        unsupported += usize::from(!ok_sm);
+        let foreign = g.running_processes.iter().filter(|p| !managed.contains(&(p.pid as i32))).count();
+        let plural = if foreign == 1 { "" } else { "es" };
+        let um = if g.unified_memory { ", unified memory" } else { "" };
+        let sm_note = if ok_sm { "" } else { "; this SM is not supported (need 8.6, 12.0 or 12.1)" };
+        lines.push(format!(
+            "gpu{} {} (SM {}): {:.1} of {:.1} GB free{um}, {foreign} foreign process{plural}{sm_note}",
+            g.index,
+            g.name,
+            g.compute_capability,
+            g.vram_free_mb as f64 / 1024.0,
+            g.vram_total_mb as f64 / 1024.0
         ));
     }
-    check("hardware", "OK", format!("driver {} | gpus: {}", hw.driver, parts.join("; ")))
+    let status = if hw.gpus.is_empty() || unsupported == hw.gpus.len() {
+        "FAIL"
+    } else if unsupported > 0 {
+        "WARN"
+    } else {
+        "OK"
+    };
+    check("hardware", status, lines.join("\n"))
 }
 
 fn check_glibc() -> Check {
