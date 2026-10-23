@@ -109,7 +109,7 @@ check_nvidia_driver() {
     echo "WARNING: nvidia-smi not found; GPU workloads need an NVIDIA driver ${DRIVER_MIN}+" >&2
     return 0
   fi
-  ver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d '[:space:]')"
+  ver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | awk 'NR == 1 {print $1}' || true)"
   if [[ -z "${ver}" ]]; then
     echo "WARNING: could not read NVIDIA driver version from nvidia-smi" >&2
     return 0
