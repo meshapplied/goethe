@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -27,6 +29,8 @@ from lib.goethe_test import (
     roomiest_test_gpu,
     run,
     run_goethe,
+    run_temp_prefix,
+    sha256_file,
     spawn,
     temp_home,
     test_public_port,
@@ -72,6 +76,42 @@ def _check_goethe_env(home: Path, goethe: str, env: dict[str, str], pkg_url: str
         late.append(f"recommend with only goethe.env failed (exit {rec.returncode}): {rec.stderr[-300:]}")
 
 
+def _cdn_with_ternary(src: Path, root: Path) -> Path:
+    """A copy of the signed CDN plus a tiny ternary pack, re-signed with a throwaway key embedded in its install.sh."""
+    cdn = root / "cdn"
+    shutil.copytree(src, cdn)
+    pack = root / "pack" / "ternary-kernels"
+    pack.mkdir(parents=True)
+    (pack / "README").write_text("e2e ternary pack\n", encoding="utf-8")
+    (cdn / "goethe").mkdir(exist_ok=True)
+    tarball = cdn / "goethe" / "ternary-kernels.tar.zst"
+    subprocess.run(["tar", "--zstd", "-C", str(pack.parent), "-cf", str(tarball), "ternary-kernels"], check=True)
+    keys, packaging = root / "keys", GOETHE_PKG / "packaging"
+    steps = [
+        ["bash", str(packaging / "keygen.sh"), str(keys)],
+        ["bash", str(packaging / "subst_install_pubkey.sh"), str(GOETHE_PKG / "cdn" / "install.sh"),
+         str(keys / "release_pub.pem"), str(cdn / "install.sh")],
+        ["bash", str(packaging / "sign_cdn.sh"), str(cdn), str(keys / "release.key")],
+    ]
+    for cmd in steps:
+        rr = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if rr.returncode != 0:
+            raise RuntimeError(f"{Path(cmd[1]).name} failed: {rr.stderr[-300:]}")
+    return cdn
+
+
+def _check_ternary(home: Path, goethe: str, env: dict[str, str], cdn: Path, late: list[str]) -> None:
+    """The installer unpacked the ternary pack and recorded its signed sha256, which update --check compares."""
+    want = sha256_file(cdn / "goethe" / "ternary-kernels.tar.zst")
+    record = home / "goethe" / "ternary-kernels.sha256"
+    got = record.read_text(encoding="utf-8").strip() if record.is_file() else None
+    if got != want or not (home / "goethe" / "ternary-kernels" / "README").is_file():
+        raise RuntimeError(f"ternary pack not unpacked or its sha256 not recorded: {got} != {want}")
+    upd = run([goethe, "update", "--check", "--ternary"], env=env, timeout=120)
+    if f"ternary pack {want[:12]} is up to date" not in upd.stdout:
+        late.append(f"update --check --ternary must see the recorded pack: {(upd.stdout + upd.stderr)[-300:]}")
+
+
 def _port_busy(port: int) -> bool:
     """True when 127.0.0.1:port cannot be bound."""
     with socket.socket() as sock:
@@ -109,9 +149,19 @@ def main() -> None:
     """Install from the signed CDN, serve a chat through the gateway with a stub engine, re-install in place."""
     if os.environ.get("GOETHE_TEST_E2E", "0") != "1":
         raise Skip("set GOETHE_TEST_E2E=1 for installer e2e gate")
-    cdn = Path(os.environ.get("GOETHE_TEST_CDN", f"{GOETHE_PKG}/dist/cdn"))
-    if not (cdn / "install.sh").is_file() or not (cdn / "SHA256SUMS.sig").is_file():
-        raise RuntimeError(f"GOETHE_TEST_E2E=1 needs a signed CDN at {cdn} (packaging/build_cdn.sh)")
+    src = Path(os.environ.get("GOETHE_TEST_CDN", f"{GOETHE_PKG}/dist/cdn"))
+    if not (src / "install.sh").is_file() or not (src / "SHA256SUMS.sig").is_file():
+        raise RuntimeError(f"GOETHE_TEST_E2E=1 needs a signed CDN at {src} (packaging/build_cdn.sh)")
+    root = Path(tempfile.mkdtemp(prefix=run_temp_prefix("e2ecdn"), dir="/tmp"))
+    try:
+        cdn = _cdn_with_ternary(src, root)
+        _serve_and_install(cdn)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _serve_and_install(cdn: Path) -> None:
+    """Serve cdn over local HTTP and run the install, gateway, ternary and re-install checks against it."""
     port = free_port()
     srv: Proc = spawn(
         [os.environ.get("GOETHE_PYTHON", "python3"), "-m", "http.server", str(port), "--bind", "127.0.0.1"],
@@ -151,6 +201,7 @@ def main() -> None:
                 write_stub_python(bin_dir, bin_dir / "python-real")
                 goethe = str(home / "bin" / "goethe")
                 _check_goethe_env(home, goethe, env, pkg_url, late)
+                _check_ternary(home, goethe, env, cdn, late)
                 src = home / "src-model"
                 src.mkdir()
                 (src / "config.json").write_text(json.dumps(_CFG), encoding="utf-8")
