@@ -64,6 +64,9 @@ jobs:
           . engine/sglang/PIN
           git clone --quiet --filter=blob:none --no-checkout "$SGLANG_REPO" sglang-fork
           git -C sglang-fork checkout --quiet "$SGLANG_REV"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.1"
       - name: Signed release build (x86_64 and aarch64)
         env:
           SGLANG_FORK_SRC: ${{ github.workspace }}/sglang-fork
