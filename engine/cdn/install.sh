@@ -340,20 +340,36 @@ goethed_answers() {
   "${GOETHE_HOME}/bin/goethe" ps >/dev/null 2>&1
 }
 
+system_unit_home() {
+  # GOETHE_HOME pinned by the existing goethed system unit, empty when there is none.
+  local unit="${GOETHE_SYSTEMD_UNIT_DIR:-/etc/systemd/system}/goethed.service" pinned
+  if [[ ! -f "${unit}" ]]; then
+    return 0
+  fi
+  pinned="$(grep -m1 -o 'GOETHE_HOME=[^"]*' "${unit}" || true)"
+  printf '%s\n' "${pinned#GOETHE_HOME=}"
+}
+
 start_goethed() {
-  # systemd unit for root on systemd hosts, otherwise a detached nohup goethed; skipped when one answers.
+  # systemd unit for root on systemd hosts unless another home owns it, else a detached nohup goethed.
+  local other
   if goethed_answers; then
     echo "goethed already running for ${GOETHE_HOME}"
     return
   fi
   if [[ "$(id -u)" -eq 0 && "$(ps -p 1 -o comm= 2>/dev/null || true)" == "systemd" ]]; then
-    fetch "goethed.service" "${GOETHE_HOME}/goethed.service"
-    sed "s|__GOETHE_HOME__|${GOETHE_HOME}|g" "${GOETHE_HOME}/goethed.service" >/etc/systemd/system/goethed.service
-    mkdir -p /etc/goethe
-    printf 'NGINX_BIN=%s\n' "${NGINX_BIN}" >/etc/goethe/goethe.env
-    systemctl daemon-reload
-    systemctl enable --now goethed.service
-    return
+    other="$(system_unit_home)"
+    if [[ -z "${other}" || "${other}" == "${GOETHE_HOME}" ]]; then
+      fetch "goethed.service" "${GOETHE_HOME}/goethed.service"
+      sed "s|__GOETHE_HOME__|${GOETHE_HOME}|g" "${GOETHE_HOME}/goethed.service" >/etc/systemd/system/goethed.service
+      mkdir -p /etc/goethe
+      printf 'NGINX_BIN=%s\n' "${NGINX_BIN}" >/etc/goethe/goethe.env
+      systemctl daemon-reload
+      systemctl enable --now goethed.service
+      return
+    fi
+    echo "goethed.service already starts goethed for ${other}; this home starts now but gets no autostart." >&2
+    echo "To move autostart here: GOETHE_HOME=${other} goethe service disable, then goethe service enable." >&2
   fi
   local launcher=(nohup)
   if command -v setsid >/dev/null 2>&1; then
