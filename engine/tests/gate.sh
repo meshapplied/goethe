@@ -131,7 +131,7 @@ build_step() {
       return 1
     fi
     stale="$(find "${GOETHE_PKG}/crates/core" "${GOETHE_PKG}/crates/${b}" -type f \
-      \( -name '*.rs' -o -name 'Cargo.toml' \) -newer "${GOETHE_BIN_DIR}/${b}" | head -3)"
+      \( -name '*.rs' -o -name 'Cargo.toml' \) -newer "${GOETHE_BIN_DIR}/${b}" | head -3 || true)"
     if [[ -n "${stale}" ]]; then
       record "step0 binaries" FAIL 0 "${GOETHE_BIN_DIR}/${b} is older than: $(echo "${stale}" | tr '\n' ' ')"
       return 1
