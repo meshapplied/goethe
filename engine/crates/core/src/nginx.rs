@@ -229,32 +229,59 @@ pub fn set_public_bind(home: &Path, addr: &str) -> Result<String, String> {
     ))
 }
 
-fn is_local_address(ip: IpAddr) -> bool {
-    // An interface of this host carries the address; a bind test alone passes everything under ip_nonlocal_bind.
+pub struct InterfaceAddr {
+    pub name: String,
+    pub ip: IpAddr,
+    pub prefix: u8,
+}
+
+fn sockaddr_ip(sa: *const libc::sockaddr) -> Option<IpAddr> {
+    // An IPv4 or IPv6 address out of a sockaddr from getifaddrs.
+    let family = unsafe { sa.as_ref() }.map(|a| i32::from(a.sa_family))?;
+    match family {
+        libc::AF_INET => {
+            let sin = unsafe { &*(sa as *const libc::sockaddr_in) };
+            Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))))
+        }
+        libc::AF_INET6 => {
+            let sin6 = unsafe { &*(sa as *const libc::sockaddr_in6) };
+            Some(IpAddr::V6(Ipv6Addr::from(sin6.sin6_addr.s6_addr)))
+        }
+        _ => None,
+    }
+}
+
+pub fn interface_addrs() -> Option<Vec<InterfaceAddr>> {
+    // Every address on this host's interfaces with its interface name and prefix length; None when getifaddrs fails.
     let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
     if unsafe { libc::getifaddrs(&mut ifap) } != 0 {
-        return TcpListener::bind((ip, 0)).is_ok();
+        return None;
     }
-    let mut found = ip.is_loopback();
+    let mut out = Vec::new();
     let mut cur = ifap;
     while !cur.is_null() {
         let ifa = unsafe { &*cur };
-        let addr = match unsafe { ifa.ifa_addr.as_ref() }.map(|a| i32::from(a.sa_family)) {
-            Some(libc::AF_INET) => {
-                let sin = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in) };
-                Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))))
-            }
-            Some(libc::AF_INET6) => {
-                let sin6 = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in6) };
-                Some(IpAddr::V6(Ipv6Addr::from(sin6.sin6_addr.s6_addr)))
-            }
-            _ => None,
-        };
-        found |= addr == Some(ip);
+        if let Some(ip) = sockaddr_ip(ifa.ifa_addr) {
+            let prefix = match sockaddr_ip(ifa.ifa_netmask) {
+                Some(IpAddr::V4(m)) => u32::from(m).count_ones() as u8,
+                Some(IpAddr::V6(m)) => u128::from(m).count_ones() as u8,
+                None => if ip.is_ipv4() { 32 } else { 128 },
+            };
+            let name = unsafe { std::ffi::CStr::from_ptr(ifa.ifa_name) }.to_string_lossy().into_owned();
+            out.push(InterfaceAddr { name, ip, prefix });
+        }
         cur = ifa.ifa_next;
     }
     unsafe { libc::freeifaddrs(ifap) };
-    found
+    Some(out)
+}
+
+fn is_local_address(ip: IpAddr) -> bool {
+    // An interface of this host carries the address; a bind test alone passes everything under ip_nonlocal_bind.
+    match interface_addrs() {
+        Some(addrs) => ip.is_loopback() || addrs.iter().any(|a| a.ip == ip),
+        None => TcpListener::bind((ip, 0)).is_ok(),
+    }
 }
 
 fn binds_clash(previous: &str, next: IpAddr) -> bool {

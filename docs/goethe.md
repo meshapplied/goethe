@@ -188,6 +188,9 @@ GOETHE_HOME/
   - revocation takes effect immediately.
 - **Rate limits:** nginx limits every client address (20 requests per second, burst 40, 32 open API connections); per-key limits are enforced in the mux. Request bodies are capped at `GOETHE_MAX_BODY_MB` (default 10).
 - **Aliases:** `goethe alias set chat org/model` lets clients use a short name. A real model id always wins over an alias spelled the same.
+- **Guided access setup:** `goethe configure api` asks whether clients are local, on a VPN or on a public network, then sets the bind address and allowlist to match:
+  - VPN mode listens only on the VPN address and allows the VPN's range (all of `100.64.0.0/10` for Tailscale).
+  - Public mode warns first, binds every interface, and allows only the client IPs you name. It refuses `0.0.0.0/0` unless you confirm on a terminal.
 - **TLS and binding:**
   - TLS uses a self-signed certificate by default.
   - The gateway listens on 127.0.0.1. Use `goethe gateway bind 0.0.0.0` (plus an allowlist entry) to serve other machines.
@@ -252,6 +255,7 @@ Exit codes: `0` success, `1` error, `2` usage error, `3` confirmation needed but
 
 | Command | Description | Arguments |
 |---|---|---|
+| `goethe configure api` | Guided setup of who can reach the API: local only, VPN (recommended, detects Tailscale, WireGuard and ZeroTier) or public network (warns, asks for client IPs); offers to create a key | `--mode local\|vpn\|public`, `--vpn-ip IP`, `--allow CIDR` (repeatable), `--yes` |
 | `goethe gateway status` | Show bind address, port, URL, state and allowlist size | `--json` |
 | `goethe gateway bind` | Set where the gateway listens | `ADDR` (`127.0.0.1`, `0.0.0.0` or an IP of this host) |
 | `goethe allowlist add` | Allow an address range | `CIDR`, `--description TEXT` |
