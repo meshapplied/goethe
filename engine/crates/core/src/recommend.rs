@@ -18,6 +18,8 @@ pub struct RecommendedModel {
     pub tp: u64,
     pub gpus: Vec<u32>,
     pub vram_per_gpu_gb: f64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub manual_download: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,8 +48,9 @@ pub fn run(json_out: bool) -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
     } else {
         for item in &out.recommended {
+            let manual = if item.manual_download { " (manual download: gated on Hugging Face)" } else { "" };
             println!(
-                "recommended {} tp={} gpus={:?} {:.2} GB/gpu",
+                "recommended {} tp={} gpus={:?} {:.2} GB/gpu{manual}",
                 item.model_id, item.tp, item.gpus, item.vram_per_gpu_gb
             );
         }
@@ -78,6 +81,7 @@ pub fn recommend(hw: &HardwareState, reg: &Registry) -> RecommendOutput {
                 tp: fit.tp as u64,
                 gpus: fit.gpus,
                 vram_per_gpu_gb: fit.need_gb,
+                manual_download: model.gated.unwrap_or(false),
             }),
             Err(missing) => excluded.push(ExcludedModel {
                 model_id: model.id.clone(),

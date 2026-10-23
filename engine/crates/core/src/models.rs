@@ -68,7 +68,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
             });
             rows.push(ModelRow {
                 id: m.id.clone(),
-                status: "available".to_string(),
+                status: if m.gated.unwrap_or(false) { "manual download" } else { "available" }.to_string(),
                 gb: m.download_gb.unwrap_or(m.static_vram_gb),
                 fit: if sm_ok { fit_label(&registry_input(m), pinned, &hw) } else { "unsupported SM".to_string() },
                 custom: None,
@@ -101,7 +101,7 @@ fn installed_rows(con: &Connection) -> Result<Vec<Installed>, String> {
     let mut stmt = con
         .prepare(
             "SELECT model_id, static_vram_gb, kv_bytes_per_token, default_ctx, default_max_conc, default_tp,
-                    NULL, max_ctx, num_attention_heads, num_kv_heads, attention
+                    max_ctx, num_attention_heads, num_kv_heads, attention
              FROM installed_models ORDER BY model_id",
         )
         .map_err(|e| e.to_string())?;
@@ -109,16 +109,16 @@ fn installed_rows(con: &Connection) -> Result<Vec<Installed>, String> {
         .query_map([], |r| {
             let kv_bytes: i64 = r.get(2)?;
             let default_ctx: i64 = r.get(3)?;
-            let max_ctx = r.get::<_, Option<i64>>(7)?.unwrap_or(default_ctx).max(1) as u64;
+            let max_ctx = r.get::<_, Option<i64>>(6)?.unwrap_or(default_ctx).max(1) as u64;
             Ok(Installed {
                 id: r.get(0)?,
                 default_tp: r.get(5)?,
                 input: ChooserInput {
                     static_vram_gb: r.get(1)?,
                     kv_bytes_per_token: kv_bytes.max(1) as u64,
-                    num_attention_heads: r.get::<_, Option<i64>>(8)?.unwrap_or(1) as u64,
-                    num_kv_heads: r.get::<_, Option<i64>>(9)?.unwrap_or(1) as u64,
-                    attention: r.get::<_, Option<String>>(10)?.unwrap_or_else(|| "gqa".to_string()),
+                    num_attention_heads: r.get::<_, Option<i64>>(7)?.unwrap_or(1) as u64,
+                    num_kv_heads: r.get::<_, Option<i64>>(8)?.unwrap_or(1) as u64,
+                    attention: r.get::<_, Option<String>>(9)?.unwrap_or_else(|| "gqa".to_string()),
                     max_ctx,
                     ctx: (default_ctx.max(1) as u64).min(max_ctx),
                     max_conc: r.get::<_, i64>(4)? as u64,
