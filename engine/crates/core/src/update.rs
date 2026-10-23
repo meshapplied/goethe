@@ -88,6 +88,9 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     let ternary = if differs("ternary pack") { stage_ternary(pkg, &sums, tmp)? } else { None };
     let was_running = crate::service::goethed_running();
     swap_all(&staged)?;
+    if bins {
+        crate::service::refresh_unit(home);
+    }
     if let Some(w) = wheel {
         bootstrap_engine(home, &w)?;
         let name = w.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -417,7 +420,6 @@ fn unpack_ternary(home: &Path, archive: &Path) -> Result<(), String> {
 
 fn restart_goethed(home: &Path) -> Result<(), String> {
     // Engines keep serving: stop the old goethed with keep_engines, then start the new one (systemd for this home's unit).
-    crate::service::refresh_unit(home);
     println!("{}", crate::service::stop_keeping_engines()?);
     match crate::service::systemctl_restart_args() {
         Some(args) => {
