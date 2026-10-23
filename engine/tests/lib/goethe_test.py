@@ -723,13 +723,17 @@ def write_stub_python(pyenv_bin: Path, real: Path) -> None:
 
 
 def _teardown_home(td: Path, strict: bool) -> None:
-    """Remove a temp home; fail (when strict) if stub engines outlived it."""
-    leftover = stub_engine_pids(td)
+    """Remove a temp home; when strict, fail if any process (engine, CLI, download) or file outlived the test."""
+    leftover = sorted(p for p in home_process_tree(td) if pid_alive(p))
+    names = [proc_cmdline(p)[:100] for p in leftover]
     shutil.rmtree(td, ignore_errors=True)
     if leftover:
         wait_until(lambda: not any(pid_alive(p) for p in leftover), timeout=10.0)
-        if strict:
-            raise RuntimeError(f"stub engines outlived temp home {td}: {leftover}")
+        shutil.rmtree(td, ignore_errors=True)
+    if strict and leftover:
+        raise RuntimeError(f"processes outlived temp home {td}: {list(zip(leftover, names, strict=True))}")
+    if strict and td.exists():
+        raise RuntimeError(f"temp home {td} could not be removed: {[str(x) for x in td.rglob('*')][:5]}")
 
 
 @contextmanager
