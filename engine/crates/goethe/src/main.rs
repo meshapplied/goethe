@@ -26,6 +26,8 @@ use serde_json::{json, Value};
                   goethe unload removes all instances of a model (all slots) and their desired rows."
 )]
 struct Cli {
+    #[arg(short = 'V', long = "version", help = "Print version, git commit and build date.")]
+    version: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -395,7 +397,7 @@ enum ServiceCommands {
     Status,
     #[command(about = "Toggle restore of desired loads at goethed start.")]
     Restore {
-        #[arg(long, help = "Disable restore on start.")]
+        #[arg(long, conflicts_with = "on", help = "Disable restore on start.")]
         off: bool,
         #[arg(long, help = "Enable restore on start.")]
         on: bool,
@@ -460,6 +462,10 @@ fn main() {
         return;
     }
     let cli = Cli::parse();
+    if cli.version {
+        println!("{}", goethe_core::build_info::version_line());
+        return;
+    }
     let result = match cli.command {
         Commands::Hw {
             cmd: HwCommands::Profile { json },
@@ -631,7 +637,7 @@ fn main() {
                 (Some(_), true) => usage("give either a model id or --all, not both"),
                 (None, true) => {}
             }
-            do_unload(model_id, all, force)
+            do_unload(model_id.as_deref(), force)
         }
         Commands::Ps { json } => do_ps(json),
         Commands::Stop => shutdown::run_stop(),
@@ -673,7 +679,12 @@ fn main() {
             daemon,
             gateway,
             prune,
-        } => goethe_core::logs::run_logs(target.as_deref(), follow, lines, daemon, gateway, prune),
+        } => {
+            if target.is_none() && !(daemon || gateway || prune) {
+                usage("give a model id or instance id, or --daemon or --gateway");
+            }
+            goethe_core::logs::run_logs(target.as_deref(), follow, lines, daemon, gateway, prune)
+        }
         Commands::Update {
             check,
             engine,
@@ -696,19 +707,22 @@ fn main() {
         }),
         Commands::Allowlist { cmd } => match cmd {
             AllowlistCommands::Add { cidr, description } => {
-                security::allowlist_add(&cidr, description.as_deref())
+                security::allowlist_add(&cidr, description.as_deref()).map(|()| {
+                    println!("allowlist: added {}", security::canonical_cidr(&cidr).unwrap_or(cidr));
+                })
             }
-            AllowlistCommands::Remove { cidr } => security::allowlist_remove(&cidr),
-            AllowlistCommands::List => match security::allowlist_list() {
-                Ok(rows) => {
-                    print_gateway_line();
-                    for cidr in rows {
-                        println!("{cidr}");
-                    }
-                    Ok(())
+            AllowlistCommands::Remove { cidr } => security::allowlist_remove(&cidr).map(|()| {
+                println!("allowlist: removed {}", security::canonical_cidr(&cidr).unwrap_or(cidr));
+            }),
+            AllowlistCommands::List => security::allowlist_list().map(|rows| {
+                for cidr in &rows {
+                    println!("{cidr}");
                 }
-                Err(e) => Err(e),
-            },
+                if rows.is_empty() {
+                    eprintln!("the allowlist is empty, so the gateway refuses every client: goethe allowlist add <client-ip>/32");
+                }
+                print_gateway_line();
+            }),
         },
         Commands::Key { cmd } => match cmd {
             KeyCommands::Create {
@@ -718,17 +732,21 @@ fn main() {
                 expires,
                 models,
                 admin,
-            } => match security::key_create(&name, true, rpm, expires.as_deref(), models.as_deref(), admin) {
-                Ok(token) => {
-                    print!("{}", key_create_stdout(&token, &name, raw));
+            } => {
+                if name.trim().is_empty() {
+                    usage("--name must not be empty");
+                }
+                if let Some(Err(e)) = models.as_deref().map(security::model_scope_list) {
+                    usage(e);
+                }
+                security::key_create(&name, true, rpm, expires.as_deref(), models.as_deref(), admin).map(|token| {
+                    print!("{}", key_create_stdout(&token, &key_id_for_token(&token), &name, raw));
                     if let Some(line) = nginx::format_gateway_line(&goethe_home()) {
                         eprintln!("{line}");
                     }
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            },
-            KeyCommands::Revoke { key_id } => security::key_revoke(&key_id),
+                })
+            }
+            KeyCommands::Revoke { key_id } => security::key_revoke(&key_id).map(|()| println!("revoked key {key_id}")),
             KeyCommands::List { json } => {
                 if json {
                     match security::key_list_detailed() {
@@ -744,7 +762,7 @@ fn main() {
                             for row in rows {
                                 let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("");
                                 let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                let rpm = row.get("rpm").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let rpm = rpm_text(row.get("rpm").and_then(|v| v.as_i64()).unwrap_or(0));
                                 let exp = row.get("expires").and_then(|v| v.as_str()).unwrap_or("-");
                                 let models = row.get("models").and_then(|v| v.as_str()).unwrap_or("");
                                 let admin = row
@@ -766,7 +784,7 @@ fn main() {
             }
         },
         Commands::Alias { cmd } => match cmd {
-            AliasCommands::Set { alias: a, model } => alias::set(&a, &model),
+            AliasCommands::Set { alias: a, model } => alias::set(&a, &model).map(|()| println!("alias {a} -> {model}")),
             AliasCommands::List => match alias::list() {
                 Ok(rows) => {
                     for (a, model) in rows {
@@ -776,7 +794,7 @@ fn main() {
                 }
                 Err(e) => Err(e),
             },
-            AliasCommands::Remove { alias: a } => alias::remove(&a),
+            AliasCommands::Remove { alias: a } => alias::remove(&a).map(|()| println!("removed alias {a}")),
         },
     };
     match result {
@@ -842,12 +860,32 @@ fn do_load(args: DoLoadArgs) -> Result<(), String> {
     install::run_load(params, args.no_wait, args.json)
 }
 
-fn key_create_stdout(token: &str, name: &str, raw: bool) -> String {
+fn key_id_for_token(token: &str) -> String {
+    // The stored key id of a token just created (ids are random, so look it up by the token hash).
+    db::open(&goethe_home())
+        .ok()
+        .and_then(|con| {
+            con.query_row("SELECT key_id FROM api_keys WHERE token_hash = ?1", [security::token_hash(token)], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+        })
+        .unwrap_or_else(|| "?".to_string())
+}
+
+fn rpm_text(rpm: i64) -> String {
+    if rpm <= 0 {
+        "unlimited".to_string()
+    } else {
+        rpm.to_string()
+    }
+}
+
+fn key_create_stdout(token: &str, id: &str, name: &str, raw: bool) -> String {
     // --raw prints exactly the token; otherwise the token once, its id, and a store-it-now note.
     if raw {
         return format!("{token}\n");
     }
-    let id = token.get(8..16).unwrap_or("?");
     format!(
         "API key: {token}\nKey id:  {id} (name {name})\nStore this key now: goethe keeps only its hash and cannot show it again.\n"
     )
@@ -914,17 +952,53 @@ fn do_gpu_allow(id: u32) -> Result<(), String> {
     Ok(())
 }
 
-fn do_unload(model_id: Option<String>, all: bool, force: bool) -> Result<(), String> {
+fn do_unload(model_id: Option<&str>, force: bool) -> Result<(), String> {
+    // Unload one model (or all), then confirm how many instances stopped; a model goethe knows nothing about exits 1.
+    let (live, known) = unload_counts(model_id);
     let reply = rpc::call(
         "unload",
-        json!({"model_id": model_id, "all": all, "force": force}),
+        json!({"model_id": model_id, "all": model_id.is_none(), "force": force}),
     )
     .map_err(rpc_daemon_err)?;
     if reply.code != 0 {
         eprintln!("{}", reply.stderr);
-        std::process::exit(reply.code as i32);
+        std::process::exit(reply.code);
     }
-    Ok(())
+    let what = model_id.unwrap_or("all models");
+    match (live, known) {
+        (_, 0) if model_id.is_some() => Err(format!("{what} is not loaded (goethe ps lists loaded models)")),
+        (_, 0) => {
+            println!("nothing was loaded");
+            Ok(())
+        }
+        (0, _) => {
+            println!("unloaded {what} (no running instance; it will not be restored)");
+            Ok(())
+        }
+        (n, _) => {
+            println!("unloaded {what} ({n} instance{})", if n == 1 { "" } else { "s" });
+            Ok(())
+        }
+    }
+}
+
+fn unload_counts(model_id: Option<&str>) -> (i64, i64) {
+    // Live instances, and every instance or desired row, for one model or all, read before the unload.
+    let home = goethe_home();
+    if !home.join("state.db").is_file() {
+        return (0, 0);
+    }
+    let Ok(con) = db::open(&home) else {
+        return (0, 0);
+    };
+    let count = |sql: &str| con.query_row(sql, [model_id], |r| r.get::<_, i64>(0)).unwrap_or(0);
+    let only = "(?1 IS NULL OR model_id = ?1)";
+    let live = count(&format!(
+        "SELECT COUNT(*) FROM loaded_instances WHERE status IN ('STARTING', 'RUNNING', 'RESTARTING') AND {only}"
+    ));
+    let rows = count(&format!("SELECT COUNT(*) FROM loaded_instances WHERE {only}"))
+        + count(&format!("SELECT COUNT(*) FROM desired_loads WHERE {only}"));
+    (live, rows)
 }
 
 fn ps_gpus_csv(row: &Value) -> String {
@@ -979,10 +1053,10 @@ fn do_ps(json: bool) -> Result<(), String> {
     if json {
         println!("{}", reply.stdout.trim());
     } else {
-        print_gateway_line();
         if let Ok(Value::Array(rows)) = serde_json::from_str(reply.stdout.trim()) {
             print_ps_table(&rows);
         }
+        print_gateway_line();
     }
     Ok(())
 }
@@ -1041,8 +1115,9 @@ fn gateway_status_text(bind: &str, port: u16, url: &str, running: bool, allowlis
 }
 
 fn print_gateway_line() {
+    // On stderr, so stdout stays the data rows.
     if let Some(line) = nginx::format_gateway_line(&goethe_home()) {
-        println!("{line}");
+        eprintln!("{line}");
     }
 }
 
@@ -1123,10 +1198,12 @@ mod tests {
     #[test]
     fn key_create_raw_is_only_the_token() {
         let token = "goethe_sk_0123456789abcdef0123456789abcdef";
-        assert_eq!(key_create_stdout(token, "ops", true), format!("{token}\n"));
-        let human = key_create_stdout(token, "ops", false);
+        assert_eq!(key_create_stdout(token, "a1b2c3d4e5f6", "ops", true), format!("{token}\n"));
+        let human = key_create_stdout(token, "a1b2c3d4e5f6", "ops", false);
         assert!(human.contains(token));
-        assert!(human.contains("Key id:  k_012345"));
+        assert!(human.contains("Key id:  a1b2c3d4e5f6 (name ops)"));
+        assert_eq!(rpm_text(0), "unlimited");
+        assert_eq!(rpm_text(120), "120");
         assert!(human.contains("Store this key now"));
         assert_eq!(human.matches(token).count(), 1);
     }

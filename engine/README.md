@@ -66,7 +66,7 @@ For gated or private repos, accept the license on Hugging Face, download with yo
     goethe load <model_id> [--gpus csv] [--tp N] [--ep N] [--ctx N] [--max-conc N] [--replica] [--no-wait] [--json] [-- <sglang flags>]
     goethe unload <model_id> [--force] | --all  # drains in-flight requests (new ones get 503), then unloads; --force cuts them
     goethe list                               # alias of goethe models
-    goethe alias set <alias> <model_id> | list | remove <alias>
+    goethe alias set <alias> <model_id> | list | remove <alias>   # an alias may not be empty or another model's id
     goethe gpu list [--json]                  # index, compute capability, managed and foreign VRAM, ALLOWED or DENIED
     goethe gpu deny <id> | allow <id>         # denied GPUs are skipped by automatic placement and refused with --gpus
     goethe config <model_id> --ctx 32768 --max-conc 4
@@ -94,7 +94,7 @@ Loaded models are restored after a daemon restart or reboot unless you unloaded 
 
 - The public gateway (nginx, TLS, self-signed by default) allows only addresses added with `goethe allowlist add|remove|list`.
 - It listens on 127.0.0.1 unless you run `goethe gateway bind 0.0.0.0` (or one IP address of this host); `goethe gateway bind 127.0.0.1` closes it again and `goethe gateway status` shows bind, port, URL and allowlist size. Moving between loopback and 0.0.0.0 restarts nginx (a few seconds without the gateway); `goethe domain add` also binds 0.0.0.0.
-- API keys: `goethe key create --name N [--rpm N] [--expires 30d] [--models a,b] [--admin]`, `goethe key list`, `goethe key revoke <id>`. Keys are stored hashed; usage per key is counted.
+- API keys: `goethe key create --name N [--rpm N] [--expires 30d] [--models a,b] [--admin]`, `goethe key list`, `goethe key revoke <id>`. Keys are stored hashed; usage per key is counted. `--rpm` defaults to 120; `--rpm 0` means unlimited and `key list` shows it as `unlimited`. An empty `--name` or `--models` is refused.
 - A key with `--models` sees only those models in `/v1/models`. Requests for any other model, or for a model that is not loaded, get 404 `Model Not Found`.
 - Health: `/health` (public), `/health/ready?model=<id>` (200 only when that model's engine answers), `/health/admin` (admin key only; other callers get 404) returns GPU VRAM, instances with in-flight counts, and inactive models.
 - Engines listen on loopback only and each one gets its own random API key, so a local process cannot use an engine without going through the gateway. SGLang refuses keys with `--tokenizer-worker-num` above 1; such engines run keyless (still loopback only).
