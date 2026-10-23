@@ -1014,10 +1014,26 @@ fn ps_gpus_csv(row: &Value) -> String {
         .unwrap_or_default()
 }
 
+fn ps_status(row: &Value, now: i64) -> String {
+    // RESTARTING rows (crash backoff) show the coming attempt and the seconds until it.
+    let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    if status != "RESTARTING" {
+        return status.to_string();
+    }
+    let attempt = row.get("restarts").and_then(|v| v.as_i64()).unwrap_or(0) + 1;
+    match row.get("next_attempt_at").and_then(|v| v.as_i64()) {
+        Some(at) => format!("RESTARTING (attempt {attempt}, next in {}s)", (at - now).max(0)),
+        None => format!("RESTARTING (attempt {attempt})"),
+    }
+}
+
 fn print_ps_table(rows: &[Value]) {
     if rows.is_empty() {
         return;
     }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
     println!(
         "INSTANCE\tMODEL\tSLOT\tSTATUS\tGPUS\tPORT\tVRAM_GB\tRESTARTS\tIN_FLIGHT\tTOK_PER_S"
     );
@@ -1025,7 +1041,7 @@ fn print_ps_table(rows: &[Value]) {
         let inst = row.get("instance_id").and_then(|v| v.as_str()).unwrap_or("");
         let model = row.get("model_id").and_then(|v| v.as_str()).unwrap_or("");
         let slot = row.get("slot_key").and_then(|v| v.as_str()).unwrap_or("");
-        let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        let status = ps_status(row, now);
         let gpus = ps_gpus_csv(row);
         let port = row.get("internal_port").and_then(|v| v.as_i64()).unwrap_or(0);
         let vram = row
@@ -1193,6 +1209,15 @@ mod tests {
         assert!(open.contains("bind: 0.0.0.0 (remote clients reach it when allowlisted)"), "{open}");
         assert!(open.contains("state: not running"), "{open}");
         assert!(open.contains("allowlist: 2 entries\nendpoint: tcp://1.2.3.4:4000 -> port 9443\n"), "{open}");
+    }
+
+    #[test]
+    fn restarting_rows_show_attempt_and_wait() {
+        let row = json!({"status": "RESTARTING", "restarts": 2, "next_attempt_at": 1_000_030});
+        assert_eq!(ps_status(&row, 1_000_000), "RESTARTING (attempt 3, next in 30s)");
+        assert_eq!(ps_status(&row, 1_000_090), "RESTARTING (attempt 3, next in 0s)");
+        assert_eq!(ps_status(&json!({"status": "RESTARTING", "restarts": 0}), 0), "RESTARTING (attempt 1)");
+        assert_eq!(ps_status(&json!({"status": "RUNNING", "restarts": 4}), 0), "RUNNING");
     }
 
     #[test]
