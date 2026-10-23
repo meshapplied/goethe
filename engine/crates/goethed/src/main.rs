@@ -136,6 +136,11 @@ async fn main() {
         eprintln!("{e}");
         std::process::exit(1);
     });
+    match goethe_core::placement::ensure_hw_profile(&home) {
+        Ok(true) => eprintln!("hardware profile written (missing or older than this boot)"),
+        Ok(false) => {}
+        Err(e) => eprintln!("hardware profile: {e}"),
+    }
     let _ = supervisor::reconcile_on_start();
     security::sync_api_keys_conf(&home);
     let sock = goethe_sock();

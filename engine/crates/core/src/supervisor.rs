@@ -7,7 +7,7 @@ use crate::coordinator;
 use crate::db;
 use crate::engine_cmd::{self, EngineSpec};
 use crate::engine_overhead::{Kind, Learned};
-use crate::foreign::{self, Foreign};
+use crate::foreign::{self, Foreign, GpuLive};
 use crate::hw::HardwareState;
 use crate::listener::{self, PortOwner};
 use crate::load_slot;
@@ -281,12 +281,18 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
     if let Some(tp) = req.pinned_tp {
         placement::ensure_eligible_for_tp(&netted, tp, &req.denied).map_err(err1)?;
     }
-    let base = chooser_input(req, &req.pinned, req.ctx, req.max_conc);
+    let candidates: Vec<u32> = match req.pinned.is_empty() {
+        true => netted.iter().map(|g| g.index).collect(),
+        false => req.pinned.clone(),
+    };
+    let base = chooser_input(req, &snap, &candidates, req.ctx, req.max_conc);
     let pinned = (!req.pinned.is_empty()).then_some(req.pinned.as_slice());
     let tp = req.pinned_tp.or(req.default_tp);
-    let plan = match chooser::pick_load_plan(&base, &netted, req.hw.as_ref(), tp, pinned) {
+    let first_name = gpu_name(&snap, candidates.first().copied().unwrap_or(0));
+    let learned_at = |t: usize| crate::engine_overhead::read_learned(con, model_id, &first_name, t as u64);
+    let plan = match chooser::plan_with(&base, &netted, req.hw.as_ref(), tp, pinned, &learned_at) {
         Ok(plan) => plan,
-        Err(e) => chooser::pick_load_plan(&base, &raw, req.hw.as_ref(), tp, pinned)
+        Err(e) => chooser::plan_with(&base, &raw, req.hw.as_ref(), tp, pinned, &learned_at)
             .map_err(|_| missing_error(e.message, &foreign::foreign_on(&snap, &e.gpus, &managed, &live)))?,
     };
     let busy = coordinator::busy(&plan.gpus);
@@ -298,10 +304,10 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
             (*g, mb as f64 / 1024.0)
         })
         .collect();
-    let gpu_name = gpu_name(req.hw.as_ref(), plan.gpus[0]);
-    let input = chooser_input(req, &plan.gpus, plan.ctx, plan.max_conc);
+    let gpu_name = gpu_name(&snap, plan.gpus[0]);
+    let input = chooser_input(req, &snap, &plan.gpus, plan.ctx, plan.max_conc);
     let learned = crate::engine_overhead::read_learned(con, model_id, &gpu_name, plan.tp as u64);
-    let need = with_learned(chooser::need(&input, plan.tp), learned);
+    let need = chooser::with_learned(chooser::need(&input, plan.tp), learned);
     let found = foreign::foreign_on(&snap, &plan.gpus, &managed, &live);
     let short = plan.gpus.iter().find_map(|g| shortfall(&need, *g, free[g]));
     if let (Some(why), false) = (short, busy) {
@@ -334,15 +340,6 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
     let min_free = free.values().copied().fold(f64::INFINITY, f64::min);
     let starting = start_engine(req, con, &plan, need, learned, min_free, gpu_name)?;
     Ok(Step::Started(Box::new(starting), notices))
-}
-
-fn with_learned(base: Need, learned: Learned) -> Need {
-    // Fold what this model taught us on this GPU and tp into the budget parts: static extra and non-static overhead.
-    Need {
-        weights: base.weights + learned.static_gb,
-        kv: base.kv,
-        overhead: base.overhead + learned.overhead_gb,
-    }
 }
 
 fn copies_of(con: &Connection, model_id: &str) -> Vec<(String, String, String, i64)> {
@@ -1145,14 +1142,14 @@ fn kv_bytes_per_token(row: &InstRow, card: &toml::Value) -> u64 {
     }
 }
 
-fn chooser_input(req: &LoadReq, gpus: &[u32], ctx: u64, max_conc: u64) -> ChooserInput {
-    // Budget inputs for a GPU set: Marlin extra only on Blackwell-class GPUs, KV bytes from the card dtype.
+fn chooser_input(req: &LoadReq, snap: &[GpuLive], gpus: &[u32], ctx: u64, max_conc: u64) -> ChooserInput {
+    // Budget inputs for a GPU set: Marlin extra by the live compute capability, KV bytes from the card dtype.
     let row = &req.row;
     ChooserInput {
         static_vram_gb: static_weight_gb(
             row.static_vram_gb,
             req.card.get("marlin_extra_gb").and_then(|v| v.as_float()),
-            marlin_extra_applies(req.hw.as_ref(), gpus, &req.card),
+            marlin_extra_applies(snap, gpus, &req.card),
         ),
         kv_bytes_per_token: kv_bytes_per_token(row, &req.card),
         num_attention_heads: row.num_attention_heads.unwrap_or(1) as u64,
@@ -1164,36 +1161,21 @@ fn chooser_input(req: &LoadReq, gpus: &[u32], ctx: u64, max_conc: u64) -> Choose
     }
 }
 
-fn marlin_extra_applies(hw: Option<&HardwareState>, gpus: &[u32], card: &toml::Value) -> bool {
-    // The Marlin weight copy exists only on compute capability 10+ unless GOETHE_MARLIN=0 (env or card).
+fn marlin_extra_applies(snap: &[GpuLive], gpus: &[u32], card: &toml::Value) -> bool {
+    // The Marlin weight copy exists on live compute capability 10+ (NVML, not a cached profile) unless GOETHE_MARLIN=0.
     let off = std::env::var("GOETHE_MARLIN").as_deref() == Ok("0")
         || card
             .get("env")
             .and_then(|v| v.get("GOETHE_MARLIN"))
             .and_then(|v| v.as_str())
             == Some("0");
-    if off {
-        return false;
-    }
-    gpus.iter()
-        .filter_map(|g| {
-            hw?.gpus
-                .iter()
-                .find(|x| x.index == *g)?
-                .compute_capability
-                .split('.')
-                .next()?
-                .parse::<u32>()
-                .ok()
-        })
-        .max()
-        .unwrap_or(0)
-        >= 10
+    !off && snap.iter().any(|g| gpus.contains(&g.index) && g.cc_major >= 10)
 }
 
-fn gpu_name(hw: Option<&HardwareState>, idx: u32) -> String {
-    hw.and_then(|h| h.gpus.iter().find(|g| g.index == idx).map(|g| g.name.clone()))
-        .unwrap_or_else(|| "gpu".to_string())
+fn gpu_name(snap: &[GpuLive], idx: u32) -> String {
+    snap.iter()
+        .find(|g| g.index == idx && !g.name.is_empty())
+        .map_or_else(|| "gpu".to_string(), |g| g.name.clone())
 }
 
 fn pinned_gpus(raw: Option<&str>, card: &toml::Value, tp: Option<u64>) -> Result<Vec<u32>, String> {
@@ -1815,6 +1797,20 @@ mod tests {
 
     fn free_port() -> u16 {
         TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn marlin_extra_follows_live_compute_capability() {
+        let live = |index, cc_major| GpuLive { index, name: "g".to_string(), cc_major, free_mb: 1, procs: Vec::new() };
+        let snap = vec![live(2, 12), live(3, 8)];
+        let card: toml::Value = toml::from_str("marlin_extra_gb = 7.8").unwrap();
+        assert!(marlin_extra_applies(&snap, &[2], &card));
+        assert!(!marlin_extra_applies(&snap, &[3], &card));
+        assert!(marlin_extra_applies(&snap, &[2, 3], &card));
+        let off: toml::Value = toml::from_str("[env]\nGOETHE_MARLIN = \"0\"").unwrap();
+        assert!(!marlin_extra_applies(&snap, &[2], &off));
+        assert_eq!(gpu_name(&snap, 3), "g");
+        assert_eq!(gpu_name(&snap, 9), "gpu");
     }
 
     #[test]
