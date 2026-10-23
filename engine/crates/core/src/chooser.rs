@@ -1,6 +1,7 @@
 // Tensor parallel size and GPU set selection for goethe load.
 
 use crate::calc::{missing_gb, shortfall, Need, BASE_OVERHEAD_GB};
+use crate::engine_overhead::Learned;
 use crate::hw::HardwareState;
 use crate::placement::{format_gpu_list, rank_sets, GpuPlacementInput, SetRank};
 
@@ -71,6 +72,17 @@ pub fn per_gpu_budget_gb(input: &ChooserInput, tp: usize) -> f64 {
     need(input, tp).total()
 }
 
+pub fn with_learned(base: Need, learned: Learned) -> Need {
+    // Fold what a model taught us on a GPU type and tp into the budget parts: static extra and non-static overhead.
+    Need {
+        weights: base.weights + learned.static_gb,
+        kv: base.kv,
+        overhead: base.overhead + learned.overhead_gb,
+    }
+}
+
+type LearnedAt<'a> = &'a dyn Fn(usize) -> Learned;
+
 fn free_gb(set: &SetRank) -> f64 {
     set.min_free_mb as f64 / 1024.0
 }
@@ -89,7 +101,18 @@ pub fn pick_load_plan(
     pinned_tp: Option<usize>,
     pinned_gpus: Option<&[u32]>,
 ) -> Result<LoadPlan, PlanError> {
-    // Pinned GPUs are checked as given; a pinned tp ranks every fitting set; otherwise the smallest fitting tp wins.
+    plan_with(input, gpus, hw, pinned_tp, pinned_gpus, &|_| Learned::default())
+}
+
+pub fn plan_with(
+    input: &ChooserInput,
+    gpus: &[GpuPlacementInput],
+    hw: Option<&HardwareState>,
+    pinned_tp: Option<usize>,
+    pinned_gpus: Option<&[u32]>,
+    learned: LearnedAt,
+) -> Result<LoadPlan, PlanError> {
+    // Pinned GPUs as given, a pinned tp over every fitting set, else the smallest fitting tp; budgets include learned GB.
     if let Some(pg) = pinned_gpus.filter(|p| !p.is_empty()) {
         let tp = pinned_tp.unwrap_or(pg.len());
         if tp != pg.len() {
@@ -98,14 +121,18 @@ pub fn pick_load_plan(
                 gpus: Vec::new(),
             });
         }
-        return fixed_plan(input, gpus, pg);
+        return fixed_plan(input, gpus, pg, learned);
     }
     if let Some(tp) = pinned_tp {
-        return best_fit(input, gpus, hw, tp)
+        return best_fit(input, gpus, hw, tp, learned)
             .map(|set| plan(input, tp, set))
-            .ok_or_else(|| closest_miss(input, gpus, hw, tp));
+            .ok_or_else(|| closest_miss(input, gpus, hw, tp, learned));
     }
-    auto_plan(input, gpus, hw)
+    auto_plan(input, gpus, hw, learned)
+}
+
+fn need_at(input: &ChooserInput, tp: usize, learned: LearnedAt) -> Need {
+    with_learned(need(input, tp), learned(tp))
 }
 
 fn plan(input: &ChooserInput, tp: usize, set: SetRank) -> LoadPlan {
@@ -121,6 +148,7 @@ fn fixed_plan(
     input: &ChooserInput,
     gpus: &[GpuPlacementInput],
     pinned: &[u32],
+    learned: LearnedAt,
 ) -> Result<LoadPlan, PlanError> {
     // Check the exact GPU set the user asked for against the one fit rule.
     let tp = pinned.len();
@@ -142,7 +170,7 @@ fn fixed_plan(
         link: 0,
         min_free_mb: free_mb.into_iter().min().unwrap_or(0),
     };
-    let need = need(input, tp);
+    let need = need_at(input, tp, learned);
     if let Some(message) = shortfall(&need, tightest(&set, gpus), free_gb(&set)) {
         return Err(PlanError { message, gpus: set.gpus });
     }
@@ -154,8 +182,9 @@ fn best_fit(
     gpus: &[GpuPlacementInput],
     hw: Option<&HardwareState>,
     tp: usize,
+    learned: LearnedAt,
 ) -> Option<SetRank> {
-    let need = need(input, tp);
+    let need = need_at(input, tp, learned);
     rank_sets(gpus, hw, tp).into_iter().find(|s| missing_gb(&need, free_gb(s)) <= 0.0)
 }
 
@@ -164,9 +193,10 @@ fn closest_miss(
     gpus: &[GpuPlacementInput],
     hw: Option<&HardwareState>,
     tp: usize,
+    learned: LearnedAt,
 ) -> PlanError {
     // Report the shortfall on the tp-sized set with the most free VRAM.
-    let need = need(input, tp);
+    let need = need_at(input, tp, learned);
     let Some(set) = rank_sets(gpus, hw, tp).into_iter().max_by_key(|s| s.min_free_mb) else {
         return PlanError {
             message: format!("cannot place tp={tp}: only {} eligible GPUs", gpus.len()),
@@ -184,6 +214,7 @@ fn auto_plan(
     input: &ChooserInput,
     gpus: &[GpuPlacementInput],
     hw: Option<&HardwareState>,
+    learned: LearnedAt,
 ) -> Result<LoadPlan, PlanError> {
     // Smallest tp with a fitting set (clean GPUs first), shrinking ctx and then concurrency until something fits.
     if gpus.is_empty() {
@@ -198,7 +229,7 @@ fn auto_plan(
     trial.max_conc = input.max_conc.max(1);
     loop {
         for &tp in &tps {
-            if let Some(set) = best_fit(&trial, gpus, hw, tp) {
+            if let Some(set) = best_fit(&trial, gpus, hw, tp, learned) {
                 return Ok(plan(&trial, tp, set));
             }
         }
@@ -208,7 +239,7 @@ fn auto_plan(
             trial.max_conc -= 1;
             trial.ctx = input.ctx.min(input.max_ctx);
         } else {
-            let mut err = closest_miss(input, gpus, hw, tps.last().copied().unwrap_or(1));
+            let mut err = closest_miss(input, gpus, hw, tps.last().copied().unwrap_or(1), learned);
             err.message = format!("no placement fits even at reduced ctx/concurrency; {}", err.message);
             return Err(err);
         }
@@ -301,6 +332,19 @@ mod tests {
         huge.static_vram_gb = 200.0;
         let err = pick_load_plan(&huge, &[gpu(3, 90.0, false)], None, None, Some(&[3])).unwrap_err();
         assert!(err.message.contains("missing") && err.gpus == vec![3], "{}", err.message);
+    }
+
+    #[test]
+    fn learned_budget_drives_placement_and_failure_text() {
+        let gpus = vec![gpu(2, 30.0, false), gpu(3, 26.0, false)];
+        let fits = pick_load_plan(&inp(), &gpus, None, Some(1), None).unwrap();
+        assert_eq!(fits.gpus, vec![2]);
+        let heavy = |_: usize| Learned { static_gb: 0.0, overhead_gb: 7.0 };
+        let err = plan_with(&inp(), &gpus, None, Some(1), Some(&[3]), &heavy).unwrap_err();
+        assert!(err.message.contains("overhead 8.8"), "{}", err.message);
+        assert_eq!(pick_load_plan(&inp(), &gpus, None, None, None).unwrap().tp, 1);
+        let auto = plan_with(&inp(), &gpus, None, None, None, &heavy).unwrap();
+        assert_eq!((auto.tp, auto.gpus), (2, vec![2, 3]), "the learned tp=1 budget no longer fits one GPU");
     }
 
     #[test]
