@@ -7,6 +7,7 @@ use crate::paths::{contained_in_models, ensure_layout, goethe_home, model_dir, v
 use crate::registry::{fetch, find_model, registry_url, RegistryModel};
 use crate::safetensors;
 use crate::sglang_infer as sgl;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
@@ -557,6 +558,9 @@ pub fn commit(home: &Path, p: &Planned, verb: &str, out: &mut dyn Write) -> Resu
         ],
     )
     .map_err(|e| format!("state.db: {e}"))?;
+    if let Some(note) = drop_shadowing_alias(&con, &p.model_id)? {
+        eprintln!("warning: {note}");
+    }
     let mut lines = vec![format!("{verb} {}", p.model_id), format!("  path      {}", p.dir.display())];
     lines.push(match &p.source_dir {
         Some(src) => format!("  files     kept in {} (goethe remove only unregisters)", src.display()),
@@ -713,6 +717,22 @@ fn load_installed(model_id: &str, opts: &InstallOpts) -> Result<(), String> {
     run_load(params, opts.no_wait, false)
 }
 
+pub fn drop_shadowing_alias(con: &rusqlite::Connection, model_id: &str) -> Result<Option<String>, String> {
+    // An alias spelled like a newly installed model id would compete with it for that name: remove it and say so.
+    let target: Option<String> = con
+        .query_row("SELECT model_id FROM model_aliases WHERE alias = ?1", [model_id], |r| r.get(0))
+        .optional()
+        .map_err(|e| format!("state.db: {e}"))?;
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    con.execute("DELETE FROM model_aliases WHERE alias = ?1", [model_id])
+        .map_err(|e| format!("state.db: {e}"))?;
+    Ok(Some(format!(
+        "removed alias {model_id} (it pointed to {target}): the name now belongs to the installed model {model_id}"
+    )))
+}
+
 pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), String> {
     // Send the load, show the plan, wait for this instance, and end with one RUNNING or STARTING line (or JSON).
     let started = std::time::Instant::now();
@@ -836,6 +856,19 @@ fn print_reply_text(reply: &crate::rpc::RpcReply) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installing_a_model_drops_a_same_named_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let con = db::open(dir.path()).unwrap();
+        con.execute("INSERT INTO model_aliases (alias, model_id) VALUES ('org/new', 'org/old'), ('fast', 'org/old')", [])
+            .unwrap();
+        let note = drop_shadowing_alias(&con, "org/new").unwrap().unwrap();
+        assert!(note.contains("removed alias org/new (it pointed to org/old)"), "{note}");
+        assert_eq!(drop_shadowing_alias(&con, "org/new").unwrap(), None);
+        let left: i64 = con.query_row("SELECT COUNT(*) FROM model_aliases", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 1, "other aliases stay");
+    }
 
     #[test]
     fn load_lines_and_already_loaded() {
