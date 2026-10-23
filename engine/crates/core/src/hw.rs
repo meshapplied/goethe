@@ -223,6 +223,39 @@ pub fn list_gpus_for_placement(managed: &HashSet<i32>) -> Result<Vec<GpuPlacemen
     Ok(out)
 }
 
+pub struct LiveGpu {
+    pub index: u32,
+    pub uuid: String,
+    pub free_mb: u64,
+    pub pids: Vec<i32>,
+}
+
+pub fn live_gpus() -> Result<Vec<LiveGpu>, String> {
+    // Live free VRAM (after the unified-memory reserve), uuid and process ids per GPU.
+    let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
+    let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
+    let mut out = Vec::new();
+    for index in 0..count {
+        let dev = nvml.device_by_index(index).map_err(|e| format!("device {index}: {e}"))?;
+        let (_, _, free, unified) = device_memory(&dev)?;
+        let mut pids: Vec<i32> = [dev.running_compute_processes(), dev.running_graphics_processes()]
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|p| p.pid as i32)
+            .collect();
+        pids.sort_unstable();
+        pids.dedup();
+        out.push(LiveGpu {
+            index,
+            uuid: dev.uuid().unwrap_or_default(),
+            free_mb: if unified { free.saturating_sub(UNIFIED_OS_RESERVE_GB * 1024) } else { free },
+            pids,
+        });
+    }
+    Ok(out)
+}
+
 pub fn gpu_used_mb_live(gpu_index: u32) -> Result<u64, String> {
     let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
     let dev = nvml.device_by_index(gpu_index).map_err(|e| format!("device {gpu_index}: {e}"))?;

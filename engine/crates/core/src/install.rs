@@ -123,6 +123,14 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         .ok()
         .and_then(|r| find_model(&r, &opts.model_id).cloned());
     let card_dir = model_dir(home, &opts.model_id);
+    if entry.as_ref().is_some_and(|e| e.manual_download.unwrap_or(false)) {
+        return Err(format!(
+            "the weights of {} are not on Hugging Face, so goethe cannot download them. Put the model folder \
+             (config.json and safetensors) at {} and run: goethe scan",
+            opts.model_id,
+            card_dir.display()
+        ));
+    }
     let dl = DownloadOpts {
         revision: entry.as_ref().and_then(|e| e.revision.clone()),
         force: opts.force,
