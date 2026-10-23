@@ -313,7 +313,14 @@ fn is_auth_error(msg: &str) -> bool {
 pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: &str, excludes: &[String]) -> Result<(), String> {
     // hf download resumes partial files and is cheap when everything is already present.
     let program = hf_binary(home)?;
-    let mut cmd = Command::new(program);
+    let mut cmd = match python_of_script(&program) {
+        Some(python) => {
+            let mut c = Command::new(python);
+            c.arg("-c").arg(HF_QUIET).arg(&program);
+            c
+        }
+        None => Command::new(&program),
+    };
     cmd.arg("download")
         .arg(model_id)
         .arg("--local-dir")
@@ -326,6 +333,7 @@ pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: 
     cmd.env("HF_XET_HIGH_PERFORMANCE", "1");
     cmd.env("HF_HUB_DISABLE_TELEMETRY", "1");
     cmd.env("HF_HUB_VERBOSITY", "error");
+    cmd.env("HF_HUB_DISABLE_UPDATE_CHECK", "1");
     cmd.env("PYTHONWARNINGS", "ignore::FutureWarning");
     cmd.env_remove("HF_TOKEN").env_remove("HUGGING_FACE_HUB_TOKEN").env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1");
     cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
@@ -334,6 +342,21 @@ pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: 
         return Err(format!("hf download exited with {status}"));
     }
     Ok(())
+}
+
+const HF_QUIET: &str = "import logging, runpy, sys
+logging.getLogger('huggingface_hub.utils._http').addFilter(lambda r: 'HF_TOKEN' not in r.getMessage())
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')";
+
+fn python_of_script(script: &Path) -> Option<PathBuf> {
+    // The interpreter a console script's shebang names, when it is a Python on disk.
+    let mut head = Vec::new();
+    fs::File::open(script).ok()?.take(256).read_to_end(&mut head).ok()?;
+    let first = String::from_utf8_lossy(&head).lines().next()?.to_string();
+    let interp = PathBuf::from(first.strip_prefix("#!")?.split_whitespace().next()?);
+    let name = interp.file_name()?.to_string_lossy().into_owned();
+    (name.starts_with("python") && interp.is_file()).then_some(interp)
 }
 
 pub fn hf_binary(home: &Path) -> Result<PathBuf, String> {
@@ -604,6 +627,21 @@ mod tests {
             size,
             lfs_sha256: None,
         }
+    }
+
+    #[test]
+    fn hf_runs_under_its_own_python_with_the_hint_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let python = dir.path().join("python3.11");
+        fs::write(&python, b"").unwrap();
+        let script = dir.path().join("hf");
+        fs::write(&script, format!("#!{}\nimport sys\n", python.display())).unwrap();
+        assert_eq!(python_of_script(&script), Some(python.clone()));
+        fs::write(&script, "#!/bin/bash\necho fake hf\n").unwrap();
+        assert_eq!(python_of_script(&script), None, "a shell stand-in runs directly");
+        fs::write(&script, format!("#!{}/missing/python\n", dir.path().display())).unwrap();
+        assert_eq!(python_of_script(&script), None);
+        assert!(HF_QUIET.contains("huggingface_hub.utils._http") && HF_QUIET.contains("run_name='__main__'"));
     }
 
     #[test]

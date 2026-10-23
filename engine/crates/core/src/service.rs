@@ -100,7 +100,77 @@ pub fn goethed_running() -> bool {
     std::os::unix::net::UnixStream::connect(goethe_sock()).is_ok()
 }
 
+pub fn live_engine_pids() -> Vec<i64> {
+    // Leader PIDs of RUNNING engines, from goethed's ps.
+    let Ok(reply) = crate::rpc::call("ps", serde_json::Value::Null) else {
+        return Vec::new();
+    };
+    let rows: serde_json::Value = serde_json::from_str(reply.stdout.trim()).unwrap_or_default();
+    rows.as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|r| r.get("status").and_then(|s| s.as_str()) == Some("RUNNING"))
+                .filter_map(|r| r.get("pid").and_then(|p| p.as_i64()))
+                .filter(|p| *p > 0)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn pid_alive(pid: i64) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+pub fn stop_keeping_engines() -> Result<(usize, usize), String> {
+    // shutdown::stop_daemon(true) (contract C-D); returns the RUNNING engines before and how many are still alive.
+    let before = if goethed_running() { live_engine_pids() } else { Vec::new() };
+    crate::shutdown::stop_daemon(true)?;
+    Ok((before.len(), before.iter().filter(|p| pid_alive(**p)).count()))
+}
+
+pub fn kept_text(before: usize, kept: usize) -> String {
+    if kept < before {
+        format!("{kept} of {before} engine(s) still run: the stopped goethed tore the rest down; the next goethed restores them")
+    } else {
+        format!("{kept} engine(s) kept serving")
+    }
+}
+
+pub fn wait_goethed(timeout: std::time::Duration) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if goethed_running() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(format!("goethed did not come up within {} s (see goethe logs --daemon)", timeout.as_secs()))
+}
+
+pub fn refresh_unit(home: &Path) {
+    // Rewrite this home's unit when it predates the current template (KillMode=process lets engines outlive goethed).
+    let units = [(system_unit_path(), "multi-user.target", false), (user_unit_path(), "default.target", true)];
+    for (path, wanted_by, user) in units {
+        let current = fs::read_to_string(&path).ok();
+        if !matches!(unit_owner(&path, home), UnitOwner::Ours) || current.as_deref() == Some(unit_text(home, wanted_by).as_str()) {
+            continue;
+        }
+        if (user || unsafe { libc::geteuid() } == 0) && write_unit(&path, home, wanted_by).is_ok() {
+            systemctl_quiet(if user { &["--user", "daemon-reload"][..] } else { &["daemon-reload"][..] });
+        }
+    }
+}
+
 pub fn spawn_goethed(home: &Path) -> Result<(), String> {
+    spawn(home, true)
+}
+
+pub fn respawn_goethed(home: &Path) -> Result<(), String> {
+    // After a keep-engines stop: the new goethed takes the persisted ports, where the adopted gateway still listens.
+    spawn(home, false)
+}
+
+fn spawn(home: &Path, port_env: bool) -> Result<(), String> {
     // Start goethed detached in its own session, logging to GOETHE_HOME/logs/goethed.log.
     let goethed = home.join("bin/goethed");
     fs::create_dir_all(home.join("logs")).map_err(|e| e.to_string())?;
@@ -110,6 +180,9 @@ pub fn spawn_goethed(home: &Path) -> Result<(), String> {
         .open(home.join("logs/goethed.log"))
         .map_err(|e| e.to_string())?;
     let mut cmd = Command::new(&goethed);
+    if !port_env {
+        cmd.env_remove("GOETHE_MUX_PORT").env_remove("GOETHE_PUBLIC_PORT");
+    }
     cmd.env("GOETHE_HOME", home)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
@@ -296,10 +369,10 @@ fn systemd_quote(s: &str) -> String {
 }
 
 pub fn unit_text(home: &Path, wanted_by: &str) -> String {
-    // Unit with quoted paths and the installer's optional GOETHE_HOME/goethe.env.
+    // Unit with quoted paths and the installer's goethe.env; goethed stops its own engines, so KillMode=process.
     let h = home.display().to_string();
     format!(
-        "[Unit]\nDescription=Goethe control plane daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nEnvironment={}\nEnvironmentFile=-{h}/goethe.env\nExecStart={}\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy={wanted_by}\n",
+        "[Unit]\nDescription=Goethe control plane daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nEnvironment={}\nEnvironmentFile=-{h}/goethe.env\nExecStart={}\nKillMode=process\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy={wanted_by}\n",
         systemd_quote(&format!("GOETHE_HOME={h}")),
         systemd_quote(&format!("{h}/bin/goethed")),
     )
@@ -461,6 +534,7 @@ mod tests {
         assert!(unit.contains("Environment=\"GOETHE_HOME=/srv/my home/.goethe\""));
         assert!(unit.contains("ExecStart=\"/srv/my home/.goethe/bin/goethed\""));
         assert!(unit.contains("EnvironmentFile=-/srv/my home/.goethe/goethe.env"));
+        assert!(unit.contains("\nKillMode=process\n"), "engines must survive a goethed restart under systemd");
         let cron = cron_line(Path::new("/srv/50%/.goethe"));
         assert_eq!(
             cron,

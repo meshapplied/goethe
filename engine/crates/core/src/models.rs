@@ -39,20 +39,23 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
     // Installed rows use the stored budget inputs; registry rows use the registry estimate.
     let home = goethe_home();
     let con = db::open(&home).map_err(|e| e.to_string())?;
-    let loaded = loaded_set(&con);
+    let loaded = loaded_instances(&con);
     let installed = installed_rows(&home, &con)?;
     let reg = fetch(&registry_url()).ok();
     let view = crate::placement::load_hw(&home).map(|hw| View::new(&home, hw));
     let mut rows = Vec::new();
     if !available_only {
         for m in &installed {
-            let status = if loaded.contains(&m.id) { "loaded" } else { "installed" };
             let pinned = (m.default_tp > 0).then_some(m.default_tp as usize);
+            let (status, fit) = match loaded.get(&m.id) {
+                Some(live) => loaded_state(live),
+                None => ("installed".to_string(), fit_label(view.as_ref(), &m.id, &m.input, pinned, m.marlin_gb)),
+            };
             rows.push(ModelRow {
                 id: m.id.clone(),
-                status: status.to_string(),
+                status,
                 gb: m.input.static_vram_gb,
-                fit: fit_label(view.as_ref(), &m.id, &m.input, pinned, m.marlin_gb),
+                fit,
                 custom: is_custom_model(&m.id, reg.as_ref()).then_some(true),
             });
         }
@@ -167,15 +170,30 @@ fn card_kv_bytes(card: &toml::Value, elems: u64, installed_bytes: u64) -> u64 {
     }
 }
 
-fn loaded_set(con: &Connection) -> std::collections::HashSet<String> {
-    let mut set = std::collections::HashSet::new();
-    let Ok(mut stmt) = con.prepare("SELECT DISTINCT model_id FROM loaded_instances WHERE status = 'RUNNING'") else {
-        return set;
+fn loaded_instances(con: &Connection) -> HashMap<String, Vec<(String, String)>> {
+    // Live instances per model: (status, GPU list), oldest first.
+    let mut out: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let sql = "SELECT model_id, status, gpu_indices FROM loaded_instances
+               WHERE status IN ('STARTING', 'RUNNING', 'RESTARTING', 'DRAINING') ORDER BY rowid";
+    let Ok(mut stmt) = con.prepare(sql) else {
+        return out;
     };
-    if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
-        set.extend(rows.filter_map(|r| r.ok()));
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)));
+    for (model, status, gpus) in rows.into_iter().flatten().flatten() {
+        out.entry(model).or_default().push((status, gpus));
     }
-    set
+    out
+}
+
+fn loaded_state(live: &[(String, String)]) -> (String, String) {
+    // A loaded model shows its instances instead of whether one more copy would fit.
+    let status = if live.iter().any(|(s, _)| s == "RUNNING") { "loaded" } else { live[0].0.as_str() };
+    let each: Vec<String> = live.iter().map(|(s, g)| format!("GPU {g} {s}")).collect();
+    let n = live.len();
+    (
+        status.to_ascii_lowercase(),
+        format!("{n} instance{}: {} (goethe load --replica checks room for another)", if n == 1 { "" } else { "s" }, each.join(", ")),
+    )
 }
 
 fn is_custom_model(id: &str, reg: Option<&Registry>) -> bool {
@@ -443,6 +461,30 @@ mod tests {
             rusqlite::params![id, rel, managed],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn loaded_models_show_their_instances() {
+        let one = vec![("RUNNING".to_string(), "2".to_string())];
+        let (status, fit) = loaded_state(&one);
+        assert_eq!(status, "loaded");
+        assert!(fit.starts_with("1 instance: GPU 2 RUNNING"), "{fit}");
+        let two = vec![("STARTING".to_string(), "3".to_string()), ("RESTARTING".to_string(), "2,3".to_string())];
+        let (status, fit) = loaded_state(&two);
+        assert_eq!(status, "starting");
+        assert!(fit.starts_with("2 instances: GPU 3 STARTING, GPU 2,3 RESTARTING"), "{fit}");
+        let dir = tempfile::tempdir().unwrap();
+        let con = db::open(dir.path()).unwrap();
+        con.execute(
+            "INSERT INTO loaded_instances (instance_id, model_id, pid, pgid, internal_port, gpu_indices,
+             allocated_vram_gb_per_gpu, mem_fraction_static, ctx_len, max_conc, status)
+             VALUES ('i1', 'org/m', 10, 10, 30001, '2', 5.0, 0.1, 4096, 4, 'RUNNING'),
+                    ('i2', 'org/m', 0, 0, 30002, '3', 5.0, 0.1, 4096, 4, 'FAILED')",
+            [],
+        )
+        .unwrap();
+        let live = loaded_instances(&con);
+        assert_eq!(live.get("org/m").map(Vec::len), Some(1), "tombstones are not loaded instances");
     }
 
     #[test]

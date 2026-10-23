@@ -1,13 +1,13 @@
 // Signed package updates from GOETHE_PKG_URL: verify everything, then swap both binaries.
 
-use crate::paths::{ensure_layout, goethe_home, goethe_sock};
-use crate::shutdown;
+use crate::paths::{ensure_layout, goethe_home};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 pub struct UpdateOpts {
     pub check_only: bool,
@@ -54,10 +54,22 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
             "published version {remote_ver} is older than goethe {local_ver}; re-run with --allow-downgrade to install it"
         ));
     }
+    let arch = normalize_arch();
     let engine = if opts.engine { Some(engine_delta(home, pkg, &sums, tmp)?) } else { None };
     let ternary = if opts.ternary { ternary_delta(home, &sums) } else { None };
-    let bins = order != Ordering::Equal;
-    let parts = [("goethe", Some(Delta::of(&local_ver, &remote_ver, bins))), ("engine", engine), ("ternary pack", ternary)];
+    let bins = order != Ordering::Equal || binaries_differ(home, &sums, &arch)?;
+    let local_commit = option_env!("GOETHE_GIT_COMMIT").unwrap_or("unknown");
+    let remote_commit = fetch_verified(pkg, &sums, "BUILDINFO", tmp)
+        .ok()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|text| buildinfo_commit(&text, local_commit.trim_end_matches("-dirty").len()));
+    let published = match remote_commit {
+        Some(c) => build_label(&remote_ver, Some(&c)),
+        None if bins && order == Ordering::Equal => format!("{remote_ver} (another build)"),
+        None => remote_ver.clone(),
+    };
+    let installed = if bins { build_label(&local_ver, Some(local_commit)) } else { published.clone() };
+    let parts = [("goethe", Some(Delta::of(&installed, &published, bins))), ("engine", engine), ("ternary pack", ternary)];
     let pending: Vec<(&str, Delta)> = parts.into_iter().filter_map(|(what, d)| d.map(|d| (what, d))).collect();
     for (what, d) in &pending {
         println!("{}", d.line(what));
@@ -65,8 +77,7 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     if opts.check_only || pending.iter().all(|(_, d)| !d.differs) {
         return Ok(());
     }
-    crate::host::confirm(&format!("Update goethe {local_ver} -> {remote_ver}?"), opts.yes)?;
-    let arch = normalize_arch();
+    crate::host::confirm(&format!("Update goethe {installed} -> {published}?"), opts.yes)?;
     let mut staged = Vec::new();
     for bin in ["goethe", "goethed"].into_iter().filter(|_| bins) {
         let rel = format!("bin/linux-{arch}/{bin}");
@@ -75,8 +86,11 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     let differs = |what: &str| pending.iter().any(|(w, d)| *w == what && d.differs);
     let wheel = if differs("engine") { Some(stage_engine(home, pkg, &sums, tmp, &arch, &mut staged)?) } else { None };
     let ternary = if differs("ternary pack") { stage_ternary(pkg, &sums, tmp)? } else { None };
-    let was_running = goethe_sock().exists();
+    let was_running = crate::service::goethed_running();
     swap_all(&staged)?;
+    if bins {
+        crate::service::refresh_unit(home);
+    }
     if let Some(w) = wheel {
         bootstrap_engine(home, &w)?;
         let name = w.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -91,8 +105,33 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     if was_running && bins {
         restart_goethed(home)?;
     }
-    println!("updated to goethe {remote_ver}");
+    println!("updated to goethe {published}");
     Ok(())
+}
+
+fn binaries_differ(home: &Path, sums: &Path, arch: &str) -> Result<bool, String> {
+    // Another build at the same version: the installed bin/goethe or bin/goethed differs from the signed entry.
+    for bin in ["goethe", "goethed"] {
+        let want = lookup_sum(sums, &format!("bin/linux-{arch}/{bin}"))?;
+        if sha256_file(&home.join("bin").join(bin)).ok().as_deref() != Some(want.as_str()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn buildinfo_commit(text: &str, len: usize) -> Option<String> {
+    // engine_commit from BUILDINFO, shortened like the local commit, with -dirty for a dirty tree.
+    let value = |key: &str| text.lines().find_map(|l| l.trim().strip_prefix(key)?.strip_prefix('=').map(str::trim));
+    let commit: String = value("engine_commit").filter(|c| !c.is_empty())?.chars().take(len.max(7)).collect();
+    Some(if value("engine_dirty") == Some("1") { format!("{commit}-dirty") } else { commit })
+}
+
+fn build_label(version: &str, commit: Option<&str>) -> String {
+    match commit.filter(|c| !c.is_empty() && *c != "unknown") {
+        Some(c) => format!("{version} (commit {c})"),
+        None => version.to_string(),
+    }
 }
 
 const TERNARY_REL: &str = "goethe/ternary-kernels.tar.zst";
@@ -380,19 +419,46 @@ fn unpack_ternary(home: &Path, archive: &Path) -> Result<(), String> {
 }
 
 fn restart_goethed(home: &Path) -> Result<(), String> {
-    // Restart through the systemd unit when one manages goethed, else stop and respawn it.
-    if let Some(args) = crate::service::systemctl_restart_args() {
-        let ok = Command::new("systemctl").args(&args).status().map_err(|e| e.to_string())?.success();
-        if !ok {
-            return Err(format!("systemctl {} failed", args.join(" ")));
+    // Engines and the gateway carry over: stop the old goethed with keep_engines, then start the new one.
+    let (before, kept) = crate::service::stop_keeping_engines()?;
+    match crate::service::systemctl_restart_args() {
+        Some(args) => {
+            let ok = Command::new("systemctl").args(&args).status().map_err(|e| e.to_string())?.success();
+            if !ok {
+                return Err(format!("systemctl {} failed; start goethed with goethe service enable", args.join(" ")));
+            }
+            println!("started the new goethed with systemctl {}", args.join(" "));
         }
-        println!("restarted goethed with systemctl {}", args.join(" "));
-        return Ok(());
+        None => {
+            crate::service::respawn_goethed(home)?;
+            println!("started the new goethed");
+        }
     }
-    shutdown::run_stop()?;
-    crate::service::spawn_goethed(home)?;
-    println!("restarted goethed; desired loads are restored when restore is on (goethe service restore --on)");
+    crate::service::wait_goethed(Duration::from_secs(30))?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut running = crate::service::live_engine_pids().len();
+    while running < before && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        running = crate::service::live_engine_pids().len();
+    }
+    println!("{}", upgrade_summary(before, kept, running));
     Ok(())
+}
+
+fn upgrade_summary(before: usize, kept: usize, running: usize) -> String {
+    // What happened to the loaded models across the goethed swap.
+    if before == 0 {
+        "no models were loaded".to_string()
+    } else if kept == before && running >= before {
+        format!(
+            "the upgrade kept all {before} loaded model instance(s) serving (requests during the few seconds without goethed got a 502)"
+        )
+    } else {
+        format!(
+            "{} {running} of {before} loaded instance(s) are RUNNING under the new goethed; goethe ps shows the rest as they come back",
+            crate::service::kept_text(before, kept)
+        )
+    }
 }
 
 #[cfg(test)]
@@ -408,6 +474,42 @@ mod tests {
         fs::write(dir.path().join("SHA256SUMS"), format!("{got}  f\n")).unwrap();
         assert_eq!(lookup_sum(&dir.path().join("SHA256SUMS"), "f").unwrap(), got);
         assert!(lookup_sum(&dir.path().join("SHA256SUMS"), "g").is_err());
+    }
+
+    #[test]
+    fn upgrade_summary_says_what_kept_serving() {
+        assert_eq!(upgrade_summary(0, 0, 0), "no models were loaded");
+        assert!(upgrade_summary(2, 2, 2).starts_with("the upgrade kept all 2 loaded model instance(s) serving"));
+        let lost = upgrade_summary(2, 0, 1);
+        assert!(lost.contains("0 of 2 engine(s) still run") && lost.contains("1 of 2 loaded instance(s) are RUNNING"), "{lost}");
+    }
+
+    #[test]
+    fn builds_are_compared_by_binary_and_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        fs::create_dir_all(home.join("bin")).unwrap();
+        fs::write(home.join("bin/goethe"), b"cli").unwrap();
+        fs::write(home.join("bin/goethed"), b"daemon").unwrap();
+        let sha = |b: &[u8]| {
+            let p = home.join("probe");
+            fs::write(&p, b).unwrap();
+            sha256_file(&p).unwrap()
+        };
+        let sums = home.join("SHA256SUMS");
+        fs::write(&sums, format!("{}  bin/linux-x86_64/goethe\n{}  bin/linux-x86_64/goethed\n", sha(b"cli"), sha(b"daemon"))).unwrap();
+        assert!(!binaries_differ(home, &sums, "x86_64").unwrap());
+        fs::write(home.join("bin/goethed"), b"older daemon").unwrap();
+        assert!(binaries_differ(home, &sums, "x86_64").unwrap());
+        assert!(binaries_differ(home, &sums, "aarch64").is_err(), "no signed entry for that arch");
+        let info = "built_at=x\nengine_commit=0123456789abcdef0123\nengine_dirty=0\n";
+        assert_eq!(buildinfo_commit(info, 7).as_deref(), Some("0123456"));
+        assert_eq!(buildinfo_commit(&info.replace("dirty=0", "dirty=1"), 9).as_deref(), Some("012345678-dirty"));
+        assert_eq!(buildinfo_commit("release=1\n", 7), None);
+        assert_eq!(build_label("0.1.0", Some("abc1234")), "0.1.0 (commit abc1234)");
+        assert_eq!(build_label("0.1.0", Some("unknown")), "0.1.0");
+        let d = Delta::of("0.1.0 (commit abc1234)", "0.1.0 (commit def5678)", true);
+        assert_eq!(d.line("goethe"), "update available: goethe 0.1.0 (commit abc1234) -> 0.1.0 (commit def5678)");
     }
 
     #[test]
