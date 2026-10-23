@@ -77,6 +77,8 @@ For gated or private repos, accept the license on Hugging Face, download with yo
     goethe update [--check] [--engine]    # signed self-update
     goethe uninstall [--purge-models]
 
+Boot entries belong to one home: `service disable` and `uninstall` remove only the unit or cron line that names this `GOETHE_HOME`, and `service enable` refuses when the systemd unit already starts another home.
+
 Loaded models are restored after a daemon restart or reboot unless you unloaded them, in the order they were first loaded, one engine per GPU at a time. A blocking `goethe load` waits until the instance from that command is RUNNING (or FAILED). Crashed engines are restarted with backoff. If goethed itself crashes or is restarted without `goethe stop`, healthy engines keep serving and are adopted when it starts again. Every engine carries an identity (boot id, start time, instance tag) that is checked before Goethe signals it, so a reused PID is never signaled.
 
 ## Cloud and containers
