@@ -133,25 +133,34 @@ fn current_text() -> Result<String, String> {
 }
 
 fn choose_mode(vpns: &[VpnAddr]) -> Result<Mode, String> {
-    // The three choices, VPN first when one is up; the answer is a number or a mode name.
+    // The three choices in an arrow-key menu, VPN preselected when one is up; a numbered prompt when raw mode fails.
     let detected = match vpns.first() {
         Some(v) => format!("detected: {} {} on {}", v.kind, v.ip, v.name),
         None => "none detected; set up Tailscale or WireGuard first".to_string(),
     };
-    eprintln!("  1) Local only: programs on this machine");
-    eprintln!("  2) VPN (recommended): devices on your private network ({detected})");
-    eprintln!("  3) Public network (not recommended): any address that can reach this machine");
-    let default = if vpns.is_empty() { "1" } else { "2" };
+    let options = vec![
+        "Local only: programs on this machine".to_string(),
+        format!("VPN (recommended): devices on your private network ({detected})"),
+        "Public network (not recommended): any address that can reach this machine".to_string(),
+    ];
+    let modes = [Mode::Local, Mode::Vpn, Mode::Public];
+    let default = if vpns.is_empty() { 0 } else { 1 };
+    match crate::term::select(&options, default) {
+        Ok(Some(i)) => return Ok(modes[i]),
+        Ok(None) => return Err("cancelled; nothing changed".to_string()),
+        Err(_) => {}
+    }
+    for (i, o) in options.iter().enumerate() {
+        eprintln!("  {}) {o}", i + 1);
+    }
     loop {
-        let a = ask(&format!("Choice [{default}]:"), default)?;
-        match a.as_str() {
-            "1" => return Ok(Mode::Local),
-            "2" => return Ok(Mode::Vpn),
-            "3" => return Ok(Mode::Public),
-            other => match Mode::parse(other) {
-                Ok(m) => return Ok(m),
-                Err(_) => eprintln!("type 1, 2 or 3"),
-            },
+        let a = ask(&format!("Choice [{}]:", default + 1), &(default + 1).to_string())?;
+        if let Some(m) = a.parse::<usize>().ok().and_then(|n| modes.get(n.wrapping_sub(1))) {
+            return Ok(*m);
+        }
+        match Mode::parse(&a) {
+            Ok(m) => return Ok(m),
+            Err(_) => eprintln!("type 1, 2 or 3"),
         }
     }
 }
@@ -200,8 +209,14 @@ fn pick_vpn(opts: &ApiOpts, vpns: &[VpnAddr]) -> Result<VpnAddr, String> {
         1 => Ok(vpns[0].clone()),
         _ if !interactive() || opts.yes => Ok(vpns[0].clone()),
         _ => {
-            for (i, v) in vpns.iter().enumerate() {
-                eprintln!("  {}) {} {} on {}", i + 1, v.kind, v.ip, v.name);
+            let labels: Vec<String> = vpns.iter().map(|v| format!("{} {} on {}", v.kind, v.ip, v.name)).collect();
+            match crate::term::select(&labels, 0) {
+                Ok(Some(i)) => return Ok(vpns[i].clone()),
+                Ok(None) => return Err("cancelled; nothing changed".to_string()),
+                Err(_) => {}
+            }
+            for (i, l) in labels.iter().enumerate() {
+                eprintln!("  {}) {l}", i + 1);
             }
             let a = ask("Which VPN address? [1]:", "1")?;
             a.parse::<usize>()
