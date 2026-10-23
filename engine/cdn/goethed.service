@@ -1,4 +1,4 @@
-# Goethe systemd unit template for goethed; install.sh replaces __GOETHE_HOME__ with the resolved home.
+# Goethe systemd unit template for goethed; install.sh fills __GOETHE_HOME__; engines may outlive goethed for adoption.
 [Unit]
 Description=Goethe control plane daemon
 After=network-online.target
@@ -9,7 +9,7 @@ Type=simple
 Environment=GOETHE_HOME=__GOETHE_HOME__
 EnvironmentFile=-/etc/goethe/goethe.env
 ExecStart=__GOETHE_HOME__/bin/goethed
-KillMode=mixed
+KillMode=process
 TimeoutStopSec=60
 Restart=on-failure
 RestartSec=3
