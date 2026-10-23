@@ -10,63 +10,96 @@ use std::process::{Command, Stdio};
 const CRON_MARKER: &str = "# goethe-goethed-reboot";
 
 pub fn run_enable() -> Result<(), String> {
-    // Prefer systemd when it is PID 1; containers without it get cron and a nohup start.
-    let home = goethe_home();
+    for line in enable_boot(&goethe_home())? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+pub fn enable_boot(home: &Path) -> Result<Vec<String>, String> {
+    // Prefer systemd when it is PID 1 (with lingering for a user unit); containers without it get cron and a nohup start.
     let goethed = home.join("bin/goethed");
     if !goethed.is_file() {
         return Err(format!("goethed not found at {}", goethed.display()));
     }
-    let env = crate::host::probe_environment(crate::nginx::public_port_u16(&home));
+    let env = crate::host::probe_environment(crate::nginx::public_port_u16(home));
     if env.systemd_pid1 {
-        if try_system_unit(&home)? {
-            println!("enabled goethed boot via systemd (system unit)");
-            return Ok(());
+        if try_system_unit(home)? {
+            return Ok(vec!["enabled goethed boot via systemd (system unit)".to_string()]);
         }
-        if try_user_unit(&home)? {
-            println!("enabled goethed boot via systemd (--user unit)");
-            return Ok(());
+        if try_user_unit(home)? {
+            let mut lines = vec!["enabled goethed boot via systemd (--user unit)".to_string()];
+            if user_unit_dir() == default_user_unit_dir() {
+                lines.push(ensure_linger());
+            }
+            return Ok(lines);
         }
     }
     if env.container.is_some() && !env.systemd_pid1 {
-        let cron = install_crontab_reboot(&home).is_ok();
+        let mut lines = Vec::new();
+        let cron = install_crontab_reboot(home).is_ok();
         if !goethed_running() {
-            spawn_goethed(&home)?;
-            println!("started goethed with nohup (no init system in this container)");
+            spawn_goethed(home)?;
+            lines.push("started goethed with nohup (no init system in this container)".to_string());
         }
         if cron {
-            println!("added a crontab @reboot entry (it only runs if cron runs in the container)");
+            lines.push("added a crontab @reboot entry (it only runs if cron runs in the container)".to_string());
         }
-        println!(
+        lines.push(format!(
             "containers restart without init: add {} & to the container start command so goethed comes back",
             shell_quote(&goethed.display().to_string())
-        );
-        return Ok(());
+        ));
+        return Ok(lines);
     }
-    install_crontab_reboot(&home)?;
-    println!("enabled goethed boot via crontab @reboot");
-    Ok(())
+    install_crontab_reboot(home)?;
+    Ok(vec!["enabled goethed boot via crontab @reboot".to_string()])
+}
+
+fn ensure_linger() -> String {
+    // A user unit starts at boot only when the user lingers; turn it on, or say how when polkit refuses.
+    let user = std::env::var("USER").unwrap_or_default();
+    let lingering = Command::new("loginctl")
+        .args(["show-user", &user, "-p", "Linger"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "Linger=yes");
+    if lingering {
+        return "user lingering is on, so goethed starts at boot without a login".to_string();
+    }
+    let ok = Command::new("loginctl").arg("enable-linger").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    if ok {
+        "turned on user lingering, so goethed starts at boot without a login".to_string()
+    } else {
+        format!("goethed starts at boot only after you log in; to start it without a login run: sudo loginctl enable-linger {user}")
+    }
 }
 
 pub fn run_disable() -> Result<(), String> {
-    // Remove only the autostart entries that start this GOETHE_HOME; other homes keep theirs.
-    let home = goethe_home();
-    let mut actions = 0usize;
-    if remove_system_unit(&home) {
-        println!("disabled goethed systemd (system unit)");
-        actions += 1;
-    }
-    if remove_user_unit(&home) {
-        println!("disabled goethed systemd (--user unit)");
-        actions += 1;
-    }
-    if remove_crontab_reboot(&home)? {
-        println!("removed goethed crontab @reboot entry");
-        actions += 1;
-    }
-    if actions == 0 {
-        println!("goethed boot was not enabled");
+    for line in disable_boot(&goethe_home())? {
+        println!("{line}");
     }
     Ok(())
+}
+
+pub fn disable_boot(home: &Path) -> Result<Vec<String>, String> {
+    // Remove only the autostart entries that start this GOETHE_HOME; other homes keep theirs.
+    let mut lines = Vec::new();
+    if remove_system_unit(home) {
+        lines.push("disabled goethed systemd (system unit)".to_string());
+    }
+    if remove_user_unit(home) {
+        lines.push("disabled goethed systemd (--user unit)".to_string());
+    }
+    if remove_crontab_reboot(home)? {
+        lines.push("removed goethed crontab @reboot entry".to_string());
+    }
+    if lines.is_empty() {
+        lines.push("goethed boot was not enabled".to_string());
+    }
+    Ok(lines)
+}
+
+pub fn autostart_opted_out() -> bool {
+    std::env::var("GOETHE_NO_AUTOSTART").is_ok_and(|v| v.trim() == "1")
 }
 
 pub fn run_status() -> Result<(), String> {
@@ -136,9 +169,15 @@ pub fn kept_text(before: usize, kept: usize) -> String {
     }
 }
 
-pub fn run_up() -> Result<(), String> {
-    // Start this home's goethed, through its systemd unit when that unit starts this home, and wait until it answers.
+pub fn run_up(boot: bool) -> Result<(), String> {
+    // Turn on start at boot (unless opted out), start this home's goethed (through its unit when ours) and wait for it.
     let home = goethe_home();
+    if boot && !autostart_opted_out() {
+        match enable_boot(&home) {
+            Ok(lines) => lines.iter().filter(|l| !l.contains("goethed with nohup")).for_each(|l| println!("{l}")),
+            Err(e) => println!("goethed will not start at boot: {e}"),
+        }
+    }
     if goethed_running() {
         println!("goethed is already running (GOETHE_HOME {})", home.display());
         return Ok(());
@@ -294,7 +333,6 @@ fn try_user_unit(home: &Path) -> Result<bool, String> {
     write_unit(&user_unit_path(), home, "default.target")?;
     systemctl_quiet(&["--user", "daemon-reload"]);
     systemctl_quiet(&enable_args(&["--user"]));
-    eprintln!("hint: run `loginctl enable-linger $USER` so goethed starts at boot without a login session");
     Ok(true)
 }
 

@@ -390,7 +390,7 @@ write_system_unit() {
 }
 
 start_goethed() {
-  # systemd unit for root on systemd hosts unless another home owns it, else a detached nohup goethed.
+  # systemd unit for root on systemd hosts unless another home owns it, else goethe up (start at boot), else nohup.
   local other
   if [[ "${STARTED:-0}" -eq 1 ]]; then
     return
@@ -407,6 +407,9 @@ start_goethed() {
     other="$(system_unit_home)"
     echo "goethed.service already starts goethed for ${other}; this home starts now but gets no autostart." >&2
     echo "To move autostart here: GOETHE_HOME=${other} goethe service disable, then goethe service enable." >&2
+  fi
+  if [[ "${GOETHE_NO_AUTOSTART:-0}" != "1" ]] && "${GOETHE_HOME}/bin/goethe" up; then
+    return
   fi
   local launcher=(nohup)
   if command -v setsid >/dev/null 2>&1; then

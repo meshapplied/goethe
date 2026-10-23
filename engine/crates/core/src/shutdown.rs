@@ -34,7 +34,15 @@ pub fn clear_shutdown_flag() {
 }
 
 pub fn run_down() -> Result<(), String> {
-    stop_daemon(false)
+    // Stop goethed and its engines, and turn off start at boot so a reboot keeps Goethe down.
+    stop_daemon(false)?;
+    if !crate::service::autostart_opted_out() {
+        let lines = crate::service::disable_boot(&crate::paths::goethe_home())?;
+        if !lines.iter().any(|l| l.contains("was not enabled")) {
+            println!("goethed will not start at boot until the next goethe up");
+        }
+    }
+    Ok(())
 }
 
 pub fn stop_daemon(keep_engines: bool) -> Result<(), String> {
