@@ -1114,6 +1114,7 @@ fn do_gateway_status(json: bool) -> Result<(), String> {
 }
 
 fn gateway_status_text(bind: &str, port: u16, url: &str, running: bool, allowlist: usize, endpoints: &[String]) -> String {
+    // Bind and who can reach it, port, local URL, state, allowlist size, then provider endpoint hints.
     let loopback = bind.parse::<std::net::IpAddr>().map_or(true, |ip| ip.is_loopback());
     let scope = if loopback {
         "this host only; `goethe gateway bind 0.0.0.0` accepts remote clients"
