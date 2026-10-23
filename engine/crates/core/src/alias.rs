@@ -17,6 +17,11 @@ pub fn set(alias: &str, model_id: &str) -> Result<(), String> {
     if shadows > 0 {
         return Err(format!("{alias} is an installed model id; pick another alias name"));
     }
+    if alias.contains('/') && crate::paths::validate_model_id(alias).is_ok() {
+        eprintln!(
+            "warning: {alias} looks like a model id; if a model with that id is installed later, it takes the name and this alias is removed"
+        );
+    }
     let n: i64 = con
         .query_row(
             "SELECT COUNT(*) FROM installed_models WHERE model_id = ?1",
