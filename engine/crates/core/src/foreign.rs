@@ -247,7 +247,15 @@ mod tests {
         }
         let live = HashSet::from(["inst-live".to_string()]);
         let none = HashSet::new();
-        assert!(is_ours(tagged.id() as i32, &none, &live));
+        let pid = tagged.id();
+        assert!(
+            is_ours(pid as i32, &none, &live),
+            "tagged child {pid}: comm={:?} tag={:?} environ_readable={} alive={}",
+            std::fs::read_to_string(format!("/proc/{pid}/comm")).ok(),
+            proc_ident::instance_tag(pid as i32),
+            std::fs::read(format!("/proc/{pid}/environ")).is_ok(),
+            std::path::Path::new(&format!("/proc/{pid}")).exists()
+        );
         assert!(!is_ours(tagged.id() as i32, &none, &HashSet::from(["inst-dead".to_string()])));
         assert!(!is_ours(plain.id() as i32, &none, &live));
         assert!(is_ours(plain.id() as i32, &HashSet::from([plain.id() as i32]), &live));
