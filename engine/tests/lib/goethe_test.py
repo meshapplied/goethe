@@ -1122,12 +1122,24 @@ def isolated_real_home(work: Path, scrub: Sequence[str]) -> dict[str, str]:
             dst.close()
             ro.close()
     mux, public = _allocate_mux_public_ports()
-    return {
+    env = {
         "GOETHE_HOME": str(work),
         "GOETHE_MUX_PORT": str(mux),
         "GOETHE_PUBLIC_PORT": str(public),
         "GOETHE_SOCK": str(work / "goethe.sock"),
     }
+    _profile_hardware(work, src, env)
+    return env
+
+
+def _profile_hardware(work: Path, src: Path, env: dict[str, str]) -> None:
+    """hardware_state.json for a real-engine home (budgets need it): goethe hw profile, else the dev home's copy."""
+    rr = run([str(require_cli("goethe")), "hw", "profile"], env={**os.environ, **env}, timeout=120)
+    if rr.returncode == 0 and (work / "hardware_state.json").is_file():
+        return
+    if not (src / "hardware_state.json").is_file():
+        raise RuntimeError(f"no hardware profile for {work}: goethe hw profile exit {rr.returncode} {rr.stderr[-200:]}")
+    shutil.copy2(src / "hardware_state.json", work / "hardware_state.json")
 
 
 def make_release_key(dirpath: Path) -> tuple[Path, Path]:
