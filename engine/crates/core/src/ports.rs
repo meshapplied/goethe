@@ -18,7 +18,7 @@ pub fn ensure_service_ports(home: &Path) -> Result<(), String> {
 
     let pub_explicit = env_port("GOETHE_PUBLIC_PORT")?;
     let pub_persisted = read_port_file(home, "nginx/public_port");
-    let ours = pub_persisted.filter(|_| pub_explicit.is_none() && crate::nginx::master_running(home));
+    let ours = pub_persisted.filter(|&p| pub_explicit.is_none_or(|e| e == p) && crate::nginx::master_running(home));
     let (public, pub_notice) = match ours {
         Some(p) => (p, false),
         None => resolve_public_port(pub_explicit, pub_persisted, localhost_port_free)?,
