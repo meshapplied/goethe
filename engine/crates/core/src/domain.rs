@@ -3,7 +3,6 @@
 use crate::db;
 use crate::nginx;
 use crate::paths::goethe_home;
-use crate::security;
 use std::fs;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, TcpListener, ToSocketAddrs};
@@ -31,13 +30,7 @@ pub fn add(domain: &str) -> Result<String, String> {
         [domain],
     )
     .map_err(|e| e.to_string())?;
-    con.execute(
-        "INSERT OR REPLACE INTO goethe_settings (key, value) VALUES ('public_bind', ?1)",
-        ["0.0.0.0"],
-    )
-    .map_err(|e| e.to_string())?;
-    nginx::write_gateway_configs(&home)?;
-    security::gateway_reload(&home)?;
+    nginx::set_public_bind(&home, "0.0.0.0")?;
     let port = nginx::public_port_u16(&home);
     Ok(format!("https://{domain}:{port}"))
 }
