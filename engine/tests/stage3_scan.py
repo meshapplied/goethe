@@ -17,11 +17,11 @@ from lib.goethe_test import (
     huggingface_reachable,
     main_exit,
     require_cli,
+    roomiest_test_gpu,
     run,
     run_goethe,
     sqlite_query,
     start_goethed,
-    stub_load_gpu,
     temp_home,
 )
 
@@ -92,7 +92,7 @@ def main() -> None:
     """Scan, load and unload with the stub engine, remove, then check the gated-repo guidance."""
     goethe = require_cli("goethe")
     clean = clean_test_gpu()
-    gpu = clean if clean is not None else stub_load_gpu()
+    gpu = clean if clean is not None else roomiest_test_gpu()
     yes = [] if clean is not None else ["--yes"]
     gated = "skipped (huggingface.co unreachable)"
     with gpu_flock([gpu]), temp_home(stub_python=True, tag="scan") as home:
