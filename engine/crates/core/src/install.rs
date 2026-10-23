@@ -441,8 +441,15 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    let extra = sgl::merge_extra_args(&sgl::merge_extra_args(&base_args, &old_args)?, &cli_args)
-        .map_err(|e| format!("{e} (use --reset to rebuild the card)"))?;
+    let mut inferred = Vec::new();
+    for (flag, value, why) in sgl::infer_parsers(&cfg, dir) {
+        if [&base_args, &old_args, &cli_args].iter().all(|a| !sgl::has_flag(a, &flag)) {
+            notes.push(format!("{flag} {value} inferred: {why} (change it with goethe config --sglang-arg)"));
+            inferred.extend([flag, value]);
+        }
+    }
+    let ordered = sgl::merge_extra_args(&sgl::merge_extra_args(&inferred, &base_args)?, &old_args)?;
+    let extra = sgl::merge_extra_args(&ordered, &cli_args).map_err(|e| format!("{e} (use --reset to rebuild the card)"))?;
     let kv_dtype = cli_kv
         .or_else(|| old("kv_cache_dtype").and_then(|v| v.as_str()).map(String::from))
         .or_else(|| t.entry.as_ref().and_then(|e| e.kv_cache_dtype.clone()))

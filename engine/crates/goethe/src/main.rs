@@ -430,10 +430,12 @@ enum HwCommands {
         #[arg(long, help = "Emit JSON.")]
         json: bool,
     },
-    #[command(about = "Suggest GPU indices for a tensor-parallel size.")]
+    #[command(about = "Show where goethe load would place a model now (same chooser, foreign processes included).")]
     PickGpus {
-        #[arg(long, default_value = "1", help = "Tensor parallel size.")]
-        tp: u64,
+        #[arg(long, help = "Tensor parallel size (default: the model's, else 1).")]
+        tp: Option<u64>,
+        #[arg(long, help = "Installed model id whose VRAM budget to place.")]
+        model: Option<String>,
     },
 }
 
@@ -471,8 +473,8 @@ fn main() {
             cmd: HwCommands::Profile { json },
         } => hw::run_profile(json),
         Commands::Hw {
-            cmd: HwCommands::PickGpus { tp },
-        } => goethe_core::placement::run_pick_gpus(tp),
+            cmd: HwCommands::PickGpus { tp, model },
+        } => hw::run_pick_gpus(tp, model.as_deref().map(checked_id)),
         Commands::Gpu { cmd } => match cmd {
             GpuCommands::List { json } => do_gpu_list(json),
             GpuCommands::Deny { id } => do_gpu_deny(id),

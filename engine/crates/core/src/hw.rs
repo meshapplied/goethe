@@ -104,6 +104,43 @@ pub fn write_state(home: &Path, state: &HardwareState) -> Result<(), String> {
     write_atomic(&path, &data).map_err(|e| format!("write hardware_state.json: {e}"))
 }
 
+pub fn run_pick_gpus(tp: Option<u64>, model: Option<&str>) -> Result<(), String> {
+    // Where goethe load would place a model now (its full budget), or an empty engine of a given tp.
+    let home = goethe_home();
+    let view = crate::recommend::View::new(&home, profile(&home)?);
+    let pinned = tp.map(|t| t.max(1) as usize);
+    let (what, fit) = match model {
+        Some(id) => {
+            let (input, card_tp, marlin) = crate::models::fit_input(&home, id)?;
+            let fit = view.fit(id, &input, pinned.or(card_tp), marlin);
+            (format!("{id} "), fit.map(|f| (f.describe(&input), f.gpus)))
+        }
+        None => {
+            let t = pinned.unwrap_or(1);
+            let empty = crate::chooser::ChooserInput {
+                static_vram_gb: 0.0,
+                kv_bytes_per_token: 1,
+                num_attention_heads: t as u64,
+                num_kv_heads: t as u64,
+                attention: "gqa".to_string(),
+                max_ctx: 1,
+                ctx: 1,
+                max_conc: 1,
+            };
+            let fit = view.fit("", &empty, Some(t), None);
+            (String::new(), fit.map(|f| (format!("tp={} on GPU {}", f.tp, crate::placement::format_gpu_list(&f.gpus)), f.gpus)))
+        }
+    };
+    let (desc, gpus) = fit.map_err(|why| format!("would not place {what}now: {why}"))?;
+    let empty = if model.is_none() { " (an empty engine; --model <id> places a real budget)" } else { "" };
+    println!("would place {what}{desc}{empty}");
+    for g in view.gpus.iter().filter(|g| gpus.contains(&g.index)) {
+        let others = if g.foreign_process { "other software is running there" } else { "no other processes" };
+        println!("  GPU {}: {:.1} GB free, {others}", g.index, g.free_vram_mb as f64 / 1024.0);
+    }
+    Ok(())
+}
+
 pub fn run_profile(json_out: bool) -> Result<(), String> {
     let home = goethe_home();
     let state = profile(&home)?;

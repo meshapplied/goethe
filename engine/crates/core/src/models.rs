@@ -11,7 +11,9 @@ use crate::rpc;
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize)]
@@ -138,6 +140,16 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
+pub fn fit_input(home: &Path, model_id: &str) -> Result<(ChooserInput, Option<usize>, Option<f64>), String> {
+    // Budget inputs of one installed model (with its card tp and Marlin extra), as goethe models computes them.
+    let con = db::open(home).map_err(|e| e.to_string())?;
+    let m = installed_rows(home, &con)?
+        .into_iter()
+        .find(|m| m.id == model_id)
+        .ok_or_else(|| format!("{model_id} is not installed (goethe models --installed lists installed models)"))?;
+    Ok((m.input, (m.default_tp > 0).then_some(m.default_tp as usize), m.marlin_gb))
+}
+
 fn card_value(dir: &Path) -> toml::Value {
     fs::read_to_string(dir.join(install::CARD_FILE))
         .ok()
@@ -210,7 +222,7 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool) -> Result<(), String> 
         if plan.source.is_some() && p == &plan.primary {
             steps.push(format!("remove goethe's links and card in {}", p.display()));
         } else {
-            steps.push(format!("delete {} ({:.1} GB)", p.display(), dir_size_gb(p)));
+            steps.push(format!("delete {} ({})", p.display(), usage_text(dir_usage_gb(p))));
         }
     }
     for (p, why) in &plan.keep {
@@ -333,20 +345,34 @@ fn remove_owned(home: &Path, p: &Path) -> Result<(), String> {
     r.map_err(|e| format!("delete {}: {e}", p.display()))
 }
 
-fn dir_size_gb(p: &Path) -> f64 {
-    // Bytes under p without following links, in GB.
-    fn walk(p: &Path) -> u64 {
+fn dir_usage_gb(p: &Path) -> (f64, f64) {
+    // GB of files under p (each inode once, links not followed) and the GB deleting p frees.
+    fn walk(p: &Path, inodes: &mut HashMap<(u64, u64), (u64, u64, u64)>) {
         let Ok(meta) = fs::symlink_metadata(p) else {
-            return 0;
+            return;
         };
-        if !meta.is_dir() {
-            return if meta.file_type().is_symlink() { 0 } else { meta.len() };
+        if meta.is_dir() {
+            for e in fs::read_dir(p).into_iter().flatten().flatten() {
+                walk(&e.path(), inodes);
+            }
+        } else if meta.is_file() {
+            inodes.entry((meta.dev(), meta.ino())).or_insert((meta.len(), meta.nlink(), 0)).2 += 1;
         }
-        fs::read_dir(p)
-            .map(|rd| rd.flatten().map(|e| walk(&e.path())).sum())
-            .unwrap_or(0)
     }
-    walk(p) as f64 / 1e9
+    let mut inodes = HashMap::new();
+    walk(p, &mut inodes);
+    let total: u64 = inodes.values().map(|v| v.0).sum();
+    let freed: u64 = inodes.values().filter(|(_, links, seen)| seen >= links).map(|v| v.0).sum();
+    (total as f64 / 1e9, freed as f64 / 1e9)
+}
+
+fn usage_text((total, freed): (f64, f64)) -> String {
+    // Hard links to files kept elsewhere free nothing, so say what deleting actually frees.
+    if freed + 0.05 < total {
+        format!("{total:.1} GB, frees {freed:.1} GB: the rest are hard links to files kept elsewhere")
+    } else {
+        format!("{total:.1} GB")
+    }
 }
 
 fn unload(model_id: &str, force: bool) -> Result<(), String> {
@@ -417,6 +443,24 @@ mod tests {
             rusqlite::params![id, rel, managed],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn hard_links_free_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tree, other) = (dir.path().join("tree"), dir.path().join("other"));
+        fs::create_dir_all(&tree).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let sparse = |p: PathBuf, len: u64| fs::File::create(p).unwrap().set_len(len).unwrap();
+        sparse(tree.join("own.bin"), 300_000_000);
+        sparse(other.join("w.bin"), 200_000_000);
+        fs::hard_link(other.join("w.bin"), tree.join("w.bin")).unwrap();
+        sparse(tree.join("pair.bin"), 100_000_000);
+        fs::hard_link(tree.join("pair.bin"), tree.join("pair2.bin")).unwrap();
+        let (total, freed) = dir_usage_gb(&tree);
+        assert!((total - 0.6).abs() < 1e-9 && (freed - 0.4).abs() < 1e-9, "{total} {freed}");
+        assert_eq!(usage_text((0.6, 0.4)), "0.6 GB, frees 0.4 GB: the rest are hard links to files kept elsewhere");
+        assert_eq!(usage_text((0.6, 0.6)), "0.6 GB");
     }
 
     #[test]
