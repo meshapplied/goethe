@@ -15,6 +15,7 @@ from lib.goethe_test import (
     home_goethe_env,
     main_exit,
     require_cli,
+    roomiest_test_gpu,
     run,
     run_goethe,
     spawn,
@@ -23,7 +24,6 @@ from lib.goethe_test import (
     wait_until,
 )
 
-ALIEN_GPU = 3
 _CFG = {
     "model_type": "llama",
     "hidden_size": 64,
@@ -116,16 +116,17 @@ def _check_foreign_notice(goethe: Path, home: Path, env: dict[str, str]) -> None
     alien = None
     try:
         wait_goethed_socket(home)
-        alien = foreign_gpu_process(ALIEN_GPU, mb=1024)
+        gpu_index = roomiest_test_gpu(8.0)
+        alien = foreign_gpu_process(gpu_index, mb=1024)
         pid = alien.popen.pid
-        if not wait_until(lambda: any(p == pid for p, _ in gpu_pids(ALIEN_GPU)), timeout=90):
+        if not wait_until(lambda: any(p == pid for p, _ in gpu_pids(gpu_index)), timeout=90):
             raise RuntimeError("test allocation never appeared on the GPU")
         rr = run_goethe([str(goethe), "hw", "profile", "--json"], env=env, timeout=120)
-        gpu = next(g for g in json.loads(rr.stdout)["gpus"] if int(g["index"]) == ALIEN_GPU)
+        gpu = next(g for g in json.loads(rr.stdout)["gpus"] if int(g["index"]) == gpu_index)
         if not any(int(p["pid"]) == pid and int(p["used_vram_mb"]) >= 900 for p in gpu["running_processes"]):
             raise RuntimeError("hw profile does not list the foreign process with its VRAM")
         proc = subprocess.run(
-            [str(goethe), "load", "org/tiny", "--gpus", str(ALIEN_GPU), "--no-wait"],
+            [str(goethe), "load", "org/tiny", "--gpus", str(gpu_index), "--no-wait"],
             env={**os.environ, **env},
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -134,8 +135,8 @@ def _check_foreign_notice(goethe: Path, home: Path, env: dict[str, str]) -> None
         )
         if proc.returncode != 3:
             raise RuntimeError(f"load next to a foreign process exited {proc.returncode}: {proc.stderr[-400:]}")
-        if not re.search(r"unmanaged process PID \d+", proc.stderr):
-            raise RuntimeError(f"foreign notice missing from stderr: {proc.stderr[-400:]}")
+        if f"unmanaged process PID {pid}" not in proc.stderr or f"kill {pid}" not in proc.stderr:
+            raise RuntimeError(f"notice must name our foreign PID and the kill command: {proc.stderr[-400:]}")
     finally:
         if alien is not None:
             alien.stop()

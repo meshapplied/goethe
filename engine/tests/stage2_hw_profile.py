@@ -10,6 +10,10 @@ import subprocess
 from lib.goethe_test import main_exit, require_cli, run_goethe, temp_home
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+CONTRACT_C = {
+    "NVLINK": "NVLINK", "PIX": "PCIE_SWITCH", "PXB": "PCIE_SWITCH", "PHB": "SAME_NUMA", "NODE": "SAME_NUMA",
+    "SYS": "CROSS_SOCKET",
+}
 
 
 def _strip_ansi(text: str) -> str:
@@ -167,8 +171,14 @@ def main() -> None:
     topo = _topo_map()
     for link in state.get("links", []):
         key = (int(link["a"]), int(link["b"]))
-        if key in topo and link["type"] != topo[key]:
-            raise RuntimeError(f"link {key} type {link['type']} != smi {topo[key]}")
+        raw = link.get("topo") or link["type"]
+        code = "NVLINK" if raw.startswith("NV") else raw
+        if link["type"] != CONTRACT_C.get(code):
+            raise RuntimeError(f"link {key} type {link['type']} is not the CONTRACT C class of topo {raw}")
+        if key in topo and code != topo[key]:
+            raise RuntimeError(f"link {key} topo {raw} != smi {topo[key]}")
+    if len(smi) > 1 and not state.get("links"):
+        raise RuntimeError("profile reports no links between GPUs")
     print("stage2_hw_profile ok")
 
 

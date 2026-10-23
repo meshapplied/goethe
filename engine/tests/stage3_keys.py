@@ -14,12 +14,12 @@ from lib.goethe_test import (
     home_goethe_env,
     main_exit,
     require_cli,
+    roomiest_test_gpu,
     run_goethe,
     seed_installed_model,
     sha256_hex,
     sqlite_query,
     start_goethed,
-    stub_load_gpu,
     temp_home,
     test_mux_port,
     write_card,
@@ -51,7 +51,7 @@ def _mux_post(home: Path, body: dict[str, Any], token: str) -> tuple[int, dict[s
 def main() -> None:
     """Exercise key limits against a stub engine through the mux."""
     goethe = require_cli("goethe")
-    gpu = stub_load_gpu()
+    gpu = roomiest_test_gpu()
     with gpu_flock([gpu]), temp_home(stub_python=True) as home:
         write_card(home / "models" / "org__k", "k", 512, 2)
         seed_installed_model(home, "k", "models/org__k", 5.0, 512, 512, 2, 1)

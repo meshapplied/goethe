@@ -9,7 +9,7 @@ from lib.goethe_test import (
     foreign_gpu_process,
     main_exit,
     require_cli,
-    require_gpus,
+    roomiest_test_gpu,
     run_goethe,
     temp_home,
     wait_gpu_pid,
@@ -21,7 +21,7 @@ FOREIGN_MB = 3072
 def main() -> None:
     """goethe hw profile lists an unmanaged GPU process with its VRAM, written into a temp home."""
     goethe = require_cli("goethe")
-    gpu = require_gpus(1)[-1]
+    gpu = roomiest_test_gpu(8.0)
     with temp_home(stub_python=True, tag="foreign") as home:
         foreign = foreign_gpu_process(gpu, mb=FOREIGN_MB)
         try:
