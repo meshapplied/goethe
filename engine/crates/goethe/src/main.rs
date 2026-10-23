@@ -646,7 +646,11 @@ fn main() {
         }
         Commands::Ps { json } => do_ps(json),
         Commands::Stop { keep_engines: false } => shutdown::run_stop(),
-        Commands::Stop { keep_engines: true } => goethe_core::service::stop_keeping_engines(),
+        Commands::Stop { keep_engines: true } => goethe_core::service::stop_keeping_engines().map(|(before, kept)| {
+            if before > 0 {
+                println!("{}", goethe_core::service::kept_text(before, kept));
+            }
+        }),
         Commands::Service { cmd } => match cmd {
             ServiceCommands::Enable => goethe_core::service::run_enable(),
             ServiceCommands::Disable => goethe_core::service::run_disable(),

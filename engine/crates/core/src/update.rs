@@ -419,8 +419,8 @@ fn unpack_ternary(home: &Path, archive: &Path) -> Result<(), String> {
 }
 
 fn restart_goethed(home: &Path) -> Result<(), String> {
-    // Engines keep serving: stop the old goethed with keep_engines, then start the new one (systemd for this home's unit).
-    crate::service::stop_keeping_engines()?;
+    // Engines and the gateway carry over: stop the old goethed with keep_engines, then start the new one.
+    let (before, kept) = crate::service::stop_keeping_engines()?;
     match crate::service::systemctl_restart_args() {
         Some(args) => {
             let ok = Command::new("systemctl").args(&args).status().map_err(|e| e.to_string())?.success();
@@ -430,19 +430,35 @@ fn restart_goethed(home: &Path) -> Result<(), String> {
             println!("started the new goethed with systemctl {}", args.join(" "));
         }
         None => {
-            crate::service::spawn_goethed(home)?;
+            crate::service::respawn_goethed(home)?;
             println!("started the new goethed");
         }
     }
     crate::service::wait_goethed(Duration::from_secs(30))?;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let mut running = crate::service::live_engine_pids().len();
-    while running == 0 && std::time::Instant::now() < deadline {
+    while running < before && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(500));
         running = crate::service::live_engine_pids().len();
     }
-    println!("{running} engine instance(s) RUNNING under the new goethed (goethe ps shows the rest as they come back)");
+    println!("{}", upgrade_summary(before, kept, running));
     Ok(())
+}
+
+fn upgrade_summary(before: usize, kept: usize, running: usize) -> String {
+    // What happened to the loaded models across the goethed swap.
+    if before == 0 {
+        "no models were loaded".to_string()
+    } else if kept == before && running >= before {
+        format!(
+            "the upgrade kept all {before} loaded model instance(s) serving (requests during the few seconds without goethed got a 502)"
+        )
+    } else {
+        format!(
+            "{} {running} of {before} loaded instance(s) are RUNNING under the new goethed; goethe ps shows the rest as they come back",
+            crate::service::kept_text(before, kept)
+        )
+    }
 }
 
 #[cfg(test)]
@@ -458,6 +474,14 @@ mod tests {
         fs::write(dir.path().join("SHA256SUMS"), format!("{got}  f\n")).unwrap();
         assert_eq!(lookup_sum(&dir.path().join("SHA256SUMS"), "f").unwrap(), got);
         assert!(lookup_sum(&dir.path().join("SHA256SUMS"), "g").is_err());
+    }
+
+    #[test]
+    fn upgrade_summary_says_what_kept_serving() {
+        assert_eq!(upgrade_summary(0, 0, 0), "no models were loaded");
+        assert!(upgrade_summary(2, 2, 2).starts_with("the upgrade kept all 2 loaded model instance(s) serving"));
+        let lost = upgrade_summary(2, 0, 1);
+        assert!(lost.contains("0 of 2 engine(s) still run") && lost.contains("1 of 2 loaded instance(s) are RUNNING"), "{lost}");
     }
 
     #[test]
