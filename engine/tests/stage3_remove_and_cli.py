@@ -109,7 +109,7 @@ def _check_key_and_profile(goethe: Path, home: Path, env: dict[str, str]) -> Non
 
 
 def _check_foreign_notice(goethe: Path, home: Path, env: dict[str, str]) -> None:
-    """A non-tty load on a GPU with a process goethe did not start exits 3 with the notice (any foreign PID may be named)."""
+    """A non-tty load next to a process goethe did not start exits 3 with the notice (any foreign PID)."""
     src = _tree(home / "src", "tiny")
     run_goethe([str(goethe), "install", str(src), "--name", "org/tiny"], env=env)
     goethed = spawn([str(require_cli("goethed"))], env=env, label="goethed")
