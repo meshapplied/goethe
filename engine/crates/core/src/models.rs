@@ -330,7 +330,7 @@ fn dir_size_gb(p: &Path) -> f64 {
 
 fn unload(model_id: &str, force: bool) -> Result<(), String> {
     let reply = rpc::call("unload", json!({"model_id": model_id, "all": false, "force": force}))
-        .map_err(|e| format!("cannot unload {model_id} before removing it: {}", rpc::map_daemon_err(e)))?;
+        .map_err(|e| format!("cannot unload {model_id} before removing it: {}", crate::paths::daemon_err(e)))?;
     if reply.code != 0 {
         let msg = if reply.stderr.trim().is_empty() { reply.stdout } else { reply.stderr };
         return Err(format!("unload of {model_id} failed, nothing was removed: {}", msg.trim()));

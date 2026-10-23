@@ -1,14 +1,16 @@
 // GOETHE_HOME resolution, model id validation, and paths under GOETHE_HOME.
 
+use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 pub const HOME_MARKER: &str = ".goethe-home";
+const ENV_FILE_KEYS: [&str; 3] = ["GOETHE_PKG_URL", "GOETHE_REGISTRY_URL", "GOETHE_PKG_TOKEN"];
 
 pub fn goethe_home() -> PathBuf {
-    // GOETHE_HOME wins; otherwise the default is probed once per process.
+    // GOETHE_HOME, else the home this binary is installed in, else the default probe (once per process).
     if let Ok(v) = std::env::var("GOETHE_HOME") {
         if !v.is_empty() {
             return PathBuf::from(v);
@@ -17,12 +19,51 @@ pub fn goethe_home() -> PathBuf {
     static DEFAULT_HOME: OnceLock<PathBuf> = OnceLock::new();
     DEFAULT_HOME
         .get_or_init(|| {
+            if let Some(home) = std::env::current_exe().ok().and_then(|exe| home_of_binary(&exe)) {
+                return home;
+            }
             let user_home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/tmp"));
             default_home(Path::new("/"), &user_home)
         })
         .clone()
+}
+
+pub fn home_of_binary(exe: &Path) -> Option<PathBuf> {
+    // <home>/bin/goethe or <home>/bin/goethed (after resolving links) inside a marked goethe home.
+    let exe = std::fs::canonicalize(exe).ok()?;
+    let name = exe.file_name()?.to_str()?;
+    let bin = exe.parent()?;
+    let home = bin.parent()?;
+    (matches!(name, "goethe" | "goethed") && bin.file_name()? == "bin" && home.join(HOME_MARKER).is_file())
+        .then(|| home.to_path_buf())
+}
+
+pub fn setting(key: &str) -> Option<String> {
+    // Process env first, then GOETHE_HOME/goethe.env for the installer's package and registry keys.
+    let from_env = std::env::var(key).ok().filter(|v| !v.is_empty());
+    let file = || std::fs::read_to_string(goethe_home().join("goethe.env")).unwrap_or_default();
+    from_env.or_else(|| ENV_FILE_KEYS.contains(&key).then(|| parse_env_file(&file()).remove(key)).flatten())
+}
+
+pub fn parse_env_file(text: &str) -> BTreeMap<String, String> {
+    // KEY=VALUE lines (optionally quoted) for the allowed keys only; comments and other keys are ignored.
+    text.lines()
+        .filter_map(|l| l.trim().split_once('='))
+        .map(|(k, v)| (k.trim().trim_start_matches("export ").to_string(), v.trim().trim_matches(['"', '\'']).to_string()))
+        .filter(|(k, v)| ENV_FILE_KEYS.contains(&k.as_str()) && !v.is_empty())
+        .collect()
+}
+
+pub fn daemon_err(e: String) -> String {
+    // Name the home and socket that were tried when goethed is not reachable.
+    let e = crate::rpc::map_daemon_err(e);
+    if e.contains("goethed is not running") {
+        format!("{e} (looked in GOETHE_HOME {} at socket {})", goethe_home().display(), goethe_sock().display())
+    } else {
+        e
+    }
 }
 
 pub fn default_home(root: &Path, user_home: &Path) -> PathBuf {
@@ -186,6 +227,32 @@ mod tests {
         assert_eq!(default_home(root.path(), &user), root.path().join("var/lib/goethe"));
         std::fs::create_dir_all(root.path().join("workspace")).unwrap();
         assert_eq!(default_home(root.path(), &user), root.path().join("workspace/.goethe"));
+    }
+
+    #[test]
+    fn home_follows_the_installed_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("custom-home");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::write(home.join("bin/goethe"), "bin").unwrap();
+        assert_eq!(home_of_binary(&home.join("bin/goethe")), None);
+        std::fs::write(home.join(HOME_MARKER), "").unwrap();
+        let canonical = std::fs::canonicalize(&home).unwrap();
+        assert_eq!(home_of_binary(&home.join("bin/goethe")), Some(canonical.clone()));
+        let link = dir.path().join("local-bin-goethe");
+        std::os::unix::fs::symlink(home.join("bin/goethe"), &link).unwrap();
+        assert_eq!(home_of_binary(&link), Some(canonical));
+        std::fs::write(home.join("bin/other"), "bin").unwrap();
+        assert_eq!(home_of_binary(&home.join("bin/other")), None);
+    }
+
+    #[test]
+    fn env_file_keeps_only_installer_keys() {
+        let text = "# installer\nGOETHE_PKG_URL=http://10.0.0.5:8000\nexport GOETHE_REGISTRY_URL=\"file:///r.json\"\nPATH=/evil\nGOETHE_PKG_TOKEN=\n";
+        let m = parse_env_file(text);
+        assert_eq!(m.get("GOETHE_PKG_URL").map(String::as_str), Some("http://10.0.0.5:8000"));
+        assert_eq!(m.get("GOETHE_REGISTRY_URL").map(String::as_str), Some("file:///r.json"));
+        assert_eq!(m.len(), 2);
     }
 
     #[test]
