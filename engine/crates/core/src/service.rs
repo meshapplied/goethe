@@ -121,20 +121,19 @@ pub fn pid_alive(pid: i64) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
-pub fn stop_keeping_engines() -> Result<(), String> {
-    // shutdown::stop_daemon(true) (contract C-D), then say how many RUNNING engines are still alive.
-    let before = live_engine_pids();
+pub fn stop_keeping_engines() -> Result<(usize, usize), String> {
+    // shutdown::stop_daemon(true) (contract C-D); returns the RUNNING engines before and how many are still alive.
+    let before = if goethed_running() { live_engine_pids() } else { Vec::new() };
     crate::shutdown::stop_daemon(true)?;
-    let kept = before.iter().filter(|p| pid_alive(**p)).count();
-    if kept < before.len() {
-        println!(
-            "{kept} of {} engine(s) still run: the stopped goethed tore the rest down; the next goethed restores them",
-            before.len()
-        );
-    } else if kept > 0 {
-        println!("{kept} engine(s) kept serving");
+    Ok((before.len(), before.iter().filter(|p| pid_alive(**p)).count()))
+}
+
+pub fn kept_text(before: usize, kept: usize) -> String {
+    if kept < before {
+        format!("{kept} of {before} engine(s) still run: the stopped goethed tore the rest down; the next goethed restores them")
+    } else {
+        format!("{kept} engine(s) kept serving")
     }
-    Ok(())
 }
 
 pub fn wait_goethed(timeout: std::time::Duration) -> Result<(), String> {
@@ -163,6 +162,15 @@ pub fn refresh_unit(home: &Path) {
 }
 
 pub fn spawn_goethed(home: &Path) -> Result<(), String> {
+    spawn(home, true)
+}
+
+pub fn respawn_goethed(home: &Path) -> Result<(), String> {
+    // After a keep-engines stop: the new goethed takes the persisted ports, where the adopted gateway still listens.
+    spawn(home, false)
+}
+
+fn spawn(home: &Path, port_env: bool) -> Result<(), String> {
     // Start goethed detached in its own session, logging to GOETHE_HOME/logs/goethed.log.
     let goethed = home.join("bin/goethed");
     fs::create_dir_all(home.join("logs")).map_err(|e| e.to_string())?;
@@ -172,6 +180,9 @@ pub fn spawn_goethed(home: &Path) -> Result<(), String> {
         .open(home.join("logs/goethed.log"))
         .map_err(|e| e.to_string())?;
     let mut cmd = Command::new(&goethed);
+    if !port_env {
+        cmd.env_remove("GOETHE_MUX_PORT").env_remove("GOETHE_PUBLIC_PORT");
+    }
     cmd.env("GOETHE_HOME", home)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
