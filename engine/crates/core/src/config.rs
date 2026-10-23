@@ -69,8 +69,8 @@ pub fn run(opts: ConfigOpts) -> Result<(), String> {
     if let Some(tp) = opts.tp {
         table.insert("tp_size".into(), int(tp));
     }
-    if let Some(gpus) = opts.gpus {
-        table.insert("preferred_gpus".into(), toml::Value::Array(gpus.into_iter().map(|g| int(g as u64)).collect()));
+    if let Some(gpus) = &opts.gpus {
+        table.insert("preferred_gpus".into(), toml::Value::Array(gpus.iter().map(|g| int(u64::from(*g))).collect()));
     }
     let (new_args, kv_dtype) = sgl::take_flag(&opts.sglang_args, "--kv-cache-dtype")?;
     if let Some(msg) = sgl::reserved_flag_error(&new_args) {
@@ -96,6 +96,7 @@ pub fn run(opts: ConfigOpts) -> Result<(), String> {
         table.insert("kv_cache_dtype".into(), toml::Value::String(kv.clone()));
     }
     write_card_table(&dir, &table)?;
+    println!("{}", config_summary(&opts, &new_args, &table, kv_dtype.as_deref()));
     let get = |k: &str, d: i64| table.get(k).and_then(|v| v.as_integer()).unwrap_or(d);
     let (ctx, mc, tp) = (get("context_length", 4096), get("max_running_requests", 8), get("tp_size", 0));
     if row.is_some() {
@@ -115,6 +116,44 @@ pub fn run(opts: ConfigOpts) -> Result<(), String> {
         .map_err(|e| format!("state.db: {e}"))?;
     }
     Ok(())
+}
+
+fn config_summary(opts: &ConfigOpts, new_args: &[String], table: &toml::Table, kv_dtype: Option<&str>) -> String {
+    // One confirmation line naming what changed, or the current defaults when nothing did.
+    let mut parts = Vec::new();
+    if let Some(v) = opts.ctx {
+        parts.push(format!("ctx {v}"));
+    }
+    if let Some(v) = opts.max_conc {
+        parts.push(format!("max-conc {v}"));
+    }
+    if let Some(v) = opts.tp {
+        parts.push(if v == 0 { "tp auto".to_string() } else { format!("tp {v}") });
+    }
+    if let Some(g) = &opts.gpus {
+        parts.push(format!("gpus {}", g.iter().map(|g| g.to_string()).collect::<Vec<_>>().join(",")));
+    }
+    if let Some(kv) = kv_dtype {
+        parts.push(format!("kv-cache-dtype {kv}"));
+    }
+    if opts.clear_sglang_args || !new_args.is_empty() {
+        let args: Vec<&str> = table
+            .get("extra_sglang_args")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+            .unwrap_or_default();
+        parts.push(if args.is_empty() { "no extra sglang args".to_string() } else { format!("sglang args {}", args.join(" ")) });
+    }
+    if parts.is_empty() {
+        let get = |k: &str| table.get(k).and_then(|v| v.as_integer()).map_or_else(|| "default".to_string(), |v| v.to_string());
+        return format!(
+            "{}: nothing changed (ctx {}, max-conc {}); use --ctx, --max-conc, --tp, --gpus or --sglang-arg",
+            opts.model_id,
+            get("context_length"),
+            get("max_running_requests")
+        );
+    }
+    format!("updated {}: {}", opts.model_id, parts.join(", "))
 }
 
 fn find_model_dir(home: &Path, model_id: &str) -> Result<PathBuf, String> {
@@ -158,5 +197,28 @@ mod tests {
         let err = validate_limits(home, "org/m", Some(999_999_999), None).unwrap_err();
         assert!(err.contains("above the maximum context of org/m (1024 tokens)"), "{err}");
         assert!(validate_limits(home, "org/other", Some(1 << 30), None).is_ok());
+    }
+
+    #[test]
+    fn config_confirms_what_changed() {
+        let mut opts = ConfigOpts {
+            model_id: "org/m".into(),
+            ctx: Some(32768),
+            max_conc: Some(4),
+            tp: Some(0),
+            gpus: Some(vec![2, 3]),
+            sglang_args: vec!["--chunked-prefill-size".into(), "4096".into()],
+            clear_sglang_args: false,
+        };
+        let table: toml::Table = toml::from_str(
+            "context_length = 32768\nmax_running_requests = 4\nextra_sglang_args = [\"--chunked-prefill-size\", \"4096\"]",
+        )
+        .unwrap();
+        assert_eq!(
+            config_summary(&opts, &opts.sglang_args, &table, Some("fp8_e5m2")),
+            "updated org/m: ctx 32768, max-conc 4, tp auto, gpus 2,3, kv-cache-dtype fp8_e5m2, sglang args --chunked-prefill-size 4096"
+        );
+        opts = ConfigOpts { ctx: None, max_conc: None, tp: None, gpus: None, sglang_args: vec![], ..opts };
+        assert!(config_summary(&opts, &[], &table, None).starts_with("org/m: nothing changed (ctx 32768, max-conc 4)"));
     }
 }

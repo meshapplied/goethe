@@ -228,6 +228,14 @@ pub fn run_validate(source: &str, opts: &ValidateOpts) -> Result<(), String> {
     if !errors.is_empty() {
         std::process::exit(1);
     }
+    let n = reg.models.len();
+    let extra = [(opts.online, "online"), (opts.check_sglang, "sglang")]
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, what)| *what)
+        .collect::<Vec<_>>();
+    let checks = if extra.is_empty() { String::new() } else { format!(" ({} checks passed)", extra.join(" and ")) };
+    println!("{source}: {n} entr{} valid{checks}", if n == 1 { "y" } else { "ies" });
     Ok(())
 }
 
