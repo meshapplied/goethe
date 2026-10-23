@@ -224,6 +224,7 @@ def _atexit_cleanup() -> None:
     for proc in list(_ACTIVE):
         proc.stop()
     for td in list(_temp_homes_active):
+        _shutdown_home_daemon(td)
         shutil.rmtree(td, ignore_errors=True)
     _temp_homes_active.clear()
     _artifact_path().unlink(missing_ok=True)
@@ -722,10 +723,23 @@ def write_stub_python(pyenv_bin: Path, real: Path) -> None:
     wrapper.chmod(0o755)
 
 
+def _shutdown_home_daemon(home: Path) -> None:
+    """Ask the goethed serving this temp home, if any, to shut down (it stops its engines and nginx too)."""
+    sock = home / "goethe.sock"
+    if not sock.exists():
+        return
+    try:
+        goethe_rpc(home, "shutdown", None, timeout=10.0)
+    except (OSError, ValueError):
+        return
+    wait_until(lambda: not sock.exists(), timeout=15.0, interval=0.1)
+
+
 def _teardown_home(td: Path, strict: bool) -> None:
     """Remove a temp home; when strict, fail if any process (engine, CLI, download) or file outlived the test."""
     leftover = sorted(p for p in home_process_tree(td) if pid_alive(p))
     names = [proc_cmdline(p)[:100] for p in leftover]
+    _shutdown_home_daemon(td)
     shutil.rmtree(td, ignore_errors=True)
     if leftover:
         wait_until(lambda: not any(pid_alive(p) for p in leftover), timeout=10.0)
