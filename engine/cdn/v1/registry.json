@@ -28,7 +28,8 @@
         "--tool-call-parser",
         "qwen3_coder"
       ],
-      "description": "Qwen3.8 27B, compressed-tensors NVFP4/FP8 with FP8 KV scales. The Hub repo has no weight files yet: install a local copy with goethe install <dir> --name meshapplied/Qwen3.8-27B-NVFP4-NInfer."
+      "description": "Qwen3.8 27B, compressed-tensors NVFP4/FP8 with FP8 KV scales. The Hub repo has no weight files yet: install a local copy with goethe install <dir> --name meshapplied/Qwen3.8-27B-NVFP4-NInfer.",
+      "manual_download": true
     },
     {
       "id": "meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest",

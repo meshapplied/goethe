@@ -217,6 +217,53 @@ pub fn resolve_model_dir_args(args: &[String], model_dir: &Path) -> Result<(Vec<
     Ok((render(&kept), notes))
 }
 
+const QWEN3_MODEL_TYPES: &[&str] = &["qwen3", "qwen3_moe", "qwen3_5", "qwen3_next", "qwen4_exp"];
+
+pub fn infer_parsers(cfg: &Value, dir: &Path) -> Vec<(String, String, String)> {
+    // Reasoning parser for Qwen3-family model types and tool-call parser from the chat template: (flag, value, note).
+    let mut out = Vec::new();
+    let model_type = [cfg.get("model_type"), cfg.pointer("/text_config/model_type")]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .find(|t| QWEN3_MODEL_TYPES.contains(t));
+    if let Some(t) = model_type {
+        out.push(("--reasoning-parser".into(), "qwen3".into(), format!("model_type {t} is Qwen3 family")));
+    }
+    let template = chat_template(dir);
+    let tool = if template.contains("<function=") {
+        Some(("qwen3_coder", "the chat template writes XML <function=...> tool calls"))
+    } else if template.contains("<tool_call>") {
+        Some(("qwen25", "the chat template writes JSON inside <tool_call>"))
+    } else {
+        None
+    };
+    if let Some((parser, why)) = tool {
+        out.push(("--tool-call-parser".into(), parser.into(), why.into()));
+    }
+    out
+}
+
+fn chat_template(dir: &Path) -> String {
+    // Every chat template the model ships: chat_template.jinja, chat_template.json and tokenizer_config.json.
+    let mut out = std::fs::read_to_string(dir.join("chat_template.jinja")).unwrap_or_default();
+    for name in ["chat_template.json", "tokenizer_config.json"] {
+        let Some(v) = std::fs::read_to_string(dir.join(name)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
+            continue;
+        };
+        match v.get("chat_template") {
+            Some(Value::String(s)) => out.push_str(s),
+            Some(Value::Array(items)) => {
+                for s in items.iter().filter_map(|i| i.get("template").and_then(Value::as_str)) {
+                    out.push_str(s);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 pub fn wants_remote_code(cfg: &Value) -> bool {
     cfg.get("auto_map").is_some()
 }
@@ -310,6 +357,27 @@ mod tests {
         assert!(notes.is_empty());
         assert_eq!(out.len(), 8);
         assert_eq!(out[5], format!("{}/spec/hot_self_32k.pt", dir.path().display()));
+    }
+
+    #[test]
+    fn parsers_follow_model_type_and_chat_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = serde_json::json!({"model_type": "qwen3_next"});
+        assert_eq!(infer_parsers(&cfg, dir.path()).len(), 1);
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"chat_template": "<tool_call>\n{\"name\": \"{{ tool.name }}\"}\n</tool_call>"}"#,
+        )
+        .unwrap();
+        let got = infer_parsers(&cfg, dir.path());
+        assert_eq!(got[0].0, "--reasoning-parser");
+        assert_eq!((got[1].0.as_str(), got[1].1.as_str()), ("--tool-call-parser", "qwen25"));
+        std::fs::write(dir.path().join("chat_template.jinja"), "<tool_call>\n<function={{ name }}>\n").unwrap();
+        assert_eq!(infer_parsers(&cfg, dir.path())[1].1, "qwen3_coder");
+        let vl = serde_json::json!({"model_type": "llava", "text_config": {"model_type": "qwen3_moe"}});
+        assert_eq!(infer_parsers(&vl, dir.path())[0].1, "qwen3");
+        let other = tempfile::tempdir().unwrap();
+        assert!(infer_parsers(&serde_json::json!({"model_type": "llama"}), other.path()).is_empty());
     }
 
     #[test]

@@ -104,6 +104,43 @@ pub fn write_state(home: &Path, state: &HardwareState) -> Result<(), String> {
     write_atomic(&path, &data).map_err(|e| format!("write hardware_state.json: {e}"))
 }
 
+pub fn run_pick_gpus(tp: Option<u64>, model: Option<&str>) -> Result<(), String> {
+    // Where goethe load would place a model now (its full budget), or an empty engine of a given tp.
+    let home = goethe_home();
+    let view = crate::recommend::View::new(&home, profile(&home)?);
+    let pinned = tp.map(|t| t.max(1) as usize);
+    let (what, fit) = match model {
+        Some(id) => {
+            let (input, card_tp, marlin) = crate::models::fit_input(&home, id)?;
+            let fit = view.fit(id, &input, pinned.or(card_tp), marlin);
+            (format!("{id} "), fit.map(|f| (f.describe(&input), f.gpus)))
+        }
+        None => {
+            let t = pinned.unwrap_or(1);
+            let empty = crate::chooser::ChooserInput {
+                static_vram_gb: 0.0,
+                kv_bytes_per_token: 1,
+                num_attention_heads: t as u64,
+                num_kv_heads: t as u64,
+                attention: "gqa".to_string(),
+                max_ctx: 1,
+                ctx: 1,
+                max_conc: 1,
+            };
+            let fit = view.fit("", &empty, Some(t), None);
+            (String::new(), fit.map(|f| (format!("tp={} on GPU {}", f.tp, crate::placement::format_gpu_list(&f.gpus)), f.gpus)))
+        }
+    };
+    let (desc, gpus) = fit.map_err(|why| format!("would not place {what}now: {why}"))?;
+    let empty = if model.is_none() { " (an empty engine; --model <id> places a real budget)" } else { "" };
+    println!("would place {what}{desc}{empty}");
+    for g in view.gpus.iter().filter(|g| gpus.contains(&g.index)) {
+        let others = if g.foreign_process { "other software is running there" } else { "no other processes" };
+        println!("  GPU {}: {:.1} GB free, {others}", g.index, g.free_vram_mb as f64 / 1024.0);
+    }
+    Ok(())
+}
+
 pub fn run_profile(json_out: bool) -> Result<(), String> {
     let home = goethe_home();
     let state = profile(&home)?;
@@ -218,6 +255,39 @@ pub fn list_gpus_for_placement(managed: &HashSet<i32>) -> Result<Vec<GpuPlacemen
             index: idx,
             foreign_compute,
             free_vram_mb,
+        });
+    }
+    Ok(out)
+}
+
+pub struct LiveGpu {
+    pub index: u32,
+    pub uuid: String,
+    pub free_mb: u64,
+    pub pids: Vec<i32>,
+}
+
+pub fn live_gpus() -> Result<Vec<LiveGpu>, String> {
+    // Live free VRAM (after the unified-memory reserve), uuid and process ids per GPU.
+    let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
+    let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
+    let mut out = Vec::new();
+    for index in 0..count {
+        let dev = nvml.device_by_index(index).map_err(|e| format!("device {index}: {e}"))?;
+        let (_, _, free, unified) = device_memory(&dev)?;
+        let mut pids: Vec<i32> = [dev.running_compute_processes(), dev.running_graphics_processes()]
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|p| p.pid as i32)
+            .collect();
+        pids.sort_unstable();
+        pids.dedup();
+        out.push(LiveGpu {
+            index,
+            uuid: dev.uuid().unwrap_or_default(),
+            free_mb: if unified { free.saturating_sub(UNIFIED_OS_RESERVE_GB * 1024) } else { free },
+            pids,
         });
     }
     Ok(out)
@@ -398,7 +468,9 @@ fn print_summary(state: &HardwareState) {
         println!("Link GPU {} - GPU {}: {} ({})", link.a, link.b, link.link_type, link.topo);
     }
     if let (Some(h), Some(e)) = (&state.host, &state.environment) {
-        for line in host::summary_lines(h, e) {
+        let home = crate::paths::goethe_home();
+        let bind = if home.join("state.db").is_file() { crate::nginx::public_bind(&home) } else { "127.0.0.1".into() };
+        for line in host::summary_lines(h, e, &bind) {
             println!("{line}");
         }
     }
