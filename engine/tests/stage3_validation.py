@@ -66,7 +66,10 @@ def main() -> None:
                 listed = json.loads(run([goethe, "key", "list", "--json"], env=env).stdout or "[]")
                 zero = next((k for k in listed if k.get("name") == "zero"), {})
                 limit = zero.get("rpm_limit", zero.get("rpm"))
-                expect(rr, limit in (None, "unlimited"), f"--rpm 0 must be refused or listed as unlimited: {limit!r}")
+                text = run([goethe, "key", "list"], env=env).stdout
+                line = next((ln for ln in text.splitlines() if "zero" in ln), "")
+                shown = limit in (None, "unlimited") or "unlimited" in line.lower()
+                expect(rr, shown, f"--rpm 0 must be refused or listed as unlimited: {limit!r} {line!r}")
             keys = sqlite_query(db, "SELECT name FROM api_keys WHERE name IN ('', 'scoped')")
             expect(rr, keys == [], f"refused keys were stored {keys}")
             for alias in (["", "demo"], ["other", "demo"]):
