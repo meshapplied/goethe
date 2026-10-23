@@ -125,6 +125,18 @@ mod tests {
         assert_eq!(parse_listen_inodes(TABLE6, 30001), vec![(5151, true), (5353, false)]);
     }
 
+    fn wait_exec(pid: u32) {
+        // Until a spawned child has exec'd it still holds this process's sockets; wait for it to become sleep.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "sleep") {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("child {pid} did not exec sleep within 5 s");
+    }
+
     #[test]
     fn real_listener_is_ours_only_for_its_own_process() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -132,13 +144,18 @@ mod tests {
         let me = proc_ident::capture("inst-test-listener", std::process::id() as i32).unwrap();
         assert_eq!(port_owner(&me, port), PortOwner::Ours);
         let mut other = Command::new("sleep").arg("30").env_remove(proc_ident::INSTANCE_ENV).spawn().unwrap();
+        wait_exec(other.id());
         let them = proc_ident::capture("inst-test-other", other.id() as i32).unwrap();
         match port_owner(&them, port) {
             PortOwner::Foreign { pid, .. } => assert_eq!(pid, Some(std::process::id() as i32)),
             owner => panic!("expected a foreign holder, got {owner:?}"),
         }
         drop(listener);
-        assert_eq!(port_owner(&them, port), PortOwner::Nobody);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while port_owner(&them, port) != PortOwner::Nobody && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(port_owner(&them, port), PortOwner::Nobody, "the socket closes once every fork that inherited it has exec'd");
         other.kill().unwrap();
         other.wait().unwrap();
     }

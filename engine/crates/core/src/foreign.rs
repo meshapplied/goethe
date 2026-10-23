@@ -218,6 +218,18 @@ mod tests {
         assert_eq!(json, serde_json::json!({"gpu":2,"pid":3127,"name":"python","user":"admin","used_mb":10504}));
     }
 
+    fn wait_exec(pid: u32) {
+        // Until a spawned child has exec'd, /proc shows the parent's environment; wait for it to become sleep.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "sleep") {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("child {pid} did not exec sleep within 5 s");
+    }
+
     #[test]
     fn tagged_child_of_a_live_instance_is_ours_and_a_stranger_is_not() {
         let mut tagged = std::process::Command::new("sleep")
@@ -230,6 +242,9 @@ mod tests {
             .env_remove(proc_ident::INSTANCE_ENV)
             .spawn()
             .unwrap();
+        for c in [&tagged, &plain] {
+            wait_exec(c.id());
+        }
         let live = HashSet::from(["inst-live".to_string()]);
         let none = HashSet::new();
         assert!(is_ours(tagged.id() as i32, &none, &live));
