@@ -298,7 +298,7 @@ def _scenarios(
     seed_installed_model(home, "a", "models/org__model_a", 200.0, kv_bytes, 131072, 64, 1)
     on_gpu = {p for p, _mb in gpu_pids(gpu)}
     rr = run(
-        [str(sup.goethe), "load", "a", "--gpus", str(gpu), "--ctx", "131072", "--max-conc", "64", "--yes"],
+        [str(sup.goethe), "load", "a", "--gpus", str(gpu), "--ctx", "131072", "--max-conc", "64", "--yes", "--replica"],
         env=sup.env,
     )
     budget_text = (rr.stderr + rr.stdout).lower()
@@ -366,16 +366,19 @@ def _scenarios(
     check("ternary-kernels" in tenv.get("PYTHONPATH", ""), "ternary PYTHONPATH")
     check("GOETHE_KERNEL_DIR" not in tenv, "ternary no kernel dir")
     sup.goethe_ok("unload", "t")
-    sup.load("a", str(gpu), "--chunked-prefill-size", "4096")
+    sup.load("a", str(gpu), "--", "--chunked-prefill-size", "4096")
     argv = stub_launch(model_a)["argv"]
     check("--chunked-prefill-size" in argv and argv[argv.index("--chunked-prefill-size") + 1] == "4096",
-          "load passes trailing SGLang args through")
-    for owned in (["--context-length", "4096"], ["--port=31999"], ["--tp", "2"], ["--api-key", "x"]):
-        load_owned = [str(sup.goethe), "load", "a", "--gpus", str(gpu), "--yes", "--no-wait", *owned]
-        rr_owned = run(load_owned, env=sup.env, timeout=60)
-        soft(rr_owned.returncode == 2, f"load rejects owned flag {owned[0]} with exit 2 (got {rr_owned.returncode})")
-    sup.goethe_ok("unload", "--all", timeout=120)
+          "load passes SGLang args after -- through")
     sup.goethe_ok("unload", "a")
+    base = [str(sup.goethe), "load", "a", "--gpus", str(gpu), "--yes", "--no-wait"]
+    for owned in (["--context-length", "4096"], ["--port=31999"], ["--tp", "2"], ["--api-key", "x"]):
+        rr_owned = run([*base, "--", *owned], env=sup.env, timeout=60)
+        soft(rr_owned.returncode == 2, f"load rejects owned flag {owned[0]} after -- ({rr_owned.returncode})")
+    for unknown in (["--bogus"], ["--gpu", str(gpu)], ["--yess"], ["--chunked-prefill-size", "4096"]):
+        rr_unknown = run([*base, *unknown], env=sup.env, timeout=60)
+        soft(rr_unknown.returncode == 2, f"load rejects unknown flag {unknown[0]} without -- ({rr_unknown.returncode})")
+    sup.goethe_ok("unload", "--all", timeout=120)
     sup.load("a", str(gpu))
     check(sup.status_is("a", {"RUNNING"}, timeout=60.0), "watchdog prekill RUNNING")
     time.sleep(2.0)
@@ -477,9 +480,12 @@ def _scenarios(
     sup.goethe_ok("unload", "--all", timeout=120)
     _clear_stub_files(model_b)
     sup.load("a", str(gpu))
-    sup.load("a", str(gpu))
+    again = sup.load("a", str(gpu))
+    soft("already loaded" in again, f"second plain load reports already loaded: {again[-200:]}")
+    soft(sup.count("SELECT COUNT(*) FROM loaded_instances WHERE model_id='a'") == 1, "plain reload adds no replica")
+    sup.load("a", str(gpu), "--replica")
     running_a = sum(1 for r in sup.ps() if r.get("model_id") == "a" and r.get("status") == "RUNNING")
-    check(running_a >= 2, "two RUNNING instances")
+    check(running_a == 2, f"--replica adds a second RUNNING instance ({running_a})")
     check(sup.count("SELECT COUNT(*) FROM desired_loads WHERE model_id='a'") == 2, "two desired slots")
     sup.restart()
     check(

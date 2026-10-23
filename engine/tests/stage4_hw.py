@@ -111,7 +111,7 @@ def main() -> None:
         run_goethe(load, env=env, timeout=900)
         load1_sec = time.time() - t_load1
         t_load2 = time.time()
-        rr2 = run(load, env=env, timeout=900)
+        rr2 = run([*load, "--replica"], env=env, timeout=900)
         print(f"stage4_hw load1_sec={load1_sec:.1f} load2_sec={time.time() - t_load2:.1f}")
         if rr2.returncode != 0:
             raise RuntimeError(f"co-residency: goethe rejected the second instance: {(rr2.stderr or rr2.stdout)[:800]}")
