@@ -16,13 +16,13 @@ from lib.goethe_test import (
     Skip,
     _acquire_gpu_flocks,
     dev_home,
+    gpu_free_gb,
     gpu_mem_snapshot,
     http_post,
     isolated_real_home,
     main_exit,
     post_test_hygiene,
     require_cli,
-    require_gpus,
     run,
     run_goethe,
     run_temp_prefix,
@@ -35,6 +35,8 @@ from lib.goethe_test import (
 )
 
 SCRUB = ("desired_loads", "loaded_instances", "watchdog_restarts", "api_keys", "key_usage", "engine_overhead")
+SAFETY_MARGIN_GB = 1.5
+NOT_RUN: list[str] = []
 
 
 def _model_slug(model_id: str) -> str:
@@ -79,6 +81,28 @@ def _chat_mux(mux_port: int, model: str, token: str) -> bytes:
     return out
 
 
+def _co_residency(goethe: Path, env: dict[str, str], load: list[str], gpu: int, pre_mb: int) -> None:
+    """A --replica of the loaded model on the same GPU, or a recorded skip when that GPU has no room for it."""
+    home = Path(env["GOETHE_HOME"])
+    sql = "SELECT MAX(allocated_vram_gb_per_gpu) FROM loaded_instances"
+    per_gpu = float(sqlite_query(home / "state.db", sql)[0][0])
+    free = gpu_free_gb(gpu)
+    if free < per_gpu + SAFETY_MARGIN_GB:
+        NOT_RUN.append(f"co-residency --replica: GPU {gpu} has {free:.1f} GB free, a copy needs {per_gpu:.1f} GB")
+        return
+    t0 = time.time()
+    rr = run([*load, "--replica"], env=env, timeout=900)
+    print(f"stage4_hw load2_sec={time.time() - t0:.1f}")
+    if rr.returncode != 0:
+        raise RuntimeError(f"co-residency: goethe rejected the second instance: {(rr.stderr or rr.stdout)[:800]}")
+    rows = _ps_json(goethe, env)
+    if len(rows) < 2 or any(r.get("status") != "RUNNING" for r in rows):
+        raise RuntimeError(f"expected two RUNNING instances, goethe ps={rows!r}")
+    used = gpu_mem_snapshot([gpu])[gpu] - pre_mb
+    if used < 28000:
+        raise RuntimeError(f"gpu {gpu} VRAM too low after co-residency: {used} MiB")
+
+
 def main() -> None:
     """Run spec Stage 4 hardware tests with real engines on an isolated GOETHE_HOME."""
     if os.environ.get("GOETHE_TEST_REAL", "0") != "1":
@@ -109,33 +133,25 @@ def main() -> None:
         load = [str(goethe), "load", primary, "--gpus", str(gpu0), "--ctx", "65536", "--max-conc", "8", "--yes"]
         t_load1 = time.time()
         run_goethe(load, env=env, timeout=900)
-        load1_sec = time.time() - t_load1
-        t_load2 = time.time()
-        rr2 = run([*load, "--replica"], env=env, timeout=900)
-        print(f"stage4_hw load1_sec={load1_sec:.1f} load2_sec={time.time() - t_load2:.1f}")
-        if rr2.returncode != 0:
-            raise RuntimeError(f"co-residency: goethe rejected the second instance: {(rr2.stderr or rr2.stdout)[:800]}")
+        print(f"stage4_hw load1_sec={time.time() - t_load1:.1f}")
+        _co_residency(goethe, env, load, gpu0, pre_mem[gpu0])
         rows = _ps_json(goethe, env)
-        if len(rows) < 2 or any(r.get("status") != "RUNNING" for r in rows):
-            raise RuntimeError(f"expected two RUNNING instances, goethe ps={rows!r}")
+        if not rows or any(r.get("status") != "RUNNING" for r in rows):
+            raise RuntimeError(f"expected RUNNING instances, goethe ps={rows!r}")
         if not all(30001 <= int(r.get("internal_port", 0)) <= 30099 for r in rows):
             raise RuntimeError(f"engine port out of range: {rows!r}")
-        mid_load = gpu_mem_snapshot([gpu0])[gpu0]
-        if mid_load - pre_mem[gpu0] < 28000:
-            raise RuntimeError(f"gpu {gpu0} VRAM too low after co-residency: {mid_load - pre_mem[gpu0]} MiB")
         _chat_mux(mux, primary, token)
         run_goethe([str(goethe), "unload", primary], env=env, timeout=300)
-        require_gpus(2)
-        tp_model = models[-1]
-        run_goethe(
-            [str(goethe), "load", tp_model, "--gpus", f"{gpus[0]},{gpus[1]}", "--tp", "2", "--ctx", "131072", "--yes"],
-            env=env,
-            timeout=900,
-        )
-        tp_rows = _ps_json(goethe, env)
-        if not tp_rows or tp_rows[-1].get("status") != "RUNNING":
-            raise RuntimeError(f"TP load not RUNNING: {tp_rows!r}")
-        _chat_mux(mux, tp_model, token)
+        if len(gpus) < 2:
+            NOT_RUN.append(f"tp=2 load (one test GPU: GOETHE_TEST_GPUS={','.join(map(str, gpus))})")
+        else:
+            tp_model = models[-1]
+            tp = [str(goethe), "load", tp_model, "--gpus", f"{gpus[0]},{gpus[1]}", "--tp", "2", "--ctx", "131072"]
+            run_goethe([*tp, "--yes"], env=env, timeout=900)
+            tp_rows = _ps_json(goethe, env)
+            if not tp_rows or tp_rows[-1].get("status") != "RUNNING":
+                raise RuntimeError(f"TP load not RUNNING: {tp_rows!r}")
+            _chat_mux(mux, tp_model, token)
         pgids = [int(r["pgid"]) for r in _ps_json(goethe, env) if r.get("pgid")]
         t0 = time.time()
         run_goethe([str(goethe), "unload", "--all"], env=env, timeout=300)
@@ -158,6 +174,8 @@ def main() -> None:
     if tree_fingerprint(dev_home() / "models") != models_before:
         raise RuntimeError("the real-engine run modified files under the dev models directory")
     post_test_hygiene(gpus, pre_mem, gate_pid=os.getpid(), test_pids=[os.getpid()])
+    if NOT_RUN:
+        raise Skip(f"every step that ran passed; not run: {NOT_RUN}")
     print("stage4_hw ok")
 
 
