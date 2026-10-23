@@ -23,6 +23,7 @@ from lib.goethe_test import (
     proc_cmdline,
     read_sse,
     require_cli,
+    roomiest_test_gpu,
     roomy_test_gpus,
     run_goethe,
     seed_installed_model,
@@ -31,7 +32,6 @@ from lib.goethe_test import (
     sse_events,
     start_goethed,
     stub_launch,
-    stub_load_gpu,
     stub_requests,
     temp_home,
     test_mux_port,
@@ -97,7 +97,7 @@ def _stop_nginx(home: Path) -> None:
 def main() -> None:
     """Run default-deny gateway checks with stub engines and TLS."""
     goethe = require_cli("goethe")
-    gpu = stub_load_gpu()
+    gpu = roomiest_test_gpu()
     others = [g for g in roomy_test_gpus(15.0) if g != gpu]
     g2 = others[0] if others else gpu
     release_gpu = _acquire_gpu_flocks(sorted({gpu, g2}))

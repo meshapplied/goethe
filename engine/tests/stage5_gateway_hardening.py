@@ -7,7 +7,6 @@ import http.client
 import json
 import os
 import re
-import sqlite3
 import ssl
 import stat
 import time
@@ -15,23 +14,22 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from lib.goethe_test import (
-    LIB_DIR,
-    STUB_ENGINE,
     _acquire_gpu_flocks,
     ensure_nginx,
     home_goethe_env,
     main_exit,
     read_sse,
     require_cli,
-    require_gpus,
+    roomiest_test_gpu,
     run,
     run_goethe,
     seed_installed_model,
     sha256_hex,
     spawn,
     sqlite_query,
+    stub_launch,
+    stub_requests,
     temp_home,
-    test_gpus,
     test_mux_port,
     test_public_port,
     wait_goethed_socket,
@@ -39,34 +37,7 @@ from lib.goethe_test import (
 )
 
 MODEL = "org/hm"
-ENGINE_KEY = "0123456789abcdef0123456789abcdef"
 ASSERTS = 0
-HEADER_STUB = '''"""Stub engine wrapper that records request headers."""
-import json
-import sys
-sys.path.insert(0, "@LIB@")
-import stub_engine
-_post = stub_engine._Handler.do_POST
-_get = stub_engine._Handler.do_GET
-def _record(handler):
-    model_dir = handler.config.get("model_dir")
-    if model_dir is None:
-        return
-    row = {"method": handler.command, "path": handler.path,
-           "authorization": handler.headers.get("Authorization"),
-           "x_request_id": handler.headers.get("X-Request-Id")}
-    with open(model_dir / "stub_headers.jsonl", "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row) + "\\n")
-def do_post(handler):
-    _record(handler)
-    _post(handler)
-def do_get(handler):
-    _record(handler)
-    _get(handler)
-stub_engine._Handler.do_POST = do_post
-stub_engine._Handler.do_GET = do_get
-sys.exit(stub_engine.main())
-'''
 
 
 def check(cond: bool, msg: str) -> None:
@@ -130,22 +101,12 @@ def metric_value(text: str, pattern: str) -> float:
 
 
 def stub_rows(model_dir: Path, method: str, path: str) -> list[dict]:
-    """Requests the header-recording stub saw for one method and path."""
-    log = model_dir / "stub_headers.jsonl"
-    if not log.is_file():
-        return []
-    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
-    return [r for r in rows if r.get("method") == method and r.get("path") == path]
-
-
-def install_header_stub(home: Path) -> None:
-    """Point the temp py-env at a stub wrapper that records each request's headers."""
-    stub = home / "hdr_stub_engine.py"
-    stub.write_text(HEADER_STUB.replace("@LIB@", str(LIB_DIR)), encoding="utf-8")
-    wrapper = home / "py-env" / "bin" / "python"
-    text = wrapper.read_text(encoding="utf-8")
-    check(f'STUB="{STUB_ENGINE}"' in text, "temp_home python wrapper layout")
-    wrapper.write_text(text.replace(f'STUB="{STUB_ENGINE}"', f'STUB="{stub}"'), encoding="utf-8")
+    """Authorization and X-Request-Id of the requests the stub engine saw for one method and path."""
+    return [
+        {"authorization": r["headers"].get("authorization"), "x_request_id": r["headers"].get("x-request-id")}
+        for r in stub_requests(model_dir)
+        if r["method"] == method and r["path"] == path
+    ]
 
 
 def new_key(goethe: Path, home: Path, *extra: str) -> tuple[str, str]:
@@ -294,29 +255,19 @@ def check_errors(home: Path, public: int, token: str) -> None:
 
 
 def check_upstream_auth(home: Path, public: int, model_dir: Path, token: str) -> None:
-    """The engine sees its own key (or none for legacy rows), never the client key; X-Request-Id passes through."""
-    db = home / "state.db"
+    """The engine runs with --api-key and sees exactly that key, never the client key; X-Request-Id passes through."""
     chat = json.dumps({"model": MODEL, "messages": [{"role": "user", "content": "k"}], "max_tokens": 2}).encode()
     auth = {"Authorization": f"Bearer {token}"}
-    current = sqlite_query(db, "SELECT engine_key FROM loaded_instances WHERE model_id = ?", (MODEL,))[0][0]
-    status, _, _ = request(public, "POST", "/v1/chat/completions", headers=auth, body=chat)
-    check(status == 200, f"chat {status}")
-    rows = stub_rows(model_dir, "POST", "/v1/chat/completions")
-    check(bool(rows), "stub recorded the chat request")
-    want = f"Bearer {current}" if current else None
-    check(rows[-1].get("authorization") == want, f"engine auth header {rows[-1]} want {want}")
-    con = sqlite3.connect(str(db))
-    try:
-        con.execute("UPDATE loaded_instances SET engine_key = ? WHERE model_id = ?", (ENGINE_KEY, MODEL))
-        con.commit()
-    finally:
-        con.close()
+    engine_key = sqlite_query(home / "state.db", "SELECT engine_key FROM loaded_instances WHERE model_id = ?", (MODEL,))
+    current = str(engine_key[0][0] or "")
+    check(re.fullmatch(r"[0-9a-f]{32}", current) is not None, f"engine_key is 32 hex: {current!r}")
+    check(stub_launch(model_dir)["parsed"].get("api_key") == current, "engine launched with --api-key engine_key")
     headers = {**auth, "X-Request-Id": "hardening-rid-1"}
     status, resp_headers, _ = request(public, "POST", "/v1/chat/completions", headers=headers, body=chat)
-    check(status == 200, f"chat after key change {status}")
+    check(status == 200, f"chat {status}")
     check(resp_headers.get("x-request-id") == "hardening-rid-1", f"request id echoed {resp_headers}")
     rows = stub_rows(model_dir, "POST", "/v1/chat/completions")
-    check(rows[-1].get("authorization") == f"Bearer {ENGINE_KEY}", f"engine key forwarded {rows[-1]}")
+    check(bool(rows) and rows[-1].get("authorization") == f"Bearer {current}", f"engine key forwarded {rows[-1:]}")
     check(rows[-1].get("x_request_id") == "hardening-rid-1", f"request id forwarded {rows[-1]}")
     status, resp_headers, _ = request(public, "POST", "/v1/chat/completions", headers=auth, body=chat)
     check(status == 200 and resp_headers.get("x-request-id", "").startswith("req-"), "request id minted")
@@ -326,7 +277,7 @@ def check_upstream_auth(home: Path, public: int, model_dir: Path, token: str) ->
     status, _, body = request(public, "GET", "/health/ready?model=org%2Fhm")
     check(status == 200 and json.loads(body).get("status") == "ready", f"ready with encoded id: {status} {body!r}")
     probes = stub_rows(model_dir, "GET", "/v1/models")
-    check(any(p.get("authorization") == f"Bearer {ENGINE_KEY}" for p in probes), "readiness probe uses the engine key")
+    check(any(p.get("authorization") == f"Bearer {current}" for p in probes), "readiness probe uses the engine key")
     status, _, _ = request(public, "GET", "/health/ready?model=not-loaded")
     check(status == 503, "ready for an unknown model")
 
@@ -344,11 +295,9 @@ def main() -> None:
     """Run the hardening checks against goethed, nginx and a header-recording stub engine."""
     goethe = require_cli("goethe")
     goethed_bin = require_cli("goethed")
-    require_gpus(1)
-    gpu = 3 if 3 in test_gpus() else test_gpus()[-1]
+    gpu = roomiest_test_gpu(15.0)
     with temp_home(stub_python=True, tag="harden") as home:
         ensure_nginx(home)
-        install_header_stub(home)
         model_dir = home / "models" / "org__hm"
         model_dir.mkdir(parents=True)
         (model_dir / "goethe_card.toml").write_text(

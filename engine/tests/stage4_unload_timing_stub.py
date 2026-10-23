@@ -14,11 +14,11 @@ from lib.goethe_test import (
     main_exit,
     pid_alive,
     require_cli,
+    roomiest_test_gpu,
     run_goethe,
     seed_installed_model,
     start_goethed,
     stub_launch,
-    stub_load_gpu,
     stub_signals,
     temp_home,
     write_card,
@@ -52,7 +52,7 @@ def _term_seen(model: Path, ignored: bool) -> bool:
 def main() -> None:
     """Measure unload latency for TERM-ignoring and slow-TERM stubs and prove the KILL escalation."""
     goethe = require_cli("goethe")
-    gpu = stub_load_gpu()
+    gpu = roomiest_test_gpu()
     with gpu_flock([gpu]), temp_home(stub_python=True) as home:
         model_a = home / "models" / "org__a"
         model_b = home / "models" / "org__b"

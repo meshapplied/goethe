@@ -26,10 +26,12 @@ from lib.goethe_test import (
     gpu_pids,
     home_goethe_env,
     home_process_tree,
+    home_zombies,
     kill_engine_group,
     main_exit,
     pid_alive,
     require_cli,
+    roomiest_test_gpu,
     roomy_test_gpus,
     run,
     run_goethe,
@@ -37,7 +39,6 @@ from lib.goethe_test import (
     sqlite_query,
     start_goethed,
     stub_launch,
-    stub_load_gpu,
     temp_home,
     test_gpus,
     vram_per_gpu_gb,
@@ -174,7 +175,7 @@ class Sup:
 def _foreign_scenario(sup: Sup, model_a: Path) -> None:
     """Unmanaged GPU process: exit 3 with the contractual notice, structured RPC result, --yes loads alongside."""
     clean = clean_test_gpu()
-    host = clean if clean is not None else stub_load_gpu(20.0)
+    host = clean if clean is not None else roomiest_test_gpu(20.0)
     foreign = foreign_gpu_process(host, mb=FOREIGN_MB)
     try:
         check(wait_gpu_pid(host, foreign.popen.pid, int(FOREIGN_MB * 0.9), timeout=60), "foreign VRAM visible")
@@ -219,7 +220,7 @@ def main() -> None:
     """Exercise goethe load, co-residency, foreign PID, unload and watchdog paths with stub engines."""
     goethe = require_cli("goethe")
     require_cli("goethed")
-    gpu = stub_load_gpu(30.0)
+    gpu = roomiest_test_gpu(30.0)
     aliens = gpu_compute_pids(test_gpus())
     static_w, kv_bytes, ctx, max_conc = 10.0, 1000, 4096, 4
     release_gpu = _acquire_gpu_flocks([gpu])
@@ -314,11 +315,13 @@ def _scenarios(
         kv_elems=kv_bytes, num_attention_heads=8, num_kv_heads=2,
     )
     if clean_test_gpu() is None:
-        NOT_RUN.append("auto placement (every test GPU hosts foreign processes and the chooser skips those)")
-    else:
-        auto_text = sup.goethe_ok("load", "auto", "--yes")
-        check("auto:" in auto_text or "tp=" in auto_text, "auto decision message")
-        sup.goethe_ok("unload", "auto")
+        rr_auto = run([str(sup.goethe), "load", "auto"], env=sup.env, timeout=120)
+        auto_notice = rr_auto.stderr + rr_auto.stdout
+        check(rr_auto.returncode == 3 and "unmanaged process PID" in auto_notice,
+              f"auto placement onto foreign-hosted GPUs needs confirmation (exit {rr_auto.returncode})")
+    auto_text = sup.goethe_ok("load", "auto", "--yes")
+    check("auto:" in auto_text or "tp=" in auto_text, "auto decision message")
+    sup.goethe_ok("unload", "auto")
     avail = roomy_test_gpus(10.0)
     if len(avail) < 2:
         NOT_RUN.append(f"tp=2 scenario (test GPUs with 10 GiB free: {avail})")
@@ -353,7 +356,7 @@ def _scenarios(
     dt = time.time() - t1
     soft(dt < 4.5, f"TERM-ignoring unload --all within 4s grace ({dt:.1f}s)")
     check(not any(pid_alive(p) for p in term_pids), "TERM-ignoring engines killed")
-    assert_no_zombies(home, timeout=4.0)
+    soft(wait_until(lambda: not home_zombies(home), timeout=4.0), f"KILLed engines reaped: {home_zombies(home)}")
     write_card(model_a, "a", ctx, max_conc)
     write_card(model_b, "b", 4096, 4, extra='kv_cache_dtype="fp8_e4m3"')
     _clear_stub_files(model_a, model_b)

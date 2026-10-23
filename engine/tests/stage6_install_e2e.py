@@ -23,11 +23,11 @@ from lib.goethe_test import (
     http_get,
     http_post,
     main_exit,
+    roomiest_test_gpu,
     run,
     run_goethe,
     spawn,
     temp_home,
-    test_gpus,
     test_public_port,
     wait_until,
     write_stub_python,
@@ -104,7 +104,7 @@ def main() -> None:
     )
     pkg_url = f"http://127.0.0.1:{port}/{cdn.name}"
     gpu = clean_test_gpu()
-    gpu = gpu if gpu is not None else test_gpus()[-1]
+    gpu = gpu if gpu is not None else roomiest_test_gpu(8.0)
     timings: list[str] = []
     try:
         if not wait_until(lambda: http_get(f"{pkg_url}/VERSION")[0] == 200, timeout=10):

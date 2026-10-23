@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 3 Hugging Face install against the real Hub: cache fast path, auth hints, endpoint and disk preflight."""
+"""Stage 3 Hugging Face install against the real Hub: cache fast path, gated guidance, endpoint and disk preflight."""
 
 from __future__ import annotations
 
@@ -18,6 +18,8 @@ from lib.goethe_test import (
     run_goethe,
     temp_home,
 )
+
+GATED = "is gated (or private) on hugging face and goethe does not log in"
 
 
 def _registry_for(model: str) -> str:
@@ -63,12 +65,12 @@ def main() -> None:
         second = time.time() - t1
         if second > max(15.0, first * 0.5):
             raise RuntimeError(f"second install not fast enough ({second:.1f}s vs first {first:.1f}s)")
-        rr = run([str(goethe), "install", "meta-llama/Llama-3.2-1B", "--no-load"], env=env, timeout=45)
-        if rr.returncode == 0 or "goethe login" not in _msg(rr):
-            raise RuntimeError(f"gated install must fail with a goethe login hint: {_msg(rr)[-300:]}")
-        rr404 = run([str(goethe), "install", "no-such-org/no-such-model-xyz", "--no-load"], env=base, timeout=60)
-        if rr404.returncode == 0 or ("check the id" not in _msg(rr404) and "goethe login" not in _msg(rr404)):
-            raise RuntimeError(f"missing repo must fail with check-the-id or login hint: {_msg(rr404)[-300:]}")
+        for repo, run_env in (("meta-llama/Llama-3.2-1B", env), ("no-such-org/no-such-model-xyz", base)):
+            rr = run([str(goethe), "install", repo, "--no-load"], env=run_env, timeout=60)
+            if rr.returncode != 1 or GATED not in _msg(rr) or "goethe scan" not in _msg(rr):
+                raise RuntimeError(f"{repo}: expected exit 1 with the download-yourself guidance: {_msg(rr)[-300:]}")
+            if any((home / "models").glob(repo.replace("/", "__") + "*")):
+                raise RuntimeError(f"{repo}: a refused install left files under models/")
         rr_net = run(
             [str(goethe), "install", tiny, "--no-load", "--force"],
             env={**env, "HF_ENDPOINT": "http://127.0.0.1:9"},
@@ -89,13 +91,9 @@ def main() -> None:
             raise RuntimeError(f"disk preflight must show need and available GB: {_msg(rr_disk)[-300:]}")
         if any(Path(p).is_file() for p in (home / "models").rglob("*.safetensors") if "distil" in str(p)):
             raise RuntimeError("disk preflight failure still downloaded weights")
-        rr_bad = run(
-            [str(goethe), "login", "--token-stdin"], env=base, timeout=30, input_text="hf_not_a_real_token\n"
-        )
-        if rr_bad.returncode == 0 or "invalid" not in _msg(rr_bad):
-            raise RuntimeError(f"bad token login must fail saying invalid: {_msg(rr_bad)[-300:]}")
-        if (home / "hf_token").exists() or any(home.glob("*token*")):
-            raise RuntimeError("a rejected token was stored")
+        rr_login = run([str(goethe), "login", "--token-stdin"], env=base, timeout=30, input_text="hf_x\n")
+        if rr_login.returncode != 2:
+            raise RuntimeError(f"goethe no longer logs in to Hugging Face; login must be a usage error: {rr_login}")
     print("stage3_hf ok")
 
 

@@ -5,12 +5,12 @@ from __future__ import annotations
 
 import shutil
 
-from lib.goethe_test import gpu_flock, main_exit, require_gpus, resolve_python, run
+from lib.goethe_test import gpu_flock, main_exit, resolve_python, roomiest_test_gpu, run
 
 
 def main() -> None:
     """Verify Python 3.11, CUDA torch, the patched SGLang fork and the hf CLI of the py-env under test."""
-    gpu = require_gpus(1)[-1]
+    gpu = roomiest_test_gpu(6.0)
     py = resolve_python()
     if not py.is_file():
         raise RuntimeError(f"missing py-env python at {py}")
