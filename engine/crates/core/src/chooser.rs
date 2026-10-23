@@ -1,6 +1,6 @@
 // Tensor parallel size and GPU set selection for goethe load.
 
-use crate::calc::missing_gb;
+use crate::calc::{missing_gb, shortfall, Need, BASE_OVERHEAD_GB};
 use crate::hw::HardwareState;
 use crate::placement::{format_gpu_list, rank_sets, GpuPlacementInput, SetRank};
 
@@ -22,7 +22,6 @@ pub struct LoadPlan {
     pub gpus: Vec<u32>,
     pub ctx: u64,
     pub max_conc: u64,
-    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,16 +56,30 @@ pub fn kv_shard(t: usize, num_kv_heads: u64, attention: &str) -> f64 {
     }
 }
 
-pub fn per_gpu_budget_gb(input: &ChooserInput, tp: usize) -> f64 {
-    // Spec formula per GPU: sharded weights plus sharded KV for min(conc, 4) full contexts plus 1.8 GB CUDA context.
+pub fn need(input: &ChooserInput, tp: usize) -> Need {
+    // Spec formula per GPU in parts: sharded weights, sharded KV for min(conc, 4) full contexts, 1.8 GB CUDA context.
     let shard = kv_shard(tp, input.num_kv_heads, &input.attention);
     let tokens = input.ctx as f64 * input.max_conc.min(4) as f64;
-    let kv = tokens * input.kv_bytes_per_token as f64 * 1e-9 / shard;
-    (input.static_vram_gb / tp as f64) + kv + 1.8
+    Need {
+        weights: input.static_vram_gb / tp as f64,
+        kv: tokens * input.kv_bytes_per_token as f64 * 1e-9 / shard,
+        overhead: BASE_OVERHEAD_GB,
+    }
+}
+
+pub fn per_gpu_budget_gb(input: &ChooserInput, tp: usize) -> f64 {
+    need(input, tp).total()
 }
 
 fn free_gb(set: &SetRank) -> f64 {
     set.min_free_mb as f64 / 1024.0
+}
+
+fn tightest(set: &SetRank, gpus: &[GpuPlacementInput]) -> u32 {
+    gpus.iter()
+        .filter(|g| set.gpus.contains(&g.index))
+        .min_by_key(|g| g.free_vram_mb)
+        .map_or(0, |g| g.index)
 }
 
 pub fn pick_load_plan(
@@ -89,24 +102,18 @@ pub fn pick_load_plan(
     }
     if let Some(tp) = pinned_tp {
         return best_fit(input, gpus, hw, tp)
-            .map(|(set, need)| plan(input, tp, set, need, ""))
+            .map(|set| plan(input, tp, set))
             .ok_or_else(|| closest_miss(input, gpus, hw, tp));
     }
     auto_plan(input, gpus, hw)
 }
 
-fn plan(input: &ChooserInput, tp: usize, set: SetRank, need: f64, prefix: &str) -> LoadPlan {
-    let message = format!(
-        "{prefix}tp={tp} on GPUs {} ({need:.1} GB/gpu, {:.1} GB free on tightest GPU)",
-        format_gpu_list(&set.gpus),
-        free_gb(&set)
-    );
+fn plan(input: &ChooserInput, tp: usize, set: SetRank) -> LoadPlan {
     LoadPlan {
         tp,
         gpus: set.gpus,
         ctx: input.ctx,
         max_conc: input.max_conc,
-        message,
     }
 }
 
@@ -135,19 +142,11 @@ fn fixed_plan(
         link: 0,
         min_free_mb: free_mb.into_iter().min().unwrap_or(0),
     };
-    let need = per_gpu_budget_gb(input, tp);
-    let missing = missing_gb(need, free_gb(&set));
-    if missing > 0.0 {
-        return Err(PlanError {
-            message: format!(
-                "VRAM budget {need:.1} GB exceeds free {:.1} GB on GPU set {} (missing {missing:.1} GB)",
-                free_gb(&set),
-                format_gpu_list(&set.gpus)
-            ),
-            gpus: set.gpus,
-        });
+    let need = need(input, tp);
+    if let Some(message) = shortfall(&need, tightest(&set, gpus), free_gb(&set)) {
+        return Err(PlanError { message, gpus: set.gpus });
     }
-    Ok(plan(input, tp, set, need, ""))
+    Ok(plan(input, tp, set))
 }
 
 fn best_fit(
@@ -155,12 +154,9 @@ fn best_fit(
     gpus: &[GpuPlacementInput],
     hw: Option<&HardwareState>,
     tp: usize,
-) -> Option<(SetRank, f64)> {
-    let need = per_gpu_budget_gb(input, tp);
-    rank_sets(gpus, hw, tp)
-        .into_iter()
-        .find(|s| missing_gb(need, free_gb(s)) <= 0.0)
-        .map(|s| (s, need))
+) -> Option<SetRank> {
+    let need = need(input, tp);
+    rank_sets(gpus, hw, tp).into_iter().find(|s| missing_gb(&need, free_gb(s)) <= 0.0)
 }
 
 fn closest_miss(
@@ -170,20 +166,16 @@ fn closest_miss(
     tp: usize,
 ) -> PlanError {
     // Report the shortfall on the tp-sized set with the most free VRAM.
-    let need = per_gpu_budget_gb(input, tp);
+    let need = need(input, tp);
     let Some(set) = rank_sets(gpus, hw, tp).into_iter().max_by_key(|s| s.min_free_mb) else {
         return PlanError {
             message: format!("cannot place tp={tp}: only {} eligible GPUs", gpus.len()),
             gpus: Vec::new(),
         };
     };
+    let why = shortfall(&need, tightest(&set, gpus), free_gb(&set)).unwrap_or_default();
     PlanError {
-        message: format!(
-            "no GPU set fits tp={tp}: VRAM budget {need:.1} GB per GPU, best set {} has {:.1} GB free; missing {:.1} GB",
-            format_gpu_list(&set.gpus),
-            free_gb(&set),
-            missing_gb(need, free_gb(&set))
-        ),
+        message: format!("no GPU set fits tp={tp} (best GPUs {}): {why}", format_gpu_list(&set.gpus)),
         gpus: set.gpus,
     }
 }
@@ -206,8 +198,8 @@ fn auto_plan(
     trial.max_conc = input.max_conc.max(1);
     loop {
         for &tp in &tps {
-            if let Some((set, need)) = best_fit(&trial, gpus, hw, tp) {
-                return Ok(plan(&trial, tp, set, need, "auto: "));
+            if let Some(set) = best_fit(&trial, gpus, hw, tp) {
+                return Ok(plan(&trial, tp, set));
             }
         }
         if trial.ctx > 8192 {
@@ -280,7 +272,6 @@ mod tests {
         let gpus = vec![gpu(2, 100.0, true), gpu(3, 90.0, false)];
         let plan = pick_load_plan(&inp(), &gpus, None, None, None).unwrap();
         assert_eq!((plan.tp, plan.gpus.clone()), (1, vec![3]));
-        assert!(plan.message.starts_with("auto:"));
     }
 
     #[test]

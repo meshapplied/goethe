@@ -149,7 +149,8 @@ pub fn notice(foreign: &[Foreign], free_gb: &HashMap<u32, f64>, need_gb: f64) ->
             free_gb.get(&g).copied().unwrap_or(0.0)
         ));
     }
-    lines.push("Re-run with --yes to load alongside it.".to_string());
+    let them = if foreign.len() == 1 { "it" } else { "them" };
+    lines.push(format!("Re-run with --yes to load alongside {them}."));
     lines.join("\n")
 }
 
@@ -203,7 +204,8 @@ mod tests {
         assert_eq!(lines[1], "Goethe never stops processes it did not start. To stop it yourself: kill 3127");
         assert!(lines[3].ends_with("To stop it yourself: sudo kill 4000"));
         assert_eq!(lines[4], "Free VRAM on GPU 2: 75.3 GB; this load needs 12.0 GB.");
-        assert_eq!(lines[5], "Re-run with --yes to load alongside it.");
+        assert_eq!(lines[5], "Re-run with --yes to load alongside them.");
+        assert!(notice(&f[..1], &free, 12.0).ends_with("Re-run with --yes to load alongside it."));
         let json = serde_json::to_value(&f[0]).unwrap();
         assert_eq!(json, serde_json::json!({"gpu":2,"pid":3127,"name":"python","user":"admin","used_mb":10504}));
     }
