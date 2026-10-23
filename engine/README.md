@@ -142,7 +142,14 @@ Add models without writing numbers by hand:
     bash packaging/keygen.sh <dir>                                   # once: release.key and release_pub.pem
     GOETHE_SIGN_KEY=<dir>/release.key bash packaging/build_cdn.sh      # builds dist/cdn (needs docker, uv, zstd, rsync)
 
-`build_cdn.sh` builds portable binaries in an Ubuntu 20.04 container (x86_64 and aarch64, or one with `--arch x86_64`) with the Rust toolchain pinned in `rust-toolchain.toml` (`rustup toolchain install 1.98.1` once), the patched SGLang wheel, hash-locked Python requirements, `VERSION`, `BUILDINFO` (SGLang fork commit and whether its tree was dirty), `SHA256SUMS` and its signature. Release builds set `GOETHE_RELEASE_PUB_FPR` to the expected public key fingerprint. Add `--with-ternary` to include the ternary pack (keep it off the public origin). Upload the contents of `dist/cdn/` to `https://pkg.meshapplied.com/` and serve `install.sh` at `https://meshapplied.com/install.sh`. Replace `packaging/release_pub.pem` with your production public key before the first public release.
+`build_cdn.sh` builds portable binaries in an Ubuntu 20.04 container (x86_64 and aarch64, or one with `--arch x86_64`) with the Rust toolchain pinned in `rust-toolchain.toml` (`rustup toolchain install 1.98.1` once), the patched SGLang wheel, hash-locked Python requirements, `VERSION`, `BUILDINFO` (SGLang fork commit and whether its tree was dirty), `SHA256SUMS` and its signature. Release builds set `GOETHE_RELEASE_PUB_FPR` to the expected public key fingerprint. Add `--with-ternary` to include the ternary pack (keep it off the public origin). `packaging/release_pub.pem` is the production public key (fingerprint `24afa2b3bddcaa4ec385f7640ec3c42b824446de0c0cac6d863ffa84ec4f473f`); local builds signed with a dev key set `GOETHE_RELEASE_PUB=<dev public key>` so the installer embeds that key instead (`--release` refuses the override). The SGLang source is upstream at the commit in `sglang/PIN` plus `sglang/goethe-marlin.patch`.
+
+Releases come from GitHub, never from a laptop:
+- Every pull request to `main` and every merge runs `.github/workflows/ci.yml`: Rust build, tests and clippy, the style lint, the CPU gates (`gate.sh 0`, `stage6_integrity`) and an unsigned x86_64 package build.
+- To release, set the version in `crates/*/Cargo.toml` through a pull request, then push a tag `vX.Y.Z` on that `main` commit (or run the release workflow by hand on `main`).
+- `.github/workflows/release.yml` then checks the commit is on `main` and the tag matches the version, reruns CI, and builds both architectures with `--release` using the `GOETHE_SIGN_KEY` secret. It verifies the checksums, signature, embedded key fingerprint and BUILDINFO, and installs the package in a clean Ubuntu 22.04 container.
+- After an approval on the `release` environment, it publishes the GitHub release. When `PKG_S3_BUCKET` is set, it uploads to the package origin behind `https://pkg.meshapplied.com/` (a versioned copy, then the live paths, `install.sh` last) and, with `SITE_S3_BUCKET`, to `https://meshapplied.com/install.sh`.
+- Existing installs then pick the release up with `goethe update`.
 
 ## Tests
 

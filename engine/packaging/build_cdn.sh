@@ -15,6 +15,7 @@ declare -A UV_SHA256=(
 )
 WITH_TERNARY=0
 RELEASE=0
+RELEASE_PUB="${GOETHE_RELEASE_PUB:-${ROOT}/packaging/release_pub.pem}"
 ARCHES="x86_64,aarch64"
 
 while [[ $# -gt 0 ]]; do
@@ -46,18 +47,22 @@ pub_fingerprint() {
 
 check_signing() {
   # Fail fast: release builds need a signing key and the expected public-key fingerprint of release_pub.pem.
-  local pub="${ROOT}/packaging/release_pub.pem" fpr
+  local pub="${RELEASE_PUB}" fpr
   if [[ ! -f "${pub}" ]]; then
     echo "missing ${pub}" >&2
     exit 1
   fi
   fpr="$(pub_fingerprint "${pub}")"
+  if [[ "${RELEASE}" -eq 1 && "${RELEASE_PUB}" != "${ROOT}/packaging/release_pub.pem" ]]; then
+    echo "--release always embeds packaging/release_pub.pem; unset GOETHE_RELEASE_PUB" >&2
+    exit 1
+  fi
   if [[ "${RELEASE}" -eq 1 && ( -z "${GOETHE_SIGN_KEY:-}" || -z "${GOETHE_RELEASE_PUB_FPR:-}" ) ]]; then
     echo "--release needs GOETHE_SIGN_KEY and GOETHE_RELEASE_PUB_FPR (expected sha256 of the DER public key)" >&2
     exit 1
   fi
   if [[ -n "${GOETHE_RELEASE_PUB_FPR:-}" && "${GOETHE_RELEASE_PUB_FPR}" != "${fpr}" ]]; then
-    echo "packaging/release_pub.pem fingerprint ${fpr} != GOETHE_RELEASE_PUB_FPR ${GOETHE_RELEASE_PUB_FPR}" >&2
+    echo "${pub} fingerprint ${fpr} != GOETHE_RELEASE_PUB_FPR ${GOETHE_RELEASE_PUB_FPR}" >&2
     exit 1
   fi
   if [[ -z "${GOETHE_SIGN_KEY:-}" && "${GOETHE_ALLOW_UNSIGNED:-}" != "1" ]]; then
@@ -158,7 +163,7 @@ cp "${ROOT}/cdn/goethed.service" "${DIST}/goethed.service"
 cp "${ROOT}/cdn/v1/registry.json" "${DIST}/v1/registry.json"
 cp "${ROOT}/pyenv/requirements.lock" "${ROOT}/pyenv/requirements.aarch64.lock" "${ROOT}/pyenv/bootstrap.sh" \
   "${DIST}/pyenv/"
-"${ROOT}/packaging/subst_install_pubkey.sh" "${ROOT}/cdn/install.sh" "${ROOT}/packaging/release_pub.pem" \
+"${ROOT}/packaging/subst_install_pubkey.sh" "${ROOT}/cdn/install.sh" "${RELEASE_PUB}" \
   "${DIST}/install.sh"
 if [[ -n "${GOETHE_SIGN_KEY:-}" ]]; then
   "${ROOT}/packaging/sign_cdn.sh" "${DIST}" "${GOETHE_SIGN_KEY}"
