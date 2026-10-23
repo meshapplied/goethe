@@ -313,9 +313,12 @@ def _scenarios(
         home, "auto", "models/org__auto", 5.0, kv_bytes, ctx, max_conc, 0,
         kv_elems=kv_bytes, num_attention_heads=8, num_kv_heads=2,
     )
-    auto_text = sup.goethe_ok("load", "auto", "--yes")
-    check("auto:" in auto_text or "tp=" in auto_text, "auto decision message")
-    sup.goethe_ok("unload", "auto")
+    if clean_test_gpu() is None:
+        NOT_RUN.append("auto placement (every test GPU hosts foreign processes and the chooser skips those)")
+    else:
+        auto_text = sup.goethe_ok("load", "auto", "--yes")
+        check("auto:" in auto_text or "tp=" in auto_text, "auto decision message")
+        sup.goethe_ok("unload", "auto")
     avail = roomy_test_gpus(10.0)
     if len(avail) < 2:
         NOT_RUN.append(f"tp=2 scenario (test GPUs with 10 GiB free: {avail})")
@@ -365,8 +368,10 @@ def _scenarios(
     check("--chunked-prefill-size" in argv and argv[argv.index("--chunked-prefill-size") + 1] == "4096",
           "load passes trailing SGLang args through")
     for owned in (["--context-length", "4096"], ["--port=31999"], ["--tp", "2"], ["--api-key", "x"]):
-        rr_owned = run([str(sup.goethe), "load", "a", "--gpus", str(gpu), "--yes", *owned], env=sup.env, timeout=60)
+        load_owned = [str(sup.goethe), "load", "a", "--gpus", str(gpu), "--yes", "--no-wait", *owned]
+        rr_owned = run(load_owned, env=sup.env, timeout=60)
         soft(rr_owned.returncode == 2, f"load rejects owned flag {owned[0]} with exit 2 (got {rr_owned.returncode})")
+    sup.goethe_ok("unload", "--all", timeout=120)
     sup.goethe_ok("unload", "a")
     sup.load("a", str(gpu))
     check(sup.status_is("a", {"RUNNING"}, timeout=60.0), "watchdog prekill RUNNING")

@@ -87,23 +87,18 @@ def _smi_pcie_snapshot() -> dict[int, dict[str, int]]:
     return out
 
 
-def _check_pcie_link(
-    idx: int, goethe_gen: int, goethe_width: int, before: dict[int, dict[str, int]], after: dict[int, dict[str, int]]
-) -> None:
-    """Accept goethe PCIe values if they match either nvidia-smi sample and sit within max."""
-    b, a = before[idx], after[idx]
-    gen_ok = {b["pcie_gen"], a["pcie_gen"]}
-    width_ok = {b["pcie_width"], a["pcie_width"]}
-    gen_max = max(b["pcie_gen_max"], a["pcie_gen_max"])
-    width_max = max(b["pcie_width_max"], a["pcie_width_max"])
-    if goethe_gen not in gen_ok:
-        raise RuntimeError(f"gpu {idx} pcie_gen {goethe_gen} not in smi samples {sorted(gen_ok)}")
-    if goethe_width not in width_ok:
-        raise RuntimeError(f"gpu {idx} pcie_width {goethe_width} not in smi samples {sorted(width_ok)}")
-    if not 1 <= goethe_gen <= gen_max:
-        raise RuntimeError(f"gpu {idx} pcie_gen {goethe_gen} outside 1..{gen_max}")
-    if not 1 <= goethe_width <= width_max:
-        raise RuntimeError(f"gpu {idx} pcie_width {goethe_width} outside 1..{width_max}")
+def _check_pcie_link(idx: int, goethe_gen: int, goethe_width: int, samples: list[dict[int, dict[str, int]]]) -> None:
+    """Exact match when the link was stable across all samples; within capability when power states moved it."""
+    gens = {s[idx]["pcie_gen"] for s in samples}
+    widths = {s[idx]["pcie_width"] for s in samples}
+    gen_max = max(s[idx]["pcie_gen_max"] for s in samples)
+    width_max = max(s[idx]["pcie_width_max"] for s in samples)
+    if len(gens) == 1 and goethe_gen not in gens:
+        raise RuntimeError(f"gpu {idx} pcie_gen {goethe_gen} != stable smi value {gens.pop()}")
+    if len(widths) == 1 and goethe_width not in widths:
+        raise RuntimeError(f"gpu {idx} pcie_width {goethe_width} != stable smi value {widths.pop()}")
+    if not 1 <= goethe_gen <= gen_max or not 1 <= goethe_width <= width_max:
+        raise RuntimeError(f"gpu {idx} pcie {goethe_gen}x{goethe_width} outside 1..{gen_max} x 1..{width_max}")
 
 
 def _topo_map() -> dict[tuple[int, int], str]:
@@ -140,9 +135,9 @@ def main() -> None:
     """Run goethe hw profile into a temp home and compare hardware_state.json with nvidia-smi."""
     goethe = require_cli("goethe")
     with temp_home(stub_python=True, tag="hwprof") as home:
-        pcie_before = _smi_pcie_snapshot()
+        samples = [_smi_pcie_snapshot() for _ in range(3)]
         run_goethe([str(goethe), "hw", "profile"], env={"GOETHE_HOME": str(home)})
-        pcie_after = _smi_pcie_snapshot()
+        samples += [_smi_pcie_snapshot() for _ in range(3)]
         path = home / "hardware_state.json"
         if not path.is_file():
             raise RuntimeError("hardware_state.json missing")
@@ -166,9 +161,9 @@ def main() -> None:
         ref_total = int(ref["vram_total_mb"])
         if abs(total - ref_total) / max(ref_total, 1) > 0.01:
             raise RuntimeError("vram_total_mb out of 1 percent")
-        if idx not in pcie_before or idx not in pcie_after:
+        if any(idx not in snap for snap in samples):
             raise RuntimeError(f"pcie snapshot missing gpu {idx}")
-        _check_pcie_link(idx, int(gpu["pcie_gen"]), int(gpu["pcie_width"]), pcie_before, pcie_after)
+        _check_pcie_link(idx, int(gpu["pcie_gen"]), int(gpu["pcie_width"]), samples)
     topo = _topo_map()
     for link in state.get("links", []):
         key = (int(link["a"]), int(link["b"]))
