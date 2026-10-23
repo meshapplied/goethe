@@ -21,8 +21,8 @@ use serde_json::{json, Value};
 #[command(
     name = "goethe",
     disable_version_flag = true,
-    about = "MeshApplied inference engine",
-    after_help = "Examples:\n  goethe install meshapplied/Qwen3-8B --load\n  goethe load my/model --gpus 2,3 --ctx 65536\n  goethe registry add org/model --file cdn/v1/registry.json\n  goethe key create --name ops --raw\n\ngoethe stop stops goethed but keeps desired loads for restore (every desired slot). \
+    about = "Goethe: serve LLMs on your NVIDIA GPUs behind one OpenAI-compatible gateway",
+    after_help = "Examples:\n  goethe install Qwen/Qwen3-8B --load\n  goethe scan\n  goethe load Qwen/Qwen3-8B --gpus 2,3 --ctx 65536\n  goethe key create --name ops --raw\n\ngoethe stop stops goethed but keeps desired loads for restore (every desired slot). \
                   goethe unload removes all instances of a model (all slots) and their desired rows."
 )]
 struct Cli {
