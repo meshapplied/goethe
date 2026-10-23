@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import json
-
 from lib.goethe_test import (
     RunResult,
     home_goethe_env,
@@ -62,14 +60,9 @@ def main() -> None:
                 rr = run([goethe, "key", "create", *args, "--raw"], env=env)
                 expect(rr, rr.returncode != 0 and "goethe_sk_" not in rr.stdout, f"key create {args} refused")
             rr = run([goethe, "key", "create", "--name", "zero", "--rpm", "0", "--raw"], env=env)
-            if rr.returncode == 0:
-                listed = json.loads(run([goethe, "key", "list", "--json"], env=env).stdout or "[]")
-                zero = next((k for k in listed if k.get("name") == "zero"), {})
-                limit = zero.get("rpm_limit", zero.get("rpm"))
-                text = run([goethe, "key", "list"], env=env).stdout
-                line = next((ln for ln in text.splitlines() if "zero" in ln), "")
-                shown = limit in (None, "unlimited") or "unlimited" in line.lower()
-                expect(rr, shown, f"--rpm 0 must be refused or listed as unlimited: {limit!r} {line!r}")
+            text = run([goethe, "key", "list"], env=env).stdout
+            line = next((ln for ln in text.splitlines() if "\tzero\t" in ln), "")
+            expect(rr, rr.returncode == 0 and "rpm=unlimited" in line, f"--rpm 0 is listed as rpm=unlimited: {line!r}")
             keys = sqlite_query(db, "SELECT name FROM api_keys WHERE name IN ('', 'scoped')")
             expect(rr, keys == [], f"refused keys were stored {keys}")
             for alias in (["", "demo"], ["other", "demo"]):
