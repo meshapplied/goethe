@@ -44,7 +44,7 @@ Any public Hugging Face repo can be installed. Goethe does not log in to Hugging
     goethe install org/model              # public repo from Hugging Face
     goethe install ./my-model-dir         # local directory, registered in place (--copy to copy)
     goethe install org/model --sglang-arg --reasoning-parser --sglang-arg qwen3
-    goethe models                         # installed and available, with fit on this machine
+    goethe models                         # installed and available: loaded instances, or fit on this machine
     goethe remove org/model               # deletes what Goethe downloaded, copied or scanned
 
 Downloads resume per file, every weight is checked against its Hugging Face sha256 (a changed file is hashed again on re-install), and free disk is checked first. Engine flags are inferred from `config.json` (Qwen3-family models get `--reasoning-parser qwen3`, and the chat template picks `--tool-call-parser qwen3_coder` or `qwen25`; registry and your own flags win) and can be set with `--sglang-arg` on `install` and `config`, or `goethe load <model> -- <args>` for one run. Flags Goethe sets itself (`--host`, `--port`, `--tp-size`, `--context-length`, `--max-running-requests`, `--mem-fraction-static`, `--api-key`, `--served-model-name`) are refused there; use `--gpus`, `--tp`, `--ctx` and `--max-conc` instead. Repos that ship their own Python code need `goethe install --trust-remote-code`.
@@ -66,7 +66,7 @@ For gated or private repos, accept the license on Hugging Face, download with yo
     goethe load <model_id> [--gpus csv] [--tp N] [--ep N] [--ctx N] [--max-conc N] [--replica] [--no-wait] [--json] [-- <sglang flags>]
     goethe unload <model_id> [--force] | --all  # drains in-flight requests (new ones get 503), then unloads; --force cuts them
     goethe list                               # alias of goethe models
-    goethe alias set <alias> <model_id> | list | remove <alias>   # an alias may not be empty or another model's id
+    goethe alias set <alias> <model_id> | list | remove <alias>   # not empty, not an installed id; installing that id later removes it
     goethe gpu list [--json]                  # index, compute capability, managed and foreign VRAM, ALLOWED or DENIED
     goethe gpu deny <id> | allow <id>         # denied GPUs are skipped by automatic placement and refused with --gpus
     goethe config <model_id> --ctx 32768 --max-conc 4
@@ -74,9 +74,11 @@ For gated or private repos, accept the license on Hugging Face, download with yo
     goethe doctor [--json] [--probe-public]  # checks with a fix hint each; probe-public needs GOETHE_CANARY_URL for a real answer
     goethe gateway bind 0.0.0.0 | status  # where the public gateway listens (default 127.0.0.1)
     goethe service enable                 # start goethed at boot (systemd, systemd --user, or cron)
-    goethe stop                           # stop daemon and engines (loaded models return on next start)
-    goethe update [--check] [--engine] [--ternary]  # signed self-update; --check compares binaries, engine wheel, ternary pack
+    goethe stop [--keep-engines]          # stop daemon and engines (loaded models return on next start); --keep-engines leaves engines serving
+    goethe update [--check] [--engine] [--ternary]  # signed self-update; compares the installed binaries, engine wheel and ternary pack
     goethe uninstall [--purge-models]
+
+`goethe update` notices another build at the same version (the installed `bin/goethe` and `bin/goethed` against the signed checksums, shown as `0.1.0 (commit A) -> 0.1.0 (commit B)`), swaps both binaries, then stops the old goethed with `--keep-engines` and starts the new one (through systemd when this home has a unit, whose `KillMode=process` lets engines outlive goethed), so loaded models keep serving.
 
 Boot entries belong to one home: `service disable` and `uninstall` remove only the unit or cron line that names this `GOETHE_HOME`, and `service enable` refuses when the systemd unit already starts another home.
 
