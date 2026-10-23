@@ -221,7 +221,7 @@ install_pyenv() {
 }
 
 install_ternary() {
-  # Optional ternary kernel pack: 401/403/404 means not entitled and is not an error.
+  # Optional ternary kernel pack (401/403/404: not entitled, not an error); records its verified sha256.
   local want=0 tar code
   if [[ "${GOETHE_INSTALL_TERNARY:-}" == "1" ]]; then
     want=1
@@ -246,6 +246,7 @@ install_ternary() {
     verify_file_sum "goethe/ternary-kernels.tar.zst" "${tar}.part"
   fi
   zstd -dc "${tar}.part" | tar -xf - -C "${GOETHE_HOME}/goethe"
+  sha256sum "${tar}.part" | awk '{print $1}' >"${GOETHE_HOME}/goethe/ternary-kernels.sha256"
   rm -f "${tar}.part"
 }
 
