@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 
-from lib.goethe_test import gpu_flock, main_exit, require_gpus
+from lib.goethe_test import gpu_flock, main_exit, roomiest_test_gpu
 
 E2M1_LUT = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
 
@@ -280,7 +280,7 @@ def _run_fused(
 
 def main() -> None:
     """Compare the fused Marlin MoE against dense Marlin and an fp32 dequant reference on the small-CUDA GPU."""
-    gpu = require_gpus(1)[-1]
+    gpu = roomiest_test_gpu(6.0)
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA required")

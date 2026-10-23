@@ -18,6 +18,7 @@ from lib.goethe_test import (
     main_exit,
     pid_alive,
     require_cli,
+    roomiest_test_gpu,
     run,
     run_goethe,
     seed_installed_model,
@@ -25,7 +26,6 @@ from lib.goethe_test import (
     start_goethed,
     stub_engine_pids,
     stub_launch,
-    stub_load_gpu,
     temp_home,
     wait_until,
     write_card,
@@ -51,7 +51,7 @@ def _run_registry(home: Path) -> list[Path]:
 def main() -> None:
     """Exercise shortfall retries, CLI notices, cancel, and orphan reap."""
     goethe = require_cli("goethe")
-    gpu = stub_load_gpu()
+    gpu = roomiest_test_gpu()
     md: Proc | None = None
     with gpu_flock([gpu]), temp_home(stub_python=True) as home:
         model = home / "models" / "org__retry"

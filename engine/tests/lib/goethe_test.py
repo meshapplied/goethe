@@ -523,7 +523,7 @@ def roomy_test_gpus(min_free_gb: float) -> list[int]:
     return [i for free, i in ranked if free >= min_free_gb]
 
 
-def stub_load_gpu(min_free_gb: float = 15.0) -> int:
+def roomiest_test_gpu(min_free_gb: float = 15.0) -> int:
     """Test GPU with the most free VRAM for stub loads (budgets use live free memory); Skip when none has room."""
     roomy = roomy_test_gpus(min_free_gb)
     if not roomy:
