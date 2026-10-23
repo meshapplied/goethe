@@ -398,7 +398,9 @@ fn print_summary(state: &HardwareState) {
         println!("Link GPU {} - GPU {}: {} ({})", link.a, link.b, link.link_type, link.topo);
     }
     if let (Some(h), Some(e)) = (&state.host, &state.environment) {
-        for line in host::summary_lines(h, e) {
+        let home = crate::paths::goethe_home();
+        let bind = if home.join("state.db").is_file() { crate::nginx::public_bind(&home) } else { "127.0.0.1".into() };
+        for line in host::summary_lines(h, e, &bind) {
             println!("{line}");
         }
     }
