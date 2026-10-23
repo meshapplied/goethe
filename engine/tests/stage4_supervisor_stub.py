@@ -401,14 +401,18 @@ def _scenarios(
     t_kill = time.time()
     sup.kill_engine("a")
     backoff: list[dict[str, Any]] = []
+    texts: list[str] = []
 
     def restarting() -> bool:
         backoff.extend(r for r in sup.ps() if r.get("model_id") == "a" and r.get("status") == "RESTARTING")
+        if backoff:
+            texts.append(sup.goethe_ok("ps"))
         return bool(backoff)
 
     check(wait_until(restarting, timeout=60.0, interval=0.2), "ps shows RESTARTING during the crash backoff")
     nxt = backoff[0].get("next_attempt_at")
     check(isinstance(nxt, int) and t_kill - 1 <= nxt <= time.time() + 60, f"next_attempt_at in ps: {backoff[0]}")
+    check(bool(re.search(r"RESTARTING \(attempt \d+, next in \d+s\)", texts[0])), f"ps text backoff: {texts[0][-300:]}")
     check(wait_until(lambda: sup.restarts_at_least("a", 1), timeout=120.0), "watchdog restart count after SIGKILL")
     sup.goethe_ok("unload", "a")
     stub_s = stub_launch(model_a)
