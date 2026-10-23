@@ -37,7 +37,7 @@ struct VerifiedCache {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct VerifiedEntry {
     size: u64,
-    mtime: i64,
+    mtime_ns: i64,
     sha256: String,
 }
 
@@ -444,7 +444,6 @@ pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: 
     }
     cmd.env("HF_XET_HIGH_PERFORMANCE", "1");
     cmd.env("HF_HUB_DISABLE_TELEMETRY", "1");
-    cmd.env("HF_HUB_ENABLE_HF_TRANSFER", "1");
     cmd.env("PYTHONWARNINGS", "ignore::FutureWarning");
     if let Some(t) = resolve_token(home) {
         cmd.env("HF_TOKEN", t);
@@ -509,9 +508,21 @@ fn verify_model(
     model_id: &str,
     excludes: &[String],
 ) -> Result<(), String> {
-    // Check sha256 of every LFS file; re-download mismatches once, then give up loudly.
-    let lfs: Vec<&HfSibling> = files.iter().copied().filter(|s| s.lfs_sha256.is_some()).collect();
+    // Check sha256 of every LFS file (re-hashing only files whose size or mtime changed); re-download mismatches once.
+    let previous = read_verified_cache(local_dir).filter(|c| c.revision == revision);
+    let (reused, lfs): (Vec<&HfSibling>, Vec<&HfSibling>) = files.iter().copied().filter(|s| s.lfs_sha256.is_some()).partition(|s| {
+        previous.as_ref().and_then(|c| c.files.get(&s.rfilename)).is_some_and(|e| {
+            Some(e.sha256.as_str()) == s.lfs_sha256.as_deref() && unchanged(local_dir, &s.rfilename, e)
+        })
+    });
     let mut results = hash_all(local_dir, &lfs);
+    if let Some(prev) = &previous {
+        for s in &reused {
+            if let Some(e) = prev.files.get(&s.rfilename) {
+                results.push((s.rfilename.clone(), Ok(e.clone())));
+            }
+        }
+    }
     let bad: Vec<&HfSibling> = lfs
         .iter()
         .copied()
@@ -549,24 +560,13 @@ fn verify_model(
 }
 
 fn verify_one_file(path: &Path, expect_sha: &str) -> Result<VerifiedEntry, String> {
-    if !path.is_file() {
-        return Err(format!("missing {}", path.display()));
-    }
-    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
+    // Hash one file and record the size and mtime it had while being hashed.
+    let (size, mtime_ns) = file_identity(path).ok_or_else(|| format!("missing {}", path.display()))?;
     let got = sha256_file(path)?;
     if !expect_sha.is_empty() && got != expect_sha {
         return Err("sha256 mismatch".to_string());
     }
-    Ok(VerifiedEntry {
-        size: meta.len(),
-        mtime: meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0),
-        sha256: got,
-    })
+    Ok(VerifiedEntry { size, mtime_ns, sha256: got })
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -583,19 +583,26 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", h.finalize()))
 }
 
+fn file_identity(path: &Path) -> Option<(u64, i64)> {
+    let meta = fs::metadata(path).ok().filter(|m| m.is_file())?;
+    let mtime = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some((meta.len(), mtime.as_nanos() as i64))
+}
+
+fn read_verified_cache(local_dir: &Path) -> Option<VerifiedCache> {
+    serde_json::from_str(&fs::read_to_string(local_dir.join(VERIFIED_FILE)).ok()?).ok()
+}
+
+fn unchanged(local_dir: &Path, rel: &str, entry: &VerifiedEntry) -> bool {
+    file_identity(&local_dir.join(rel)) == Some((entry.size, entry.mtime_ns))
+}
+
 fn verify_cache_matches(local_dir: &Path) -> bool {
-    // Every file recorded at verification time is still there with the same size.
-    let Ok(text) = fs::read_to_string(local_dir.join(VERIFIED_FILE)) else {
-        return local_dir.join(REVISION_FILE).exists();
-    };
-    let Ok(cache) = serde_json::from_str::<VerifiedCache>(&text) else {
-        return false;
-    };
-    cache.files.iter().all(|(rel, entry)| {
-        fs::metadata(local_dir.join(rel))
-            .map(|m| m.is_file() && m.len() == entry.size)
-            .unwrap_or(false)
-    })
+    // Every file hashed at verification time still has the same size and modification time.
+    match read_verified_cache(local_dir) {
+        Some(cache) => cache.files.iter().all(|(rel, entry)| unchanged(local_dir, rel, entry)),
+        None => local_dir.join(REVISION_FILE).exists() && !local_dir.join(VERIFIED_FILE).exists(),
+    }
 }
 
 fn write_verified_cache(local_dir: &Path, cache: &VerifiedCache) -> Result<(), String> {
