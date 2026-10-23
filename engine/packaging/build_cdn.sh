@@ -116,7 +116,8 @@ write_buildinfo
 
 BUILD_TMP="$(mktemp -d)"
 trap 'rm -rf "${BUILD_TMP}"' EXIT
-rsync -a --exclude .git "${FORK}/" "${BUILD_TMP}/sglang/"
+rsync -a --exclude .git --exclude /python/build/ --exclude /python/dist/ --exclude '/python/*.egg-info/' \
+  "${FORK}/" "${BUILD_TMP}/sglang/"
 if ! "${ROOT}/sglang/apply.sh" "${BUILD_TMP}/sglang"; then
   echo "error: sglang patch failed; refusing to build an unpatched wheel" >&2
   exit 1
