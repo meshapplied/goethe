@@ -177,9 +177,12 @@ enum Commands {
         #[arg(long, help = "JSON rows with instance_id, slot_key, status, restarts.")]
         json: bool,
     },
-    #[command(about = "Start goethed and the gateway (loaded models from last time come back).")]
-    Up,
-    #[command(about = "Stop goethed and its engines (loaded models come back on the next goethe up).")]
+    #[command(about = "Start goethed and the gateway, and start them at boot (loaded models from last time come back).")]
+    Up {
+        #[arg(long = "no-boot", help = "Start now without turning on start at boot.")]
+        no_boot: bool,
+    },
+    #[command(about = "Stop goethed and its engines and turn off start at boot (loaded models come back on the next goethe up).")]
     Down {
         #[arg(long = "keep-engines", help = "Leave loaded engines serving; the next goethed adopts them.")]
         keep_engines: bool,
@@ -698,7 +701,7 @@ fn main() {
             do_unload(model_id.as_deref(), force)
         }
         Commands::Ps { json } => do_ps(json),
-        Commands::Up => do_up(),
+        Commands::Up { no_boot } => do_up(!no_boot),
         Commands::Get { cmd: GetCommands::Api { json } } => do_get_api(json),
         Commands::Configure { cmd: ConfigureCommands::Api { mode, vpn_ip, allow, yes } } => {
             let mode = mode.as_deref().map(goethe_core::configure::Mode::parse).transpose().unwrap_or_else(|e| usage(e));
@@ -1222,9 +1225,9 @@ fn gateway_status_text(bind: &str, port: u16, url: &str, running: bool, allowlis
     out
 }
 
-fn do_up() -> Result<(), String> {
+fn do_up(boot: bool) -> Result<(), String> {
     // Start goethed, give the gateway a few seconds to listen, then print where the API is.
-    goethe_core::service::run_up()?;
+    goethe_core::service::run_up(boot)?;
     let home = goethe_home();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while nginx::format_gateway_line(&home).is_none() && std::time::Instant::now() < deadline {

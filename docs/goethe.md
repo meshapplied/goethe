@@ -207,7 +207,11 @@ GOETHE_HOME/
 
 - **Logs:** `goethe logs` shows engine, goethed and gateway logs. All logs rotate by size (engines 256 MB, goethed and nginx 100 MB), and `--prune` removes logs of unloaded instances.
 - **Doctor:** `goethe doctor` runs 17 checks in parallel, each with a fix hint. They include the driver, hardware, glibc, GOETHE_HOME, state database location, Python environment, RAM, disk, ports, goethed, nginx, gateway, TLS expiry, Hugging Face reachability, container and cloud.
-- **Autostart:** `goethe service enable` sets up a systemd unit (system or user) or a cron entry. Each install home has its own; uninstalling one home never touches another.
+- **Autostart:** Goethe survives reboots by default.
+  - `goethe up` and the installer turn on start at boot: a systemd unit (system or user, with user lingering turned on so no login is needed), or a cron entry in containers. If the machine shuts down with Goethe running, it comes back with its models.
+  - `goethe down` turns start at boot off again.
+  - `goethe up --no-boot` or `GOETHE_NO_AUTOSTART=1` opt out.
+  - Each install home has its own autostart; uninstalling one home never touches another.
 - **Updates and removal:**
   - `goethe update` verifies and applies signed updates for goethe and the engine.
   - `goethe uninstall` refuses to delete anything that does not look like a Goethe home.
@@ -270,8 +274,8 @@ Exit codes: `0` success, `1` error, `2` usage error, `3` confirmation needed but
 
 | Command | Description | Arguments |
 |---|---|---|
-| `goethe up` | Start goethed and the gateway; print the API URL | none |
-| `goethe down` | Stop goethed and its engines (loaded models come back on the next `goethe up`) | `--keep-engines` |
+| `goethe up` | Start goethed and the gateway and turn on start at boot; print the API URL | `--no-boot` |
+| `goethe down` | Stop goethed and its engines and turn off start at boot (loaded models come back on the next `goethe up`) | `--keep-engines` (also keeps start at boot) |
 | `goethe service enable` | Start goethed at boot (systemd, systemd user, or cron) | none |
 | `goethe service disable` | Remove this home's autostart | none |
 | `goethe service status` | Show autostart state | none |
