@@ -270,7 +270,7 @@ fn removal_plan(home: &Path, con: &Connection, model_id: &str, local_path: &str,
     Ok(plan)
 }
 
-fn ternary_dirs_of(home: &Path, dir: &Path) -> Vec<PathBuf> {
+pub fn ternary_dirs_of(home: &Path, dir: &Path) -> Vec<PathBuf> {
     let Ok(card) = install::read_card(dir) else {
         return Vec::new();
     };

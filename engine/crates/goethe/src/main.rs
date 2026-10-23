@@ -82,6 +82,15 @@ enum Commands {
         #[arg(long = "sglang-arg", allow_hyphen_values = true, help = "Extra SGLang CLI flag.")]
         sglang_arg: Vec<String>,
     },
+    #[command(about = "Register model folders you downloaded yourself and moved into GOETHE_HOME/models.")]
+    Scan {
+        #[arg(help = "One folder inside GOETHE_HOME/models (default: all of them).")]
+        dir: Option<String>,
+        #[arg(long, help = "Add every supported model without asking.")]
+        yes: bool,
+        #[arg(long, help = "Emit JSON rows (dir, model_id, status, reason, notes).")]
+        json: bool,
+    },
     #[command(about = "Validate, generate, or merge registry entries.")]
     Registry {
         #[command(subcommand)]
@@ -488,6 +497,7 @@ fn main() {
                 reset,
             })
         }
+        Commands::Scan { dir, yes, json } => goethe_core::scan::run(goethe_core::scan::ScanOpts { yes, json, dir }),
         Commands::Registry { cmd } => match cmd {
             RegistryCommands::Validate {
                 source,
@@ -994,6 +1004,7 @@ fn do_registry_add(
         strict,
     })
 }
+
 
 fn fail(msg: String) -> ! {
     eprintln!("{msg}");
