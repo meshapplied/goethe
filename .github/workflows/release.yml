@@ -8,9 +8,10 @@ name: release
 #   secret   GOETHE_SIGN_KEY          contents of release.key (P-256 PEM private key)
 #   variable GOETHE_RELEASE_PUB_FPR   sha256 of the DER public key (printed by packaging/keygen.sh)
 #   environment "release"             add required reviewers so publishing waits for an approval
-# Optional upload to the package origin behind https://pkg.meshapplied.com (any S3-compatible store, e.g. S3 or R2):
-#   variable PKG_S3_BUCKET, variable PKG_S3_ENDPOINT (empty for AWS), secrets PKG_S3_ACCESS_KEY_ID and PKG_S3_SECRET_ACCESS_KEY
-#   variable SITE_S3_BUCKET           bucket that serves https://meshapplied.com/install.sh
+# The package is served by GitHub Pages at https://pkg.meshapplied.com:
+#   Settings > Pages > Source: GitHub Actions, Custom domain: pkg.meshapplied.com, Enforce HTTPS
+#   DNS: CNAME pkg.meshapplied.com -> meshapplied.github.io
+# Every release is also kept as GitHub Release files.
 
 on:
   push:
@@ -144,23 +145,27 @@ jobs:
           fi
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
             goethe-cdn-*.tar.zst engine/dist/cdn/install.sh engine/dist/cdn/SHA256SUMS engine/dist/cdn/SHA256SUMS.sig
-      - name: Upload to the package origin (versioned copy first, then the live paths, install.sh last)
-        if: ${{ vars.PKG_S3_BUCKET != '' }}
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.PKG_S3_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.PKG_S3_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          ENDPOINT: ${{ vars.PKG_S3_ENDPOINT }}
-          BUCKET: ${{ vars.PKG_S3_BUCKET }}
-          SITE_BUCKET: ${{ vars.SITE_S3_BUCKET }}
-          VERSION: ${{ needs.guard.outputs.version }}
+
+  pages:
+    needs: [guard, publish]
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: goethe-cdn
+      - name: Unpack the package tree served at pkg.meshapplied.com
         run: |
-          ep=()
-          [[ -n "$ENDPOINT" ]] && ep=(--endpoint-url "$ENDPOINT")
-          mkdir pkg && zstd -dc goethe-cdn-*.tar.zst | tar -C pkg -xf -
-          aws "${ep[@]}" s3 sync pkg/cdn "s3://$BUCKET/releases/$VERSION/" --only-show-errors
-          aws "${ep[@]}" s3 sync pkg/cdn "s3://$BUCKET/" --exclude install.sh --only-show-errors
-          aws "${ep[@]}" s3 cp pkg/cdn/install.sh "s3://$BUCKET/install.sh" --content-type text/x-shellscript
-          if [[ -n "$SITE_BUCKET" ]]; then
-            aws "${ep[@]}" s3 cp pkg/cdn/install.sh "s3://$SITE_BUCKET/install.sh" --content-type text/x-shellscript
-          fi
+          mkdir site && zstd -dc goethe-cdn-*.tar.zst | tar -C site --strip-components=1 -xf -
+          test -f site/install.sh && test -f site/SHA256SUMS.sig && test -f site/v1/registry.json
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
