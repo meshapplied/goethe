@@ -62,6 +62,8 @@ pub struct RegistryModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gated: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_download: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_gb: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -104,6 +106,17 @@ impl RegistryModel {
 
     pub fn effective_max_ctx(&self) -> Option<u64> {
         self.max_ctx.or(self.default_ctx)
+    }
+
+    pub fn manual_download_reason(&self) -> Option<&str> {
+        // Entries goethe cannot download: weights published elsewhere, or gated on Hugging Face.
+        if self.manual_download.unwrap_or(false) {
+            Some("weights are not on Hugging Face; place them in GOETHE_HOME/models and run goethe scan")
+        } else if self.gated.unwrap_or(false) {
+            Some("gated on Hugging Face; download it with your own account and run goethe scan")
+        } else {
+            None
+        }
     }
 }
 
@@ -338,11 +351,18 @@ fn online_checks(m: &RegistryModel, opts: &ValidateOpts, errors: &mut Vec<String
         }
     }
     let rev = m.revision.as_deref().unwrap_or("main");
+    let manual = m.manual_download.unwrap_or(false);
     match hf::preflight_model_opts(&m.id, Some(rev), true) {
+        Err(e) if manual => eprintln!("note: {}: manual download, Hugging Face says: {e}", m.id),
         Err(e) => errors.push(format!("{}: {e}", m.id)),
         Ok(p) => {
-            if !p.siblings.is_empty() && !hf::has_weight_files(&p.siblings) {
-                errors.push(format!("{}: repository has no model weight files", m.id));
+            if manual {
+                eprintln!("note: {}: manual download; its weights are not fetched from Hugging Face", m.id);
+            } else if !p.siblings.is_empty() && !hf::has_weight_files(&p.siblings) {
+                errors.push(format!(
+                    "{}: repository has no model weight files (set \"manual_download\": true if they are published elsewhere)",
+                    m.id
+                ));
             }
             let entry_gated = m.gated.unwrap_or(false);
             if p.gated && entry_gated {
@@ -381,8 +401,8 @@ fn warn_unknown_fields(text: &str) {
         "kv_elems_per_token", "min_total_vram_gb", "supported_sm", "default_ctx", "max_ctx",
         "default_max_conc", "default_tp", "num_attention_heads", "num_kv_heads", "attention",
         "kv_cache_dtype", "extra_sglang_args", "runtime", "pack_id", "base_model_id", "env",
-        "pythonpath", "revision", "gated", "download_gb", "description", "family", "license",
-        "released", "modalities",
+        "pythonpath", "revision", "gated", "manual_download", "download_gb", "description", "family",
+        "license", "released", "modalities",
     ];
     let Some(models) = raw.get("models").and_then(|v| v.as_array()) else {
         return;
@@ -575,6 +595,9 @@ fn merge_overlay(dst: &mut RegistryModel, src: &RegistryModel) -> Result<(), Str
     if !src.supported_sm.is_empty() {
         dst.supported_sm = src.supported_sm.clone();
     }
+    if src.manual_download.is_some() {
+        dst.manual_download = src.manual_download;
+    }
     dst.extra_sglang_args = sglang_infer::merge_extra_args(&dst.extra_sglang_args, &src.extra_sglang_args)?;
     Ok(())
 }
@@ -652,6 +675,7 @@ pub fn infer_one_entry(
         pythonpath: None,
         revision: Some(sha),
         gated: pre.gated.then_some(true),
+        manual_download: None,
         download_gb: Some(download_gb),
         description: None,
         family: None,
@@ -722,6 +746,7 @@ mod validate_tests {
             pythonpath: None,
             revision: None,
             gated: None,
+            manual_download: None,
             download_gb: None,
             description: None,
             family: None,

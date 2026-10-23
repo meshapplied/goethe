@@ -3,10 +3,9 @@
 use crate::chooser::ChooserInput;
 use crate::db;
 use crate::host;
-use crate::hw::HardwareState;
 use crate::install;
 use crate::paths::{contained_in_models, goethe_home, shell_quote, validate_model_id};
-use crate::recommend::{best_fit, registry_input};
+use crate::recommend::{registry_input, View};
 use crate::registry::{fetch, registry_url, Registry};
 use crate::rpc;
 use rusqlite::{Connection, OptionalExtension};
@@ -29,6 +28,7 @@ struct Installed {
     id: String,
     input: ChooserInput,
     default_tp: i64,
+    marlin_gb: Option<f64>,
 }
 
 const LIVE: &str = "status NOT IN ('FAILED', 'CANCELLED')";
@@ -38,9 +38,9 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
     let home = goethe_home();
     let con = db::open(&home).map_err(|e| e.to_string())?;
     let loaded = loaded_set(&con);
-    let installed = installed_rows(&con)?;
+    let installed = installed_rows(&home, &con)?;
     let reg = fetch(&registry_url()).ok();
-    let hw = load_hw(&home);
+    let view = crate::placement::load_hw(&home).map(|hw| View::new(&home, hw));
     let mut rows = Vec::new();
     if !available_only {
         for m in &installed {
@@ -50,7 +50,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 id: m.id.clone(),
                 status: status.to_string(),
                 gb: m.input.static_vram_gb,
-                fit: fit_label(&m.input, pinned, &hw),
+                fit: fit_label(view.as_ref(), &m.id, &m.input, pinned, m.marlin_gb),
                 custom: is_custom_model(&m.id, reg.as_ref()).then_some(true),
             });
         }
@@ -61,16 +61,20 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 continue;
             }
             let pinned = m.default_tp.filter(|t| *t > 0).map(|t| t as usize);
-            let sm_ok = hw.as_ref().is_none_or(|h| {
+            let sm_ok = view.as_ref().is_none_or(|v| {
                 m.supported_sm
                     .iter()
-                    .any(|sm| h.gpus.iter().any(|g| &g.compute_capability == sm))
+                    .any(|sm| v.hw.gpus.iter().any(|g| &g.compute_capability == sm))
             });
             rows.push(ModelRow {
                 id: m.id.clone(),
-                status: if m.gated.unwrap_or(false) { "manual download" } else { "available" }.to_string(),
+                status: if m.manual_download_reason().is_some() { "manual download" } else { "available" }.to_string(),
                 gb: m.download_gb.unwrap_or(m.static_vram_gb),
-                fit: if sm_ok { fit_label(&registry_input(m), pinned, &hw) } else { "unsupported SM".to_string() },
+                fit: if sm_ok {
+                    fit_label(view.as_ref(), &m.id, &registry_input(m), pinned, None)
+                } else {
+                    "unsupported SM".to_string()
+                },
                 custom: None,
             });
         }
@@ -78,6 +82,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
     if json {
         println!("{}", serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?);
     } else {
+        println!("MODEL\tSTATUS\tSIZE\tFIT ON THIS MACHINE");
         for r in rows {
             println!("{}\t{}\t{:.2} GB\t{}", r.id, r.status, r.gb, r.fit);
         }
@@ -85,23 +90,23 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
     Ok(())
 }
 
-fn fit_label(input: &ChooserInput, pinned: Option<usize>, hw: &Option<HardwareState>) -> String {
-    let Some(hw) = hw else {
+fn fit_label(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<usize>, marlin_gb: Option<f64>) -> String {
+    // What goethe load would do with this model now, in the daemon's budget wording.
+    let Some(view) = view else {
         return "unknown (run goethe hw profile)".to_string();
     };
-    let um = if hw.gpus.iter().any(|g| g.unified_memory) { " unified memory" } else { "" };
-    match best_fit(input, hw, pinned) {
-        Ok(f) => format!("ok tp={} {:.1} GB/gpu{um}", f.tp, f.need_gb),
-        Err(missing) => format!("needs {missing:.1} GB more{um}"),
+    match view.fit(id, input, pinned, marlin_gb) {
+        Ok(f) => format!("fits: {}", f.describe(input)),
+        Err(why) => format!("does not fit: {why}"),
     }
 }
 
-fn installed_rows(con: &Connection) -> Result<Vec<Installed>, String> {
-    // Read the same columns goethed uses to budget a load.
+fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, String> {
+    // The columns and card fields goethed budgets a load with: KV bytes for the card dtype, Marlin extra, ctx caps.
     let mut stmt = con
         .prepare(
             "SELECT model_id, static_vram_gb, kv_bytes_per_token, default_ctx, default_max_conc, default_tp,
-                    max_ctx, num_attention_heads, num_kv_heads, attention
+                    max_ctx, num_attention_heads, num_kv_heads, attention, kv_elems_per_token, local_path
              FROM installed_models ORDER BY model_id",
         )
         .map_err(|e| e.to_string())?;
@@ -110,23 +115,44 @@ fn installed_rows(con: &Connection) -> Result<Vec<Installed>, String> {
             let kv_bytes: i64 = r.get(2)?;
             let default_ctx: i64 = r.get(3)?;
             let max_ctx = r.get::<_, Option<i64>>(6)?.unwrap_or(default_ctx).max(1) as u64;
+            let card = card_value(&home.join(r.get::<_, String>(11)?));
+            let elems = r.get::<_, Option<i64>>(10)?.unwrap_or(kv_bytes).max(0) as u64;
+            let marlin_off = card.get("env").and_then(|e| e.get("GOETHE_MARLIN")).and_then(|v| v.as_str()) == Some("0");
             Ok(Installed {
                 id: r.get(0)?,
                 default_tp: r.get(5)?,
+                marlin_gb: card.get("marlin_extra_gb").and_then(|v| v.as_float()).filter(|_| !marlin_off),
                 input: ChooserInput {
                     static_vram_gb: r.get(1)?,
-                    kv_bytes_per_token: kv_bytes.max(1) as u64,
+                    kv_bytes_per_token: card_kv_bytes(&card, elems, kv_bytes.max(0) as u64).max(1),
                     num_attention_heads: r.get::<_, Option<i64>>(7)?.unwrap_or(1) as u64,
                     num_kv_heads: r.get::<_, Option<i64>>(8)?.unwrap_or(1) as u64,
                     attention: r.get::<_, Option<String>>(9)?.unwrap_or_else(|| "gqa".to_string()),
                     max_ctx,
                     ctx: (default_ctx.max(1) as u64).min(max_ctx),
-                    max_conc: r.get::<_, i64>(4)? as u64,
+                    max_conc: r.get::<_, i64>(4)?.max(1) as u64,
                 },
             })
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+fn card_value(dir: &Path) -> toml::Value {
+    fs::read_to_string(dir.join(install::CARD_FILE))
+        .ok()
+        .and_then(|t| toml::from_str(&t).ok())
+        .unwrap_or_else(|| toml::Value::Table(Default::default()))
+}
+
+fn card_kv_bytes(card: &toml::Value, elems: u64, installed_bytes: u64) -> u64 {
+    // KV bytes per token for the card's kv_cache_dtype, as goethed computes them; auto keeps the installed figure.
+    match card.get("kv_cache_dtype").and_then(|v| v.as_str()).map(str::to_ascii_lowercase) {
+        Some(d) if d.contains("fp8") => elems,
+        Some(d) if d.contains("fp4") => elems.div_ceil(2),
+        Some(d) if d.contains("16") => elems * 2,
+        _ => installed_bytes,
+    }
 }
 
 fn loaded_set(con: &Connection) -> std::collections::HashSet<String> {
@@ -138,11 +164,6 @@ fn loaded_set(con: &Connection) -> std::collections::HashSet<String> {
         set.extend(rows.filter_map(|r| r.ok()));
     }
     set
-}
-
-fn load_hw(home: &Path) -> Option<HardwareState> {
-    let text = fs::read_to_string(home.join("hardware_state.json")).ok()?;
-    serde_json::from_str(&text).ok()
 }
 
 fn is_custom_model(id: &str, reg: Option<&Registry>) -> bool {

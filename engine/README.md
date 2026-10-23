@@ -107,14 +107,16 @@ Loaded models are restored after a daemon restart or reboot unless you unloaded 
 Source file: `cdn/v1/registry.json`, served at `https://pkg.meshapplied.com/v1/registry.json` (override with `GOETHE_REGISTRY_URL`, `file://` works). It describes models only; GPU count, TP, context and concurrency are computed per machine.
 
 Required per entry: `id` (Hugging Face repo, owned by an organization), `runtime` (`sglang` or `ternary`), `architecture` (`dense` or `moe`), `supported_sm`, `static_vram_gb` (whole model), `kv_elems_per_token`, `max_ctx`, `num_attention_heads`, `num_kv_heads`.
-Optional: `attention` (`gqa`, `mla`, `hybrid`), `extra_sglang_args`, `revision`, `gated`, `download_gb`, `description`, `family`, `license`, `released`, `modalities`. Ternary entries also take `pack_id`, `base_model_id`, `env`, `pythonpath`.
+Optional: `attention` (`gqa`, `mla`, `hybrid`), `extra_sglang_args`, `revision`, `gated`, `manual_download` (weights are published somewhere other than Hugging Face), `download_gb`, `description`, `family`, `license`, `released`, `modalities`. Ternary entries also take `pack_id`, `base_model_id`, `env`, `pythonpath`.
 
 Add models without writing numbers by hand:
 
     goethe registry add org/model-a org/model-b --file cdn/v1/registry.json [--overlay hand-written.json] [--dry-run]
     goethe registry validate cdn/v1/registry.json --online --check-sglang
 
-`add` measures size, KV elements, heads and context from Hugging Face, merges hand-written fields from the overlay, validates, and writes atomically. Gated repos cannot be measured without logging in, so their entries are written by hand with `"gated": true`; `goethe recommend` and `goethe models` mark them as manual downloads.
+`add` measures size, KV elements, heads and context from Hugging Face, merges hand-written fields from the overlay, validates, and writes atomically. Gated repos cannot be measured without logging in, so their entries are written by hand with `"gated": true`. Entries with `"gated": true` or `"manual_download": true` are never recommended: `goethe recommend` lists them as manual downloads with their fit, `goethe models` labels them, `goethe install` explains where to put the files for `goethe scan`, and `validate --online` does not require weights on Hugging Face for `manual_download` entries.
+
+`goethe recommend` and `goethe models` judge fit with the plan `goethe load` would make on the live GPUs (shrinking context, then concurrency) plus the overhead learned from earlier loads, and say how much is missing when nothing fits.
 
 ## Defaults worth knowing
 
