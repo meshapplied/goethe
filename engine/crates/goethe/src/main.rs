@@ -184,6 +184,11 @@ enum Commands {
         #[arg(long = "keep-engines", help = "Leave loaded engines serving; the next goethed adopts them.")]
         keep_engines: bool,
     },
+    #[command(about = "Guided setup.")]
+    Configure {
+        #[command(subcommand)]
+        cmd: ConfigureCommands,
+    },
     #[command(about = "Print connection details.")]
     Get {
         #[command(subcommand)]
@@ -260,6 +265,21 @@ enum Commands {
     Alias {
         #[command(subcommand)]
         cmd: AliasCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigureCommands {
+    #[command(about = "Choose who can reach the API: local only, VPN (recommended) or public network.")]
+    Api {
+        #[arg(long, help = "local, vpn or public (asked on a terminal when omitted).")]
+        mode: Option<String>,
+        #[arg(long = "vpn-ip", help = "VPN address of this machine to listen on (default: the detected one).")]
+        vpn_ip: Option<std::net::IpAddr>,
+        #[arg(long = "allow", help = "Client CIDR to allow (repeatable; default for vpn: the VPN's range).")]
+        allow: Vec<String>,
+        #[arg(long, help = "Apply without questions (public mode still refuses 0.0.0.0/0).")]
+        yes: bool,
     },
 }
 
@@ -680,6 +700,10 @@ fn main() {
         Commands::Ps { json } => do_ps(json),
         Commands::Up => do_up(),
         Commands::Get { cmd: GetCommands::Api { json } } => do_get_api(json),
+        Commands::Configure { cmd: ConfigureCommands::Api { mode, vpn_ip, allow, yes } } => {
+            let mode = mode.as_deref().map(goethe_core::configure::Mode::parse).transpose().unwrap_or_else(|e| usage(e));
+            goethe_core::configure::run_api(goethe_core::configure::ApiOpts { mode, vpn_ip, allow, yes })
+        }
         Commands::Down { keep_engines: false } => shutdown::run_down(),
         Commands::Down { keep_engines: true } => goethe_core::service::stop_keeping_engines().map(|(before, kept)| {
             if before > 0 {
