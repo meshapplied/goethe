@@ -686,8 +686,8 @@ fn main() {
             gateway,
             prune,
         } => {
-            if target.is_none() && !(daemon || gateway || prune) {
-                usage("give a model id or instance id, or --daemon or --gateway");
+            if let Some(msg) = logs_target_error(target.as_deref(), daemon, gateway, prune) {
+                usage(msg);
             }
             goethe_core::logs::run_logs(target.as_deref(), follow, lines, daemon, gateway, prune)
         }
@@ -1083,6 +1083,17 @@ fn do_ps(json: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn logs_target_error(target: Option<&str>, daemon: bool, gateway: bool, prune: bool) -> Option<&'static str> {
+    if target.is_some_and(|t| t.trim().is_empty()) {
+        return Some("the log target is empty: give a model id or instance id, or --daemon or --gateway");
+    }
+    match [target.is_some(), daemon, gateway].iter().filter(|b| **b).count() {
+        0 if !prune => Some("give a model id or instance id, or --daemon or --gateway"),
+        n if n > 1 => Some("give one log target: a model or instance id, --daemon, or --gateway"),
+        _ => None,
+    }
+}
+
 fn do_stop_keep_engines() -> Result<(), String> {
     // Stop goethed only (contract C-D); engines keep serving and are adopted when goethed starts again.
     if !goethe_core::service::goethed_running() {
@@ -1226,6 +1237,18 @@ mod tests {
         assert!(open.contains("bind: 0.0.0.0 (remote clients reach it when allowlisted)"), "{open}");
         assert!(open.contains("state: not running"), "{open}");
         assert!(open.contains("allowlist: 2 entries\nendpoint: tcp://1.2.3.4:4000 -> port 9443\n"), "{open}");
+    }
+
+    #[test]
+    fn logs_take_exactly_one_target() {
+        assert!(logs_target_error(Some(""), false, false, false).is_some_and(|m| m.contains("empty")));
+        assert!(logs_target_error(Some("  "), false, false, false).is_some());
+        assert!(logs_target_error(Some("org/m"), true, false, false).is_some_and(|m| m.contains("one log target")));
+        assert!(logs_target_error(None, true, true, false).is_some());
+        assert!(logs_target_error(None, false, false, false).is_some());
+        assert_eq!(logs_target_error(None, false, false, true), None);
+        assert_eq!(logs_target_error(Some("org/m"), false, false, false), None);
+        assert_eq!(logs_target_error(None, false, true, false), None);
     }
 
     #[test]
