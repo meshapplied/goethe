@@ -224,6 +224,7 @@ def _atexit_cleanup() -> None:
     for proc in list(_ACTIVE):
         proc.stop()
     for td in list(_temp_homes_active):
+        _shutdown_home_daemon(td)
         shutil.rmtree(td, ignore_errors=True)
     _temp_homes_active.clear()
     _artifact_path().unlink(missing_ok=True)
@@ -669,9 +670,16 @@ def home_zombies(home: Path) -> list[int]:
 
 
 def assert_no_zombies(home: Path, timeout: float = 3.0) -> None:
-    """Fail when the temp home's process tree still holds defunct processes after timeout."""
+    """Fail when the temp home's process tree still holds defunct processes after timeout, naming them."""
     if not wait_until(lambda: not home_zombies(home), timeout=timeout, interval=0.1):
-        raise RuntimeError(f"defunct processes under {home}: {home_zombies(home)}")
+        table = process_table()
+        named = [
+            f"{z} ({_proc_bytes(z, 'comm').decode(errors='replace').strip()}, parent {table[z][1]} "
+            f"{proc_cmdline(table[z][1])[:60]!r})"
+            for z in home_zombies(home)
+            if z in table
+        ]
+        raise RuntimeError(f"defunct processes under {home}: {named}")
 
 
 def home_goethe_env(home: Path) -> dict[str, str]:
@@ -722,10 +730,23 @@ def write_stub_python(pyenv_bin: Path, real: Path) -> None:
     wrapper.chmod(0o755)
 
 
+def _shutdown_home_daemon(home: Path) -> None:
+    """Ask the goethed serving this temp home, if any, to shut down (it stops its engines and nginx too)."""
+    sock = home / "goethe.sock"
+    if not sock.exists():
+        return
+    try:
+        goethe_rpc(home, "shutdown", None, timeout=10.0)
+    except (OSError, ValueError):
+        return
+    wait_until(lambda: not sock.exists(), timeout=15.0, interval=0.1)
+
+
 def _teardown_home(td: Path, strict: bool) -> None:
     """Remove a temp home; when strict, fail if any process (engine, CLI, download) or file outlived the test."""
     leftover = sorted(p for p in home_process_tree(td) if pid_alive(p))
     names = [proc_cmdline(p)[:100] for p in leftover]
+    _shutdown_home_daemon(td)
     shutil.rmtree(td, ignore_errors=True)
     if leftover:
         wait_until(lambda: not any(pid_alive(p) for p in leftover), timeout=10.0)
@@ -845,28 +866,29 @@ def make_tls_certs(home: Path) -> None:
     )
 
 
+def _nginx_runs(binary: Path) -> bool:
+    return binary.is_file() and subprocess.run([str(binary), "-v"], capture_output=True, timeout=30).returncode == 0
+
+
 def ensure_nginx(home: Path) -> Path:
-    """Return nginx binary, extracting rootless nginx into GOETHE_HOME if needed."""
+    """A working nginx: NGINX_BIN, else nginx, nginx-core or nginx-light extracted rootless under GOETHE_HOME."""
     env_bin = os.environ.get("NGINX_BIN")
-    if env_bin and Path(env_bin).is_file():
+    if env_bin and _nginx_runs(Path(env_bin)):
         return Path(env_bin)
-    rootless = home / "nginx-root" / "usr" / "sbin" / "nginx"
-    if rootless.is_file():
-        return rootless
-    cache = home / "nginx-root"
-    deb_dir = cache / "debs"
-    deb_dir.mkdir(parents=True, exist_ok=True)
-    for pkg in ("nginx", "nginx-common"):
-        matches = sorted(deb_dir.glob(f"{pkg}_*.deb"))
-        if not matches:
-            subprocess.run(["apt-get", "download", pkg], cwd=str(deb_dir), check=True, capture_output=True, timeout=120)
-            matches = sorted(deb_dir.glob(f"{pkg}_*.deb"))
-        if not matches:
-            raise RuntimeError(f"apt-get download missing deb for {pkg}")
-        subprocess.run(["dpkg-deb", "-x", str(matches[0]), str(cache)], check=True, capture_output=True, timeout=60)
-    if not rootless.is_file():
-        raise RuntimeError("rootless nginx extraction failed")
-    return rootless
+    root = home / "nginx-root"
+    binary = root / "usr" / "sbin" / "nginx"
+    if _nginx_runs(binary):
+        return binary
+    debs = root / "debs"
+    debs.mkdir(parents=True, exist_ok=True)
+    for pkg in ("nginx", "nginx-core", "nginx-light"):
+        if subprocess.run(["apt-get", "download", pkg, "nginx-common"], cwd=str(debs), capture_output=True).returncode:
+            continue
+        for deb in sorted(debs.glob("*.deb")):
+            subprocess.run(["dpkg-deb", "-x", str(deb), str(root)], check=True, capture_output=True, timeout=60)
+        if _nginx_runs(binary):
+            return binary
+    raise RuntimeError("no working nginx: set NGINX_BIN or install nginx-core")
 
 
 def _ssl_ctx() -> ssl.SSLContext:

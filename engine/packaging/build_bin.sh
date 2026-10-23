@@ -17,8 +17,13 @@ case "${ARCH}" in
     ;;
 esac
 
+COMMIT="$(git -C "${ROOT}" rev-parse --short HEAD)"
+if [[ -n "$(git -C "${ROOT}" status --porcelain -- .)" ]]; then
+  COMMIT="${COMMIT}-dirty"
+fi
 docker run --rm --name "goethe-build-portable-${ARCH}" \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+  -e GOETHE_GIT_COMMIT="${COMMIT}" -e GOETHE_BUILD_DATE="$(date -u +%s)" \
   -e GOETHE_ARCH="${ARCH}" -e GOETHE_TRIPLE="${TRIPLE}" \
   -e CARGO_HOME=/cache/cargo -e RUSTUP_HOME=/cache/rustup -e CARGO_TARGET_DIR=/src/target-portable \
   -v "${ROOT}:/src" -v "${CACHE}:/cache" -w /src \

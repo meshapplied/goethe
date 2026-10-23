@@ -116,14 +116,19 @@ write_buildinfo
 
 BUILD_TMP="$(mktemp -d)"
 trap 'rm -rf "${BUILD_TMP}"' EXIT
-rsync -a --exclude .git "${FORK}/" "${BUILD_TMP}/sglang/"
+rsync -a --exclude .git --exclude /python/build/ --exclude /python/dist/ --exclude '/python/*.egg-info/' \
+  "${FORK}/" "${BUILD_TMP}/sglang/"
 if ! "${ROOT}/sglang/apply.sh" "${BUILD_TMP}/sglang"; then
   echo "error: sglang patch failed; refusing to build an unpatched wheel" >&2
   exit 1
 fi
+WHEEL_VERSION="0.0.0.dev1+g$(git -C "${FORK}" rev-parse --short=9 HEAD)"
+if [[ -n "$(git -C "${FORK}" status --porcelain)" ]]; then
+  WHEEL_VERSION="${WHEEL_VERSION}.d$(date -u +%Y%m%d)"
+fi
 (
   cd "${BUILD_TMP}/sglang/python"
-  SGLANG_BUILD_RUST_EXTS=none "${UV}" build --wheel -o "${DIST}/wheels"
+  SETUPTOOLS_SCM_PRETEND_VERSION="${WHEEL_VERSION}" SGLANG_BUILD_RUST_EXTS=none "${UV}" build --wheel -o "${DIST}/wheels"
 )
 rm -f "${DIST}/wheels/.gitignore"
 (cd "${DIST}/wheels" && ls -t sglang-*.whl | head -n1 >LATEST)
