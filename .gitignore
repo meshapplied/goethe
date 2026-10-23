@@ -21,3 +21,4 @@ build/
 .eggs/
 *.local.toml
 docs/gpu-checks.md
+!engine/packaging/release_pub.pem
