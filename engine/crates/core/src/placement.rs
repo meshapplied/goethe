@@ -110,23 +110,6 @@ pub fn load_hw(home: &Path) -> Option<HardwareState> {
     serde_json::from_str(&text).ok()
 }
 
-pub fn run_pick_gpus(tp: u64) -> Result<(), String> {
-    // Print the GPU set a load with this tp would prefer, using the same ranking as goethe load.
-    let home = crate::paths::goethe_home();
-    let con = crate::db::open(&home).map_err(|e| e.to_string())?;
-    let snap = foreign::snapshot()?;
-    let denied = crate::gpu_policy::denied_set(&con)?;
-    let inputs = placement_inputs(&snap, &managed_pids(&con), &live_instance_ids(&con), &denied, |_| 0.0);
-    let tp = tp.max(1) as usize;
-    ensure_eligible_for_tp(&inputs, tp, &denied)?;
-    let best = rank_sets(&inputs, load_hw(&home).as_ref(), tp)
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("cannot place tp={tp}"))?;
-    println!("placed on GPU {}", format_gpu_list(&best.gpus));
-    Ok(())
-}
-
 pub fn format_gpu_list(gpus: &[u32]) -> String {
     gpus.iter()
         .map(|g| g.to_string())

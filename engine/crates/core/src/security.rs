@@ -84,6 +84,9 @@ pub fn allowlist_remove(cidr: &str) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         rows.filter_map(|r| r.ok()).collect()
     };
+    if removed.is_empty() {
+        return Err(format!("{raw} is not in the allowlist (goethe allowlist list shows the entries)"));
+    }
     con.execute(
         "DELETE FROM ip_allowlist WHERE cidr = ?1 OR cidr = ?2",
         [&target, &raw.to_string()],
@@ -204,6 +207,10 @@ pub fn key_create(
     if rpm_limit < 0 {
         return Err(format!("rpm must be 0 (unlimited) or positive, got {rpm_limit}"));
     }
+    if name.trim().is_empty() {
+        return Err("key name must not be empty".to_string());
+    }
+    let model_scope = models.map(model_scope_list).transpose()?;
     let expires_at = expires.map(parse_expires).transpose()?;
     let home = goethe_home();
     let con = db::open(&home).map_err(|e| e.to_string())?;
@@ -211,7 +218,6 @@ pub fn key_create(
     let hash = token_hash(&token);
     let key_id = random_hex(6);
     let raw_prefix = token[..14].to_string();
-    let model_scope = models.map(|m| m.trim().to_string());
     con.execute(
         "INSERT INTO api_keys (key_id, name, token_hash, raw_prefix, rpm_limit, expires_at, model_scope, is_admin)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -233,6 +239,15 @@ pub fn key_create(
     } else {
         Ok(format!("created key {key_id}"))
     }
+}
+
+pub fn model_scope_list(models: &str) -> Result<String, String> {
+    // Comma-separated model ids without blanks; an empty scope is refused instead of creating an unscoped key.
+    let ids: Vec<&str> = models.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    if ids.is_empty() {
+        return Err("--models needs at least one model id (omit it for a key that may use every model)".to_string());
+    }
+    Ok(ids.join(","))
 }
 
 pub fn key_revoke(key_id: &str) -> Result<(), String> {
@@ -343,7 +358,7 @@ fn random_hex(n: usize) -> String {
     })
 }
 
-pub(crate) fn token_hash(token: &str) -> String {
+pub fn token_hash(token: &str) -> String {
     let mut h = Sha256::new();
     h.update(token.as_bytes());
     format!("{:x}", h.finalize())
@@ -352,6 +367,13 @@ pub(crate) fn token_hash(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_scope_needs_a_model() {
+        assert_eq!(model_scope_list(" a, ,b ").unwrap(), "a,b");
+        assert!(model_scope_list("").is_err());
+        assert!(model_scope_list(" , ").is_err());
+    }
 
     #[test]
     fn cidr_canonicalization() {

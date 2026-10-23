@@ -48,13 +48,14 @@ pub fn run_enable() -> Result<(), String> {
 }
 
 pub fn run_disable() -> Result<(), String> {
+    // Remove only the autostart entries that start this GOETHE_HOME; other homes keep theirs.
     let home = goethe_home();
     let mut actions = 0usize;
-    if remove_system_unit() {
+    if remove_system_unit(&home) {
         println!("disabled goethed systemd (system unit)");
         actions += 1;
     }
-    if remove_user_unit() {
+    if remove_user_unit(&home) {
         println!("disabled goethed systemd (--user unit)");
         actions += 1;
     }
@@ -82,15 +83,17 @@ pub fn run_status() -> Result<(), String> {
 }
 
 fn active_method(home: &Path) -> String {
-    if system_unit_path().is_file() {
-        "systemd (system)".into()
-    } else if user_unit_path().is_file() {
-        "systemd (--user)".into()
-    } else if crontab_entry_for(&read_crontab(), home) {
-        "crontab @reboot".into()
-    } else {
-        "none".into()
+    // This home's boot method, naming a unit that belongs to another home.
+    let mut other = String::new();
+    for (path, label) in [(system_unit_path(), "systemd (system)"), (user_unit_path(), "systemd (--user)")] {
+        match unit_owner(&path, home) {
+            UnitOwner::Ours => return label.into(),
+            UnitOwner::Other(h) => other = format!(" ({label} unit starts {})", describe_home(h.as_deref())),
+            UnitOwner::Absent => {}
+        }
     }
+    let method = if crontab_entry_for(&read_crontab(), home) { "crontab @reboot" } else { "none" };
+    format!("{method}{other}")
 }
 
 pub fn goethed_running() -> bool {
@@ -122,10 +125,13 @@ pub fn spawn_goethed(home: &Path) -> Result<(), String> {
 }
 
 pub fn systemctl_restart_args() -> Option<Vec<String>> {
-    if unsafe { libc::geteuid() } == 0 && system_unit_path().is_file() && system_unit_dir() == default_system_unit_dir() {
+    // Restart through systemd only when the real unit starts this GOETHE_HOME.
+    let home = goethe_home();
+    let ours = |path: PathBuf| matches!(unit_owner(&path, &home), UnitOwner::Ours);
+    if unsafe { libc::geteuid() } == 0 && system_unit_dir() == default_system_unit_dir() && ours(system_unit_path()) {
         return Some(vec!["restart".into(), "goethed.service".into()]);
     }
-    if user_unit_path().is_file() && user_unit_dir() == default_user_unit_dir() {
+    if user_unit_dir() == default_user_unit_dir() && ours(user_unit_path()) {
         return Some(vec!["--user".into(), "restart".into(), "goethed.service".into()]);
     }
     None
@@ -165,6 +171,7 @@ fn try_system_unit(home: &Path) -> Result<bool, String> {
     if unsafe { libc::geteuid() } != 0 {
         return Ok(false);
     }
+    refuse_other_home(&system_unit_path(), home)?;
     write_unit(&system_unit_path(), home, "multi-user.target")?;
     systemctl_quiet(&["daemon-reload"]);
     systemctl_quiet(&enable_args(&[]));
@@ -183,12 +190,87 @@ fn try_user_unit(home: &Path) -> Result<bool, String> {
     if !ok {
         return Ok(false);
     }
+    refuse_other_home(&user_unit_path(), home)?;
     fs::create_dir_all(user_unit_dir()).map_err(|e| e.to_string())?;
     write_unit(&user_unit_path(), home, "default.target")?;
     systemctl_quiet(&["--user", "daemon-reload"]);
     systemctl_quiet(&enable_args(&["--user"]));
     eprintln!("hint: run `loginctl enable-linger $USER` so goethed starts at boot without a login session");
     Ok(true)
+}
+
+enum UnitOwner {
+    Absent,
+    Ours,
+    Other(Option<PathBuf>),
+}
+
+fn unit_owner(path: &Path, home: &Path) -> UnitOwner {
+    // Whether a goethed unit exists and whether it starts this GOETHE_HOME.
+    if !path.is_file() {
+        return UnitOwner::Absent;
+    }
+    match fs::read_to_string(path).ok().and_then(|t| unit_text_home(&t)) {
+        Some(h) if same_home(&h, home) => UnitOwner::Ours,
+        other => UnitOwner::Other(other),
+    }
+}
+
+pub fn unit_text_home(text: &str) -> Option<PathBuf> {
+    // The GOETHE_HOME a unit pins in its Environment= lines.
+    text.lines()
+        .filter_map(|l| l.trim().strip_prefix("Environment="))
+        .flat_map(env_assignments)
+        .find_map(|a| a.strip_prefix("GOETHE_HOME=").map(PathBuf::from))
+}
+
+fn env_assignments(value: &str) -> Vec<String> {
+    // Split a systemd Environment= value into assignments, honoring double quotes and backslash escapes.
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => cur.extend(chars.next()),
+            '"' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+fn same_home(a: &Path, b: &Path) -> bool {
+    a == b || matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
+}
+
+fn describe_home(home: Option<&Path>) -> String {
+    home.map(|h| format!("GOETHE_HOME {}", h.display())).unwrap_or_else(|| "an unnamed GOETHE_HOME".into())
+}
+
+fn refuse_other_home(path: &Path, home: &Path) -> Result<(), String> {
+    // One goethed unit per user: refuse to take over the unit of another home.
+    let UnitOwner::Other(other) = unit_owner(path, home) else {
+        return Ok(());
+    };
+    let how = other
+        .as_deref()
+        .map(|h| format!("GOETHE_HOME={} goethe service disable", shell_quote(&h.display().to_string())))
+        .unwrap_or_else(|| format!("goethe service disable from that home, or remove {}", path.display()));
+    Err(format!(
+        "{} already starts goethed for {}; this home ({}) cannot get a unit too. Disable the other one first ({how})",
+        path.display(),
+        describe_home(other.as_deref()),
+        home.display()
+    ))
 }
 
 fn enable_args<'a>(prefix: &[&'a str]) -> Vec<&'a str> {
@@ -214,10 +296,10 @@ fn systemd_quote(s: &str) -> String {
 }
 
 pub fn unit_text(home: &Path, wanted_by: &str) -> String {
-    // Unit with quoted paths and an optional GOETHE_HOME/goethed.env for overrides such as ports.
+    // Unit with quoted paths and the installer's optional GOETHE_HOME/goethe.env.
     let h = home.display().to_string();
     format!(
-        "[Unit]\nDescription=Goethe control plane daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nEnvironment={}\nEnvironmentFile=-{h}/goethed.env\nExecStart={}\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy={wanted_by}\n",
+        "[Unit]\nDescription=Goethe control plane daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nEnvironment={}\nEnvironmentFile=-{h}/goethe.env\nExecStart={}\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy={wanted_by}\n",
         systemd_quote(&format!("GOETHE_HOME={h}")),
         systemd_quote(&format!("{h}/bin/goethed")),
     )
@@ -289,22 +371,27 @@ fn write_crontab(text: &str) -> Result<(), String> {
 }
 
 fn crontab_entry_for(text: &str, home: &Path) -> bool {
-    let h = home.display().to_string();
     let lines: Vec<&str> = text.lines().collect();
     lines
         .windows(2)
-        .any(|w| w[0].trim() == CRON_MARKER && w[1].contains(&h))
+        .any(|w| w[0].trim() == CRON_MARKER && cron_line_is_for(w[1], home))
+}
+
+fn cron_line_is_for(line: &str, home: &Path) -> bool {
+    // The entry's GOETHE_HOME= token is exactly this home, quoted as written now or bare as older builds wrote it.
+    let h = home.display().to_string();
+    let quoted = format!("GOETHE_HOME={} ", shell_quote(&h).replace('%', "\\%"));
+    line.contains(&quoted) || line.contains(&format!("GOETHE_HOME={h} "))
 }
 
 pub fn strip_cron_entry(text: &str, home: &Path) -> Option<String> {
     // Drop our marker and the entry after it, only for this GOETHE_HOME.
-    let h = home.display().to_string();
     let lines: Vec<&str> = text.lines().collect();
     let mut kept = Vec::new();
     let mut i = 0;
     let mut removed = false;
     while i < lines.len() {
-        if lines[i].trim() == CRON_MARKER && lines.get(i + 1).is_some_and(|n| n.contains(&h)) {
+        if lines[i].trim() == CRON_MARKER && lines.get(i + 1).is_some_and(|n| cron_line_is_for(n, home)) {
             i += 2;
             removed = true;
             continue;
@@ -329,9 +416,9 @@ fn remove_crontab_reboot(home: &Path) -> Result<bool, String> {
     }
 }
 
-fn remove_system_unit() -> bool {
+fn remove_system_unit(home: &Path) -> bool {
     let p = system_unit_path();
-    if unsafe { libc::geteuid() } != 0 || !p.is_file() {
+    if unsafe { libc::geteuid() } != 0 || !unit_is_ours(&p, home) {
         return false;
     }
     systemctl_quiet(&["disable", "--now", "goethed.service"]);
@@ -340,15 +427,27 @@ fn remove_system_unit() -> bool {
     true
 }
 
-fn remove_user_unit() -> bool {
+fn remove_user_unit(home: &Path) -> bool {
     let p = user_unit_path();
-    if !p.is_file() {
+    if !unit_is_ours(&p, home) {
         return false;
     }
     systemctl_quiet(&["--user", "disable", "--now", "goethed.service"]);
     let _ = fs::remove_file(&p);
     systemctl_quiet(&["--user", "daemon-reload"]);
     true
+}
+
+fn unit_is_ours(path: &Path, home: &Path) -> bool {
+    // True for this home's unit; another home's unit is left alone with a note.
+    match unit_owner(path, home) {
+        UnitOwner::Ours => true,
+        UnitOwner::Absent => false,
+        UnitOwner::Other(h) => {
+            eprintln!("left {} alone: it starts goethed for {}", path.display(), describe_home(h.as_deref()));
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -361,7 +460,7 @@ mod tests {
         let unit = unit_text(home, "default.target");
         assert!(unit.contains("Environment=\"GOETHE_HOME=/srv/my home/.goethe\""));
         assert!(unit.contains("ExecStart=\"/srv/my home/.goethe/bin/goethed\""));
-        assert!(unit.contains("EnvironmentFile=-/srv/my home/.goethe/goethed.env"));
+        assert!(unit.contains("EnvironmentFile=-/srv/my home/.goethe/goethe.env"));
         let cron = cron_line(Path::new("/srv/50%/.goethe"));
         assert_eq!(
             cron,
@@ -380,5 +479,36 @@ mod tests {
         assert!(out.starts_with("0 1 * * * backup\n"));
         assert!(crontab_entry_for(&out, b));
         assert!(strip_cron_entry(&out, a).is_none());
+        let prefix = Path::new("/a/.goeth");
+        assert!(strip_cron_entry(&text, prefix).is_none());
+        let legacy = format!(
+            "{CRON_MARKER}\n@reboot GOETHE_HOME=/a/.goethe /a/.goethe/bin/goethed >>/a/.goethe/logs/goethed.log 2>&1\n"
+        );
+        assert_eq!(strip_cron_entry(&legacy, a).as_deref(), Some(""));
+        assert!(strip_cron_entry(&legacy, Path::new("/a/.goethe2")).is_none());
+    }
+
+    #[test]
+    fn unit_ownership_follows_its_goethe_home() {
+        let mine = Path::new("/srv/my home/.goethe");
+        assert_eq!(unit_text_home(&unit_text(mine, "default.target")).as_deref(), Some(mine));
+        assert_eq!(
+            unit_text_home("[Service]\nEnvironment=FOO=1 GOETHE_HOME=/b/.goethe\n").as_deref(),
+            Some(Path::new("/b/.goethe"))
+        );
+        assert_eq!(unit_text_home("[Service]\nExecStart=/x/bin/goethed\n"), None);
+        let dir = std::env::temp_dir().join(format!("goethe-unit-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let unit = dir.join("goethed.service");
+        assert!(matches!(unit_owner(&unit, mine), UnitOwner::Absent));
+        fs::write(&unit, unit_text(Path::new("/other/.goethe"), "default.target")).unwrap();
+        assert!(matches!(unit_owner(&unit, mine), UnitOwner::Other(Some(_))));
+        assert!(!unit_is_ours(&unit, mine));
+        let err = refuse_other_home(&unit, mine).unwrap_err();
+        assert!(err.contains("GOETHE_HOME='/other/.goethe' goethe service disable"), "{err}");
+        fs::write(&unit, unit_text(mine, "default.target")).unwrap();
+        assert!(matches!(unit_owner(&unit, mine), UnitOwner::Ours));
+        assert!(refuse_other_home(&unit, mine).is_ok());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
