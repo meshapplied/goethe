@@ -178,7 +178,10 @@ enum Commands {
         json: bool,
     },
     #[command(about = "Ask goethed to shut down (desired loads are kept for restore).")]
-    Stop,
+    Stop {
+        #[arg(long = "keep-engines", help = "Leave loaded engines serving; the next goethed adopts them.")]
+        keep_engines: bool,
+    },
     #[command(about = "Enable or inspect autostart for goethed.")]
     Service {
         #[command(subcommand)]
@@ -642,7 +645,8 @@ fn main() {
             do_unload(model_id.as_deref(), force)
         }
         Commands::Ps { json } => do_ps(json),
-        Commands::Stop => shutdown::run_stop(),
+        Commands::Stop { keep_engines: false } => shutdown::run_stop(),
+        Commands::Stop { keep_engines: true } => do_stop_keep_engines(),
         Commands::Service { cmd } => match cmd {
             ServiceCommands::Enable => goethe_core::service::run_enable(),
             ServiceCommands::Disable => goethe_core::service::run_disable(),
@@ -1076,6 +1080,16 @@ fn do_ps(json: bool) -> Result<(), String> {
         }
         print_gateway_line();
     }
+    Ok(())
+}
+
+fn do_stop_keep_engines() -> Result<(), String> {
+    // Stop goethed only (contract C-D); engines keep serving and are adopted when goethed starts again.
+    if !goethe_core::service::goethed_running() {
+        println!("goethed not running");
+        return Ok(());
+    }
+    println!("{}", goethe_core::service::stop_keeping_engines()?);
     Ok(())
 }
 
