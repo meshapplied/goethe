@@ -428,7 +428,7 @@ enum GpuCommands {
 
 #[derive(Subcommand)]
 enum HwCommands {
-    #[command(about = "Print GPU model, VRAM, and driver info.")]
+    #[command(about = "GPUs and links, CPU, RAM, disk, OS, container and cloud; writes hardware_state.json.")]
     Profile {
         #[arg(long, help = "Emit JSON.")]
         json: bool,
