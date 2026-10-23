@@ -57,7 +57,7 @@ docker run --rm --name "${NAME}" -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
     goethe allowlist add 127.0.0.1/32 >/dev/null
     token=$(goethe key create --name c --raw | grep "^goethe_sk_")
     test "$(curl -sk -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${token}" "https://127.0.0.1:${port}/v1/models")" = 200
-    goethe stop >/dev/null
+    goethe down >/dev/null
     echo "container gateway ok on ${port}"
   '
 echo "stage6_container ok"

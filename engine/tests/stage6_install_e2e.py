@@ -131,7 +131,7 @@ def _engine(home: Path) -> list[tuple[int, str]]:
 
 
 def _check_upgrade(home: Path, new: Path, out: str, before: list[tuple[int, str]], late: list[str]) -> None:
-    """The re-install swapped in the new build, said so, and kept the RUNNING engine (C-D: stop --keep-engines)."""
+    """The re-install swapped in the new build, said so, and kept the RUNNING engine (C-D: down --keep-engines)."""
     for name in ("goethe", "goethed"):
         if sha256_file(home / "bin" / name) != sha256_file(new / "bin" / f"linux-{ARCH}" / name):
             raise RuntimeError(f"re-installing a newer build did not replace bin/{name}: {out[-500:]}")
@@ -165,8 +165,8 @@ def _port_busy(port: int) -> bool:
 
 
 def _stop_installed_daemon(home: Path, env: dict[str, str]) -> None:
-    """goethe stop, then fail (after killing them) if processes of this home's own goethed binary remain."""
-    run([str(home / "bin" / "goethe"), "stop"], env=env, timeout=60)
+    """goethe down, then fail (after killing them) if processes of this home's own goethed binary remain."""
+    run([str(home / "bin" / "goethe"), "down"], env=env, timeout=60)
     goethed = str(home / "bin" / "goethed")
     if wait_until(lambda: not home_process_tree(home), timeout=15):
         return
@@ -177,7 +177,7 @@ def _stop_installed_daemon(home: Path, env: dict[str, str]) -> None:
                 os.kill(pid, signal.SIGKILL)
         except OSError:
             pass
-    raise RuntimeError(f"processes left under {home} after goethe stop: {leftovers}")
+    raise RuntimeError(f"processes left under {home} after goethe down: {leftovers}")
 
 
 def _log_tails(home: Path) -> str:

@@ -1,4 +1,4 @@
-// goethed shutdown coordination and goethe stop, including stops that leave engines running for an upgrade.
+// goethed shutdown coordination and goethe down, including stops that leave engines running for an upgrade.
 
 use crate::paths::{goethe_home, goethe_sock};
 use crate::rpc;
@@ -33,7 +33,7 @@ pub fn clear_shutdown_flag() {
     KEEP_ENGINES.store(false, Ordering::SeqCst);
 }
 
-pub fn run_stop() -> Result<(), String> {
+pub fn run_down() -> Result<(), String> {
     stop_daemon(false)
 }
 

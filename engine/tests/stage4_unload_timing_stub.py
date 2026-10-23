@@ -83,9 +83,9 @@ def main() -> None:
         if any(pid_alive(p) for p in pids):
             raise RuntimeError(f"engines alive after unload --all: {[p for p in pids if pid_alive(p)]}")
         assert_no_zombies(home)
-        dt3 = _timed(goethe, env, "stop")
+        dt3 = _timed(goethe, env, "down")
         if dt3 >= 4.0:
-            raise RuntimeError(f"goethe stop exceeded 4.0s on empty home ({dt3:.2f}s)")
+            raise RuntimeError(f"goethe down exceeded 4.0s on empty home ({dt3:.2f}s)")
         md.stop()
         assert_no_stub_engines(home)
         print(f"stage4_unload_timing_stub ok ignore={dt:.2f}s slow_term={dt1:.2f}s all={dt2:.2f}s stop={dt3:.2f}s")

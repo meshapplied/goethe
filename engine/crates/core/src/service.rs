@@ -136,6 +136,28 @@ pub fn kept_text(before: usize, kept: usize) -> String {
     }
 }
 
+pub fn run_up() -> Result<(), String> {
+    // Start this home's goethed, through its systemd unit when that unit starts this home, and wait until it answers.
+    let home = goethe_home();
+    if goethed_running() {
+        println!("goethed is already running (GOETHE_HOME {})", home.display());
+        return Ok(());
+    }
+    match systemctl_restart_args() {
+        Some(args) => {
+            let args: Vec<String> = args.into_iter().map(|a| if a == "restart" { "start".to_string() } else { a }).collect();
+            let ok = Command::new("systemctl").args(&args).status().is_ok_and(|s| s.success());
+            if !ok {
+                return Err(format!("systemctl {} failed (see journalctl for goethed.service)", args.join(" ")));
+            }
+        }
+        None => spawn_goethed(&home)?,
+    }
+    wait_goethed(std::time::Duration::from_secs(60))?;
+    println!("goethed is up (GOETHE_HOME {}); goethe ps shows loaded models, goethe get api the endpoint", home.display());
+    Ok(())
+}
+
 pub fn wait_goethed(timeout: std::time::Duration) -> Result<(), String> {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
@@ -171,8 +193,12 @@ pub fn respawn_goethed(home: &Path) -> Result<(), String> {
 }
 
 fn spawn(home: &Path, port_env: bool) -> Result<(), String> {
-    // Start goethed detached in its own session, logging to GOETHE_HOME/logs/goethed.log.
-    let goethed = home.join("bin/goethed");
+    // Start this home's goethed (else the one beside this CLI) detached, logging to GOETHE_HOME/logs/goethed.log.
+    let beside_cli = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("goethed")));
+    let goethed = std::iter::once(home.join("bin/goethed"))
+        .chain(beside_cli)
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| home.join("bin/goethed"));
     fs::create_dir_all(home.join("logs")).map_err(|e| e.to_string())?;
     let log = fs::OpenOptions::new()
         .create(true)

@@ -117,7 +117,7 @@ def main() -> None:
         if _spawn_lines(work) != sp0 + 1:
             raise RuntimeError(f"expected one spawn got {sp0}->{_spawn_lines(work)}")
         timings.append(f"kill9_restart={time.time() - t1:.0f}s")
-        run_goethe([str(goethe), "stop"], env=env)
+        run_goethe([str(goethe), "down"], env=env)
         md.stop()
         md = _start(work, env)
         if not wait_until(lambda: (_ps_row(goethe, env, required=False) or {}).get("status") == "RUNNING", 120.0):
@@ -144,7 +144,7 @@ def main() -> None:
         timings.append("ctx16384_ok")
     finally:
         run([str(goethe), "unload", "--all"], env=env, timeout=120)
-        run([str(goethe), "stop"], env=env, timeout=60)
+        run([str(goethe), "down"], env=env, timeout=60)
         md.stop()
         release()
         shutil.rmtree(work, ignore_errors=True)

@@ -132,19 +132,27 @@ pub struct ValidateOpts {
     pub check_sglang: bool,
 }
 
+pub const DEFAULT_REGISTRY_URL: &str = "https://pkg.meshapplied.com/v1/registry.json";
+
+const BUNDLED_REGISTRY: &str = include_str!("../../../cdn/v1/registry.json");
+
 pub fn registry_url() -> String {
-    crate::paths::setting("GOETHE_REGISTRY_URL")
-        .unwrap_or_else(|| "https://pkg.meshapplied.com/v1/registry.json".to_string())
+    crate::paths::setting("GOETHE_REGISTRY_URL").unwrap_or_else(|| DEFAULT_REGISTRY_URL.to_string())
+}
+
+pub fn bundled() -> Result<Registry, String> {
+    parse_registry(BUNDLED_REGISTRY)
 }
 
 pub fn fetch(url: &str) -> Result<Registry, String> {
+    // file:// or http(s) with a cache; the default URL falls back to the catalog built into this binary.
     if let Some(rest) = url.strip_prefix("file://") {
         let path = Path::new(rest);
         let text = fs_read(path)?;
         return parse_registry(&text);
     }
     if url.starts_with("http://") || url.starts_with("https://") {
-        return fetch_http_cached(url);
+        return fetch_http_cached(url).or_else(|e| if url == DEFAULT_REGISTRY_URL { bundled() } else { Err(e) });
     }
     Err(format!("unsupported registry URL scheme: {url}"))
 }

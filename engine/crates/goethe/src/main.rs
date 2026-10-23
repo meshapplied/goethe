@@ -22,8 +22,8 @@ use serde_json::{json, Value};
     name = "goethe",
     disable_version_flag = true,
     about = "Goethe: serve LLMs on your NVIDIA GPUs behind one OpenAI-compatible gateway",
-    after_help = "Examples:\n  goethe install Qwen/Qwen3-8B --load\n  goethe scan\n  goethe load Qwen/Qwen3-8B --gpus 2,3 --ctx 65536\n  goethe key create --name ops --raw\n\ngoethe stop stops goethed but keeps desired loads for restore (every desired slot). \
-                  goethe unload removes all instances of a model (all slots) and their desired rows."
+    after_help = "Examples:\n  goethe up\n  goethe install Qwen/Qwen3-8B --load\n  goethe scan\n  goethe load Qwen/Qwen3-8B --gpus 2,3 --ctx 65536\n  goethe get api\n  goethe key create --name ops --raw\n  goethe down\n\ngoethe down stops goethed but keeps loaded models for the next goethe up. \
+                  goethe unload removes all instances of a model and it is not restored."
 )]
 struct Cli {
     #[arg(short = 'V', long = "version", help = "Print version, git commit and build date.")]
@@ -177,10 +177,17 @@ enum Commands {
         #[arg(long, help = "JSON rows with instance_id, slot_key, status, restarts.")]
         json: bool,
     },
-    #[command(about = "Ask goethed to shut down (desired loads are kept for restore).")]
-    Stop {
+    #[command(about = "Start goethed and the gateway (loaded models from last time come back).")]
+    Up,
+    #[command(about = "Stop goethed and its engines (loaded models come back on the next goethe up).")]
+    Down {
         #[arg(long = "keep-engines", help = "Leave loaded engines serving; the next goethed adopts them.")]
         keep_engines: bool,
+    },
+    #[command(about = "Print connection details.")]
+    Get {
+        #[command(subcommand)]
+        cmd: GetCommands,
     },
     #[command(about = "Enable or inspect autostart for goethed.")]
     Service {
@@ -253,6 +260,15 @@ enum Commands {
     Alias {
         #[command(subcommand)]
         cmd: AliasCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum GetCommands {
+    #[command(about = "The OpenAI-compatible API base URL, then the loaded models.")]
+    Api {
+        #[arg(long, help = "JSON with api, goethed_running and models.")]
+        json: bool,
     },
 }
 
@@ -662,8 +678,10 @@ fn main() {
             do_unload(model_id.as_deref(), force)
         }
         Commands::Ps { json } => do_ps(json),
-        Commands::Stop { keep_engines: false } => shutdown::run_stop(),
-        Commands::Stop { keep_engines: true } => goethe_core::service::stop_keeping_engines().map(|(before, kept)| {
+        Commands::Up => do_up(),
+        Commands::Get { cmd: GetCommands::Api { json } } => do_get_api(json),
+        Commands::Down { keep_engines: false } => shutdown::run_down(),
+        Commands::Down { keep_engines: true } => goethe_core::service::stop_keeping_engines().map(|(before, kept)| {
             if before > 0 {
                 println!("{}", goethe_core::service::kept_text(before, kept));
             }
@@ -1178,6 +1196,74 @@ fn gateway_status_text(bind: &str, port: u16, url: &str, running: bool, allowlis
         out.push_str(&format!("endpoint: {e}\n"));
     }
     out
+}
+
+fn do_up() -> Result<(), String> {
+    // Start goethed, give the gateway a few seconds to listen, then print where the API is.
+    goethe_core::service::run_up()?;
+    let home = goethe_home();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while nginx::format_gateway_line(&home).is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    match nginx::format_gateway_line(&home) {
+        Some(_) => println!("API: https://{}/v1 (goethe get api lists the loaded models)", nginx::gateway_connect_addr(&home)),
+        None => println!("the gateway is not listening yet (goethe logs --gateway shows why)"),
+    }
+    Ok(())
+}
+
+fn do_get_api(json: bool) -> Result<(), String> {
+    // The base URL clients point an OpenAI SDK at, then one row per loaded model with its state and GPUs.
+    let home = goethe_home();
+    let api = format!("https://{}/v1", nginx::gateway_connect_addr(&home));
+    let ps = rpc::call("ps", json!(null)).ok().filter(|r| r.code == 0);
+    let rows: Vec<Value> = ps.as_ref().and_then(|r| serde_json::from_str(r.stdout.trim()).ok()).unwrap_or_default();
+    let mut models: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+    for row in &rows {
+        let id = row.get("model_id").and_then(Value::as_str).unwrap_or("").to_string();
+        let status = row.get("status").and_then(Value::as_str).unwrap_or("").to_string();
+        let gpus = ps_gpus_csv(row).split(',').filter(|g| !g.is_empty()).map(|g| format!("gpu{g}")).collect::<Vec<_>>().join(",");
+        match models.iter_mut().find(|m| m.0 == id) {
+            Some(m) => {
+                m.1.push(status);
+                m.2.push(gpus);
+            }
+            None => models.push((id, vec![status], vec![gpus])),
+        }
+    }
+    let state = |s: &[String]| if s.iter().any(|x| x == "RUNNING") { "RUNNING".to_string() } else { s[0].clone() };
+    if json {
+        let list: Vec<Value> = models
+            .iter()
+            .map(|(id, st, g)| json!({"model": id, "status": state(st), "instances": st.len(), "gpus": g}))
+            .collect();
+        println!("{}", json!({"api": api, "goethed_running": ps.is_some(), "models": list}));
+        return Ok(());
+    }
+    println!("API: {api}");
+    println!("Auth: Authorization: Bearer <key>   (goethe key create --name <name>)");
+    for e in goethe_core::host::probe_environment(nginx::public_port_u16(&home)).public_endpoints {
+        println!("Public endpoint: {e}");
+    }
+    if security::allowlist_list()?.is_empty() {
+        println!("note: the allowlist is empty, so every client is refused (goethe allowlist add 127.0.0.1/32)");
+    }
+    println!();
+    if ps.is_none() {
+        println!("goethed is not running, so no models are served (goethe up starts it)");
+        return Ok(());
+    }
+    if models.is_empty() {
+        println!("no models loaded (goethe load <model>; goethe models lists installed models)");
+        return Ok(());
+    }
+    let mut table = goethe_core::term::Table::new(&["MODEL", "STATUS", "INSTANCES", "GPUS"]);
+    for (id, st, g) in &models {
+        table.row(vec![id.clone(), goethe_core::term::status(&state(st)), st.len().to_string(), g.join(" ")]);
+    }
+    table.print();
+    Ok(())
 }
 
 fn print_gateway_line() {

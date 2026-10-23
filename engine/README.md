@@ -74,7 +74,9 @@ For gated or private repos, accept the license on Hugging Face, download with yo
     goethe doctor [--json] [--probe-public]  # checks with a fix hint each; probe-public needs GOETHE_CANARY_URL for a real answer
     goethe gateway bind 0.0.0.0 | status  # where the public gateway listens (default 127.0.0.1)
     goethe service enable                 # start goethed at boot (systemd, systemd --user, or cron)
-    goethe stop [--keep-engines]          # stop daemon and engines (loaded models return on next start); --keep-engines leaves engines serving
+    goethe up                             # start daemon and gateway; prints the API URL
+    goethe down [--keep-engines]          # stop daemon and engines (loaded models return on next up); --keep-engines leaves engines serving
+    goethe get api [--json]               # API base URL and auth hint, then the loaded models
     goethe update [--check] [--engine] [--ternary]  # signed self-update; compares the installed binaries, engine wheel and ternary pack
     goethe uninstall [--purge-models]
 
@@ -82,7 +84,7 @@ For gated or private repos, accept the license on Hugging Face, download with yo
 
 Boot entries belong to one home: `service disable` and `uninstall` remove only the unit or cron line that names this `GOETHE_HOME`, and `service enable` refuses when the systemd unit already starts another home.
 
-Loaded models are restored after a daemon restart or reboot unless you unloaded them, in the order they were first loaded, one engine per GPU at a time. A blocking `goethe load` waits until the instance from that command is RUNNING (or FAILED) and ends with `RUNNING: <model> instance <id> on GPU <g> port <p> (<t> s)`; `--json` prints the instance row instead. Loading a model that is already loaded reports it and exits 0; `--replica` starts another instance. SGLang flags for one run go after `--`; anything else unknown is a usage error (exit 2). Crashed engines are restarted with backoff. If goethed itself crashes or is restarted without `goethe stop`, healthy engines keep serving and are adopted when it starts again. Every engine carries an identity (boot id, start time, instance tag) that is checked before Goethe signals it, so a reused PID is never signaled.
+Loaded models are restored after a daemon restart or reboot unless you unloaded them, in the order they were first loaded, one engine per GPU at a time. A blocking `goethe load` waits until the instance from that command is RUNNING (or FAILED) and ends with `RUNNING: <model> instance <id> on GPU <g> port <p> (<t> s)`; `--json` prints the instance row instead. Loading a model that is already loaded reports it and exits 0; `--replica` starts another instance. SGLang flags for one run go after `--`; anything else unknown is a usage error (exit 2). Crashed engines are restarted with backoff. If goethed itself crashes or is restarted without `goethe down`, healthy engines keep serving and are adopted when it starts again. Every engine carries an identity (boot id, start time, instance tag) that is checked before Goethe signals it, so a reused PID is never signaled.
 
 ## Cloud and containers
 
