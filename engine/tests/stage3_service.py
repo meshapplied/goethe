@@ -10,7 +10,7 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-from lib.goethe_test import home_goethe_env, main_exit, require_cli, run_goethe, temp_home
+from lib.goethe_test import RunResult, home_goethe_env, main_exit, require_cli, run, run_goethe, temp_home
 
 
 def _write_fake_crontab(bin_dir: Path, cron_file: Path) -> None:
@@ -111,7 +111,7 @@ def _user_units(unit_dir: Path) -> dict[str, str]:
 
 
 def _run_two_homes_scenario(goethe: Path, goethed: Path) -> None:
-    """Autostart is per home: uninstalling home B leaves home A's user unit untouched (F4)."""
+    """One goethed unit per user: home B is refused while A holds it and never touches A's unit or cron line (F4)."""
     with temp_home(stub_python=False, tag="svc-a") as home_a, temp_home(stub_python=False, tag="svc-b") as home_b:
         user = home_a / "user-home"
         unit_dir = user / ".config" / "systemd" / "user"
@@ -129,7 +129,7 @@ def _run_two_homes_scenario(goethe: Path, goethed: Path) -> None:
             shutil.copy2(goethed, home / "bin" / "goethed")
             (home / ".goethe-home").write_text("goethe home\n", encoding="utf-8")
 
-        def cli(home: Path, *args: str) -> str:
+        def cli(home: Path, *args: str) -> RunResult:
             env = {
                 **home_goethe_env(home),
                 "HOME": str(user),
@@ -137,29 +137,45 @@ def _run_two_homes_scenario(goethe: Path, goethed: Path) -> None:
                 "GOETHE_SYSTEMD_USER_UNIT_DIR": str(unit_dir),
                 "GOETHE_CRONTAB_FILE": str(cron_file),
             }
-            return run_goethe([str(home / "bin" / "goethe"), *args], env=env).stdout
+            return run([str(home / "bin" / "goethe"), *args], env=env, timeout=60)
 
-        cli(home_a, "service", "enable")
-        cli(home_b, "service", "enable")
-        units = _user_units(unit_dir)
-        if sorted(units.values()) != sorted([str(home_a), str(home_b)]):
-            raise RuntimeError(f"each home needs its own user unit: {units}")
-        a_name = next(name for name, pinned in units.items() if pinned == str(home_a))
-        a_text = (unit_dir / a_name).read_text(encoding="utf-8")
+        def ok(home: Path, *args: str) -> None:
+            rr = cli(home, *args)
+            if rr.returncode != 0:
+                raise RuntimeError(f"{home.name}: goethe {' '.join(args)} exit {rr.returncode}: {rr.stderr[-300:]}")
+
+        def disables() -> list[str]:
+            return [c for c in log.read_text(encoding="utf-8").splitlines() if " disable" in f" {c}"]
+
+        ok(home_a, "service", "enable")
+        if _user_units(unit_dir) != {"goethed.service": str(home_a)}:
+            raise RuntimeError(f"home A's enable must write the user unit pinning A: {_user_units(unit_dir)}")
+        a_unit = (unit_dir / "goethed.service").read_text(encoding="utf-8")
+        refused = cli(home_b, "service", "enable")
+        said = refused.stdout + refused.stderr
+        if refused.returncode != 1 or str(home_a) not in said or "goethe service disable" not in said:
+            raise RuntimeError(f"home B's enable must exit 1 naming home A and the disable command: {said[-300:]}")
         log.write_text("", encoding="utf-8")
-        cli(home_b, "uninstall", "--yes")
-        left = _user_units(unit_dir)
-        if left != {a_name: str(home_a)} or (unit_dir / a_name).read_text(encoding="utf-8") != a_text:
-            raise RuntimeError(f"uninstalling home B must leave exactly home A's unit: {left}")
-        calls = log.read_text(encoding="utf-8").splitlines()
-        if any(a_name in c.split() for c in calls):
-            raise RuntimeError(f"uninstalling home B issued systemctl for home A's unit: {calls}")
-        status = cli(home_a, "service", "status")
-        if "boot method: systemd" not in status:
-            raise RuntimeError(f"home A lost its boot method after home B's uninstall: {status!r}")
-        cli(home_a, "service", "disable")
-        if _user_units(unit_dir):
-            raise RuntimeError(f"disable left a user unit behind: {_user_units(unit_dir)}")
+        ok(home_b, "service", "disable")
+        if (unit_dir / "goethed.service").read_text(encoding="utf-8") != a_unit or disables():
+            raise RuntimeError(f"home B's disable touched home A's unit: {disables()}")
+        ok(home_a, "service", "disable")
+        ok(home_b, "service", "enable")
+        if _user_units(unit_dir) != {"goethed.service": str(home_b)}:
+            raise RuntimeError(f"after A disabled, home B must get the unit: {_user_units(unit_dir)}")
+        ok(home_b, "service", "disable")
+        ok(home_a, "service", "enable")
+        _write_fake_systemctl(fake_bin, log, user_ok=False)
+        ok(home_a, "service", "enable")
+        cron_a = cron_file.read_text(encoding="utf-8")
+        if str(home_a) not in cron_a:
+            raise RuntimeError(f"home A's crontab entry is missing: {cron_a!r}")
+        log.write_text("", encoding="utf-8")
+        ok(home_b, "uninstall", "--yes")
+        if (unit_dir / "goethed.service").read_text(encoding="utf-8") != a_unit or disables():
+            raise RuntimeError(f"uninstalling home B touched home A's unit: {disables()}")
+        if cron_file.read_text(encoding="utf-8") != cron_a:
+            raise RuntimeError(f"uninstalling home B changed home A's crontab entry: {cron_file.read_text()!r}")
 
 
 def main() -> None:
