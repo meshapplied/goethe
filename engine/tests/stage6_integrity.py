@@ -9,7 +9,18 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from lib.goethe_test import GOETHE_PKG, Proc, free_port, main_exit, run_temp_prefix, sign_cdn_tree, spawn, temp_home
+from lib.goethe_test import (
+    GOETHE_PKG,
+    Proc,
+    free_port,
+    http_get,
+    main_exit,
+    run_temp_prefix,
+    sign_cdn_tree,
+    spawn,
+    temp_home,
+    wait_until,
+)
 
 ARCH = "aarch64" if platform.machine() in ("aarch64", "arm64") else platform.machine()
 LOCK = "requirements.aarch64.lock" if ARCH == "aarch64" else "requirements.lock"
@@ -52,6 +63,14 @@ def _variant(root: Path, name: str, cdn: Path) -> Path:
     out = root / name
     shutil.copytree(cdn, out)
     return out
+
+
+def _answers(url: str) -> bool:
+    """True once the local HTTP server serves url."""
+    try:
+        return http_get(url, timeout=2)[0] == 200
+    except OSError:
+        return False
 
 
 def main() -> None:
@@ -99,6 +118,8 @@ def main() -> None:
             label="integrity-cdn",
         )
         base = f"http://127.0.0.1:{port}"
+        if not wait_until(lambda: _answers(f"{base}/"), timeout=30):
+            raise RuntimeError(f"local CDN server on port {port} did not come up")
         verify = {"GOETHE_VERIFY_ONLY": "1"}
         cases = [
             ("valid", cdn, verify, "rc=0", "verified CDN artifacts"),
@@ -113,7 +134,7 @@ def main() -> None:
                 out = ""
                 for _ in range(20):
                     out = _install(tree / "install.sh", f"{base}/{tree.name}", home / name.replace(" ", "-"), extra)
-                    if "Connection refused" not in out:
+                    if "Connection refused" not in out and "Couldn't connect" not in out:
                         break
                 if want not in out or (also and also not in out) or (want != "rc=0" and out.startswith("rc=0")):
                     raise RuntimeError(f"{name}: expected {want!r}: {out[-500:]}")
