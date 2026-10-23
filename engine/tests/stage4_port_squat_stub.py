@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 4: an HTTP 200 squatter on a new instance's port must never make that instance RUNNING (F1)."""
+"""Stage 4: a squatter on a new instance's port never makes it RUNNING; the start fails fast and moves port (F1)."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from lib.goethe_test import (
     main_exit,
     require_cli,
     roomiest_test_gpu,
+    run_goethe,
     seed_installed_model,
     sqlite_query,
     start_goethed,
@@ -85,6 +86,7 @@ def main() -> None:
         seed_installed_model(home, MODEL, "models/org__sq", 1.0, 512, 512, 2, 1)
         md = start_goethed(home, env={"GOETHE_ENGINE_PORTS": f"{lo}-{hi}"})
         env = {**os.environ, **home_goethe_env(home)}
+        t_load = time.time()
         load = subprocess.Popen(
             [str(goethe), "load", MODEL, "--gpus", str(gpu), "--yes"],
             env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -111,16 +113,21 @@ def main() -> None:
                 load.kill()
                 raise RuntimeError("load neither failed nor became RUNNING within 90 s")
             out, err = load.communicate(timeout=10)
+            load_secs = time.time() - t_load
             squatted = squatter is not None
             if squatted and any(s == "RUNNING" and p == port for s, p in seen):
                 raise RuntimeError(f"instance went RUNNING on {port} while only the squatter answered: {seen[-5:]}")
-            if load.returncode == 0:
-                final = sqlite_query(home / "state.db", "SELECT status, internal_port FROM loaded_instances")
-                stub_port = int(stub_launch(model_dir)["parsed"]["port"])
-                if final != [("RUNNING", stub_port)] or (squatted and stub_port == port):
-                    raise RuntimeError(f"RUNNING must mean our own engine on its port: {final}, stub port {stub_port}")
-            elif not squatted or (str(port) not in err + out and "port" not in (err + out).lower()):
-                raise RuntimeError(f"a failed load must be caused by the squatter and name it: {(err + out)[-300:]}")
+            if load.returncode != 0:
+                raise RuntimeError(f"the load must retry on another port, got exit {load.returncode}: {err[-300:]}")
+            final = sqlite_query(home / "state.db", "SELECT status, internal_port FROM loaded_instances")
+            stub_port = int(stub_launch(model_dir)["parsed"]["port"])
+            if final != [("RUNNING", stub_port)] or (squatted and stub_port == port):
+                raise RuntimeError(f"RUNNING must mean our own engine on its port: {final}, stub port {stub_port}")
+            if squatted:
+                rows = json.loads(run_goethe([str(goethe), "ps", "--json"], env=env).stdout or "[]")
+                said = out + err + json.dumps([r.get("notices", []) for r in rows])
+                if f"retried on port {stub_port}" not in said or load_secs > 30:
+                    raise RuntimeError(f"squatted start must move on fast ({load_secs:.1f}s) and say so: {said[-300:]}")
         finally:
             if load.poll() is None:
                 load.kill()
@@ -130,7 +137,7 @@ def main() -> None:
                 squatter.server_close()
             subprocess.run([str(goethe), "unload", "--all"], env=env, stdin=subprocess.DEVNULL, capture_output=True)
             md.stop()
-    print(f"stage4_port_squat_stub ok rc={load.returncode} port={port} squatted={squatted}")
+    print(f"stage4_port_squat_stub ok port={port} squatted={squatted} load={load_secs:.1f}s")
 
 
 if __name__ == "__main__":
