@@ -392,6 +392,9 @@ write_system_unit() {
 start_goethed() {
   # systemd unit for root on systemd hosts unless another home owns it, else a detached nohup goethed.
   local other
+  if [[ "${STARTED:-0}" -eq 1 ]]; then
+    return
+  fi
   if goethed_answers; then
     echo "goethed already running for ${GOETHE_HOME}"
     return
@@ -415,8 +418,9 @@ start_goethed() {
 
 apply_binaries() {
   # Move staged binaries into place; a running goethed is stopped first, keeping its engines when it can.
-  local bin rc=0 old="" new
+  local bin rc=0 old="" new unit=0
   UPGRADE_NOTE=""
+  STARTED=0
   if [[ ${#STAGED[@]} -eq 0 ]]; then
     return
   fi
@@ -424,8 +428,8 @@ apply_binaries() {
     old="$("${GOETHE_HOME}/bin/goethe" --version 2>/dev/null || echo "goethe unknown build")"
   fi
   if [[ -n "${old}" && " ${STAGED[*]} " == *" goethed "* ]] && goethed_answers; then
-    if systemd_root; then
-      write_system_unit || true
+    if systemd_root && write_system_unit; then
+      unit=1
     fi
     "${GOETHE_HOME}/bin/goethe" stop --keep-engines || rc=$?
     if [[ ${rc} -eq 2 ]]; then
@@ -441,6 +445,10 @@ apply_binaries() {
   for bin in "${STAGED[@]}"; do
     mv -f "${GOETHE_HOME}/bin/.${bin}.new" "${GOETHE_HOME}/bin/${bin}"
   done
+  if [[ ${unit} -eq 1 ]]; then
+    systemctl restart goethed.service
+    STARTED=1
+  fi
   if [[ -n "${old}" ]]; then
     new="$("${GOETHE_HOME}/bin/goethe" --version)"
     UPGRADE_NOTE="upgraded goethe ${old#goethe } -> ${new#goethe }${UPGRADE_NOTE:+; ${UPGRADE_NOTE}}"
