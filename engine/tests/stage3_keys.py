@@ -16,6 +16,7 @@ from lib.goethe_test import (
     main_exit,
     require_cli,
     roomiest_test_gpu,
+    run,
     run_goethe,
     seed_installed_model,
     sha256_hex,
@@ -63,49 +64,54 @@ def main() -> None:
             out = run_goethe([str(goethe), "key", "create", *args], env=env).stdout
             return next(ln for ln in out.splitlines() if ln.startswith("goethe_sk_"))
 
-        run_goethe([str(goethe), "load", "k", "--gpus", str(gpu), "--yes"], env=env, timeout=120)
-        tok_rpm = key("--name", "rpm", "--raw", "--rpm", "2")
-        for _ in range(2):
-            st, _, _ = _mux_post(home, CHAT, tok_rpm)
+        late: list[str] = []
+        try:
+            run_goethe([str(goethe), "load", "k", "--gpus", str(gpu), "--yes"], env=env, timeout=120)
+            tok_rpm = key("--name", "rpm", "--raw", "--rpm", "2")
+            for _ in range(2):
+                st, _, _ = _mux_post(home, CHAT, tok_rpm)
+                if st != 200:
+                    raise RuntimeError(f"rpm pre-limit st={st}")
+            st, hdrs, _ = _mux_post(home, CHAT, tok_rpm)
+            if st != 429:
+                raise RuntimeError(f"expected 429 got {st}")
+            if not (hdrs.get("Retry-After") or hdrs.get("retry-after")):
+                raise RuntimeError("missing Retry-After")
+            st, _, body = _mux_post(home, CHAT, key("--name", "exp", "--raw", "--expires", "2000-01-01"))
+            if st != 401 or "expired" not in json.dumps(body):
+                raise RuntimeError(f"expiry: st={st} body={body}")
+            st, _, body = _mux_post(home, CHAT, key("--name", "sc", "--raw", "--models", "other"))
+            if st != 404 or "Model Not Found" not in json.dumps(body):
+                raise RuntimeError(f"scope: st={st} body={body}")
+            run_goethe([str(goethe), "key", "create", "--name", "adm", "--admin"], env=env)
+            lst_adm = run_goethe([str(goethe), "key", "list"], env=env).stdout
+            if "adm" not in lst_adm or "ADMIN=yes" not in lst_adm:
+                raise RuntimeError(f"admin list missing: {lst_adm}")
+            out_id = run_goethe([str(goethe), "key", "create", "--name", "idcheck"], env=env).stdout
+            tok_id = re.search(r"goethe_sk_[A-Za-z0-9_-]+", out_id)
+            q_id = "SELECT key_id FROM api_keys WHERE token_hash=?"
+            db_id = sqlite_query(home / "state.db", q_id, (sha256_hex(tok_id.group(0)),)) if tok_id else []
+            if not db_id or str(db_id[0][0]) not in out_id:
+                late.append(f"key create without --raw must print the stored key id {db_id}: {out_id}")
+            tok_use = key("--name", "use", "--raw")
+            st, _, _ = _mux_post(home, {**CHAT, "max_tokens": 2}, tok_use)
             if st != 200:
-                raise RuntimeError(f"rpm pre-limit st={st}")
-        st, hdrs, _ = _mux_post(home, CHAT, tok_rpm)
-        if st != 429:
-            raise RuntimeError(f"expected 429 got {st}")
-        if not (hdrs.get("Retry-After") or hdrs.get("retry-after")):
-            raise RuntimeError("missing Retry-After")
-        st, _, body = _mux_post(home, CHAT, key("--name", "exp", "--raw", "--expires", "2000-01-01"))
-        if st != 401 or "expired" not in json.dumps(body):
-            raise RuntimeError(f"expiry: st={st} body={body}")
-        st, _, body = _mux_post(home, CHAT, key("--name", "sc", "--raw", "--models", "other"))
-        if st != 404 or "Model Not Found" not in json.dumps(body):
-            raise RuntimeError(f"scope: st={st} body={body}")
-        run_goethe([str(goethe), "key", "create", "--name", "adm", "--admin"], env=env)
-        lst_adm = run_goethe([str(goethe), "key", "list"], env=env).stdout
-        if "adm" not in lst_adm or "ADMIN=yes" not in lst_adm:
-            raise RuntimeError(f"admin list missing: {lst_adm}")
-        out_id = run_goethe([str(goethe), "key", "create", "--name", "idcheck"], env=env).stdout
-        tok_id = re.search(r"goethe_sk_[A-Za-z0-9_-]+", out_id)
-        q_id = "SELECT key_id FROM api_keys WHERE token_hash=?"
-        db_id = sqlite_query(home / "state.db", q_id, (sha256_hex(tok_id.group(0)),)) if tok_id else []
-        if not db_id or str(db_id[0][0]) not in out_id:
-            raise RuntimeError(f"key create without --raw must print the stored key id {db_id}: {out_id}")
-        tok_use = key("--name", "use", "--raw")
-        st, _, _ = _mux_post(home, {**CHAT, "max_tokens": 2}, tok_use)
-        if st != 200:
-            raise RuntimeError(f"usage call st={st}")
-        ids = sqlite_query(home / "state.db", "SELECT key_id FROM api_keys WHERE token_hash=?", (sha256_hex(tok_use),))
-        if not ids:
-            raise RuntimeError("created key has no api_keys row with its sha256")
-        key_id = ids[0][0]
-        rows = json.loads(run_goethe([str(goethe), "key", "list", "--json"], env=env).stdout)
-        row = next(r for r in rows if r.get("id") == key_id)
-        if row.get("requests_today", 0) < 1 or row.get("tokens_total", 0) < 1:
-            raise RuntimeError(f"usage not updated: {row}")
-        if sqlite_query(home / "state.db", "SELECT COUNT(*) FROM key_usage WHERE key_id=?", (key_id,))[0][0] < 1:
-            raise RuntimeError("key_usage row missing")
-        run_goethe([str(goethe), "unload", "--all"], env=env, timeout=60)
-        goethed.stop()
+                raise RuntimeError(f"usage call st={st}")
+            ids = sqlite_query(home / "state.db", q_id, (sha256_hex(tok_use),))
+            if not ids:
+                raise RuntimeError("created key has no api_keys row with its sha256")
+            key_id = ids[0][0]
+            rows = json.loads(run_goethe([str(goethe), "key", "list", "--json"], env=env).stdout)
+            row = next(r for r in rows if r.get("id") == key_id)
+            if row.get("requests_today", 0) < 1 or row.get("tokens_total", 0) < 1:
+                raise RuntimeError(f"usage not updated: {row}")
+            if sqlite_query(home / "state.db", "SELECT COUNT(*) FROM key_usage WHERE key_id=?", (key_id,))[0][0] < 1:
+                raise RuntimeError("key_usage row missing")
+        finally:
+            run([str(goethe), "unload", "--all"], env=env, timeout=60)
+            goethed.stop()
+    if late:
+        raise RuntimeError(" | ".join(late))
     print("stage3_keys ok")
 
 
