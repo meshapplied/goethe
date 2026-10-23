@@ -1,6 +1,6 @@
 # ternary-kernels
 
-The library `goethe serve` calls for the two ternary models. `pip install -e .`, then `import ternary_runtime`.
+The library `goethe-lab serve` calls for the two ternary models. `pip install -e .`, then `import ternary_runtime`.
 
 | Profile | Pack |
 |---------|------|

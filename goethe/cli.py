@@ -1,4 +1,4 @@
-"""goethe serve | list | doctor."""
+"""goethe-lab serve | list | doctor."""
 from __future__ import annotations
 
 import argparse
@@ -16,7 +16,7 @@ from pathlib import Path
 
 from goethe import __version__, bench, connect, doctor, engine, fit, hw, registry, resolve, store, update
 
-PROG = "goethe"
+PROG = "goethe-lab"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -27,8 +27,8 @@ def _parser() -> argparse.ArgumentParser:
     serve = sub.add_parser("serve", help="start a model (default: Qwen3.8-27B)",
                            description="No name starts Qwen3.8-27B on NInfer. Any other name runs "
                                        "the SGLang command in examples/. Arguments after -- are appended.",
-                           usage="goethe serve [options] [model] [-- engine args]")
-    serve.add_argument("model", nargs="?", help="id from `goethe list`. default: qwen3-8-27b")
+                           usage="goethe-lab serve [options] [model] [-- engine args]")
+    serve.add_argument("model", nargs="?", help="id from `goethe-lab list`. default: qwen3-8-27b")
     serve.add_argument("--profile", choices=resolve.PROFILES, default="agent",
                        help="27B only: agent (default), chat, or long. --explain prints what it sets")
     serve.add_argument("--host", help="default 127.0.0.1. any other address gets an API key")
@@ -277,7 +277,7 @@ def cmd_connect(args: argparse.Namespace) -> int:
         print(shlex.join(argv))
         return 0
     if not engine.healthy("127.0.0.1", args.port):
-        print(f"error: nothing is serving on port {args.port}. Run `goethe serve` first.", file=sys.stderr)
+        print(f"error: nothing is serving on port {args.port}. Run `goethe-lab serve` first.", file=sys.stderr)
         return 1
     missing = connect.conforms(args.port)
     if missing:

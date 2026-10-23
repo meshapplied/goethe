@@ -90,6 +90,6 @@ def command(harness: str, model: str, port: int, context: int = 100000) -> tuple
                 "OPENAI_API_BASE": url, "OPENAI_API_KEY": "goethe",
                 "MSWEA_COST_TRACKING": "ignore_errors"}, ["mini"]
     if harness in FILES:
-        raise SystemExit(f"{harness} is configured through {FILES[harness]}, which goethe connect does not change")
+        raise SystemExit(f"{harness} is configured through {FILES[harness]}, which goethe-lab connect does not change")
     known = "claude, codex, aider, opencode, qwen, goose, kilo, mini-swe-agent"
     raise SystemExit(f"unknown harness {harness!r}; known: {known}")
