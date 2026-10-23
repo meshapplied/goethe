@@ -166,15 +166,13 @@ fn try_system_unit(home: &Path) -> Result<bool, String> {
         return Ok(false);
     }
     write_unit(&system_unit_path(), home, "multi-user.target")?;
-    if system_unit_dir() == default_system_unit_dir() {
-        systemctl_quiet(&["daemon-reload"]);
-        systemctl_quiet(&enable_args(&[]));
-    }
+    systemctl_quiet(&["daemon-reload"]);
+    systemctl_quiet(&enable_args(&[]));
     Ok(true)
 }
 
 fn try_user_unit(home: &Path) -> Result<bool, String> {
-    // A user unit needs a working user systemd manager; systemctl only sees units in its own dir.
+    // A user unit needs a working user systemd manager.
     let ok = Command::new("systemctl")
         .args(["--user", "status"])
         .stdout(Stdio::null())
@@ -187,11 +185,9 @@ fn try_user_unit(home: &Path) -> Result<bool, String> {
     }
     fs::create_dir_all(user_unit_dir()).map_err(|e| e.to_string())?;
     write_unit(&user_unit_path(), home, "default.target")?;
-    if user_unit_dir() == default_user_unit_dir() {
-        systemctl_quiet(&["--user", "daemon-reload"]);
-        systemctl_quiet(&enable_args(&["--user"]));
-        eprintln!("hint: run `loginctl enable-linger $USER` so goethed starts at boot without a login session");
-    }
+    systemctl_quiet(&["--user", "daemon-reload"]);
+    systemctl_quiet(&enable_args(&["--user"]));
+    eprintln!("hint: run `loginctl enable-linger $USER` so goethed starts at boot without a login session");
     Ok(true)
 }
 
@@ -338,13 +334,9 @@ fn remove_system_unit() -> bool {
     if unsafe { libc::geteuid() } != 0 || !p.is_file() {
         return false;
     }
-    if system_unit_dir() == default_system_unit_dir() {
-        systemctl_quiet(&["disable", "--now", "goethed.service"]);
-    }
+    systemctl_quiet(&["disable", "--now", "goethed.service"]);
     let _ = fs::remove_file(&p);
-    if system_unit_dir() == default_system_unit_dir() {
-        systemctl_quiet(&["daemon-reload"]);
-    }
+    systemctl_quiet(&["daemon-reload"]);
     true
 }
 
@@ -353,13 +345,9 @@ fn remove_user_unit() -> bool {
     if !p.is_file() {
         return false;
     }
-    if user_unit_dir() == default_user_unit_dir() {
-        systemctl_quiet(&["--user", "disable", "--now", "goethed.service"]);
-    }
+    systemctl_quiet(&["--user", "disable", "--now", "goethed.service"]);
     let _ = fs::remove_file(&p);
-    if user_unit_dir() == default_user_unit_dir() {
-        systemctl_quiet(&["--user", "daemon-reload"]);
-    }
+    systemctl_quiet(&["--user", "daemon-reload"]);
     true
 }
 

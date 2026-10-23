@@ -39,16 +39,25 @@ To install from a local release tree (testing before publishing):
 
 ## Models
 
-Any Hugging Face repo can be installed, including private and personal ones. Only registry models appear in `goethe recommend`.
+Any public Hugging Face repo can be installed. Goethe does not log in to Hugging Face, so gated and private repos are downloaded by you (see below). Only registry models appear in `goethe recommend`.
 
-    goethe login                          # token for private or gated repos (or set HF_TOKEN)
-    goethe install org/model              # from Hugging Face
+    goethe install org/model              # public repo from Hugging Face
     goethe install ./my-model-dir         # local directory, registered in place (--copy to copy)
     goethe install org/model --sglang-arg --reasoning-parser --sglang-arg qwen3
     goethe models                         # installed and available, with fit on this machine
     goethe remove org/model
 
 Downloads resume, are checked against Hugging Face sha256 sums, and need free disk. Engine flags are inferred from `config.json` and can be set with `--sglang-arg` on `install` and `config`, or `goethe load <model> -- <args>` for one run.
+
+## Models you download yourself
+
+For gated or private repos, accept the license on Hugging Face, download with your own account, move the folder into `$GOETHE_HOME/models`, and let Goethe register it:
+
+    hf download org/model --local-dir $GOETHE_HOME/models/org__model
+    goethe scan                           # asks per model; --yes adds all, --json for scripts
+    goethe load org/model
+
+`goethe scan` registers folders it can serve: a `config.json` with an architecture the installed SGLang knows, safetensors weights (all shards present), a quantization SGLang supports, and a size that fits the GPUs. It names the reason for anything it skips. `org__model` becomes `org/model`, any other name `local/<name>`. Scanned models live in Goethe's models folder, so `goethe remove` deletes them.
 
 ## Daily use
 
@@ -89,7 +98,7 @@ Add models without writing numbers by hand:
     goethe registry add org/model-a org/model-b --file cdn/v1/registry.json [--overlay hand-written.json] [--dry-run]
     goethe registry validate cdn/v1/registry.json --online --check-sglang
 
-`add` measures size, KV elements, heads and context from Hugging Face, merges hand-written fields from the overlay, validates, and writes atomically. Gated repos need `goethe login` first.
+`add` measures size, KV elements, heads and context from Hugging Face, merges hand-written fields from the overlay, validates, and writes atomically. Gated repos cannot be measured without logging in, so their entries are written by hand with `"gated": true`; `goethe recommend` and `goethe models` mark them as manual downloads.
 
 ## Defaults worth knowing
 
@@ -100,7 +109,7 @@ Add models without writing numbers by hand:
 
 ## Environment
 
-`GOETHE_HOME`, `GOETHE_MUX_PORT`, `GOETHE_PUBLIC_PORT`, `GOETHE_PKG_URL`, `GOETHE_PKG_TOKEN` (private packages), `GOETHE_REGISTRY_URL`, `HF_TOKEN`, `HF_ENDPOINT`, `HF_HUB_OFFLINE`, `NGINX_BIN`, `GOETHE_NO_LINK` (installer), `GOETHE_INSECURE` (installer, skips signature checks, development only).
+`GOETHE_HOME`, `GOETHE_MUX_PORT`, `GOETHE_PUBLIC_PORT`, `GOETHE_PKG_URL`, `GOETHE_PKG_TOKEN` (private packages), `GOETHE_REGISTRY_URL`, `HF_ENDPOINT`, `HF_HUB_OFFLINE`, `NGINX_BIN`, `GOETHE_NO_LINK` (installer), `GOETHE_INSECURE` (installer, skips signature checks, development only).
 
 ## Building a release
 
@@ -117,4 +126,4 @@ Opt-in: `GOETHE_TEST_REAL=1` (real engines), `GOETHE_TEST_E2E=1` with `GOETHE_TE
 
 ## Troubleshooting
 
-Run `goethe doctor` first. Gated model: accept the license on Hugging Face and run `goethe login`. `nginx binary not found`: install nginx or set `NGINX_BIN`. Slow or failing downloads on hosts with broken IPv6: Goethe already tries IPv4 first. Logs: `goethe logs <model>`, `goethe logs --daemon`, `goethe logs --gateway`.
+Run `goethe doctor` first. Gated or private model: download it yourself and run `goethe scan` (see Models you download yourself). `nginx binary not found`: install nginx or set `NGINX_BIN`. Slow or failing downloads on hosts with broken IPv6: Goethe already tries IPv4 first. Logs: `goethe logs <model>`, `goethe logs --daemon`, `goethe logs --gateway`.

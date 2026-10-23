@@ -6,7 +6,6 @@ use goethe_core::config::{self, ConfigOpts};
 use goethe_core::db;
 use goethe_core::gpu_policy;
 use goethe_core::hw;
-use goethe_core::hf;
 use goethe_core::install::{self, InstallOpts};
 use goethe_core::models;
 use goethe_core::nginx;
@@ -83,13 +82,15 @@ enum Commands {
         #[arg(long = "sglang-arg", allow_hyphen_values = true, help = "Extra SGLang CLI flag.")]
         sglang_arg: Vec<String>,
     },
-    #[command(about = "Save a Hugging Face token for private or gated downloads.")]
-    Login {
-        #[arg(long, help = "Read the token from stdin.")]
-        token_stdin: bool,
+    #[command(about = "Register model folders you downloaded yourself and moved into GOETHE_HOME/models.")]
+    Scan {
+        #[arg(help = "One folder inside GOETHE_HOME/models (default: all of them).")]
+        dir: Option<String>,
+        #[arg(long, help = "Add every supported model without asking.")]
+        yes: bool,
+        #[arg(long, help = "Emit JSON rows (dir, model_id, status, reason, notes).")]
+        json: bool,
     },
-    #[command(about = "Remove the stored Hugging Face token.")]
-    Logout,
     #[command(about = "Validate, generate, or merge registry entries.")]
     Registry {
         #[command(subcommand)]
@@ -496,8 +497,7 @@ fn main() {
                 reset,
             })
         }
-        Commands::Login { token_stdin } => do_login(token_stdin),
-        Commands::Logout => do_logout(),
+        Commands::Scan { dir, yes, json } => goethe_core::scan::run(goethe_core::scan::ScanOpts { yes, json, dir }),
         Commands::Registry { cmd } => match cmd {
             RegistryCommands::Validate {
                 source,
@@ -953,19 +953,6 @@ fn print_gateway_line() {
     }
 }
 
-fn do_login(token_stdin: bool) -> Result<(), String> {
-    let home = goethe_home();
-    ensure_layout(&home).map_err(|e| format!("layout: {e}"))?;
-    let token = if token_stdin {
-        hf::read_token_stdin()?
-    } else {
-        hf::read_token_tty()?
-    };
-    hf::login(&home, &token)?;
-    println!("logged in to Hugging Face");
-    Ok(())
-}
-
 fn do_registry_entry(
     mut repo_ids: Vec<String>,
     runtime: Option<String>,
@@ -1018,12 +1005,6 @@ fn do_registry_add(
     })
 }
 
-fn do_logout() -> Result<(), String> {
-    let home = goethe_home();
-    hf::clear_token(&home)?;
-    println!("logged out of Hugging Face");
-    Ok(())
-}
 
 fn fail(msg: String) -> ! {
     eprintln!("{msg}");

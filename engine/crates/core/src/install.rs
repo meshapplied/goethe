@@ -63,6 +63,7 @@ const CARD_KEYS: &[&str] = &[
     "source_dir",
 ];
 
+#[derive(Default)]
 pub struct InstallOpts {
     pub model_id: String,
     pub ctx: Option<u64>,
@@ -321,8 +322,91 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
+pub struct VramEstimate {
+    pub weights_gb: f64,
+    pub state_gb: f64,
+    pub host_offload_gb: f64,
+    pub kv_bytes_per_token: u64,
+}
+
+pub fn vram_estimate(dir: &Path, cfg: &Value, facts: &model_facts::ModelFacts, extra: &[String], kv_dtype: &str) -> VramEstimate {
+    // Weights left on the GPU after host offload, per-request state for 4 requests, and KV bytes per token.
+    let kv_elem_bytes = kv_element_bytes(kv_dtype, cfg);
+    let ple_offload = (sgl::has_flag(extra, "--ple-offload-embedding") || config_ple_offload(cfg))
+        && !sgl::has_flag(extra, "--no-ple-offload-embedding");
+    let ple_gb = if ple_offload {
+        safetensors::tensor_bytes_in_dir(dir, &safetensors::is_ple_embedding).unwrap_or_else(|e| {
+            eprintln!("warning: offloaded embedding size unknown: {e}");
+            0
+        }) as f64
+            / GIB
+    } else {
+        0.0
+    };
+    let cpu_offload_gb = sgl::flag_value(extra, "--cpu-offload-gb")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let host_offload_gb = ple_gb + cpu_offload_gb;
+    VramEstimate {
+        weights_gb: (facts.static_vram_gb - host_offload_gb).max(0.0),
+        state_gb: (facts.swa_kv_elems_per_request * kv_elem_bytes + facts.linear_state_bytes_per_request) as f64 * 4.0 / GIB,
+        host_offload_gb,
+        kv_bytes_per_token: facts.kv_elems_per_token * kv_elem_bytes,
+    }
+}
+
+pub struct Planned {
+    model_id: String,
+    dir: PathBuf,
+    rel: String,
+    table: toml::Table,
+    facts: model_facts::ModelFacts,
+    vram: VramEstimate,
+    kv_dtype: String,
+    ctx: u64,
+    max_conc: u64,
+    tp: u64,
+    extra: Vec<String>,
+    notes: Vec<String>,
+    managed: bool,
+    source_dir: Option<PathBuf>,
+    quant: Option<String>,
+}
+
+impl Planned {
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    pub fn static_gb(&self) -> f64 {
+        self.vram.weights_gb + self.vram.state_gb
+    }
+}
+
 fn register(home: &Path, opts: &InstallOpts, t: Target) -> Result<(), String> {
-    // Build the card (merged with an existing one unless --reset), write it, and upsert the DB row.
+    let planned = plan(home, opts, &t)?;
+    commit(home, &planned, "installed", &mut std::io::stdout())
+}
+
+pub fn plan_in_place(home: &Path, model_id: &str, dir: &Path, entry: Option<RegistryModel>) -> Result<Planned, String> {
+    // A directory already inside models/ (goethe scan): managed, card written next to the weights.
+    let opts = InstallOpts {
+        model_id: model_id.to_string(),
+        ..InstallOpts::default()
+    };
+    let t = Target {
+        model_id: model_id.to_string(),
+        card_dir: dir.to_path_buf(),
+        entry,
+        managed: true,
+        source_dir: None,
+        ternary: None,
+    };
+    plan(home, &opts, &t)
+}
+
+fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> {
+    // Compute the card (merged with an existing one unless --reset), facts and VRAM; write nothing.
     let dir = &t.card_dir;
     let cfg = model_facts::read_config(dir)?;
     let facts = model_facts::facts_from_install_dir(dir, t.entry.as_ref().map(|e| e.architecture.as_str()))?;
@@ -356,29 +440,12 @@ fn register(home: &Path, opts: &InstallOpts, t: Target) -> Result<(), String> {
         .or_else(|| t.entry.as_ref().and_then(|e| e.kv_cache_dtype.clone()))
         .or_else(|| checkpoint_kv_dtype(&cfg, dir))
         .unwrap_or_else(|| "auto".to_string());
-    let kv_elem_bytes = kv_element_bytes(&kv_dtype, &cfg);
-    let ple_offload = (sgl::has_flag(&extra, "--ple-offload-embedding") || config_ple_offload(&cfg))
-        && !sgl::has_flag(&extra, "--no-ple-offload-embedding");
-    let ple_gb = if ple_offload {
-        safetensors::tensor_bytes_in_dir(dir, &safetensors::is_ple_embedding).unwrap_or_else(|e| {
-            eprintln!("warning: offloaded embedding size unknown: {e}");
-            0
-        }) as f64
-            / GIB
-    } else {
-        0.0
-    };
-    let cpu_offload_gb = sgl::flag_value(&extra, "--cpu-offload-gb")
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(0.0);
-    let host_offload_gb = ple_gb + cpu_offload_gb;
-    let weights_gb = match (&t.ternary, &t.entry) {
-        (Some(_), Some(e)) if e.static_vram_gb > 0.0 => e.static_vram_gb,
-        _ => (facts.static_vram_gb - host_offload_gb).max(0.0),
-    };
-    let state_gb = (facts.swa_kv_elems_per_request * kv_elem_bytes + facts.linear_state_bytes_per_request) as f64 * 4.0 / GIB;
-    let static_gb = weights_gb + state_gb;
-    let kv_bytes = facts.kv_elems_per_token * kv_elem_bytes;
+    let mut vram = vram_estimate(dir, &cfg, &facts, &extra, &kv_dtype);
+    if let (Some(_), Some(e)) = (&t.ternary, &t.entry) {
+        if e.static_vram_gb > 0.0 {
+            vram.weights_gb = e.static_vram_gb;
+        }
+    }
     let marlin_extra_gb = if safetensors::is_nvfp4_compressed_model(&cfg) {
         match safetensors::marlin_extra_bytes_in_dir(dir) {
             Ok(n) => Some(n as f64 / GIB),
@@ -421,11 +488,35 @@ fn register(home: &Path, opts: &InstallOpts, t: Target) -> Result<(), String> {
         env: merged_env(old("env"), entry, t.ternary.as_ref(), home),
         pythonpath: entry.and_then(|e| e.pythonpath.clone()),
         marlin_extra_gb,
-        host_offload_gb: (host_offload_gb > 0.0).then_some(host_offload_gb),
+        host_offload_gb: (vram.host_offload_gb > 0.0).then_some(vram.host_offload_gb),
         source_dir: t.source_dir.as_ref().map(|p| p.display().to_string()),
     };
-    write_card_table(dir, &card_table(&card, existing.as_ref())?)?;
-    let rel = format!("models/{}", crate::paths::sanitize_model_id(&t.model_id));
+    let rel = dir
+        .strip_prefix(home)
+        .map(|r| r.display().to_string())
+        .map_err(|_| format!("{} is not under {}", dir.display(), home.display()))?;
+    Ok(Planned {
+        model_id: t.model_id.clone(),
+        dir: dir.clone(),
+        rel,
+        table: card_table(&card, existing.as_ref())?,
+        quant: sgl::quantization_summary(dir, &cfg),
+        facts,
+        vram,
+        kv_dtype,
+        ctx,
+        max_conc,
+        tp,
+        extra,
+        notes,
+        managed: t.managed,
+        source_dir: t.source_dir.clone(),
+    })
+}
+
+pub fn commit(home: &Path, p: &Planned, verb: &str, out: &mut dyn Write) -> Result<(), String> {
+    // Write the card atomically, upsert installed_models, and report what was registered.
+    write_card_table(&p.dir, &p.table)?;
     let con = db::open(home).map_err(|e| e.to_string())?;
     con.execute(
         "INSERT OR REPLACE INTO installed_models
@@ -434,55 +525,53 @@ fn register(home: &Path, opts: &InstallOpts, t: Target) -> Result<(), String> {
          num_attention_heads, num_kv_heads, attention, managed, installed_at)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'))",
         rusqlite::params![
-            t.model_id,
-            rel,
-            facts.architecture,
-            static_gb,
-            kv_bytes as i64,
-            ctx as i64,
-            max_conc as i64,
-            tp as i64,
-            facts.kv_elems_per_token as i64,
-            facts.max_ctx as i64,
-            facts.num_attention_heads as i64,
-            facts.num_kv_heads as i64,
-            facts.attention,
-            t.managed as i64,
+            p.model_id,
+            p.rel,
+            p.facts.architecture,
+            p.static_gb(),
+            p.vram.kv_bytes_per_token as i64,
+            p.ctx as i64,
+            p.max_conc as i64,
+            p.tp as i64,
+            p.facts.kv_elems_per_token as i64,
+            p.facts.max_ctx as i64,
+            p.facts.num_attention_heads as i64,
+            p.facts.num_kv_heads as i64,
+            p.facts.attention,
+            p.managed as i64,
         ],
     )
     .map_err(|e| format!("state.db: {e}"))?;
-    println!("installed {}", t.model_id);
-    println!("  path      {}", dir.display());
-    match &t.source_dir {
-        Some(src) => println!("  files     kept in {} (goethe remove only unregisters)", src.display()),
-        None => println!("  files     managed by goethe (goethe remove deletes them)"),
-    }
-    let state_note = if state_gb > 0.0 {
-        format!(" + {state_gb:.1} GB per-request state for 4 requests")
+    let mut lines = vec![format!("{verb} {}", p.model_id), format!("  path      {}", p.dir.display())];
+    lines.push(match &p.source_dir {
+        Some(src) => format!("  files     kept in {} (goethe remove only unregisters)", src.display()),
+        None => "  files     managed by goethe (goethe remove deletes them)".to_string(),
+    });
+    let state_note = if p.vram.state_gb > 0.0 {
+        format!(" + {:.1} GB per-request state for 4 requests", p.vram.state_gb)
     } else {
         String::new()
     };
-    println!("  vram      {weights_gb:.1} GB weights{state_note}");
-    if host_offload_gb > 0.0 {
-        println!("  host ram  {host_offload_gb:.1} GB offloaded weights in pinned memory");
+    lines.push(format!("  vram      {:.1} GB weights{state_note}", p.vram.weights_gb));
+    if p.vram.host_offload_gb > 0.0 {
+        lines.push(format!("  host ram  {:.1} GB offloaded weights in pinned memory", p.vram.host_offload_gb));
     }
-    println!(
-        "  kv cache  {:.1} KB per token ({kv_dtype}, {} attention)",
-        kv_bytes as f64 / 1024.0,
-        facts.attention
-    );
-    if let Some(q) = sgl::quantization_summary(dir, &cfg) {
-        println!("  quant     {q}, detected by SGLang");
+    lines.push(format!(
+        "  kv cache  {:.1} KB per token ({}, {} attention)",
+        p.vram.kv_bytes_per_token as f64 / 1024.0,
+        p.kv_dtype,
+        p.facts.attention
+    ));
+    if let Some(q) = &p.quant {
+        lines.push(format!("  quant     {q}, detected by SGLang"));
     }
-    let tp_s = if tp == 0 { "auto".to_string() } else { tp.to_string() };
-    println!("  defaults  ctx {ctx}, max-conc {max_conc}, tp {tp_s}");
-    if !extra.is_empty() {
-        println!("  sglang    {}", extra.join(" "));
+    let tp_s = if p.tp == 0 { "auto".to_string() } else { p.tp.to_string() };
+    lines.push(format!("  defaults  ctx {}, max-conc {}, tp {tp_s}", p.ctx, p.max_conc));
+    if !p.extra.is_empty() {
+        lines.push(format!("  sglang    {}", p.extra.join(" ")));
     }
-    for n in notes {
-        println!("  note      {n}");
-    }
-    Ok(())
+    lines.extend(p.notes.iter().map(|n| format!("  note      {n}")));
+    writeln!(out, "{}", lines.join("\n")).map_err(|e| e.to_string())
 }
 
 fn merged_env(
