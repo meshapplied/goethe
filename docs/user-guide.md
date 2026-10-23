@@ -19,7 +19,7 @@ Goethe serves large language models from your own NVIDIA GPUs through one OpenAI
 
 ## What you can use it for
 
-- **A private ChatGPT-style API for your team.** Load a model on a GPU workstation and give each person or app its own key.
+- **A private OpenAI-compatible API for your team.** Load a model on a GPU workstation and give each person or app its own OpenAI-compatible API key.
 - **Your home lab or office over a VPN.** Serve from a GPU box and use it from your laptop anywhere through Tailscale, WireGuard or ZeroTier.
 - **Local AI for your own apps.** Point code that uses the OpenAI SDK at your machine instead of a cloud service.
 - **Coding assistants and chat UIs.** Use Goethe as the backend for tools that accept an OpenAI-compatible endpoint, such as Open WebUI and many coding assistants.
