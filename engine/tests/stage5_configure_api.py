@@ -29,7 +29,10 @@ def main() -> None:
         rr = run([goethe, "configure", "api", "--mode", "public", "--yes", "--allow", "0.0.0.0/0"], env=env)
         if rr.returncode == 0 or _status(goethe, env)["bind"] != "127.0.0.1":
             raise RuntimeError(f"public mode must refuse 0.0.0.0/0 without a terminal and change nothing: {rr.stdout}")
-        rr = run([goethe, "configure", "api", "--mode", "public", "--yes", "--allow", "203.0.113.7"], env=env)
+        quiet = {**env, "GOETHE_PUBLIC_IP_LOOKUP": "0"}
+        rr = run([goethe, "configure", "api", "--mode", "public", "--yes", "--allow", "203.0.113.7"], env=quiet)
+        if "Your public IP: unknown, lookup disabled" not in rr.stdout:
+            raise RuntimeError(f"public mode must say when the public IP lookup is disabled: {rr.stdout}")
         if rr.returncode != 0 or "not recommended" not in rr.stdout or _status(goethe, env)["bind"] != "0.0.0.0":
             raise RuntimeError(f"public mode must warn and bind 0.0.0.0: {rr.stdout} {rr.stderr}")
         allowed = run([goethe, "allowlist", "list"], env=env).stdout

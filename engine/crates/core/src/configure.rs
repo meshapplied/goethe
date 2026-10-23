@@ -40,7 +40,7 @@ pub struct VpnAddr {
 }
 
 const TAILSCALE_RANGE: &str = "100.64.0.0/10";
-const PUBLIC_WARNING: &str = "WARNING: exposing the API on a public network is not recommended.
+const PUBLIC_WARNING: &str = "exposing the API on a public network is not recommended.
   - Anyone who can reach this machine can attempt to connect; only the allowlist and API keys stop them.
   - Allow only the client IPs you trust (goethe allowlist add <ip>/32) and give every client its own key.
   - Open the gateway port in your firewall or router yourself; Goethe does not change them.
@@ -258,8 +258,14 @@ fn configure_vpn(opts: &ApiOpts, vpns: &[VpnAddr]) -> Result<String, String> {
 }
 
 fn configure_public(opts: &ApiOpts) -> Result<String, String> {
-    // Warn, confirm, bind every interface and allow only the client addresses the user names.
-    println!("{PUBLIC_WARNING}");
+    // Warn, show the public IP and its API URL, confirm, bind every interface and allow only the named clients.
+    println!("{}: {PUBLIC_WARNING}", crate::term::paint("WARNING", crate::term::Color::Yellow));
+    let port = nginx::public_port_u16(&goethe_home());
+    let public = lookup_public_ip();
+    let public_host = public.as_ref().ok().map(|ip| ip.to_string());
+    for line in public_ip_lines(public, port, &nginx::interface_addrs().unwrap_or_default()) {
+        println!("{line}");
+    }
     if !confirm("Expose the API on every network interface anyway?", false, opts.yes)? {
         return Err("nothing changed (goethe configure api again to pick local or VPN)".to_string());
     }
@@ -285,7 +291,44 @@ fn configure_public(opts: &ApiOpts) -> Result<String, String> {
     if ranges.is_empty() {
         println!("No client addresses were added: only addresses already on the allowlist can connect (goethe allowlist add <ip>/32).");
     }
-    Ok("0.0.0.0".to_string())
+    Ok(public_host.unwrap_or_else(|| "0.0.0.0".to_string()))
+}
+
+const PUBLIC_IP_URL: &str = "https://api.ipify.org";
+
+fn lookup_public_ip() -> Result<IpAddr, String> {
+    // This machine's address as the internet sees it; GOETHE_PUBLIC_IP overrides, GOETHE_PUBLIC_IP_LOOKUP=0 disables.
+    if let Some(ip) = crate::paths::setting("GOETHE_PUBLIC_IP") {
+        return ip.trim().parse().map_err(|_| format!("GOETHE_PUBLIC_IP {ip:?} is not an IP address"));
+    }
+    if crate::paths::setting("GOETHE_PUBLIC_IP_LOOKUP").is_some_and(|v| v.trim() == "0") || crate::hf::offline_mode() {
+        return Err("lookup disabled (GOETHE_PUBLIC_IP_LOOKUP=0 or offline mode; set GOETHE_PUBLIC_IP to name it)".to_string());
+    }
+    let url = crate::paths::setting("GOETHE_PUBLIC_IP_URL").unwrap_or_else(|| PUBLIC_IP_URL.to_string());
+    let body = crate::net::agent()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(4))
+        .call()
+        .map_err(|e| format!("lookup at {url} failed ({e}); no internet access, or outbound HTTPS is blocked"))?
+        .into_string()
+        .map_err(|e| e.to_string())?;
+    body.trim().parse().map_err(|_| format!("{url} answered {:?}, not an IP address", body.trim()))
+}
+
+fn public_ip_lines(ip: Result<IpAddr, String>, port: u16, local: &[InterfaceAddr]) -> Vec<String> {
+    // What the public IP means for clients: the API URL on it, and whether a router must forward the port.
+    match ip {
+        Ok(ip) => {
+            let mut lines = vec![format!("Your public IP: {ip} -> API: https://{ip}:{port}/v1")];
+            if !local.iter().any(|a| a.ip == ip) {
+                lines.push(format!(
+                    "This machine is behind NAT ({ip} is not on its interfaces): forward TCP port {port} on your router or cloud firewall to it."
+                ));
+            }
+            lines
+        }
+        Err(e) => vec![format!("Your public IP: unknown, {e}")],
+    }
 }
 
 fn offer_key(yes: bool) -> Result<(), String> {
@@ -358,6 +401,18 @@ mod tests {
                 ("zt7".to_string(), "ZeroTier", "172.22.0.0/16".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn public_ip_lines_show_the_api_and_spot_nat() {
+        let local = vec![addr("eno1", "192.168.1.20", 24)];
+        let nat = public_ip_lines(Ok("203.0.113.5".parse().unwrap()), 8080, &local);
+        assert_eq!(nat[0], "Your public IP: 203.0.113.5 -> API: https://203.0.113.5:8080/v1");
+        assert!(nat[1].contains("behind NAT") && nat[1].contains("8080"));
+        let direct = public_ip_lines(Ok("192.168.1.20".parse().unwrap()), 8080, &local);
+        assert_eq!(direct.len(), 1);
+        let down = public_ip_lines(Err("lookup disabled".to_string()), 8080, &local);
+        assert_eq!(down, vec!["Your public IP: unknown, lookup disabled".to_string()]);
     }
 
     #[test]
