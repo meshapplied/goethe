@@ -422,6 +422,25 @@
       ]
     },
     {
+      "id": "LibertAIDAI/DeepSeek-V4.1-Flash-1017-NVFP4",
+      "architecture": "moe",
+      "static_vram_gb": 399.5247757434845,
+      "kv_elems_per_token": 40960,
+      "supported_sm": [
+        "10.0",
+        "10.3",
+        "12.0",
+        "12.1"
+      ],
+      "max_ctx": 1048576,
+      "num_attention_heads": 64,
+      "num_kv_heads": 1,
+      "attention": "gqa",
+      "runtime": "sglang",
+      "revision": "5be99cd15675589fb6693d0a8651e413bcb9a396",
+      "download_gb": 429.008926298
+    },
+    {
       "id": "nvidia/Qwen3.8-27B-NVFP4",
       "architecture": "dense",
       "static_vram_gb": 20.99,

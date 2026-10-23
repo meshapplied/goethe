@@ -1,6 +1,6 @@
 --- a/python/sglang/srt/layers/quantization/goethe_marlin.py
 +++ b/python/sglang/srt/layers/quantization/goethe_marlin.py
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,34 @@
 +"""NVFP4 Marlin route selection for compressed-tensors layers, resolved once per layer at weight load."""
 +
 +import os
@@ -18,7 +18,7 @@
 +
 +
 +def mode() -> str:
-+    """Return stock, marlin_all, or marlin_small for the current device and environment."""
++    """Return marlin_all (Ampere), marlin_small (consumer Blackwell 12.x) or stock (data-center Blackwell 10.x, or off)."""
 +    if _marlin_disabled():
 +        return "stock"
 +    if os.environ.get("GOETHE_FORCE_PATH", "").strip().lower() == "w4a16":
@@ -27,6 +27,8 @@
 +        major, _minor = torch.cuda.get_device_capability()
 +        if major < 10:
 +            return "marlin_all"
++        if major != 12:
++            return "stock"
 +    return "marlin_small"
 +
 +

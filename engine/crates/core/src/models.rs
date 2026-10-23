@@ -66,11 +66,9 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 continue;
             }
             let pinned = m.default_tp.filter(|t| *t > 0).map(|t| t as usize);
-            let sm_ok = view.as_ref().is_none_or(|v| {
-                m.supported_sm
-                    .iter()
-                    .any(|sm| v.hw.gpus.iter().any(|g| &g.compute_capability == sm))
-            });
+            let sm_ok = view
+                .as_ref()
+                .is_none_or(|v| v.hw.gpus.iter().any(|g| crate::gpu_arch::model_runs_on(&m.supported_sm, &g.compute_capability)));
             rows.push(ModelRow {
                 id: m.id.clone(),
                 status: if m.manual_download_reason().is_some() { "manual download" } else { "available" }.to_string(),

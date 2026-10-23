@@ -212,7 +212,7 @@ pub fn recommend(view: &View, reg: &Registry) -> RecommendOutput {
 }
 
 fn exclusion_reason(model: &RegistryModel, sm_set: &[String], total_gb: f64) -> Option<String> {
-    if !model.supported_sm.iter().any(|sm| sm_set.iter().any(|g| g == sm)) {
+    if !sm_set.iter().any(|g| crate::gpu_arch::model_runs_on(&model.supported_sm, g)) {
         return Some(format!(
             "unsupported SM; model needs {:?}, GPUs have {:?}",
             model.supported_sm, sm_set

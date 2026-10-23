@@ -236,12 +236,12 @@ fn check_hardware(home: &Path) -> Check {
     let mut lines = vec![format!("driver {}", hw.driver)];
     let mut unsupported = 0;
     for g in &hw.gpus {
-        let ok_sm = ["8.6", "12.0", "12.1"].iter().any(|sm| g.compute_capability.starts_with(sm));
+        let ok_sm = crate::gpu_arch::is_supported(&g.compute_capability);
         unsupported += usize::from(!ok_sm);
         let foreign = g.running_processes.iter().filter(|p| !managed.contains(&(p.pid as i32))).count();
         let plural = if foreign == 1 { "" } else { "es" };
         let um = if g.unified_memory { ", unified memory" } else { "" };
-        let sm_note = if ok_sm { "" } else { "; this SM is not supported (need 8.6, 12.0 or 12.1)" };
+        let sm_note = if ok_sm { String::new() } else { format!("; this SM is not supported (need {})", crate::gpu_arch::supported_text()) };
         lines.push(format!(
             "gpu{} {} (SM {}): {:.1} of {:.1} GB free{um}, {foreign} foreign process{plural}{sm_note}",
             g.index,

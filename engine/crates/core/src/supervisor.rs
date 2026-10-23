@@ -1167,14 +1167,14 @@ fn chooser_input(req: &LoadReq, snap: &[GpuLive], gpus: &[u32], ctx: u64, max_co
 }
 
 fn marlin_extra_applies(snap: &[GpuLive], gpus: &[u32], card: &toml::Value) -> bool {
-    // The Marlin weight copy exists on live compute capability 10+ (NVML, not a cached profile) unless GOETHE_MARLIN=0.
+    // The Marlin weight copy exists where the live GPU (NVML) takes the small-batch Marlin path, unless GOETHE_MARLIN=0.
     let off = std::env::var("GOETHE_MARLIN").as_deref() == Ok("0")
         || card
             .get("env")
             .and_then(|v| v.get("GOETHE_MARLIN"))
             .and_then(|v| v.as_str())
             == Some("0");
-    !off && snap.iter().any(|g| gpus.contains(&g.index) && g.cc_major >= 10)
+    !off && snap.iter().any(|g| gpus.contains(&g.index) && crate::gpu_arch::nvfp4_dual_copy(g.cc_major))
 }
 
 fn gpu_name(snap: &[GpuLive], idx: u32) -> String {
