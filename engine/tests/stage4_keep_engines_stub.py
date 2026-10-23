@@ -53,6 +53,13 @@ class Keep:
     def rows(self) -> list[tuple]:
         return sqlite_query(self.home / "state.db", ROWS)
 
+    def ports(self) -> list[str]:
+        return [(self.home / "nginx" / f).read_text(encoding="utf-8").strip() for f in ("mux_port", "public_port")]
+
+    def log_size(self) -> int:
+        log = self.home / "logs" / "goethed.log"
+        return log.stat().st_size if log.is_file() else 0
+
     def chat(self, url: str) -> tuple[int, bytes]:
         return http_post(url, self.body.encode(), headers=self.hdr, timeout=10)
 
@@ -60,7 +67,8 @@ class Keep:
         """Stop goethed keeping engines (rpc or cli), check the engine and the gap, start a goethed on saved ports."""
         before, ticks = self.rows(), start_ticks(int(self.rows()[0][1]))
         _iid, pid, port, key, _status = before[0]
-        mux_port = (self.home / "nginx" / "mux_port").read_text(encoding="utf-8").strip()
+        ports = self.ports()
+        log_at = self.log_size()
         if stop == "rpc":
             goethe_rpc(self.home, "shutdown", {"keep_engines": True})
         else:
@@ -75,15 +83,19 @@ class Keep:
         auth = {"Authorization": f"Bearer {key}"}
         if start_ticks(int(pid)) != ticks or http_get(f"http://127.0.0.1:{port}/v1/models", headers=auth)[0] != 200:
             raise RuntimeError(f"engine {pid} must keep serving on {port} while goethed is down ({stop})")
+        mux_code = self.chat(self.mux)[0]
         code, gap = self.chat(self.public)
-        if code != 502 or not _json(gap):
-            LATE.append(f"during the gap nginx must answer a JSON 502 ({stop}): {code} {gap[:120]!r}")
+        if mux_code != 0 or code != 502 or not _json(gap):
+            raise RuntimeError(f"gap ({stop}): mux must refuse ({mux_code}), nginx answer JSON 502: {code} {gap!r}")
         self.md = start_goethed(self.home, env={"GOETHE_MUX_PORT": "", "GOETHE_PUBLIC_PORT": ""}, label="goethed-next")
         adopted = [r[:4] + ("RUNNING",) for r in before]
         if not wait_until(lambda: self.rows() == adopted, timeout=30):
             raise RuntimeError(f"the next goethed must adopt {adopted} unchanged ({stop}), has {self.rows()}")
-        if (self.home / "nginx" / "mux_port").read_text(encoding="utf-8").strip() != mux_port:
-            raise RuntimeError(f"the next goethed must keep the persisted mux port {mux_port} ({stop})")
+        if self.ports() != ports:
+            raise RuntimeError(f"the next goethed must keep the persisted mux and public ports {ports} ({stop})")
+        log = (self.home / "logs" / "goethed.log").read_bytes()[log_at:].decode(errors="replace")
+        if "goethed stopping with keep_engines" not in log or "adopted instance" not in log:
+            raise RuntimeError(f"goethed.log must record the keep_engines stop and adoption ({stop}): {log[-400:]}")
         served = len(stub_requests(self.model_dir))
         code, reply = self.chat(self.mux)
         if code != 200 or len(stub_requests(self.model_dir)) <= served:
