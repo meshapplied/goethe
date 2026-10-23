@@ -407,14 +407,24 @@ fn check_pyenv(home: &Path) -> Check {
     if !env.join("bin/python").is_file() {
         return check("py-env", "FAIL", "run the installer or goethe update --engine");
     }
-    match pyenv_versions(&env) {
-        (python, Some(sglang)) => check("py-env", "OK", format!("sglang {sglang}, python {python}")),
-        (python, None) => check(
-            "py-env",
-            "FAIL",
-            format!("python {python} but no sglang distribution in site-packages; run goethe update --engine"),
-        ),
+    let (python, sglang) = pyenv_versions(&env);
+    match sglang.or_else(|| sglang_from_python(&env.join("bin/python"))) {
+        Some(sglang) => check("py-env", "OK", format!("sglang {sglang}, python {python}")),
+        None => check("py-env", "FAIL", format!("python {python} but no sglang distribution; run goethe update --engine")),
     }
+}
+
+fn sglang_from_python(py: &Path) -> Option<String> {
+    // Ask the interpreter for the sglang distribution (metadata, then a spec lookup) without importing sglang.
+    let code = "import importlib.metadata as m, importlib.util as u\ntry:\n    print(m.version('sglang'))\nexcept Exception:\n    print('installed' if u.find_spec('sglang') else '')";
+    let out = std::process::Command::new(py)
+        .args(["-c", code])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !v.is_empty()).then_some(v)
 }
 
 fn pyenv_versions(env: &Path) -> (String, Option<String>) {
@@ -626,5 +636,7 @@ mod tests {
         fs::create_dir_all(&dist).unwrap();
         fs::write(dist.join("METADATA"), "Metadata-Version: 2.1\nName: sglang\nVersion: 0.5.3+goethe\n").unwrap();
         assert_eq!(pyenv_versions(env), ("3.12.3".to_string(), Some("0.5.3+goethe".to_string())));
+        assert!(sglang_from_python(Path::new("/bin/echo")).is_some_and(|v| v.starts_with("-c import")));
+        assert_eq!(sglang_from_python(Path::new("/bin/false")), None);
     }
 }
