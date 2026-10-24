@@ -981,7 +981,7 @@ fn do_gpu_list(json: bool) -> Result<(), String> {
     }
     let mut table = goethe_core::term::Table::new(&["GPU", "NAME", "SM", "VRAM TOTAL", "GOETHE", "FOREIGN", "STATUS"]);
     let gb = |mb: u64| format!("{:.1} GB", mb as f64 / 1024.0);
-    for r in rows {
+    for r in &rows {
         table.row(vec![
             format!("gpu{}", r.index),
             r.name.clone(),
@@ -993,6 +993,11 @@ fn do_gpu_list(json: bool) -> Result<(), String> {
         ]);
     }
     table.print();
+    for r in &rows {
+        if let Some(why) = goethe_core::gpu_arch::unsupported_reason(&r.compute_capability) {
+            println!("gpu{}: {why}; Goethe will not place models on it", r.index);
+        }
+    }
     Ok(())
 }
 

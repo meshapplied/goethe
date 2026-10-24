@@ -1,6 +1,7 @@
 // GPU set ranking and the view of which processes belong to live Goethe instances.
 
 use crate::foreign::{self, GpuLive};
+use crate::gpu_arch;
 use crate::hw::{self, HardwareState};
 use crate::proc_ident::{self, Identity};
 use rusqlite::Connection;
@@ -11,6 +12,7 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuPlacementInput {
     pub index: u32,
+    pub cc: String,
     pub foreign_process: bool,
     pub free_vram_mb: u64,
 }
@@ -18,6 +20,7 @@ pub struct GpuPlacementInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetRank {
     pub gpus: Vec<u32>,
+    pub cc: String,
     pub foreign: usize,
     pub link: u32,
     pub min_free_mb: u64,
@@ -68,14 +71,16 @@ fn combos(n: usize, k: usize) -> Vec<Vec<usize>> {
 }
 
 pub fn rank_sets(inputs: &[GpuPlacementInput], hw: Option<&HardwareState>, tp: usize) -> Vec<SetRank> {
-    // Every tp-sized GPU set, best first: fewest GPUs with foreign processes, most free VRAM, best link, lowest ids.
+    // Every tp-sized set of one compute capability (SGLang picks kernels per rank), fewest foreign, most free, best link.
     let mut sorted: Vec<&GpuPlacementInput> = inputs.iter().collect();
     sorted.sort_by_key(|g| g.index);
     let mut out: Vec<SetRank> = combos(sorted.len(), tp)
         .into_iter()
+        .filter(|c| c.iter().all(|&i| gpu_arch::same_cc(&sorted[i].cc, &sorted[c[0]].cc)))
         .map(|c| {
             let gpus: Vec<u32> = c.iter().map(|&i| sorted[i].index).collect();
             SetRank {
+                cc: sorted[c[0]].cc.clone(),
                 foreign: c.iter().filter(|&&i| sorted[i].foreign_process).count(),
                 link: hw.map(|h| hw::worst_link_rank(h, &gpus)).unwrap_or(0),
                 min_free_mb: c.iter().map(|&i| sorted[i].free_vram_mb).min().unwrap_or(0),
@@ -99,6 +104,7 @@ pub fn placement_inputs(
         .filter(|g| !denied.contains(&g.index))
         .map(|g| GpuPlacementInput {
             index: g.index,
+            cc: g.compute_capability.clone(),
             foreign_process: g.procs.iter().any(|(p, _)| !foreign::is_ours(*p, managed, live)),
             free_vram_mb: (g.free_mb as f64 - reserved_gb(g.index) * 1024.0).max(0.0) as u64,
         })
@@ -199,8 +205,13 @@ mod tests {
     use crate::hw::LinkState;
 
     fn inp(idx: u32, foreign: bool, free_mb: u64) -> GpuPlacementInput {
+        on(idx, "12.0", foreign, free_mb)
+    }
+
+    fn on(idx: u32, cc: &str, foreign: bool, free_mb: u64) -> GpuPlacementInput {
         GpuPlacementInput {
             index: idx,
+            cc: cc.to_string(),
             foreign_process: foreign,
             free_vram_mb: free_mb,
         }
@@ -277,8 +288,24 @@ mod tests {
     }
 
     #[test]
+    fn tensor_parallel_sets_never_mix_architectures() {
+        let gpus = [on(0, "12.0", false, 90000), on(1, "8.6", false, 24000), on(2, "12.0", false, 90000), on(3, "8.6", false, 24000)];
+        let r = rank_sets(&gpus, None, 2);
+        let sets: Vec<(Vec<u32>, &str)> = r.iter().map(|s| (s.gpus.clone(), s.cc.as_str())).collect();
+        assert_eq!(sets, vec![(vec![0, 2], "12.0"), (vec![1, 3], "8.6")]);
+        assert!(rank_sets(&gpus[..2], None, 2).is_empty(), "one GPU of each kind has no tp=2 set");
+        assert_eq!(rank_sets(&gpus, None, 1).len(), 4);
+    }
+
+    #[test]
     fn placement_inputs_drop_denied_and_subtract_ledger() {
-        let live = |index, procs| GpuLive { index, name: "g".to_string(), cc_major: 12, free_mb: 20480, procs };
+        let live = |index, procs| GpuLive {
+            index,
+            name: "g".to_string(),
+            compute_capability: "12.0".to_string(),
+            free_mb: 20480,
+            procs,
+        };
         let snap = vec![live(2, vec![(i32::MAX - 7, 100)]), live(3, Vec::new()), live(4, Vec::new())];
         let denied = HashSet::from([4u32]);
         let got = placement_inputs(&snap, &HashSet::new(), &HashSet::new(), &denied, |g| if g == 3 { 5.0 } else { 0.0 });

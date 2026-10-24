@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- No CUDA toolkit install is needed: engines build run-time kernels with the toolkit bundled in the py-env (nvcc, crt, nvvm and cccl pinned to 13.0 to match the 13.0 runtime headers). Before each start Goethe adds the `lib64`, unversioned library and `libcuda.so` links that pip wheels leave out. `CUDA_HOME` or `CUDA_PATH` in goethed's environment or a card still wins.
+- The installer offers to install the NVIDIA driver when a GPU has none or one older than 580. It asks first, uses `ubuntu-drivers` on Ubuntu or NVIDIA's CUDA repository on Debian and the RHEL family, then loads the driver or asks for a reboot. `GOETHE_INSTALL_DRIVER=1` installs without asking and `GOETHE_INSTALL_DRIVER=0` never installs. It never installs inside containers. A working driver is left alone.
+- When the NVIDIA driver is unusable, `goethe doctor`, `goethe load` and the installer name the cause and the fix: no GPU attached to the VM or container, no driver loaded, driver older than 580, no `/dev/nvidia*`, or missing `libcuda.so.1`/`libnvidia-ml.so.1`. The installer reads the driver version from `/proc/driver/nvidia/version` when `nvidia-smi` is absent.
+- Volta (7.0) and Turing (7.5) GPUs are recognised and named: `goethe gpu list` marks them UNSUPPORTED with the reason, `goethe doctor` explains it, and placement never uses them.
+- `goethe recommend` shows where each fitting model would load (GPUs, VRAM per GPU, context) and its download size, instead of one size column that looked like the VRAM need.
+
+- GPU support covers Ampere (8.0, 8.6), Hopper (9.0) and data-center Blackwell (10.0, 10.3) next to consumer Blackwell (12.0, 12.1), from one architecture table. Machines with mixed GPU architectures work: placement only uses GPUs a model runs on, a tensor-parallel group never mixes architectures, `--gpus` sets that mix them are refused with the reason, and `goethe doctor` lists the architectures. Engines build run-time kernels for their own target (`TORCH_CUDA_ARCH_LIST`, `sm_90a`/`sm_100a` style) with one JIT cache per architecture. Cards record the compute capabilities of their catalog entry. The Marlin weight copy is budgeted only on GPUs that keep one (12.x); `goethe recommend` used to add it on 10.x too.
+
 - Drop standing comments outside function bodies; keep file-top lines and docstrings only.
 
 - `docs/HUB_CARDS.md` records the Hub card contract for the Ternary-Latest ids.

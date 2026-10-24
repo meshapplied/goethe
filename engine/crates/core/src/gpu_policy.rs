@@ -69,7 +69,9 @@ pub fn list_rows(con: &Connection, home: &Path) -> Result<Vec<GpuListRow>, Strin
             vram_total_mb: gpu.vram_total_mb,
             managed_mb,
             foreign_mb,
-            status: if is_denied {
+            status: if !crate::gpu_arch::is_supported(&gpu.compute_capability) {
+                "UNSUPPORTED".to_string()
+            } else if is_denied {
                 "DENIED".to_string()
             } else {
                 "ALLOWED".to_string()

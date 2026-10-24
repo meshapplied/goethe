@@ -2,6 +2,7 @@
 
 use crate::calc::{missing_gb, shortfall, Need, BASE_OVERHEAD_GB};
 use crate::engine_overhead::Learned;
+use crate::gpu_arch;
 use crate::hw::HardwareState;
 use crate::placement::{format_gpu_list, rank_sets, GpuPlacementInput, SetRank};
 
@@ -15,12 +16,15 @@ pub struct ChooserInput {
     pub max_ctx: u64,
     pub ctx: u64,
     pub max_conc: u64,
+    pub marlin_extra_gb: f64,
+    pub supported_sm: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadPlan {
     pub tp: usize,
     pub gpus: Vec<u32>,
+    pub cc: String,
     pub ctx: u64,
     pub max_conc: u64,
 }
@@ -57,19 +61,20 @@ pub fn kv_shard(t: usize, num_kv_heads: u64, attention: &str) -> f64 {
     }
 }
 
-pub fn need(input: &ChooserInput, tp: usize) -> Need {
-    // Spec formula per GPU in parts: sharded weights, sharded KV for min(conc, 4) full contexts, 1.8 GB CUDA context.
+pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
+    // Per GPU: sharded weights (plus the Marlin copy where cc keeps one), sharded KV for min(conc, 4) contexts, 1.8 GB.
     let shard = kv_shard(tp, input.num_kv_heads, &input.attention);
     let tokens = input.ctx as f64 * input.max_conc.min(4) as f64;
+    let marlin = if gpu_arch::nvfp4_dual_copy(cc) { input.marlin_extra_gb } else { 0.0 };
     Need {
-        weights: input.static_vram_gb / tp as f64,
+        weights: (input.static_vram_gb + marlin) / tp as f64,
         kv: tokens * input.kv_bytes_per_token as f64 * 1e-9 / shard,
         overhead: BASE_OVERHEAD_GB,
     }
 }
 
-pub fn per_gpu_budget_gb(input: &ChooserInput, tp: usize) -> f64 {
-    need(input, tp).total()
+pub fn per_gpu_budget_gb(input: &ChooserInput, tp: usize, cc: &str) -> f64 {
+    need(input, tp, cc).total()
 }
 
 pub fn with_learned(base: Need, learned: Learned) -> Need {
@@ -81,7 +86,7 @@ pub fn with_learned(base: Need, learned: Learned) -> Need {
     }
 }
 
-type LearnedAt<'a> = &'a dyn Fn(usize) -> Learned;
+type LearnedAt<'a> = &'a dyn Fn(usize, u32) -> Learned;
 
 fn free_gb(set: &SetRank) -> f64 {
     set.min_free_mb as f64 / 1024.0
@@ -101,7 +106,7 @@ pub fn pick_load_plan(
     pinned_tp: Option<usize>,
     pinned_gpus: Option<&[u32]>,
 ) -> Result<LoadPlan, PlanError> {
-    plan_with(input, gpus, hw, pinned_tp, pinned_gpus, &|_| Learned::default())
+    plan_with(input, gpus, hw, pinned_tp, pinned_gpus, &|_, _| Learned::default())
 }
 
 pub fn plan_with(
@@ -112,7 +117,7 @@ pub fn plan_with(
     pinned_gpus: Option<&[u32]>,
     learned: LearnedAt,
 ) -> Result<LoadPlan, PlanError> {
-    // Pinned GPUs as given, a pinned tp over every fitting set, else the smallest fitting tp; budgets include learned GB.
+    // Pinned GPUs as given, else a pinned or the smallest fitting tp over GPUs whose architecture runs the model.
     if let Some(pg) = pinned_gpus.filter(|p| !p.is_empty()) {
         let tp = pinned_tp.unwrap_or(pg.len());
         if tp != pg.len() {
@@ -123,22 +128,39 @@ pub fn plan_with(
         }
         return fixed_plan(input, gpus, pg, learned);
     }
-    if let Some(tp) = pinned_tp {
-        return best_fit(input, gpus, hw, tp, learned)
-            .map(|set| plan(input, tp, set))
-            .ok_or_else(|| closest_miss(input, gpus, hw, tp, learned));
+    let eligible: Vec<GpuPlacementInput> =
+        gpus.iter().filter(|g| gpu_arch::model_runs_on(&input.supported_sm, &g.cc)).cloned().collect();
+    if eligible.is_empty() && !gpus.is_empty() {
+        return Err(PlanError { message: no_arch_message(input, gpus), gpus: Vec::new() });
     }
-    auto_plan(input, gpus, hw, learned)
+    if let Some(tp) = pinned_tp {
+        return best_fit(input, &eligible, hw, tp, learned)
+            .map(|set| plan(input, tp, set))
+            .ok_or_else(|| closest_miss(input, &eligible, hw, tp, learned));
+    }
+    auto_plan(input, &eligible, hw, learned)
 }
 
-fn need_at(input: &ChooserInput, tp: usize, learned: LearnedAt) -> Need {
-    with_learned(need(input, tp), learned(tp))
+fn no_arch_message(input: &ChooserInput, gpus: &[GpuPlacementInput]) -> String {
+    // Which architectures the model needs against what the visible GPUs are.
+    let mut have: Vec<String> = gpus.iter().map(|g| format!("GPU {} is SM {}", g.index, g.cc)).collect();
+    have.dedup();
+    let wants = match input.supported_sm.is_empty() {
+        true => gpu_arch::supported_text(),
+        false => input.supported_sm.join(", "),
+    };
+    format!("no GPU here can run this model: it runs on SM {wants}; {}", have.join(", "))
+}
+
+fn need_at(input: &ChooserInput, set: &SetRank, learned: LearnedAt) -> Need {
+    with_learned(need(input, set.gpus.len(), &set.cc), learned(set.gpus.len(), set.gpus[0]))
 }
 
 fn plan(input: &ChooserInput, tp: usize, set: SetRank) -> LoadPlan {
     LoadPlan {
         tp,
         gpus: set.gpus,
+        cc: set.cc,
         ctx: input.ctx,
         max_conc: input.max_conc,
     }
@@ -150,27 +172,36 @@ fn fixed_plan(
     pinned: &[u32],
     learned: LearnedAt,
 ) -> Result<LoadPlan, PlanError> {
-    // Check the exact GPU set the user asked for against the one fit rule.
+    // The exact GPU set asked for: available, one architecture the model runs on, then the one fit rule.
     let tp = pinned.len();
-    let mut free_mb = Vec::new();
+    let fail = |message: String| Err(PlanError { message, gpus: Vec::new() });
+    let mut picked = Vec::new();
     for g in pinned {
         match gpus.iter().find(|x| x.index == *g) {
-            Some(x) => free_mb.push(x.free_vram_mb),
-            None => {
-                return Err(PlanError {
-                    message: format!("GPU {g} is not available for placement"),
-                    gpus: Vec::new(),
-                })
+            Some(x) if !gpu_arch::model_runs_on(&input.supported_sm, &x.cc) => {
+                let why = gpu_arch::unsupported_reason(&x.cc).unwrap_or_else(|| no_arch_message(input, gpus));
+                return fail(format!("GPU {g} (SM {}) cannot run this model; {why}", x.cc));
             }
+            Some(x) => picked.push(x),
+            None => return fail(format!("GPU {g} is not available for placement")),
         }
+    }
+    let cc = picked[0].cc.clone();
+    if let Some(other) = picked.iter().find(|x| !gpu_arch::same_cc(&x.cc, &cc)) {
+        return fail(format!(
+            "GPUs {} mix SM {cc} and SM {}; a tensor-parallel group needs GPUs of one architecture",
+            format_gpu_list(pinned),
+            other.cc
+        ));
     }
     let set = SetRank {
         gpus: pinned.to_vec(),
+        cc,
         foreign: 0,
         link: 0,
-        min_free_mb: free_mb.into_iter().min().unwrap_or(0),
+        min_free_mb: picked.iter().map(|x| x.free_vram_mb).min().unwrap_or(0),
     };
-    let need = need_at(input, tp, learned);
+    let need = need_at(input, &set, learned);
     if let Some(message) = shortfall(&need, tightest(&set, gpus), free_gb(&set)) {
         return Err(PlanError { message, gpus: set.gpus });
     }
@@ -184,8 +215,9 @@ fn best_fit(
     tp: usize,
     learned: LearnedAt,
 ) -> Option<SetRank> {
-    let need = need_at(input, tp, learned);
-    rank_sets(gpus, hw, tp).into_iter().find(|s| missing_gb(&need, free_gb(s)) <= 0.0)
+    rank_sets(gpus, hw, tp)
+        .into_iter()
+        .find(|s| missing_gb(&need_at(input, s, learned), free_gb(s)) <= 0.0)
 }
 
 fn closest_miss(
@@ -196,18 +228,23 @@ fn closest_miss(
     learned: LearnedAt,
 ) -> PlanError {
     // Report the shortfall on the tp-sized set with the most free VRAM.
-    let need = need_at(input, tp, learned);
     let Some(set) = rank_sets(gpus, hw, tp).into_iter().max_by_key(|s| s.min_free_mb) else {
         return PlanError {
-            message: format!("cannot place tp={tp}: only {} eligible GPUs", gpus.len()),
+            message: format!("cannot place tp={tp}: no {tp} eligible GPUs of one architecture"),
             gpus: Vec::new(),
         };
     };
+    let need = need_at(input, &set, learned);
     let why = shortfall(&need, tightest(&set, gpus), free_gb(&set)).unwrap_or_default();
     PlanError {
         message: format!("no GPU set fits tp={tp} (best GPUs {}): {why}", format_gpu_list(&set.gpus)),
         gpus: set.gpus,
     }
+}
+
+fn largest_arch_group(gpus: &[GpuPlacementInput]) -> usize {
+    // The widest tensor-parallel group possible: the most GPUs sharing one compute capability.
+    gpus.iter().map(|g| gpus.iter().filter(|x| gpu_arch::same_cc(&x.cc, &g.cc)).count()).max().unwrap_or(0)
 }
 
 fn auto_plan(
@@ -223,7 +260,7 @@ fn auto_plan(
             gpus: Vec::new(),
         });
     }
-    let tps = valid_tp_values(input, gpus.len());
+    let tps = valid_tp_values(input, largest_arch_group(gpus));
     let mut trial = input.clone();
     trial.ctx = input.ctx.min(input.max_ctx);
     trial.max_conc = input.max_conc.max(1);
@@ -260,15 +297,70 @@ mod tests {
             max_ctx: 131072,
             ctx: 8192,
             max_conc: 4,
+            marlin_extra_gb: 0.0,
+            supported_sm: Vec::new(),
         }
     }
 
     fn gpu(idx: u32, free_gb: f64, foreign: bool) -> GpuPlacementInput {
+        GpuPlacementInput { foreign_process: foreign, ..gpu_on(idx, "12.0", free_gb) }
+    }
+
+    fn gpu_on(idx: u32, cc: &str, free_gb: f64) -> GpuPlacementInput {
         GpuPlacementInput {
             index: idx,
-            foreign_process: foreign,
+            cc: cc.to_string(),
+            foreign_process: false,
             free_vram_mb: (free_gb * 1024.0) as u64,
         }
+    }
+
+    fn mixed_host() -> Vec<GpuPlacementInput> {
+        // Two RTX PRO 6000 (12.0), one H100 (9.0) and one RTX 3090 (8.6).
+        vec![gpu_on(0, "12.0", 20.0), gpu_on(1, "12.0", 20.0), gpu_on(2, "9.0", 70.0), gpu_on(3, "8.6", 23.0)]
+    }
+
+    #[test]
+    fn a_heterogeneous_host_places_each_model_on_an_architecture_it_runs_on() {
+        let mut m = inp();
+        m.supported_sm = vec!["12.0".to_string(), "12.1".to_string()];
+        let plan = pick_load_plan(&m, &mixed_host(), None, None, None).unwrap();
+        assert_eq!((plan.gpus.clone(), plan.cc.as_str()), (vec![0, 1], "12.0"), "too big for one 20 GB GPU");
+        m.supported_sm = vec!["8.6".to_string()];
+        let plan = pick_load_plan(&m, &mixed_host(), None, None, None).unwrap();
+        assert_eq!((plan.gpus, plan.cc.as_str()), (vec![2], "9.0"), "Hopper is covered by Ampere validation");
+        m.supported_sm = vec!["10.0".to_string()];
+        let err = pick_load_plan(&m, &mixed_host(), None, None, None).unwrap_err();
+        assert!(err.message.contains("no GPU here can run this model") && err.message.contains("GPU 2 is SM 9.0"), "{}", err.message);
+    }
+
+    #[test]
+    fn pinned_gpus_must_share_an_architecture_the_model_runs_on() {
+        let err = pick_load_plan(&inp(), &mixed_host(), None, None, Some(&[1, 2])).unwrap_err();
+        assert!(err.message.contains("mix SM 12.0 and SM 9.0"), "{}", err.message);
+        let mut m = inp();
+        m.supported_sm = vec!["12.0".to_string()];
+        let err = pick_load_plan(&m, &mixed_host(), None, None, Some(&[3])).unwrap_err();
+        assert!(err.message.starts_with("GPU 3 (SM 8.6) cannot run this model"), "{}", err.message);
+        assert_eq!(pick_load_plan(&inp(), &mixed_host(), None, None, Some(&[2])).unwrap().cc, "9.0");
+    }
+
+    #[test]
+    fn auto_tp_never_spans_architectures() {
+        let mut big = inp();
+        big.static_vram_gb = 60.0;
+        let hosts: Vec<GpuPlacementInput> = mixed_host().into_iter().filter(|g| g.index != 2).collect();
+        let err = pick_load_plan(&big, &hosts, None, None, None).unwrap_err();
+        assert!(err.message.contains("best GPUs 0,1"), "the 3090 never joins the 12.0 pair: {}", err.message);
+    }
+
+    #[test]
+    fn the_marlin_copy_is_budgeted_only_where_the_architecture_keeps_one() {
+        let mut m = inp();
+        m.marlin_extra_gb = 4.0;
+        assert_eq!(need(&m, 2, "12.0").weights, 12.0);
+        assert_eq!(need(&m, 2, "10.0").weights, 10.0);
+        assert_eq!(need(&m, 2, "9.0").weights, 10.0);
     }
 
     #[test]
@@ -339,7 +431,7 @@ mod tests {
         let gpus = vec![gpu(2, 30.0, false), gpu(3, 26.0, false)];
         let fits = pick_load_plan(&inp(), &gpus, None, Some(1), None).unwrap();
         assert_eq!(fits.gpus, vec![2]);
-        let heavy = |_: usize| Learned { static_gb: 0.0, overhead_gb: 7.0 };
+        let heavy = |_: usize, _: u32| Learned { static_gb: 0.0, overhead_gb: 7.0 };
         let err = plan_with(&inp(), &gpus, None, Some(1), Some(&[3]), &heavy).unwrap_err();
         assert!(err.message.contains("overhead 8.8"), "{}", err.message);
         assert_eq!(pick_load_plan(&inp(), &gpus, None, None, None).unwrap().tp, 1);

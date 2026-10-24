@@ -34,7 +34,7 @@ print(reply.choices[0].message.content)
 ## Why Goethe
 
 - **Three steps, one address.** Every model you load is served at the same URL; a request picks its model by name.
-- **Fast.** Models run on SGLang, with continuous batching, prefix caching and CUDA graphs. Goethe adds its own NVFP4 kernels for Blackwell and Ampere GPUs, so 4-bit models use about a quarter of the memory of the full-precision version and stay quick.
+- **Fast.** Models run on SGLang, with continuous batching, prefix caching and CUDA graphs. Goethe adds its own NVFP4 kernels for Blackwell, Hopper and Ampere GPUs, so 4-bit models use about a quarter of the memory of the full-precision version and stay quick.
 - **Private by default.** Nothing can reach the API until you allow it, and every client needs its own key. You can rate-limit, expire, scope or revoke keys at any time.
 - **Fits your network.** Serve on this machine only, over Tailscale, WireGuard or ZeroTier, or on a public IP. `goethe configure api` walks you through the choice.
 - **Many models, many GPUs.** Run several models side by side, split large models across GPUs, and keep other GPU software running next to Goethe.
@@ -44,10 +44,11 @@ print(reply.choices[0].message.content)
 
 - Linux on x86_64 or ARM64.
 - An NVIDIA GPU:
-  - Blackwell: GeForce RTX 5090, RTX PRO 6000 Blackwell, or DGX Spark (GB10);
-  - or Ampere with compute capability 8.6: GeForce RTX 3090, RTX A6000, and similar.
-- NVIDIA driver 580 or newer.
-- The CUDA 13.0 toolkit, used to build GPU kernels on the first model load ([install steps](docs/user-guide.md#install)).
+  - Blackwell: GeForce RTX 5090, RTX PRO 6000 Blackwell, DGX Spark (GB10), B200 or B300;
+  - Hopper: H100, H200 or GH200;
+  - or Ampere: A100, RTX A6000, GeForce RTX 3090, and similar.
+  - GPUs of different kinds can share one machine; each model runs on GPUs of one kind.
+- NVIDIA driver 580 or newer. That is all: Goethe brings its own CUDA compiler, and `goethe doctor` says what to fix when a VM or container has no usable driver.
 - Enough GPU memory for your model. `goethe recommend` lists the models that fit your machine.
 
 Details on [supported hardware, model families and formats](docs/user-guide.md#what-goethe-supports) are in the user guide.

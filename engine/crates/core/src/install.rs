@@ -43,6 +43,8 @@ pub struct GoetheCard {
     pub host_offload_gb: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supported_sm: Option<Vec<String>>,
 }
 
 const CARD_KEYS: &[&str] = &[
@@ -62,7 +64,27 @@ const CARD_KEYS: &[&str] = &[
     "marlin_extra_gb",
     "host_offload_gb",
     "source_dir",
+    "supported_sm",
 ];
+
+pub fn card_supported_sm(card: &toml::Value) -> Vec<String> {
+    // Compute capabilities the card's catalog entry lists; empty (any supported GPU) for cards without one.
+    card.get("supported_sm")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+pub fn card_marlin_extra_gb(card: &toml::Value) -> f64 {
+    // The card's Marlin weight copy, or 0 when GOETHE_MARLIN=0 in goethed's or the card's environment.
+    let off = |v: Option<&str>| v.is_some_and(|v| v.trim() == "0");
+    if off(std::env::var("GOETHE_MARLIN").ok().as_deref())
+        || off(card.get("env").and_then(|e| e.get("GOETHE_MARLIN")).and_then(|v| v.as_str()))
+    {
+        return 0.0;
+    }
+    card.get("marlin_extra_gb").and_then(|v| v.as_float()).unwrap_or(0.0)
+}
 
 #[derive(Default)]
 pub struct InstallOpts {
@@ -507,6 +529,7 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         marlin_extra_gb,
         host_offload_gb: (vram.host_offload_gb > 0.0).then_some(vram.host_offload_gb),
         source_dir: t.source_dir.as_ref().map(|p| p.display().to_string()),
+        supported_sm: entry.map(|e| e.supported_sm.clone()).filter(|sm| !sm.is_empty()),
     };
     let rel = dir
         .strip_prefix(home)
@@ -946,6 +969,7 @@ mod tests {
             marlin_extra_gb: None,
             host_offload_gb: None,
             source_dir: None,
+            supported_sm: None,
         };
         let old: toml::Table = toml::from_str("note = \"mine\"\nmarlin_extra_gb = 3.0\n").unwrap();
         let t = card_table(&card, Some(&old)).unwrap();

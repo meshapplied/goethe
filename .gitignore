@@ -25,3 +25,6 @@ docs/gpu-checks.md
 
 # Developer docs (local only, never committed)
 docs/dev/
+
+# Modal PoC, kept local
+modal/
