@@ -225,7 +225,7 @@ pub fn set_public_bind(home: &Path, addr: &str) -> Result<String, String> {
         thread::sleep(Duration::from_millis(250));
     }
     Err(format!(
-        "the gateway did not come back on {ip} within 25 s; goethed restarts it (check goethe gateway status and goethe logs --gateway)"
+        "the gateway did not come back on {ip} within 25 s; goethed restarts it (check goethe gateway and goethe logs --gateway)"
     ))
 }
 

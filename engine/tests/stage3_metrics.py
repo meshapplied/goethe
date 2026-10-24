@@ -36,7 +36,7 @@ def main() -> None:
         seed_installed_model(home, "m", "models/org__m", 5.0, 512, 512, 2, 1)
         goethed = start_goethed(home)
         env = home_goethe_env(home)
-        run_goethe([str(goethe), "load", "m", "--gpus", str(gpu), "--yes"], env=env, timeout=120)
+        run_goethe([str(goethe), "load", "--model", "m", "--gpus", str(gpu), "--yes"], env=env, timeout=120)
         code, raw = http_get(f"http://127.0.0.1:{test_mux_port(home)}/metrics", timeout=10)
         text = raw.decode("utf-8")
         if code != 200 or "# HELP goethe_up" not in text or "# TYPE goethe_up gauge" not in text:
@@ -46,8 +46,8 @@ def main() -> None:
                 raise RuntimeError(f"missing HELP for {name}")
         if not re.search(r"goethe_engine_status\{[^}]+\}\s+[01]", text):
             raise RuntimeError("goethe_engine_status sample missing")
-        run_goethe([str(goethe), "allowlist", "add", "127.0.0.1/32"], env=env)
-        out = run_goethe([str(goethe), "key", "create", "--name", "m", "--raw"], env=env).stdout
+        run_goethe([str(goethe), "allowlist", "--add", "127.0.0.1/32"], env=env)
+        out = run_goethe([str(goethe), "key", "--create", "m", "--raw"], env=env).stdout
         token = next(ln for ln in out.splitlines() if ln.startswith("goethe_sk_"))
         public = f"https://127.0.0.1:{test_public_port(home)}"
         if not wait_until(lambda: http_get(f"{public}/health")[0] == 200, timeout=20):

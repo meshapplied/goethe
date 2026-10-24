@@ -24,6 +24,27 @@ struct ModelRow {
     fit: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     custom: Option<bool>,
+    #[serde(skip)]
+    verdict: Verdict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Verdict {
+    Unknown,
+    Fits { per_gpu: f64, total: f64 },
+    TooLarge,
+    Unsupported,
+}
+
+impl Verdict {
+    fn label(&self) -> String {
+        match self {
+            Verdict::Unknown => "unknown (run goethe hw profile)".to_string(),
+            Verdict::Fits { per_gpu, .. } => format!("fits: {per_gpu:.1} GB per GPU"),
+            Verdict::TooLarge => "does not fit: not enough VRAM".to_string(),
+            Verdict::Unsupported => "does not fit: unsupported architecture".to_string(),
+        }
+    }
 }
 
 struct Installed {
@@ -41,14 +62,15 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
     let loaded = loaded_instances(&con);
     let installed = installed_rows(&home, &con)?;
     let reg = fetch(&registry_url()).ok();
-    let view = crate::placement::load_hw(&home).map(|hw| View::new(&home, hw));
+    let view = crate::placement::load_hw(&home).map(|hw| View::capacity(&home, hw));
     let mut rows = Vec::new();
     if !available_only {
         for m in &installed {
             let pinned = (m.default_tp > 0).then_some(m.default_tp as usize);
+            let verdict = verdict(view.as_ref(), &m.id, &m.input, pinned);
             let (status, fit) = match loaded.get(&m.id) {
                 Some(live) => loaded_state(live),
-                None => ("installed".to_string(), fit_label(view.as_ref(), &m.id, &m.input, pinned)),
+                None => ("installed".to_string(), verdict.label()),
             };
             rows.push(ModelRow {
                 id: m.id.clone(),
@@ -56,39 +78,31 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 gb: m.input.static_vram_gb,
                 fit,
                 custom: is_custom_model(&m.id, reg.as_ref()).then_some(true),
+                verdict,
             });
         }
     }
     if let (false, Some(r)) = (installed_only, &reg) {
-        for m in &r.models {
+        for m in r.models.iter().filter(|m| m.manual_download_reason().is_none()) {
             if installed.iter().any(|i| i.id == m.id) {
                 continue;
             }
             let pinned = m.default_tp.filter(|t| *t > 0).map(|t| t as usize);
-            let sm_ok = view
-                .as_ref()
-                .is_none_or(|v| v.hw.gpus.iter().any(|g| crate::gpu_arch::model_runs_on(&m.supported_sm, &g.compute_capability)));
+            let verdict = verdict(view.as_ref(), &m.id, &registry_input(m), pinned);
             rows.push(ModelRow {
                 id: m.id.clone(),
-                status: if m.manual_download_reason().is_some() { "manual download" } else { "available" }.to_string(),
+                status: "available".to_string(),
                 gb: m.download_gb.unwrap_or(m.static_vram_gb),
-                fit: if sm_ok {
-                    fit_label(view.as_ref(), &m.id, &registry_input(m), pinned)
-                } else {
-                    "unsupported SM".to_string()
-                },
+                fit: verdict.label(),
                 custom: None,
+                verdict,
             });
         }
     }
     if json {
         println!("{}", serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?);
     } else {
-        let mut table = crate::term::Table::new(&["MODEL", "STATUS", "SIZE", "FIT ON THIS MACHINE"]);
-        for r in rows {
-            table.row(vec![r.id.clone(), crate::term::status(&r.status), format!("{:.2} GB", r.gb), fit_colored(&r.fit)]);
-        }
-        table.print();
+        print!("{}", list_text(&rows, view.as_ref().map(View::free_text)));
     }
     Ok(())
 }
@@ -127,7 +141,7 @@ fn match_installed(id: &str, rows: &[(String, String)]) -> Result<String, Option
 fn not_installed_message(id: &str, near: Option<&str>) -> String {
     match near {
         Some(m) => format!("model {id} is not installed; did you mean {m}? (goethe models lists installed models)"),
-        None => format!("model {id} is not installed (goethe models lists installed models; goethe install {id} adds it)"),
+        None => format!("model {id} is not installed (goethe models lists installed models; goethe install --model {id} adds it)"),
     }
 }
 
@@ -148,7 +162,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 fn fit_colored(fit: &str) -> String {
     // The verdict word of a fit label in color: fits green, does not fit red; the details stay plain.
     use crate::term::{paint, Color};
-    for (word, color) in [("does not fit", Color::Red), ("unsupported", Color::Red), ("fits", Color::Green)] {
+    for (word, color) in [("does not fit", Color::Red), ("fits", Color::Green)] {
         if let Some(rest) = fit.strip_prefix(word) {
             return format!("{}{rest}", paint(word, color));
         }
@@ -156,15 +170,53 @@ fn fit_colored(fit: &str) -> String {
     fit.to_string()
 }
 
-fn fit_label(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<usize>) -> String {
-    // What goethe load would do with this model now, in the daemon's budget wording.
+fn verdict(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<usize>) -> Verdict {
+    // Fits (with its VRAM per GPU and in total), or whether the architecture or the free VRAM stops it.
     let Some(view) = view else {
-        return "unknown (run goethe hw profile)".to_string();
+        return Verdict::Unknown;
     };
-    match view.fit(id, input, pinned) {
-        Ok(f) => format!("fits: {}", f.describe(input)),
-        Err(why) => format!("does not fit: {why}"),
+    if !view.hw.gpus.iter().any(|g| crate::gpu_arch::model_runs_on(&input.supported_sm, &g.compute_capability)) {
+        return Verdict::Unsupported;
     }
+    match view.fit(id, input, pinned) {
+        Ok(f) => Verdict::Fits { per_gpu: f.need.total(), total: f.need.total() * f.tp as f64 },
+        Err(_) => Verdict::TooLarge,
+    }
+}
+
+fn list_text(rows: &[ModelRow], free_gb: Option<String>) -> String {
+    // Installed models, then available ones grouped by the VRAM they take, then those that do not fit and why.
+    use crate::term::{paint, Color, Table};
+    let mut out = String::new();
+    if let Some(free) = free_gb {
+        out.push_str(&format!("{free}\n\n"));
+    }
+    let row = |r: &ModelRow| vec![r.id.clone(), crate::term::status(&r.status), format!("{:.1} GB", r.gb), fit_colored(&r.fit)];
+    let header = ["MODEL", "STATUS", "DISK", "FIT ON THIS MACHINE"];
+    let (installed, available): (Vec<&ModelRow>, Vec<&ModelRow>) = rows.iter().partition(|r| r.status != "available");
+    if !installed.is_empty() {
+        let mut table = Table::new(&header);
+        installed.iter().for_each(|r| table.row(row(r)));
+        out.push_str(&format!("{}\n{}\n", paint("Installed", Color::Bold), table.render()));
+    }
+    let fits: Vec<(f64, Vec<String>)> = available
+        .iter()
+        .filter_map(|r| match r.verdict {
+            Verdict::Fits { total, .. } => Some((total, row(r))),
+            _ => None,
+        })
+        .collect();
+    out.push_str(&crate::recommend::banded(&header, fits));
+    for (title, kind) in [("Too large for the allowed GPUs", Verdict::TooLarge), ("Unsupported architecture", Verdict::Unsupported), ("Unknown", Verdict::Unknown)] {
+        let mut table = Table::new(&header);
+        let mut group: Vec<&&ModelRow> = available.iter().filter(|r| r.verdict == kind).collect();
+        group.sort_by(|a, b| a.gb.total_cmp(&b.gb));
+        group.iter().for_each(|r| table.row(row(r)));
+        if !table.is_empty() {
+            out.push_str(&format!("{}\n{}\n", paint(title, Color::Bold), table.render()));
+        }
+    }
+    out.trim_end().to_string() + "\n"
 }
 
 fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, String> {
@@ -310,7 +362,7 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool) -> Result<(), String> 
     if let Some(src) = &plan.source {
         steps.push(format!("unregister the model; your files in {src} stay on disk"));
     }
-    host::confirm(&format!("goethe remove {model_id} will:\n  {}\nProceed?", steps.join("\n  ")), yes)?;
+    host::confirm(&format!("goethe remove --model {model_id} will:\n  {}\nProceed?", steps.join("\n  ")), yes)?;
     if instances > 0 {
         unload(model_id, force)?;
     }

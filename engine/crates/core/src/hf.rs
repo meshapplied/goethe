@@ -7,6 +7,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
@@ -57,20 +58,43 @@ pub fn offline_mode() -> bool {
         .unwrap_or(false)
 }
 
+static TOKEN: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn set_token(token: Option<String>) {
+    // A Hugging Face token for this process only (gated or private repos); it is never written to disk.
+    let value = token.filter(|t| !t.trim().is_empty()).map(|t| t.trim().to_string());
+    TOKEN.lock().unwrap_or_else(|e| e.into_inner()).clone_from(&value);
+}
+
+fn token() -> Option<String> {
+    TOKEN.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub fn whoami(token: &str) -> Result<String, String> {
+    // The account a token belongs to, which proves Hugging Face accepts it.
+    let url = format!("{}/api/whoami-v2", hf_endpoint());
+    let resp = match crate::net::agent().get(&url).set("Authorization", &format!("Bearer {}", token.trim())).timeout(Duration::from_secs(15)).call() {
+        Ok(r) => r,
+        Err(ureq::Error::Status(401, _)) => return Err("Hugging Face did not accept this token".to_string()),
+        Err(e) => return Err(format!("cannot reach Hugging Face: {e}")),
+    };
+    let text = resp.into_string().map_err(|e| format!("Hugging Face reply: {e}"))?;
+    let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Hugging Face reply: {e}"))?;
+    Ok(body.get("name").and_then(|v| v.as_str()).unwrap_or("your account").to_string())
+}
+
 pub fn preflight_model(model_id: &str, revision: Option<&str>) -> Result<ModelPreflight, String> {
     preflight_model_opts(model_id, revision, false)
 }
 
 pub fn gated_guidance(model_id: &str) -> String {
-    let dir = crate::paths::model_dir(&crate::paths::goethe_home(), model_id);
     format!(
-        "{model_id} is gated (or private) on Hugging Face and goethe does not log in. Download it yourself after accepting its license, for example: hf download {model_id} --local-dir {} . Then run: goethe scan",
-        dir.display()
+        "{model_id} is gated or private on Hugging Face, so it needs your Hugging Face token. After accepting its license on huggingface.co, run: goethe install --model {model_id} --hf-token"
     )
 }
 
 pub fn preflight_model_opts(model_id: &str, revision: Option<&str>, allow_gated: bool) -> Result<ModelPreflight, String> {
-    // Anonymous model API query (at a revision when given): gating, files, sizes, and the commit sha.
+    // Model API query (at a revision when given), with the session token if one is set: gating, files, sizes, commit.
     if offline_mode() {
         return Ok(ModelPreflight {
             gated: false,
@@ -84,10 +108,17 @@ pub fn preflight_model_opts(model_id: &str, revision: Option<&str>, allow_gated:
         None => format!("{endpoint}/api/models/{model_id}?blobs=true"),
     };
     let resp = api_get(&url)?;
+    let allow_gated = allow_gated || token().is_some();
     match resp.status {
+        401 | 403 | 404 if token().is_some() => {
+            return Err(format!(
+                "{model_id}: not found, or this Hugging Face token has no access (accept the license at {}/{model_id})",
+                hf_endpoint()
+            ))
+        }
         401 | 403 | 404 if !allow_gated => return Err(gated_guidance(model_id)),
         401 | 403 | 404 => {
-            return Err(format!("{model_id}: not found, or private (goethe does not log in to Hugging Face)"))
+            return Err(format!("{model_id}: not found on Hugging Face, or private (add --hf-token)"))
         }
         s if s >= 500 => return Err(format!("cannot reach {endpoint}: HTTP {s}")),
         s if s >= 400 => return Err(format!("HF API error for {model_id}: HTTP {s}")),
@@ -335,7 +366,11 @@ pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: 
     cmd.env("HF_HUB_VERBOSITY", "error");
     cmd.env("HF_HUB_DISABLE_UPDATE_CHECK", "1");
     cmd.env("PYTHONWARNINGS", "ignore::FutureWarning");
-    cmd.env_remove("HF_TOKEN").env_remove("HUGGING_FACE_HUB_TOKEN").env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1");
+    cmd.env_remove("HF_TOKEN").env_remove("HUGGING_FACE_HUB_TOKEN");
+    match token() {
+        Some(t) => cmd.env("HF_TOKEN", t),
+        None => cmd.env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1"),
+    };
     cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     let status = cmd.status().map_err(|e| format!("hf download failed to start: {e}"))?;
     if !status.success() {
@@ -575,7 +610,11 @@ fn api_get(url: &str) -> Result<ApiResponse, String> {
 }
 
 fn api_get_once(url: &str) -> Result<ApiResponse, String> {
-    let resp = match crate::net::agent().get(url).timeout(Duration::from_secs(30)).call() {
+    let mut req = crate::net::agent().get(url).timeout(Duration::from_secs(30));
+    if let Some(t) = token() {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    let resp = match req.call() {
         Ok(r) => r,
         Err(ureq::Error::Status(_code, r)) => r,
         Err(e) => return Err(e.to_string()),

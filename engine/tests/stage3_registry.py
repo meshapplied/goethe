@@ -78,7 +78,8 @@ def main() -> None:
             link_dev_pyenv(sg_home)
             sg_env = {"GOETHE_HOME": str(sg_home), "HF_HUB_OFFLINE": "1"}
             reg_path = GOETHE_PKG / "cdn" / "v1" / "registry.json"
-            rr = run([str(goethe), "registry", "validate", f"file://{reg_path}", "--check-sglang"], env=sg_env)
+            validate = [str(goethe), "registry", "validate", "--source"]
+            rr = run([*validate, f"file://{reg_path}", "--check-sglang"], env=sg_env)
             if rr.returncode != 0 or "skipped" in (rr.stdout + rr.stderr):
                 raise RuntimeError(f"shipped registry must validate against the real fork: {rr.stderr or rr.stdout}")
             ids_file = work / "ids.txt"
@@ -95,7 +96,8 @@ def main() -> None:
                 work / "overlay.json",
                 {"version": 1, "models": [{"id": "stub/moe", "description": "test overlay", "supported_sm": ["12.0"]}]},
             )
-            add = [str(goethe), "registry", "add", "stub/moe", "--file", str(reg_file), "--overlay", str(overlay)]
+            add_moe = [str(goethe), "registry", "add", "--repo", "stub/moe"]
+            add = [*add_moe, "--file", str(reg_file), "--overlay", str(overlay)]
             rr_add = run([*add, "--dry-run"], env=hf_env, timeout=60)
             if rr_add.returncode != 0:
                 raise RuntimeError(rr_add.stderr or rr_add.stdout)
@@ -108,7 +110,7 @@ def main() -> None:
             )
             reg_bad = _write(work / "reg_bad.json", {"version": 1, "models": []})
             rr_bad = run(
-                [str(goethe), "registry", "add", "stub/moe", "--file", str(reg_bad), "--overlay", str(bad_overlay)],
+                [*add_moe, "--file", str(reg_bad), "--overlay", str(bad_overlay)],
                 env=hf_env,
                 timeout=60,
             )
@@ -127,7 +129,7 @@ def main() -> None:
                     ],
                 },
             )
-            rr_val = run([str(goethe), "registry", "validate", f"file://{tiny}", "--check-sglang"], env=sg_env)
+            rr_val = run([*validate, f"file://{tiny}", "--check-sglang"], env=sg_env)
             if rr_val.returncode == 0:
                 raise RuntimeError("validate should error on minimax_m3 parser")
         with temp_home(stub_python=True, tag="local") as home:
@@ -138,7 +140,7 @@ def main() -> None:
             env = {"GOETHE_HOME": str(home), "HF_HUB_OFFLINE": "1"}
             rr_inst = run(
                 [
-                    str(goethe), "install", str(model_src), "--name", "local/test-model",
+                    str(goethe), "install", "--model", str(model_src), "--name", "local/test-model",
                     "--sglang-arg", "--disable-shared-experts-fusion",
                 ],
                 env=env,
@@ -159,7 +161,7 @@ def main() -> None:
             ]:
                 raise RuntimeError("in-place install modified the user's source folder")
             managed = sqlite_query(home / "state.db", "SELECT managed FROM installed_models")
-            rr_rm = run([str(goethe), "remove", "local/test-model", "--yes"], env=env, timeout=30)
+            rr_rm = run([str(goethe), "remove", "--model", "local/test-model", "--yes"], env=env, timeout=30)
             if rr_rm.returncode != 0:
                 raise RuntimeError(rr_rm.stderr or rr_rm.stdout)
             if not (model_src / "w.safetensors").is_file() or not (model_src / "config.json").is_file():

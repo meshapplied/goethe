@@ -21,14 +21,14 @@ def main() -> None:
             encoding="utf-8",
         )
         rr = run(
-            [str(goethe), "logs", "m/a", "-n", "2"],
+            [str(goethe), "logs", "--model", "m/a", "-n", "2"],
             env={"GOETHE_HOME": str(home)},
         )
         if "line2" not in rr.stdout or "line3" not in rr.stdout:
             raise RuntimeError(rr.stdout)
         legacy = logs / "local__x.log"
         legacy.write_text("legacy\n", encoding="utf-8")
-        rr2 = run([str(goethe), "logs", "local/x", "-n", "5"], env={"GOETHE_HOME": str(home)})
+        rr2 = run([str(goethe), "logs", "--model", "local/x", "-n", "5"], env={"GOETHE_HOME": str(home)})
         if "legacy" not in rr2.stdout:
             raise RuntimeError("legacy log path failed")
     print("stage3_logs ok")

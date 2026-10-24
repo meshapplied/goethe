@@ -465,10 +465,10 @@ pub fn public_access_hint(bind: &str) -> String {
     // What remote clients still need before the gateway lets them in.
     if bind.parse::<std::net::IpAddr>().map_or(true, |ip| ip.is_loopback()) {
         format!(
-            "the gateway listens on {bind} only: run `goethe gateway bind 0.0.0.0`, then allow clients with `goethe allowlist add <client-ip>/32`"
+            "the gateway listens on {bind} only: run `goethe gateway --bind 0.0.0.0`, then allow clients with `goethe allowlist --add <client-ip>/32`"
         )
     } else {
-        format!("the gateway listens on {bind}; allow clients with `goethe allowlist add <client-ip>/32` (all other addresses are refused)")
+        format!("the gateway listens on {bind}; allow clients with `goethe allowlist --add <client-ip>/32` (all other addresses are refused)")
     }
 }
 

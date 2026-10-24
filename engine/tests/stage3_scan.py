@@ -100,15 +100,16 @@ def main() -> None:
         good, bad = _check_scan(goethe, home, env)
         daemon = start_goethed(home)
         try:
-            run_goethe([str(goethe), "load", "local/tinyscan", "--gpus", str(gpu), *yes], env=env, timeout=180)
+            load = [str(goethe), "load", "--model", "local/tinyscan", "--gpus", str(gpu), *yes]
+            run_goethe(load, env=env, timeout=180)
             rows = json.loads(run_goethe([str(goethe), "ps", "--json"], env=env).stdout)
             if not any(r.get("model_id") == "local/tinyscan" and r.get("status") == "RUNNING" for r in rows):
                 raise RuntimeError(f"scanned model is not RUNNING after load: {rows}")
-            run_goethe([str(goethe), "unload", "local/tinyscan"], env=env, timeout=120)
+            run_goethe([str(goethe), "unload", "--model", "local/tinyscan"], env=env, timeout=120)
         finally:
             daemon.stop()
         assert_no_stub_engines(home)
-        run_goethe([str(goethe), "remove", "local/tinyscan", "--yes"], env=env, timeout=60)
+        run_goethe([str(goethe), "remove", "--model", "local/tinyscan", "--yes"], env=env, timeout=60)
         if good.exists():
             raise RuntimeError("remove kept the scanned (managed) model folder")
         if not bad.is_dir():
@@ -116,11 +117,10 @@ def main() -> None:
         if huggingface_reachable(3.0):
             target = home / "models" / "meta-llama__Llama-3.2-1B"
             want = (
-                f"{GATED} is gated (or private) on Hugging Face and goethe does not log in. Download it yourself "
-                f"after accepting its license, for example: hf download {GATED} --local-dir {target} . "
-                "Then run: goethe scan"
+                f"{GATED} is gated or private on Hugging Face, so it needs your Hugging Face token. After accepting "
+                f"its license on huggingface.co, run: goethe install --model {GATED} --hf-token"
             )
-            rr = run([str(goethe), "install", GATED, "--no-load"], env=env, timeout=120)
+            rr = run([str(goethe), "install", "--model", GATED, "--no-load"], env=env, timeout=120)
             if rr.returncode != 1 or want not in rr.stderr:
                 raise RuntimeError(f"gated install guidance missing: rc={rr.returncode} {rr.stderr[-500:]}")
             if target.exists():

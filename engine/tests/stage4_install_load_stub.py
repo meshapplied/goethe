@@ -50,7 +50,7 @@ def main() -> None:
         env = home_goethe_env(home)
         t0 = time.time()
         run_goethe(
-            [str(goethe), "install", str(src), "--name", "inst", "--load", "--gpus", str(gpu), *yes],
+            [str(goethe), "install", "--model", str(src), "--name", "inst", "--load", "--gpus", str(gpu), *yes],
             env=env,
             timeout=120,
         )
@@ -65,7 +65,7 @@ def main() -> None:
             raise RuntimeError(f"install --load returned after {elapsed:.1f}s, before the engine listened")
         token = next(
             ln
-            for ln in run_goethe([str(goethe), "key", "create", "--name", "t", "--raw"], env=env).stdout.splitlines()
+            for ln in run_goethe([str(goethe), "key", "--create", "t", "--raw"], env=env).stdout.splitlines()
             if ln.startswith("goethe_sk_")
         )
         body = json.dumps({"model": "inst", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4}).encode()

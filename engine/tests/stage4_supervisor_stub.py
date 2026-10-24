@@ -138,7 +138,7 @@ class Sup:
 
     def load(self, mid: str, gpus: str, *extra: str, timeout: float = 300) -> str:
         """Load with --yes (the alien processes on GPU 2 would otherwise exit 3)."""
-        return self.goethe_ok("load", mid, "--gpus", gpus, "--yes", *extra, timeout=timeout)
+        return self.goethe_ok("load", "--model", mid, "--gpus", gpus, "--yes", *extra, timeout=timeout)
 
     def ps(self) -> list[dict[str, Any]]:
         return json.loads(self.goethe_ok("ps", "--json").strip() or "[]")
@@ -183,7 +183,7 @@ def _foreign_scenario(sup: Sup, model_a: Path) -> None:
     try:
         check(wait_gpu_pid(host, foreign.popen.pid, int(FOREIGN_MB * 0.9), timeout=60), "foreign VRAM visible")
         strict = {p for p, _mb in gpu_pids(host)} == {foreign.popen.pid}
-        rr = run([str(sup.goethe), "load", "a", "--gpus", str(host)], env=sup.env, timeout=120)
+        rr = run([str(sup.goethe), "load", "--model", "a", "--gpus", str(host)], env=sup.env, timeout=120)
         text = rr.stderr + rr.stdout
         check(rr.returncode == 3, f"foreign load exit {rr.returncode}, want 3: {text[-300:]}")
         listed = {int(p) for p in re.findall(r"unmanaged process PID (\d+)", text)}
@@ -311,7 +311,8 @@ def _scenarios(
     seed_installed_model(home, "a", "models/org__model_a", 200.0, kv_bytes, 131072, 64, 1)
     on_gpu = {p for p, _mb in gpu_pids(gpu)}
     rr = run(
-        [str(sup.goethe), "load", "a", "--gpus", str(gpu), "--ctx", "131072", "--max-conc", "64", "--yes", "--replica"],
+        [str(sup.goethe), "load", "--model", "a", "--gpus", str(gpu)]
+        + ["--ctx", "131072", "--max-conc", "64", "--yes", "--replica"],
         env=sup.env,
     )
     budget_text = (rr.stderr + rr.stdout).lower()
@@ -331,13 +332,13 @@ def _scenarios(
         kv_elems=kv_bytes, num_attention_heads=8, num_kv_heads=2,
     )
     if clean_test_gpu() is None:
-        rr_auto = run([str(sup.goethe), "load", "auto"], env=sup.env, timeout=120)
+        rr_auto = run([str(sup.goethe), "load", "--model", "auto"], env=sup.env, timeout=120)
         auto_notice = rr_auto.stderr + rr_auto.stdout
         check(rr_auto.returncode == 3 and "unmanaged process PID" in auto_notice,
               f"auto placement onto foreign-hosted GPUs needs confirmation (exit {rr_auto.returncode})")
-    auto_text = sup.goethe_ok("load", "auto", "--yes")
+    auto_text = sup.goethe_ok("load", "--model", "auto", "--yes")
     check("auto:" in auto_text or "tp=" in auto_text, "auto decision message")
-    sup.goethe_ok("unload", "auto")
+    sup.goethe_ok("unload", "--model", "auto")
     avail = roomy_test_gpus(10.0)
     if len(avail) < 2:
         NOT_RUN.append(f"tp=2 scenario (test GPUs with 10 GiB free: {avail})")
@@ -348,9 +349,10 @@ def _scenarios(
         launch = stub_launch(model_auto)
         check(int(launch["parsed"]["tp_size"]) == 2 and len(launch["tp_pids"]) == 1, "stub tp_size 2 with one rank")
         check(sup.count("SELECT COUNT(*) FROM loaded_instances WHERE model_id='auto'") == 1, "one TP instance")
-        sup.goethe_ok("unload", "auto")
+        sup.goethe_ok("unload", "--model", "auto")
         check(not any(pid_alive(p) for p in [launch["pid"], *launch["tp_pids"]]), "TP leader and rank gone")
-    rr_conflict = run([str(sup.goethe), "load", "auto", "--tp", "1", "--gpus", f"{gpu},{gpu}", "--yes"], env=sup.env)
+    conflict = [str(sup.goethe), "load", "--model", "auto", "--tp", "1", "--gpus", f"{gpu},{gpu}", "--yes"]
+    rr_conflict = run(conflict, env=sup.env)
     check(rr_conflict.returncode != 0, "tp gpu conflict rc")
     check("disagrees" in (rr_conflict.stderr + rr_conflict.stdout).lower(), "tp conflict msg")
     _foreign_scenario(sup, model_a)
@@ -381,13 +383,13 @@ def _scenarios(
     check("TERNARY_PACK_DIR" in tenv or "TERNARY_MODEL_DIR" in tenv, "ternary card env")
     check("ternary-kernels" in tenv.get("PYTHONPATH", ""), "ternary PYTHONPATH")
     check("GOETHE_KERNEL_DIR" not in tenv, "ternary no kernel dir")
-    sup.goethe_ok("unload", "t")
+    sup.goethe_ok("unload", "--model", "t")
     sup.load("a", str(gpu), "--", "--chunked-prefill-size", "4096")
     argv = stub_launch(model_a)["argv"]
     check("--chunked-prefill-size" in argv and argv[argv.index("--chunked-prefill-size") + 1] == "4096",
           "load passes SGLang args after -- through")
-    sup.goethe_ok("unload", "a")
-    base = [str(sup.goethe), "load", "a", "--gpus", str(gpu), "--yes", "--no-wait"]
+    sup.goethe_ok("unload", "--model", "a")
+    base = [str(sup.goethe), "load", "--model", "a", "--gpus", str(gpu), "--yes", "--no-wait"]
     for owned in (["--context-length", "4096"], ["--port=31999"], ["--tp", "2"], ["--api-key", "x"]):
         rr_owned = run([*base, "--", *owned], env=sup.env, timeout=60)
         soft(rr_owned.returncode == 2, f"load rejects owned flag {owned[0]} after -- ({rr_owned.returncode})")
@@ -414,25 +416,25 @@ def _scenarios(
     check(isinstance(nxt, int) and t_kill - 1 <= nxt <= time.time() + 60, f"next_attempt_at in ps: {backoff[0]}")
     check(bool(re.search(r"RESTARTING \(attempt \d+, next in \d+s\)", texts[0])), f"ps text backoff: {texts[0][-300:]}")
     check(wait_until(lambda: sup.restarts_at_least("a", 1), timeout=120.0), "watchdog restart count after SIGKILL")
-    sup.goethe_ok("unload", "a")
+    sup.goethe_ok("unload", "--model", "a")
     stub_s = stub_launch(model_a)
     check("TERNARY_PACK_DIR" not in stub_s["env"], "sglang no ternary env")
     check("ternary-kernels" not in stub_s["env"].get("PYTHONPATH", ""), "sglang no ternary pythonpath")
     health_timeout = os.environ.get("GOETHE_HEALTH_POLL_TIMEOUT_SEC")
     if health_timeout and health_timeout.isdigit():
         write_card(model_b, "b", 4096, 4, env={"STUB_START_DELAY": str(float(health_timeout) + 2.0)})
-        run([str(sup.goethe), "load", "b", "--gpus", str(gpu), "--yes"], env=sup.env, timeout=600)
+        run([str(sup.goethe), "load", "--model", "b", "--gpus", str(gpu), "--yes"], env=sup.env, timeout=600)
         q = "SELECT status FROM loaded_instances WHERE model_id='b' ORDER BY rowid DESC LIMIT 1"
         st_row = sqlite_query(sup.db, q)
         check(bool(st_row) and st_row[0][0] == "FAILED", "health timeout FAILED")
-        sup.goethe_ok("unload", "b")
+        sup.goethe_ok("unload", "--model", "b")
         write_card(model_b, "b", 4096, 4, extra='kv_cache_dtype="fp8_e4m3"')
     sup.load("a", str(gpu))
     os.kill(sup.md.popen.pid, signal.SIGTERM)
     sup.md.popen.wait(timeout=30)
     sup.restart()
     check(sup.status_is("a", {"RUNNING", "STARTING"}, timeout=120.0), "goethed SIGTERM restart restores desired load")
-    sup.goethe_ok("unload", "a")
+    sup.goethe_ok("unload", "--model", "a")
     check(sup.count("SELECT COUNT(*) FROM desired_loads WHERE model_id='a'") == 0, "unload clears desired")
     sup.restart()
     time.sleep(2.0)
@@ -456,7 +458,7 @@ def _scenarios(
     check(time.time() - t_ps < 10.0, "ps during load")
     check(wait_until(lambda: (model_a / "stub_launch_argv.json").is_file(), timeout=15), "delayed stub started")
     check(stub_launch(model_a)["knobs"].get("STUB_START_DELAY") == "25", "start delay knob active")
-    sup.goethe_ok("unload", "a", timeout=120)
+    sup.goethe_ok("unload", "--model", "a", timeout=120)
     write_card(model_a, "a", ctx, max_conc)
     _clear_stub_files(model_a, model_b)
     (model_b / "stub_health_mode.txt").write_text("late503", encoding="utf-8")
@@ -467,7 +469,7 @@ def _scenarios(
     check(row_b is not None and row_b.get("status") == "STARTING", "late health stays STARTING")
     check(sup.md.popen.poll() is None, "goethed alive during late startup")
     check(sup.status_is("b", {"RUNNING"}, timeout=90.0), "late health reaches RUNNING")
-    sup.goethe_ok("unload", "b")
+    sup.goethe_ok("unload", "--model", "b")
     (model_b / "stub_health_mode.txt").write_text("warmup", encoding="utf-8")
     (model_b / "stub_health_delay.txt").write_text("12", encoding="utf-8")
     sup.load("b", str(gpu), "--no-wait", timeout=60)
@@ -498,23 +500,24 @@ def _scenarios(
     time.sleep(9.0)
     row_b = next(r for r in sup.ps() if r.get("model_id") == "b")
     check(row_b.get("status") == "RUNNING" and int(row_b.get("restarts", 0)) == 0, "burst503 survives")
-    sup.goethe_ok("unload", "b")
+    sup.goethe_ok("unload", "--model", "b")
     _clear_stub_files(model_b)
     (model_b / "stub_cheap_mode.txt").write_text("503_after", encoding="utf-8")
     sup.load("b", str(gpu))
     t_h = time.time()
     check(wait_until(lambda: sup.restarts_at_least("b", 1), timeout=120.0), "sustained cheap probe restart")
     check(time.time() - t_h >= 25.0, "restart after sustained cheap fail")
-    sup.goethe_ok("unload", "b", timeout=120)
+    sup.goethe_ok("unload", "--model", "b", timeout=120)
     check(sup.md.popen.poll() is None, "goethed alive after hung probe")
     sup.goethe_ok("unload", "--all", timeout=120)
     _clear_stub_files(model_b)
     sup.load("a", str(gpu))
-    again = run([str(sup.goethe), "load", "a", "--gpus", str(gpu), "--yes"], env=sup.env, timeout=120)
+    again = run([str(sup.goethe), "load", "--model", "a", "--gpus", str(gpu), "--yes"], env=sup.env, timeout=120)
     check(again.returncode == 0 and "already loaded:" in again.stdout + again.stderr,
           f"plain re-load exits 0 with already loaded: {again.returncode} {(again.stdout + again.stderr)[-200:]}")
     check(sup.count("SELECT COUNT(*) FROM loaded_instances WHERE model_id='a'") == 1, "plain re-load adds no replica")
-    rr_rep = run([str(sup.goethe), "load", "a", "--gpus", str(gpu), "--yes", "--replica"], env=sup.env, timeout=300)
+    replica = [str(sup.goethe), "load", "--model", "a", "--gpus", str(gpu), "--yes", "--replica"]
+    rr_rep = run(replica, env=sup.env, timeout=300)
     running_a = sum(1 for r in sup.ps() if r.get("model_id") == "a" and r.get("status") == "RUNNING")
     soft(rr_rep.returncode == 0 and running_a == 2, f"--replica adds a second RUNNING instance ({running_a})")
     if running_a == 2:
@@ -527,7 +530,7 @@ def _scenarios(
             ),
             "restore both slots",
         )
-    sup.goethe_ok("unload", "a", timeout=120)
+    sup.goethe_ok("unload", "--model", "a", timeout=120)
     left_inst = sup.count("SELECT COUNT(*) FROM loaded_instances WHERE model_id='a'")
     left_des = sup.count("SELECT COUNT(*) FROM desired_loads WHERE model_id='a'")
     check(left_inst == 0 and left_des == 0, "unload all slots of model")

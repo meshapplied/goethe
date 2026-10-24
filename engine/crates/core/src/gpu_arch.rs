@@ -155,6 +155,15 @@ pub fn supported_text() -> String {
     }
 }
 
+pub fn microarchitectures_text() -> String {
+    // "sm_80 (Ampere data center), sm_86 (Ampere), ..." from the table, for doctor.
+    let names: Vec<String> = SUPPORTED
+        .iter()
+        .map(|a| format!("{} ({})", a.tag(), a.family.split(" (").next().unwrap_or(a.family)))
+        .collect();
+    names.join(", ")
+}
+
 pub fn nvfp4_dual_copy(cc: &str) -> bool {
     // Only the small-batch Marlin path keeps a Marlin weight copy next to the native FP4 weights.
     lookup(cc).is_some_and(|a| a.nvfp4 == Nvfp4Path::MarlinSmall)
@@ -186,6 +195,13 @@ mod tests {
         assert_eq!(lookup("9.0").map(|a| a.nvfp4), Some(Nvfp4Path::MarlinAll));
         assert_eq!(parse_cc("12"), Some((12, 0)));
         assert!(nvfp4_dual_copy("12.0") && !nvfp4_dual_copy("10.0") && !nvfp4_dual_copy("9.0") && !nvfp4_dual_copy("8.6"));
+    }
+
+    #[test]
+    fn doctor_lists_every_microarchitecture_with_its_family() {
+        let text = microarchitectures_text();
+        assert!(text.starts_with("sm_80 (Ampere data center), sm_86 (Ampere), sm_90a (Hopper), sm_100a (Blackwell data center)"), "{text}");
+        assert!(text.ends_with("sm_121a (Blackwell)"), "{text}");
     }
 
     #[test]

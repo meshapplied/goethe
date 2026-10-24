@@ -61,7 +61,7 @@ def main() -> None:
         seed_installed_model(home, "retry", "models/org__retry", 5.0, 1000, 4096, 4, 1)
         md = start_goethed(home)
         env = home_goethe_env(home)
-        load = [str(goethe), "load", "retry", "--gpus", str(gpu), "--yes"]
+        load = [str(goethe), "load", "--model", "retry", "--gpus", str(gpu), "--yes"]
         rr = run(load, env=env, timeout=120)
         if rr.returncode != 0:
             raise RuntimeError(f"load failed: {rr.stderr[-400:]}")
@@ -73,14 +73,14 @@ def main() -> None:
             raise RuntimeError(f"expected one instance row got {n_inst}")
         if _index_lines(home) != 3:
             raise RuntimeError(f"expected 3 spawns in index got {_index_lines(home)}")
-        run_goethe([str(goethe), "unload", "retry"], env=env)
+        run_goethe([str(goethe), "unload", "--model", "retry"], env=env)
         if not wait_until(lambda: not _stubs(home) and not _run_registry(home), timeout=5):
             raise RuntimeError("orphan engine or run registry entry after unload")
         (model / "stub_shortfall_seen.txt").unlink(missing_ok=True)
         if run([*load, "--no-wait"], env=env, timeout=60).returncode != 0:
             raise RuntimeError("no-wait load failed")
         time.sleep(1.0)
-        run_goethe([str(goethe), "unload", "retry"], env=env, timeout=60)
+        run_goethe([str(goethe), "unload", "--model", "retry"], env=env, timeout=60)
         if not wait_until(lambda: not _stubs(home), timeout=5):
             raise RuntimeError("stub survived unload during retry window")
         if not wait_until(lambda: not _run_registry(home), timeout=5):

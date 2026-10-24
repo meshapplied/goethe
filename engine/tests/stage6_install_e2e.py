@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 6 install.sh end-to-end gate: signed CDN into a throwaway home, gateway, in-place upgrade, re-install."""
+"""Stage 6 install.sh end-to-end gate: signed CDN into a throwaway home, goethe up, gateway, upgrade, re-install."""
 
 from __future__ import annotations
 
@@ -55,17 +55,24 @@ _CFG = {
 }
 
 
-def _install(install_sh: Path, env: dict[str, str], late: list[str]) -> tuple[float, str]:
-    """Run install.sh like `curl | bash` would (stdin closed), note a failed recommend; duration and output."""
+def _install(install_sh: Path, env: dict[str, str]) -> tuple[float, str]:
+    """Run install.sh like `curl | bash` would (stdin closed); it must end with Get started; duration and output."""
     t0 = time.time()
     rr = subprocess.run(
         ["bash", str(install_sh)], env=env, capture_output=True, text=True, timeout=1800, stdin=subprocess.DEVNULL
     )
     if rr.returncode != 0 or "Goethe install complete" not in rr.stdout:
         raise RuntimeError(f"install.sh failed rc={rr.returncode}: {(rr.stdout + rr.stderr)[-1500:]}")
-    if "goethe recommend failed" in rr.stdout + rr.stderr:
-        late.append(f"the installer's recommend failed: {rr.stderr[-300:]}")
+    if not rr.stdout.endswith("\nGet started:\n\n\t\u2192 goethe start\n"):
+        raise RuntimeError(f"install.sh must end with Get started and goethe start: {rr.stdout[-300:]}")
     return time.time() - t0, rr.stdout + rr.stderr
+
+
+def _up_after_install(goethe: str, env: dict[str, str]) -> None:
+    """The installer leaves goethed down when it was not running; goethe up then starts it."""
+    if run([goethe, "ps"], env=env, timeout=30).returncode == 0:
+        raise RuntimeError("install.sh started goethed; it must leave that to goethe start or goethe up")
+    run_goethe([goethe, "up"], env=env, timeout=120)
 
 
 def _check_goethe_env(home: Path, goethe: str, env: dict[str, str], pkg_url: str, late: list[str]) -> None:
@@ -227,7 +234,7 @@ def _serve_and_install(cdn: Path, new: Path) -> None:
             env.pop("GOETHE_PYTHON", None)
             env.pop("GOETHE_REGISTRY_URL", None)
             try:
-                timings.append(f"install={_install(cdn / 'install.sh', env, late)[0]:.0f}s")
+                timings.append(f"install={_install(cdn / 'install.sh', env)[0]:.0f}s")
                 prefix = run([str(home / "py-env" / "bin" / "python"), "-c", "import sys; print(sys.prefix)"]).stdout
                 if Path(prefix.strip()).resolve() != (home / "py-env").resolve():
                     raise RuntimeError(f"installer py-env is not a venv in the temp home: {prefix.strip()}")
@@ -242,17 +249,19 @@ def _serve_and_install(cdn: Path, new: Path) -> None:
                 (bin_dir / "python-real").symlink_to(os.readlink(bin_dir / "python"))
                 write_stub_python(bin_dir, bin_dir / "python-real")
                 goethe = str(home / "bin" / "goethe")
+                _up_after_install(goethe, env)
                 _check_goethe_env(home, goethe, env, pkg_url, late)
                 _check_ternary(home, goethe, env, cdn, late)
                 src = home / "src-model"
                 src.mkdir()
                 (src / "config.json").write_text(json.dumps(_CFG), encoding="utf-8")
                 (src / "model.safetensors").write_bytes(b"x" * 256)
-                run_goethe([goethe, "install", str(src), "--name", "e2e/tiny", "--no-load"], env=env, timeout=120)
-                run_goethe([goethe, "load", "e2e/tiny", "--gpus", str(gpu), "--yes"], env=env, timeout=300)
-                out = run_goethe([goethe, "key", "create", "--name", "e2e", "--raw"], env=env).stdout
+                install = [goethe, "install", "--model", str(src), "--name", "e2e/tiny", "--no-load"]
+                run_goethe(install, env=env, timeout=120)
+                run_goethe([goethe, "load", "--model", "e2e/tiny", "--gpus", str(gpu), "--yes"], env=env, timeout=300)
+                out = run_goethe([goethe, "key", "--create", "e2e", "--raw"], env=env).stdout
                 token = next(ln for ln in out.splitlines() if ln.startswith("goethe_sk_"))
-                run_goethe([goethe, "allowlist", "add", "127.0.0.1/32"], env=env)
+                run_goethe([goethe, "allowlist", "--add", "127.0.0.1/32"], env=env)
                 base = f"https://127.0.0.1:{test_public_port(home)}"
                 auth = {"Authorization": f"Bearer {token}"}
                 if not wait_until(lambda: http_get(f"{base}/v1/models", headers=auth)[0] == 200, timeout=20):
@@ -264,7 +273,7 @@ def _serve_and_install(cdn: Path, new: Path) -> None:
                     raise RuntimeError(f"completion through the gateway failed: code={code} body={reply[:200]!r}")
                 before = _engine(home)
                 env = {**env, "GOETHE_PKG_URL": f"http://127.0.0.1:{port}/{new.name}"}
-                secs, out = _install(new / "install.sh", env, late)
+                secs, out = _install(new / "install.sh", env)
                 timings.append(f"upgrade={secs:.0f}s")
                 _check_upgrade(home, new, out, before, late)
                 if not wait_until(lambda: _chat_ok(base, body, auth), timeout=90):
@@ -274,7 +283,8 @@ def _serve_and_install(cdn: Path, new: Path) -> None:
                 (home / "nginx" / "mux_port").unlink(missing_ok=True)
                 busy = _port_busy(30000)
                 reinstall_env = {k: v for k, v in env.items() if k not in ("GOETHE_MUX_PORT", "GOETHE_SOCK")}
-                timings.append(f"reinstall={_install(new / 'install.sh', reinstall_env, late)[0]:.0f}s")
+                timings.append(f"reinstall={_install(new / 'install.sh', reinstall_env)[0]:.0f}s")
+                _up_after_install(goethe, reinstall_env)
                 mux = int((home / "nginx" / "mux_port").read_text(encoding="utf-8").strip())
                 if (busy and not 30100 <= mux <= 30199) or (not busy and mux != 30000):
                     raise RuntimeError(f"mux port {mux} after re-install (30000 busy={busy})")

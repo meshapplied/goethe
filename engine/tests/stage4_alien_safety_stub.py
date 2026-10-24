@@ -112,7 +112,7 @@ def main() -> None:
             md = start_goethed(home)
             seed_installed_model(home, "alien-stub", str(model.relative_to(home)), 1.0, 1000, 4096, 4, 1)
             env = home_goethe_env(home)
-            rr = run([str(goethe), "load", "alien-stub", "--gpus", str(gpu)], env=env, input_text="")
+            rr = run([str(goethe), "load", "--model", "alien-stub", "--gpus", str(gpu)], env=env, input_text="")
             text = rr.stdout + rr.stderr
             check(rr.returncode == 3, f"load without --yes must exit 3, got {rr.returncode}: {text[-400:]}")
             check(f"unmanaged process PID {apid}" in text, f"notice names the alien pid: {text[-400:]}")
@@ -121,15 +121,16 @@ def main() -> None:
             foreign = reply.get("result", {}).get("foreign", []) if isinstance(reply.get("result"), dict) else []
             check(reply.get("code") == 3 and any(f.get("pid") == apid for f in foreign), f"rpc foreign: {reply}")
             check(pid_alive(apid), "alien alive after the notice")
-            run_goethe([str(goethe), "load", "alien-stub", "--gpus", str(gpu), "--yes"], env=env, timeout=120)
-            run_goethe([str(goethe), "unload", "alien-stub"], env=env, timeout=60)
+            load = [str(goethe), "load", "--model", "alien-stub", "--gpus", str(gpu), "--yes"]
+            run_goethe(load, env=env, timeout=120)
+            run_goethe([str(goethe), "unload", "--model", "alien-stub"], env=env, timeout=60)
             check(pid_alive(apid), "alien survives unload")
             _seed_stale_row(home, gpu, "inst-ghost-watchdog", apid, free_port(), "RUNNING")
             tomb = [("inst-ghost-watchdog", "FAILED", 0)]
             check(wait_until(lambda: _ghost_rows(home) == tomb, timeout=30.0), "watchdog tombstones an unverified row")
             check(pid_alive(apid), "alien survives the watchdog")
             _seed_stale_row(home, gpu, "inst-ghost-unload", apid, free_port(), "STARTING")
-            run_goethe([str(goethe), "unload", "ghost"], env=env, timeout=60)
+            run_goethe([str(goethe), "unload", "--model", "ghost"], env=env, timeout=60)
             check(not _ghost_rows(home) and pid_alive(apid), "alien survives unload of a row holding its pid")
             _seed_stale_row(home, gpu, "inst-ghost-stop", apid, free_port(), "STARTING")
             rr_stop = run_goethe([str(goethe), "down"], env=env, timeout=60)

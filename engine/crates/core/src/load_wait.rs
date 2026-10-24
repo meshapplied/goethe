@@ -96,7 +96,7 @@ pub fn failure_report(home: &std::path::Path, instance_id: &str) -> String {
         out.push("  engine log:".to_string());
         out.extend(picked.into_iter().map(|l| format!("    {}", l.trim_end())));
     }
-    out.push(format!("full engine log: goethe logs {instance_id} -n 200"));
+    out.push(format!("full engine log: goethe logs --model {instance_id} -n 200"));
     out.join("\n")
 }
 
@@ -115,7 +115,7 @@ mod tests {
         assert!(r.contains("goethed: watchdog instance=inst-x reason=process exited"), "{r}");
         assert!(r.contains("RuntimeError: CUDA error: no kernel image"), "{r}");
         assert!(!r.contains("other line") && !r.contains("    loading"), "{r}");
-        assert!(r.ends_with("goethe logs inst-x -n 200"));
+        assert!(r.ends_with("goethe logs --model inst-x -n 200"));
         let none = failure_report(td.path(), "inst-missing");
         assert!(none.starts_with("the engine failed to start (instance inst-missing)"));
     }
