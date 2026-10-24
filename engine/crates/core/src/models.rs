@@ -30,7 +30,6 @@ struct Installed {
     id: String,
     input: ChooserInput,
     default_tp: i64,
-    marlin_gb: Option<f64>,
 }
 
 const LIVE: &str = "status NOT IN ('FAILED', 'CANCELLED')";
@@ -49,7 +48,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
             let pinned = (m.default_tp > 0).then_some(m.default_tp as usize);
             let (status, fit) = match loaded.get(&m.id) {
                 Some(live) => loaded_state(live),
-                None => ("installed".to_string(), fit_label(view.as_ref(), &m.id, &m.input, pinned, m.marlin_gb)),
+                None => ("installed".to_string(), fit_label(view.as_ref(), &m.id, &m.input, pinned)),
             };
             rows.push(ModelRow {
                 id: m.id.clone(),
@@ -74,7 +73,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 status: if m.manual_download_reason().is_some() { "manual download" } else { "available" }.to_string(),
                 gb: m.download_gb.unwrap_or(m.static_vram_gb),
                 fit: if sm_ok {
-                    fit_label(view.as_ref(), &m.id, &registry_input(m), pinned, None)
+                    fit_label(view.as_ref(), &m.id, &registry_input(m), pinned)
                 } else {
                     "unsupported SM".to_string()
                 },
@@ -157,12 +156,12 @@ fn fit_colored(fit: &str) -> String {
     fit.to_string()
 }
 
-fn fit_label(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<usize>, marlin_gb: Option<f64>) -> String {
+fn fit_label(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<usize>) -> String {
     // What goethe load would do with this model now, in the daemon's budget wording.
     let Some(view) = view else {
         return "unknown (run goethe hw profile)".to_string();
     };
-    match view.fit(id, input, pinned, marlin_gb) {
+    match view.fit(id, input, pinned) {
         Ok(f) => format!("fits: {}", f.describe(input)),
         Err(why) => format!("does not fit: {why}"),
     }
@@ -184,11 +183,9 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
             let max_ctx = r.get::<_, Option<i64>>(6)?.unwrap_or(default_ctx).max(1) as u64;
             let card = card_value(&home.join(r.get::<_, String>(11)?));
             let elems = r.get::<_, Option<i64>>(10)?.unwrap_or(kv_bytes).max(0) as u64;
-            let marlin_off = card.get("env").and_then(|e| e.get("GOETHE_MARLIN")).and_then(|v| v.as_str()) == Some("0");
             Ok(Installed {
                 id: r.get(0)?,
                 default_tp: r.get(5)?,
-                marlin_gb: card.get("marlin_extra_gb").and_then(|v| v.as_float()).filter(|_| !marlin_off),
                 input: ChooserInput {
                     static_vram_gb: r.get(1)?,
                     kv_bytes_per_token: card_kv_bytes(&card, elems, kv_bytes.max(0) as u64).max(1),
@@ -198,6 +195,8 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
                     max_ctx,
                     ctx: (default_ctx.max(1) as u64).min(max_ctx),
                     max_conc: r.get::<_, i64>(4)?.max(1) as u64,
+                    marlin_extra_gb: install::card_marlin_extra_gb(&card),
+                    supported_sm: install::card_supported_sm(&card),
                 },
             })
         })
@@ -205,14 +204,14 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
-pub fn fit_input(home: &Path, model_id: &str) -> Result<(ChooserInput, Option<usize>, Option<f64>), String> {
-    // Budget inputs of one installed model (with its card tp and Marlin extra), as goethe models computes them.
+pub fn fit_input(home: &Path, model_id: &str) -> Result<(ChooserInput, Option<usize>), String> {
+    // Budget inputs of one installed model (with its card tp), as goethe models computes them.
     let con = db::open(home).map_err(|e| e.to_string())?;
     let m = installed_rows(home, &con)?
         .into_iter()
         .find(|m| m.id == model_id)
         .ok_or_else(|| format!("{model_id} is not installed (goethe models --installed lists installed models)"))?;
-    Ok((m.input, (m.default_tp > 0).then_some(m.default_tp as usize), m.marlin_gb))
+    Ok((m.input, (m.default_tp > 0).then_some(m.default_tp as usize)))
 }
 
 fn card_value(dir: &Path) -> toml::Value {

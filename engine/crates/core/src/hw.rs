@@ -64,7 +64,7 @@ pub struct LinkState {
 pub fn profile(home: &Path) -> Result<HardwareState, String> {
     // Probe every GPU and pair over NVML, then add the host and runtime environment.
     ensure_layout(home).map_err(|e| format!("layout: {e}"))?;
-    let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
+    let nvml = crate::nvidia_driver::nvml()?;
     let driver = nvml.sys_driver_version().map_err(|e| format!("driver version: {e}"))?;
     let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
     let mut gpus = Vec::new();
@@ -111,8 +111,8 @@ pub fn run_pick_gpus(tp: Option<u64>, model: Option<&str>) -> Result<(), String>
     let pinned = tp.map(|t| t.max(1) as usize);
     let (what, fit) = match model {
         Some(id) => {
-            let (input, card_tp, marlin) = crate::models::fit_input(&home, id)?;
-            let fit = view.fit(id, &input, pinned.or(card_tp), marlin);
+            let (input, card_tp) = crate::models::fit_input(&home, id)?;
+            let fit = view.fit(id, &input, pinned.or(card_tp));
             (format!("{id} "), fit.map(|f| (f.describe(&input), f.gpus)))
         }
         None => {
@@ -126,8 +126,10 @@ pub fn run_pick_gpus(tp: Option<u64>, model: Option<&str>) -> Result<(), String>
                 max_ctx: 1,
                 ctx: 1,
                 max_conc: 1,
+                marlin_extra_gb: 0.0,
+                supported_sm: Vec::new(),
             };
-            let fit = view.fit("", &empty, Some(t), None);
+            let fit = view.fit("", &empty, Some(t));
             (String::new(), fit.map(|f| (format!("tp={} on GPU {}", f.tp, crate::placement::format_gpu_list(&f.gpus)), f.gpus)))
         }
     };
@@ -240,7 +242,7 @@ pub struct GpuPlacementSnapshot {
 
 pub fn list_gpus_for_placement(managed: &HashSet<i32>) -> Result<Vec<GpuPlacementSnapshot>, String> {
     // Free memory (after the unified-memory reserve) and foreign-process presence per GPU.
-    let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
+    let nvml = crate::nvidia_driver::nvml()?;
     let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
     let mut out = Vec::new();
     for idx in 0..count {
@@ -269,7 +271,7 @@ pub struct LiveGpu {
 
 pub fn live_gpus() -> Result<Vec<LiveGpu>, String> {
     // Live free VRAM (after the unified-memory reserve), uuid and process ids per GPU.
-    let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
+    let nvml = crate::nvidia_driver::nvml()?;
     let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
     let mut out = Vec::new();
     for index in 0..count {
@@ -294,14 +296,14 @@ pub fn live_gpus() -> Result<Vec<LiveGpu>, String> {
 }
 
 pub fn gpu_used_mb_live(gpu_index: u32) -> Result<u64, String> {
-    let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
+    let nvml = crate::nvidia_driver::nvml()?;
     let dev = nvml.device_by_index(gpu_index).map_err(|e| format!("device {gpu_index}: {e}"))?;
     Ok(device_memory(&dev)?.1)
 }
 
 pub fn managed_vram_listed_mb(gpu_index: u32, managed: &HashSet<i32>) -> Result<u64, String> {
     // VRAM NVML attributes to goethe-managed PIDs on one GPU.
-    let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
+    let nvml = crate::nvidia_driver::nvml()?;
     let dev = nvml.device_by_index(gpu_index).map_err(|e| format!("device {gpu_index}: {e}"))?;
     let mut sum = 0u64;
     for procs in [dev.running_compute_processes(), dev.running_graphics_processes()] {
@@ -321,14 +323,14 @@ pub fn managed_vram_listed_mb(gpu_index: u32, managed: &HashSet<i32>) -> Result<
 }
 
 pub fn gpu_free_mb_live(gpu_index: u32) -> Result<u64, String> {
-    let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
+    let nvml = crate::nvidia_driver::nvml()?;
     let dev = nvml.device_by_index(gpu_index).map_err(|e| format!("device {gpu_index}: {e}"))?;
     let (_, _, free, unified) = device_memory(&dev)?;
     Ok(if unified { free.saturating_sub(UNIFIED_OS_RESERVE_GB * 1024) } else { free })
 }
 
 pub fn refresh_gpu_vram(gpu_index: u32) -> Result<(u64, u64, u64, Vec<RunningProcess>), String> {
-    let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
+    let nvml = crate::nvidia_driver::nvml()?;
     let dev = nvml.device_by_index(gpu_index).map_err(|e| format!("device {gpu_index}: {e}"))?;
     let (total, used, free, unified) = device_memory(&dev)?;
     Ok((total, used, free, compute_processes(&dev, unified)?))

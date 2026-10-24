@@ -94,6 +94,7 @@ impl View {
                 };
                 GpuPlacementInput {
                     index: g.index,
+                    cc: g.compute_capability.clone(),
                     foreign_process: pids.iter().any(|p| !crate::foreign::is_ours(*p, &managed, &live)),
                     free_vram_mb: free_mb,
                 }
@@ -102,14 +103,13 @@ impl View {
         View { hw, gpus, con }
     }
 
-    pub fn fit(&self, model_id: &str, input: &ChooserInput, pinned_tp: Option<usize>, marlin_gb: Option<f64>) -> Result<Fit, String> {
+    pub fn fit(&self, model_id: &str, input: &ChooserInput, pinned_tp: Option<usize>) -> Result<Fit, String> {
         // The plan goethe load would pick (shrinking ctx, then concurrency) and its budget with learned figures.
         let plan = chooser::pick_load_plan(input, &self.gpus, Some(&self.hw), pinned_tp, None).map_err(|e| e.message)?;
         let mut trial = input.clone();
         trial.ctx = plan.ctx;
         trial.max_conc = plan.max_conc;
-        trial.static_vram_gb = calc::static_weight_gb(input.static_vram_gb, marlin_gb, self.marlin_applies(&plan.gpus));
-        let base = chooser::need(&trial, plan.tp);
+        let base = chooser::need(&trial, plan.tp, &plan.cc);
         let learned = self.con.as_ref().map(|c| {
             crate::engine_overhead::read_learned(c, model_id, &self.gpu_name(plan.gpus[0]), plan.tp as u64)
         });
@@ -131,16 +131,6 @@ impl View {
     fn gpu_name(&self, idx: u32) -> String {
         self.hw.gpus.iter().find(|g| g.index == idx).map_or_else(|| "gpu".to_string(), |g| g.name.clone())
     }
-
-    fn marlin_applies(&self, gpus: &[u32]) -> bool {
-        // The Marlin weight copy exists on compute capability 10 and newer unless GOETHE_MARLIN=0.
-        std::env::var("GOETHE_MARLIN").as_deref() != Ok("0")
-            && gpus.iter().any(|g| {
-                self.hw.gpus.iter().find(|x| x.index == *g).is_some_and(|x| {
-                    x.compute_capability.split('.').next().and_then(|m| m.parse::<u32>().ok()).unwrap_or(0) >= 10
-                })
-            })
-    }
 }
 
 fn file_free_mb(g: &GpuState) -> u64 {
@@ -161,10 +151,16 @@ pub fn run(json_out: bool) -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
         return Ok(());
     }
-    let mut table = crate::term::Table::new(&["MODEL", "SIZE"]);
+    let mut table = crate::term::Table::new(&["MODEL", "GPUS", "VRAM PER GPU", "CTX", "DOWNLOAD"]);
     for item in &out.recommended {
-        let gb = reg.models.iter().find(|m| m.id == item.model_id).map(|m| m.download_gb.unwrap_or(m.static_vram_gb));
-        table.row(vec![item.model_id.clone(), gb.map_or("?".to_string(), |g| format!("{g:.1} GB"))]);
+        let download = reg.models.iter().find(|m| m.id == item.model_id).and_then(|m| m.download_gb);
+        table.row(vec![
+            item.model_id.clone(),
+            format_gpu_list(&item.gpus),
+            format!("{:.1} GB", item.vram_per_gpu_gb),
+            item.ctx.to_string(),
+            download.map_or_else(|| "-".to_string(), |g| format!("{g:.1} GB")),
+        ]);
     }
     if table.is_empty() {
         println!("no catalog model fits the free GPU memory right now (goethe models shows why)");
@@ -187,7 +183,7 @@ pub fn recommend(view: &View, reg: &Registry) -> RecommendOutput {
         }
         let input = registry_input(model);
         let pinned = model.default_tp.filter(|t| *t > 0).map(|t| t as usize);
-        let fit = view.fit(&model.id, &input, pinned, None);
+        let fit = view.fit(&model.id, &input, pinned);
         if let Some(reason) = model.manual_download_reason() {
             let fit = match &fit {
                 Ok(f) => format!("fits: {}", f.describe(&input)),
@@ -243,6 +239,8 @@ pub fn registry_input(m: &RegistryModel) -> ChooserInput {
         max_ctx,
         ctx: m.default_ctx.unwrap_or(max_ctx.min(131072)).min(max_ctx),
         max_conc: m.default_max_conc.unwrap_or(8),
+        marlin_extra_gb: 0.0,
+        supported_sm: m.supported_sm.clone(),
     }
 }
 
@@ -289,11 +287,11 @@ mod tests {
         let m = entry("nvidia/Llama-3.1-8B-Instruct-NVFP4", serde_json::json!({}));
         let input = registry_input(&m);
         assert_eq!(input.ctx, 131072);
-        let f = v.fit(&m.id, &input, None, None).expect("an 8B model fits a 20 GB GPU at a reduced context");
+        let f = v.fit(&m.id, &input, None).expect("an 8B model fits a 20 GB GPU at a reduced context");
         assert_eq!((f.tp, f.gpus.clone()), (1, vec![2]));
         assert!(f.ctx < 131072, "ctx {}", f.ctx);
         assert!(f.describe(&input).contains("(reduced to fit)"), "{}", f.describe(&input));
-        let full = view(vec![gpu(2, 2, true)]).fit(&m.id, &input, None, None).unwrap_err();
+        let full = view(vec![gpu(2, 2, true)]).fit(&m.id, &input, None).unwrap_err();
         assert!(full.contains("missing"), "{full}");
     }
 

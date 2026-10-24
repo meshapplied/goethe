@@ -53,21 +53,23 @@ curl -k https://127.0.0.1:8443/v1/chat/completions \
 - Linux on x86_64 or ARM64, with glibc 2.30 or newer: Ubuntu 20.04+, Debian 11+ and similar.
 - A [supported NVIDIA GPU](#hardware) with driver **580 or newer**. Check with `nvidia-smi`.
 - `curl`, `zstd` and `openssl`. Most systems have them; on Ubuntu run `sudo apt-get install -y curl zstd openssl`.
-- The **CUDA 13.0 toolkit**. The first time you load a model, Goethe builds GPU kernels for your card, and that needs the CUDA compiler.
 - Disk space for your models, plus about 10 GB for Goethe itself.
 
-### Install the CUDA 13.0 toolkit
+### If the GPU driver is missing
 
-On Ubuntu 24.04 (for 22.04, replace `ubuntu2404` with `ubuntu2204`):
+Goethe brings its own CUDA compiler, so you do not install the CUDA toolkit. It needs only the NVIDIA driver 580 or newer.
 
-```bash
-wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-sudo dpkg -i cuda-keyring_1.1-1_all.deb
-sudo apt-get update
-sudo apt-get install -y cuda-toolkit-13-0
-```
+The installer checks the driver first. If it is there and new enough, nothing happens. If a GPU has no driver, or the driver is older than 580, the installer says so and asks whether to install it. It uses `ubuntu-drivers` on Ubuntu and NVIDIA's CUDA repository on Debian and on RHEL, Rocky, AlmaLinux and Fedora, with `sudo` when you are not root. It then loads the driver, or tells you to reboot. Set `GOETHE_INSTALL_DRIVER=1` to install without asking, or `GOETHE_INSTALL_DRIVER=0` to never install. Inside a container it never installs, because the driver belongs on the host.
 
-If `which -a nvcc` shows an older compiler, typically `/usr/bin/nvcc` from Ubuntu's `nvidia-cuda-toolkit` package, remove it so that CUDA 13.0 is used: `sudo apt-get remove -y nvidia-cuda-toolkit`.
+On a machine where Goethe is already installed, run `goethe doctor`. If the driver is not usable, its hardware line names the cause and the fix:
+
+| What `goethe doctor` finds | Fix it names |
+|---|---|
+| No NVIDIA GPU visible | Attach the GPU to the VM (PCI passthrough or vGPU), or start the container with `--gpus all` |
+| A GPU but no driver loaded | The driver package for your distribution, for example `sudo ubuntu-drivers install --gpgpu nvidia:580-server-open`, then a reboot |
+| A driver older than 580 | The same, to update it |
+| A driver but no `/dev/nvidia*` | Pass the devices into the container, or `sudo nvidia-modprobe -u -c=0` on the host |
+| A driver but no `libcuda.so.1` or `libnvidia-ml.so.1` | The NVIDIA Container Toolkit for containers, or the matching user-space driver (`libnvidia-compute-<version>`) |
 
 ### Install Goethe
 
@@ -392,15 +394,23 @@ Models that were loaded when Goethe stopped come back by themselves when it star
 
 | GPU family | Examples | Compute capability | Status |
 |---|---|---|---|
-| Blackwell (consumer and workstation) | GeForce RTX 5090, RTX PRO 6000 Blackwell | 12.0 | Supported and tested |
-| Blackwell (DGX Spark) | GB10 | 12.1 | Supported |
-| Ampere | GeForce RTX 3090, RTX A6000 | 8.6 | Supported |
+| GPU family | Examples | Compute capability | NVFP4 path | Status |
+|---|---|---|---|---|
+| Blackwell (consumer and workstation) | GeForce RTX 5090, RTX PRO 6000 Blackwell | 12.0 | Native FP4 plus Marlin for small batches | Supported and tested |
+| Blackwell (DGX Spark) | GB10 | 12.1 | Native FP4 plus Marlin for small batches | Supported |
+| Blackwell data center | B100, B200, GB200 | 10.0 | Native FP4 | Supported |
+| Blackwell Ultra data center | B300, GB300 | 10.3 | Native FP4 | Supported |
+| Hopper | H100, H200, GH200 | 9.0 | Marlin (4-bit weights, 16-bit math) | Supported |
+| Ampere | GeForce RTX 3090, RTX A6000, A40, A10 | 8.6 | Marlin (4-bit weights, 16-bit math) | Supported |
+| Ampere data center | A100, A30 | 8.0 | Marlin (4-bit weights, 16-bit math) | Supported |
 
 - **Several GPUs:** a model can be split across several GPUs in one machine (`--tp`), and mixture-of-experts models can also use expert parallelism (`--ep`).
-- **Operating system:** Linux on x86_64 or ARM64 with glibc 2.30 or newer, NVIDIA driver 580 or newer and the CUDA 13.0 toolkit.
+- **Mixed GPUs:** one machine can hold GPUs of different architectures, for example two RTX PRO 6000 and an H100. Each model loads on GPUs it runs on, and a model split across GPUs always uses GPUs of one architecture; `goethe load --gpus` refuses a set that mixes them. Kernels that SGLang builds on first use are compiled for each architecture separately (`sm_80`, `sm_86`, `sm_90a`, `sm_100a`, `sm_103a`, `sm_120a`, `sm_121a`) and cached under `$GOETHE_HOME/cache/jit/<target>`. `goethe doctor` lists the architectures it finds.
+- **Catalog models:** a model validated on Ampere (8.6) also runs on A100 (8.0) and Hopper (9.0), which take the same NVFP4 path with more shared memory; a model validated on consumer Blackwell (12.x) also runs on data-center Blackwell (10.x).
+- **Operating system:** Linux on x86_64 or ARM64 with glibc 2.30 or newer, and NVIDIA driver 580 or newer. Goethe brings its own CUDA compiler.
 - **Where it runs:** bare metal, virtual machines and containers (Docker, Podman, Kubernetes, LXC). Cloud GPU providers are detected automatically: RunPod, Vast.ai, Lambda, AWS, Google Cloud, Azure, Oracle Cloud, CoreWeave and Paperspace.
 
-Other NVIDIA GPUs, such as the H100 (9.0), A100 (8.0), L40S or RTX 4090 (8.9), are not supported by this version.
+Other NVIDIA GPUs, such as the L40S or RTX 4090 (8.9) and anything older than Ampere, are not supported by this version.
 
 ### Model families
 
@@ -530,7 +540,7 @@ Most people never need these. Set them in your shell, or in `goethe.env` inside 
 **`model ... is not installed; did you mean ...?`** Use the id from `goethe models`.
 
 **A load fails.** Goethe prints the reason and the end of the model's log. For the full log, run `goethe logs <model> -n 200`. Common causes:
-- **`NVCC version must be at least 12.9`, or a CUDA compiler error:** install the [CUDA 13.0 toolkit](#install-the-cuda-130-toolkit) and remove older CUDA compilers. Then run `rm -rf ~/.cache/sglang/.cache/flashinfer` and load again.
+- **`NVCC version must be at least 12.9`, or a CUDA compiler error:** Goethe gives each engine its own CUDA compiler unless `CUDA_HOME` or `CUDA_PATH` is set in goethed's environment or in the model card. Remove that setting so the bundled compiler is used, then run `rm -rf ~/.cache/sglang/.cache/flashinfer` and load again.
 - **Not enough GPU memory:** use a smaller context (`--ctx`), fewer parallel requests (`--max-conc`), more GPUs (`--tp 2`), or a quantized version of the model.
 - **The model needs its own code:** reinstall it with `--trust-remote-code`.
 

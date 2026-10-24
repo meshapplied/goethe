@@ -18,7 +18,7 @@
 +
 +
 +def mode() -> str:
-+    """Return marlin_all (Ampere), marlin_small (consumer Blackwell 12.x) or stock (data-center Blackwell 10.x, or off)."""
++    """Return marlin_all (Ampere and Hopper, below 10.0), marlin_small (consumer Blackwell 12.x) or stock (data-center Blackwell 10.x, or off)."""
 +    if _marlin_disabled():
 +        return "stock"
 +    if os.environ.get("GOETHE_FORCE_PATH", "").strip().lower() == "w4a16":

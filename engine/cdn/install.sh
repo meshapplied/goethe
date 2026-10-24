@@ -7,6 +7,7 @@ GOETHE_RELEASE_PUB_PEM='__GOETHE_RELEASE_PUB_PEM__'
 DEFAULT_PKG_URL="https://pkg.meshapplied.com"
 DRIVER_MIN=580
 GLIBC_MIN=2.30
+DRIVER_REBOOT=0
 
 default_home() {
   # /workspace/.goethe (RunPod, Vast), else /var/lib/goethe for root or when writable, else ~/.goethe.
@@ -98,27 +99,155 @@ check_glibc() {
   fi
 }
 
-check_nvidia_driver() {
-  # torch cu130 in the py-env needs a CUDA 13 driver (580+) whenever a GPU driver is present.
-  local ver major
-  if ! command -v nvidia-smi >/dev/null 2>&1; then
-    if [[ "${GOETHE_REQUIRE_GPU:-}" == "1" ]]; then
-      echo "nvidia-smi not found (GOETHE_REQUIRE_GPU=1)" >&2
-      exit 1
+driver_version() {
+  # Loaded NVIDIA driver version from nvidia-smi, else from the kernel module; empty when none is usable.
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | awk 'NR == 1 {print $1}' || true
+  else
+    sed -n 's/^NVRM version:.*  \([0-9][0-9.]*\)  .*/\1/p' "${GOETHE_NVIDIA_VERSION_FILE:-/proc/driver/nvidia/version}" 2>/dev/null || true
+  fi
+}
+
+nvidia_pci_gpus() {
+  # Number of NVIDIA display or 3D controllers on the PCI bus.
+  local d vendor class n=0
+  for d in "${GOETHE_PCI_DIR:-/sys/bus/pci/devices}"/*; do
+    vendor="" class=""
+    read -r vendor <"${d}/vendor" 2>/dev/null || true
+    read -r class <"${d}/class" 2>/dev/null || true
+    [[ "${vendor}" == "0x10de" && "${class}" == 0x03* ]] && n=$((n + 1))
+  done
+  echo "${n}"
+}
+
+in_container() {
+  [[ -n "${container:-}" || -e /.dockerenv || -e /run/.containerenv ]]
+}
+
+os_field() {
+  # One field of os-release, unquoted.
+  sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" "${GOETHE_OS_RELEASE:-/etc/os-release}" 2>/dev/null | head -n 1
+}
+
+driver_install_steps() {
+  # Install the open NVIDIA driver 580+ with the distribution's tools or NVIDIA's CUDA repository; $1 is "" or sudo.
+  local sudo="$1" id like ver repo_arch tag
+  id="$(os_field ID)"
+  like="$(os_field ID_LIKE)"
+  ver="$(os_field VERSION_ID)"
+  repo_arch="x86_64"
+  [[ "${ARCH:-$(uname -m)}" == "aarch64" ]] && repo_arch="sbsa"
+  case " ${id} ${like} " in
+    *" ubuntu "*)
+      ${sudo} apt-get update -qq
+      ${sudo} env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ubuntu-drivers-common || true
+      if ${sudo} timeout 900 ubuntu-drivers install --gpgpu "nvidia:${DRIVER_MIN}-server-open"; then
+        return 0
+      fi
+      if ${sudo} env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "nvidia-driver-${DRIVER_MIN}-server-open"; then
+        return 0
+      fi
+      tag="ubuntu${ver//./}"
+      ;;
+    *" debian "*)
+      ${sudo} apt-get update -qq
+      ${sudo} env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "linux-headers-$(uname -r)" || true
+      tag="debian${ver%%.*}"
+      ;;
+    *" rhel "* | *" centos "* | *" fedora "*)
+      [[ "${id}" == "fedora" ]] && tag="fedora${ver%%.*}" || tag="rhel${ver%%.*}"
+      ${sudo} dnf -y install dnf-plugins-core "kernel-devel-$(uname -r)" kernel-headers || true
+      [[ "${id}" == "fedora" ]] || ${sudo} dnf -y install epel-release || true
+      ${sudo} dnf config-manager --add-repo \
+        "https://developer.download.nvidia.com/compute/cuda/repos/${tag}/${repo_arch}/cuda-${tag}.repo"
+      ${sudo} dnf -y install nvidia-open || ${sudo} dnf -y module install nvidia-driver:open-dkms
+      return
+      ;;
+    *)
+      echo "no automatic driver install for ${id:-this distribution}" >&2
+      return 1
+      ;;
+  esac
+  local keyring
+  keyring="$(mktemp)"
+  curl -fsSL -o "${keyring}" "https://developer.download.nvidia.com/compute/cuda/repos/${tag}/${repo_arch}/cuda-keyring_1.1-1_all.deb"
+  ${sudo} dpkg -i "${keyring}"
+  rm -f "${keyring}"
+  ${sudo} apt-get update -qq
+  ${sudo} env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nvidia-open
+}
+
+offer_driver_install() {
+  # Offer, then run, the driver install for a GPU without a usable driver; true when it ran, DRIVER_REBOOT=1 if needed.
+  local why="$1" choice="${GOETHE_INSTALL_DRIVER:-ask}" sudo="" answer
+  if in_container; then
+    echo "${why}; this is a container, so install the NVIDIA driver ${DRIVER_MIN}+ on the host and start the container with --gpus all" >&2
+    return 1
+  fi
+  if [[ "$(id -u)" -ne 0 ]]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+      echo "${why}; install the NVIDIA driver ${DRIVER_MIN}+ as root (rerun this installer as root to have it done)" >&2
+      return 1
     fi
-    echo "WARNING: nvidia-smi not found; GPU workloads need an NVIDIA driver ${DRIVER_MIN}+" >&2
-    return 0
+    sudo="sudo"
   fi
-  ver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | awk 'NR == 1 {print $1}' || true)"
-  if [[ -z "${ver}" ]]; then
-    echo "WARNING: could not read NVIDIA driver version from nvidia-smi" >&2
-    return 0
+  case "${choice}" in
+    0 | no) echo "${why}; skipping the driver install (GOETHE_INSTALL_DRIVER=0)" >&2; return 1 ;;
+    1 | yes) ;;
+    *)
+      if ! { : </dev/tty >/dev/tty; } 2>/dev/null; then
+        echo "${why}; rerun with GOETHE_INSTALL_DRIVER=1 to install the NVIDIA driver ${DRIVER_MIN}+ ($(os_field ID) packages)" >&2
+        return 1
+      fi
+      printf '%s.\nInstall the NVIDIA driver %s+ now with %s packages (needs %s, may need a reboot)? [Y/n] ' \
+        "${why}" "${DRIVER_MIN}" "$(os_field ID)" "${sudo:-root}" >/dev/tty
+      read -r answer </dev/tty || answer="n"
+      [[ -z "${answer}" || "${answer}" == [Yy]* ]] || return 1
+      ;;
+  esac
+  if mokutil --sb-state 2>/dev/null | grep -qi enabled; then
+    echo "Secure Boot is on: if the driver module is built locally, set the MOK password it asks for and enroll it at the next boot" >&2
   fi
+  if ! driver_install_steps "${sudo}"; then
+    echo "WARNING: the NVIDIA driver install failed; goethe doctor names the manual fix" >&2
+    return 1
+  fi
+  ${sudo} modprobe nvidia 2>/dev/null || true
+  local ver
+  ver="$(driver_version)"
+  if [[ -z "${ver}" || "$(version_major "${ver}")" -lt "${DRIVER_MIN}" ]]; then
+    DRIVER_REBOOT=1
+  fi
+  return 0
+}
+
+check_nvidia_driver() {
+  # torch cu130 in the py-env needs a CUDA 13 driver (580+); offer to install one where a GPU lacks it.
+  local ver major why
+  ver="$(driver_version)"
   major="$(version_major "${ver}")"
-  if [[ -z "${major}" ]] || ((major < DRIVER_MIN)); then
-    echo "NVIDIA driver ${ver} is below minimum ${DRIVER_MIN} (CUDA 13)" >&2
+  if [[ -n "${ver}" && -n "${major}" ]] && ((major >= DRIVER_MIN)); then
+    return 0
+  fi
+  if [[ -n "${ver}" ]]; then
+    why="NVIDIA driver ${ver} is below minimum ${DRIVER_MIN} (CUDA 13)"
+  elif [[ "$(nvidia_pci_gpus)" -gt 0 ]]; then
+    why="NVIDIA GPU found but no NVIDIA driver is loaded"
+  else
+    why=""
+  fi
+  if [[ -n "${why}" ]] && offer_driver_install "${why}"; then
+    return 0
+  fi
+  if [[ -n "${ver}" ]]; then
+    echo "${why}" >&2
     exit 1
   fi
+  if [[ "${GOETHE_REQUIRE_GPU:-}" == "1" ]]; then
+    echo "no usable NVIDIA driver found (GOETHE_REQUIRE_GPU=1); goethe doctor names the fix" >&2
+    exit 1
+  fi
+  echo "WARNING: no usable NVIDIA driver ${DRIVER_MIN}+ found; after the install, goethe doctor names the exact fix" >&2
 }
 
 curl_auth() {
@@ -580,6 +709,9 @@ main() {
     echo "WARNING: goethe recommend failed: $(printf '%s' "${rec}" | tail -n 2)" >&2
   fi
   summary
+  if [[ "${DRIVER_REBOOT}" == "1" ]]; then
+    echo "Reboot to load the new NVIDIA driver, then check it with goethe doctor"
+  fi
   if [[ -n "${LINK_DIR}" && ":${PATH}:" != *":${LINK_DIR}:"* ]]; then
     echo "Add ${LINK_DIR} to PATH to use goethe"
   fi
