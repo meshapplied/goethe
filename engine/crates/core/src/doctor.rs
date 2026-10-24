@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::json;
 use std::fs;
 use std::net::{TcpListener, TcpStream};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
@@ -35,6 +35,7 @@ pub fn run(json: bool, probe_public: bool) -> Result<(), String> {
             table.row(vec![c.name.clone(), crate::term::status(&c.status), c.hint.clone()]);
         }
         table.print();
+        println!("\nSupported microarchitectures: {}", crate::gpu_arch::microarchitectures_text());
     }
     if probe_public {
         probe_public_reachability(&home);
@@ -112,58 +113,12 @@ fn check(name: &str, status: &str, hint: impl Into<String>) -> Check {
 }
 
 fn check_nvidia_driver() -> Check {
-    let out = Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=driver_version",
-            "--format=csv,noheader",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output();
-    let Ok(o) = out else {
-        return Check {
-            name: "nvidia_driver".into(),
-            status: "WARN".into(),
-            hint: "nvidia-smi not found".into(),
-        };
-    };
-    if !o.status.success() {
-        return Check {
-            name: "nvidia_driver".into(),
-            status: "WARN".into(),
-            hint: "nvidia-smi failed".into(),
-        };
-    }
-    let ver = String::from_utf8_lossy(&o.stdout)
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if ver.is_empty() {
-        return Check {
-            name: "nvidia_driver".into(),
-            status: "WARN".into(),
-            hint: "could not read driver version".into(),
-        };
-    }
-    let major = ver.split('.').next().and_then(|p| p.parse::<u32>().ok());
-    match major {
-        Some(m) if m >= 550 => Check {
-            name: "nvidia_driver".into(),
-            status: "OK".into(),
-            hint: ver,
-        },
-        Some(m) => Check {
-            name: "nvidia_driver".into(),
-            status: "FAIL".into(),
-            hint: format!("driver {ver} (major {m}) below minimum 550"),
-        },
-        None => Check {
-            name: "nvidia_driver".into(),
-            status: "WARN".into(),
-            hint: format!("unparsed driver version {ver}"),
-        },
+    // The kernel module version, or the first blocker (no GPU, no driver, too old, no devices, no libraries) and its fix.
+    let probe = crate::nvidia_driver::probe();
+    match (crate::nvidia_driver::diagnose(&probe), probe.module_version) {
+        (Some(why), _) => check("nvidia_driver", "FAIL", why),
+        (None, Some(version)) => check("nvidia_driver", "OK", version),
+        (None, None) => check("nvidia_driver", "WARN", "could not read the driver version"),
     }
 }
 
@@ -219,7 +174,7 @@ fn probe_public_reachability(home: &Path) {
 
 fn print_public_security_advisory() {
     println!(
-        "Public mode exposes the gateway to the internet. Keep the allowlist tight (goethe allowlist add/remove), use API keys with scopes and rpm limits, and rotate keys."
+        "Public mode exposes the gateway to the internet. Keep the allowlist tight (goethe allowlist --add/--remove), use API keys with scopes and rpm limits, and rotate keys."
     );
 }
 
@@ -227,7 +182,10 @@ fn check_hardware(home: &Path) -> Check {
     // NVML probe plus per-GPU support and foreign-process counts.
     let hw = match crate::hw::profile(home) {
         Ok(h) => h,
-        Err(e) => return check("hardware", "FAIL", format!("{e}; install the NVIDIA driver and make sure nvidia-smi works")),
+        Err(e) => {
+            let why = crate::nvidia_driver::diagnose(&crate::nvidia_driver::probe());
+            return check("hardware", "FAIL", why.unwrap_or_else(|| format!("{e}; make sure nvidia-smi works")));
+        }
     };
     let managed = crate::db::open(home)
         .ok()
@@ -236,12 +194,12 @@ fn check_hardware(home: &Path) -> Check {
     let mut lines = vec![format!("driver {}", hw.driver)];
     let mut unsupported = 0;
     for g in &hw.gpus {
-        let ok_sm = ["8.6", "12.0", "12.1"].iter().any(|sm| g.compute_capability.starts_with(sm));
-        unsupported += usize::from(!ok_sm);
+        let why = crate::gpu_arch::unsupported_reason(&g.compute_capability);
+        unsupported += usize::from(why.is_some());
         let foreign = g.running_processes.iter().filter(|p| !managed.contains(&(p.pid as i32))).count();
         let plural = if foreign == 1 { "" } else { "es" };
         let um = if g.unified_memory { ", unified memory" } else { "" };
-        let sm_note = if ok_sm { "" } else { "; this SM is not supported (need 8.6, 12.0 or 12.1)" };
+        let sm_note = why.map_or_else(String::new, |w| format!("; {w}"));
         lines.push(format!(
             "gpu{} {} (SM {}): {:.1} of {:.1} GB free{um}, {foreign} foreign process{plural}{sm_note}",
             g.index,
@@ -251,6 +209,8 @@ fn check_hardware(home: &Path) -> Check {
             g.vram_total_mb as f64 / 1024.0
         ));
     }
+    let ccs: Vec<(u32, &str)> = hw.gpus.iter().map(|g| (g.index, g.compute_capability.as_str())).collect();
+    lines.extend(mixed_arch_note(&ccs));
     let status = if hw.gpus.is_empty() || unsupported == hw.gpus.len() {
         "FAIL"
     } else if unsupported > 0 {
@@ -259,6 +219,24 @@ fn check_hardware(home: &Path) -> Check {
         "OK"
     };
     check("hardware", status, lines.join("\n"))
+}
+
+fn mixed_arch_note(gpus: &[(u32, &str)]) -> Option<String> {
+    // On a host with more than one supported architecture, say how Goethe groups the GPUs.
+    let mut groups: Vec<(&str, Vec<u32>)> = Vec::new();
+    for (index, cc) in gpus.iter().filter(|(_, cc)| crate::gpu_arch::is_supported(cc)) {
+        match groups.iter_mut().find(|(c, _)| crate::gpu_arch::same_cc(c, cc)) {
+            Some((_, members)) => members.push(*index),
+            None => groups.push((cc, vec![*index])),
+        }
+    }
+    (groups.len() > 1).then(|| {
+        let parts: Vec<String> = groups
+            .iter()
+            .map(|(cc, g)| format!("SM {cc} on GPU {}", crate::placement::format_gpu_list(g)))
+            .collect();
+        format!("mixed architectures: {}; each model loads on GPUs of one architecture", parts.join(", "))
+    })
 }
 
 fn check_glibc() -> Check {
@@ -635,6 +613,13 @@ fn available_gb(path: &Path) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_architecture_hosts_get_one_note() {
+        let note = mixed_arch_note(&[(0, "12.0"), (1, "8.6"), (2, "12.0"), (3, "7.5")]).unwrap();
+        assert_eq!(note, "mixed architectures: SM 12.0 on GPU 0,2, SM 8.6 on GPU 1; each model loads on GPUs of one architecture");
+        assert_eq!(mixed_arch_note(&[(0, "9.0"), (1, "9.0"), (2, "7.5")]), None, "unsupported GPUs do not count");
+    }
 
     #[test]
     fn pyenv_versions_are_read_from_disk() {

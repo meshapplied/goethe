@@ -30,7 +30,7 @@ def _load(goethe: Path, env: dict[str, str], model: Path, mid: str, gpu: int, kn
     write_card(model, mid, env=knobs)
     for old in model.glob("stub_*"):
         old.unlink()
-    run_goethe([str(goethe), "load", mid, "--gpus", str(gpu), "--yes"], env=env, timeout=120)
+    run_goethe([str(goethe), "load", "--model", mid, "--gpus", str(gpu), "--yes"], env=env, timeout=120)
     launch = stub_launch(model)
     for key, val in knobs.items():
         if launch["knobs"].get(key) != val:
@@ -62,7 +62,7 @@ def main() -> None:
         env = home_goethe_env(home)
         ignore = {"STUB_IGNORE_SIGTERM": "1"}
         pid = _load(goethe, env, model_a, "a", gpu, ignore)
-        dt = _timed(goethe, env, "unload", "a")
+        dt = _timed(goethe, env, "unload", "--model", "a")
         if dt >= 4.0:
             raise RuntimeError(f"ignore-SIGTERM unload took {dt:.2f}s (limit 4.0s)")
         if not _term_seen(model_a, ignored=True):
@@ -71,7 +71,7 @@ def main() -> None:
             raise RuntimeError(f"TERM-ignoring engine {pid} survived unload: no SIGKILL escalation")
         assert_no_zombies(home)
         pid = _load(goethe, env, model_a, "a", gpu, {"STUB_SIGTERM_DELAY": "1"})
-        dt1 = _timed(goethe, env, "unload", "a")
+        dt1 = _timed(goethe, env, "unload", "--model", "a")
         if not 0.9 <= dt1 < 2.0:
             raise RuntimeError(f"slow-TERM unload took {dt1:.2f}s (expected graceful exit in 0.9-2.0s)")
         if not _term_seen(model_a, ignored=False) or pid_alive(pid):

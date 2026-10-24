@@ -56,7 +56,7 @@ def _ensure_installed(goethe: Path, env: dict[str, str], model_id: str) -> None:
     """Install model_id into the isolated home unless the mirrored card is already there."""
     if (Path(env["GOETHE_HOME"]) / "models" / _model_slug(model_id) / "goethe_card.toml").is_file():
         return
-    run_goethe([str(goethe), "install", model_id.strip(), "--no-load"], env=env, timeout=600)
+    run_goethe([str(goethe), "install", "--model", model_id.strip(), "--no-load"], env=env, timeout=600)
 
 
 def _ps_json(goethe: Path, env: dict[str, str]) -> list[dict]:
@@ -65,7 +65,7 @@ def _ps_json(goethe: Path, env: dict[str, str]) -> list[dict]:
 
 def _make_key(goethe: Path, home: Path, env: dict[str, str]) -> tuple[str, str]:
     """Create a throwaway API key and return (token, key_id)."""
-    rr = run_goethe([str(goethe), "key", "create", "--name", "hw", "--raw"], env=env, timeout=60)
+    rr = run_goethe([str(goethe), "key", "--create", "hw", "--raw"], env=env, timeout=60)
     token = next(ln for ln in rr.stdout.splitlines() if ln.startswith("goethe_sk_"))
     sql = "SELECT key_id FROM api_keys WHERE name = ? ORDER BY created_at DESC LIMIT 1"
     return token, str(sqlite_query(home / "state.db", sql, ("hw",))[0][0])
@@ -130,7 +130,8 @@ def main() -> None:
         wait_goethed_socket(work, timeout=30.0)
         release_gpu = _acquire_gpu_flocks(gpus)
         token, key_id = _make_key(goethe, work, env)
-        load = [str(goethe), "load", primary, "--gpus", str(gpu0), "--ctx", "65536", "--max-conc", "8", "--yes"]
+        load = [str(goethe), "load", "--model", primary, "--gpus", str(gpu0)]
+        load += ["--ctx", "65536", "--max-conc", "8", "--yes"]
         t_load1 = time.time()
         run_goethe(load, env=env, timeout=900)
         print(f"stage4_hw load1_sec={time.time() - t_load1:.1f}")
@@ -141,12 +142,13 @@ def main() -> None:
         if not all(30001 <= int(r.get("internal_port", 0)) <= 30099 for r in rows):
             raise RuntimeError(f"engine port out of range: {rows!r}")
         _chat_mux(mux, primary, token)
-        run_goethe([str(goethe), "unload", primary], env=env, timeout=300)
+        run_goethe([str(goethe), "unload", "--model", primary], env=env, timeout=300)
         if len(gpus) < 2:
             NOT_RUN.append(f"tp=2 load (one test GPU: GOETHE_TEST_GPUS={','.join(map(str, gpus))})")
         else:
             tp_model = models[-1]
-            tp = [str(goethe), "load", tp_model, "--gpus", f"{gpus[0]},{gpus[1]}", "--tp", "2", "--ctx", "131072"]
+            tp = [str(goethe), "load", "--model", tp_model, "--gpus", f"{gpus[0]},{gpus[1]}"]
+            tp += ["--tp", "2", "--ctx", "131072"]
             run_goethe([*tp, "--yes"], env=env, timeout=900)
             tp_rows = _ps_json(goethe, env)
             if not tp_rows or tp_rows[-1].get("status") != "RUNNING":
@@ -168,7 +170,7 @@ def main() -> None:
         run([str(goethe), "unload", "--all"], env=env, timeout=120)
         if goethed is not None:
             if key_id:
-                run([str(goethe), "key", "revoke", key_id], env=env, timeout=30)
+                run([str(goethe), "key", "--revoke", key_id], env=env, timeout=30)
             goethed.stop()
         shutil.rmtree(work, ignore_errors=True)
     if tree_fingerprint(dev_home() / "models") != models_before:

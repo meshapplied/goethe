@@ -81,6 +81,28 @@ def _engine_key_checks(home: Path, model_dir: Path, client_tokens: list[str]) ->
     soft(all(r["headers"].get("authorization") == f"Bearer {engine_key}" for r in chats), "mux sends engine key")
 
 
+def _litellm_checks(base: str, token: str) -> None:
+    """LiteLLM spellings: routes without /v1, its key headers, /model/info, health, and Anthropic Messages."""
+    msg = json.dumps({"model": "ma", "messages": [{"role": "user", "content": "x"}], "max_tokens": 2}).encode()
+    code, body = http_post(f"{base}/chat/completions", msg, {"Authorization": f"Bearer {token}"})
+    check(code == 200 and b"model=ma" in body, "chat without /v1")
+    code, body = http_post(f"{base}/v1/chat/completions", msg, {"x-litellm-api-key": f"Bearer {token}"})
+    check(code == 200 and b"model=ma" in body, "x-litellm-api-key")
+    code, body = http_get(f"{base}/models", headers={"api-key": token})
+    check(code == 200 and "ma" in {m.get("id") for m in json.loads(body).get("data", [])}, "models without /v1")
+    code, body = http_get(f"{base}/model/info", headers={"Authorization": f"Bearer {token}"})
+    check(code == 200 and "ma" in {m.get("model_name") for m in json.loads(body).get("data", [])}, "model info")
+    check(http_get(f"{base}/health/liveliness")[0] == 200, "liveliness no key")
+    check(http_get(f"{base}/health/readiness")[0] == 200, "readiness no key")
+    check(http_get(f"{base}/metrics")[0] == 404, "metrics stay private")
+    code, body = http_post(f"{base}/v1/messages", msg, {"x-api-key": token, "anthropic-version": "2023-06-01"})
+    check(code == 200 and json.loads(body).get("type") == "message", "anthropic messages")
+    check(b"model=ma" in body, "anthropic messages routed to ma")
+    code, body = http_post(f"{base}/v1/messages", msg, {"x-api-key": "goethe_sk_bad"})
+    kind = json.loads(body).get("error", {}).get("type")
+    check(code == 401 and kind == "authentication_error", f"anthropic 401 shape, got {code} {kind}")
+
+
 def _stop_nginx(home: Path) -> None:
     """Fast-stop the gateway master goethed started (TERM lets it take its workers down)."""
     pid_path = home / "nginx" / "nginx.pid"
@@ -127,13 +149,13 @@ def _gateway(goethe: Path, home: Path, gpu: int, g2: int) -> None:
         return run_goethe([str(goethe), *args], env=env, timeout=timeout).stdout
 
     try:
-        goethe_ok("load", "ma", "--gpus", str(gpu), "--yes", timeout=300)
-        goethe_ok("load", "mb", "--gpus", str(g2), "--yes", timeout=300)
+        goethe_ok("load", "--model", "ma", "--gpus", str(gpu), "--yes", timeout=300)
+        goethe_ok("load", "--model", "mb", "--gpus", str(g2), "--yes", timeout=300)
         check(stub_launch(ma)["knobs"].get("STUB_TOKEN_INTERVAL") == TOKEN_INTERVAL, "token interval knob active")
         check(wait_until(lambda: http_get(f"{base}/v1/models")[0] != 0, timeout=20), "gateway listening")
         code, _ = http_get(f"{base}/v1/models")
         check(code == 403, f"empty allowlist denies with 403, got {code}")
-        goethe_ok("allowlist", "add", "127.0.0.1/32")
+        goethe_ok("allowlist", "--add", "127.0.0.1/32")
         code, body = http_get(f"{base}/health")
         check(code == 200 and json.loads(body.decode("utf-8")).get("status") == "ok", "health no key")
         check(http_get(f"{base}/health/ready?model=ma")[0] == 200, "health ready running")
@@ -141,7 +163,7 @@ def _gateway(goethe: Path, home: Path, gpu: int, g2: int) -> None:
         check(http_get(f"{base}/health/ready")[0] == 400, "health ready no param")
         check(http_get(f"{base}/v1/models")[0] == 401, "no key unauthorized")
         check(http_get(f"{base}/v1/models", headers={"Authorization": "Bearer goethe_sk_bad"})[0] == 401, "wrong key")
-        token = _token(goethe_ok("key", "create", "--name", "t", "--raw"))
+        token = _token(goethe_ok("key", "--create", "t", "--raw"))
         keys_conf = home / "nginx" / "api_keys.conf"
         check("goethe_sk_" not in keys_conf.read_text(encoding="utf-8"), "api_keys.conf no raw token")
         check((keys_conf.stat().st_mode & 0o777) == 0o600, "api_keys.conf mode 0600")
@@ -152,12 +174,12 @@ def _gateway(goethe: Path, home: Path, gpu: int, g2: int) -> None:
         auth = {"Authorization": f"Bearer {token}"}
         code, body = http_get(f"{base}/v1/models", headers=auth)
         check(code == 200 and {m.get("id") for m in json.loads(body).get("data", [])} == {"ma", "mb"}, "models list")
-        adm_token = _token(goethe_ok("key", "create", "--name", "adm", "--admin", "--raw"))
+        adm_token = _token(goethe_ok("key", "--create", "adm", "--admin", "--raw"))
         code, body = http_get(f"{base}/health/admin", headers={"Authorization": f"Bearer {adm_token}"})
         check(code == 200, "admin health")
         check({"gpus", "instances", "inactive_models"} <= set(json.loads(body.decode("utf-8"))), "admin health keys")
         check(http_get(f"{base}/health/admin", headers=auth)[0] == 404, "admin health denied")
-        sc_token = _token(goethe_ok("key", "create", "--name", "sc", "--raw", "--models", "ma"))
+        sc_token = _token(goethe_ok("key", "--create", "sc", "--raw", "--models", "ma"))
         code, body = http_get(f"{base}/v1/models", headers={"Authorization": f"Bearer {sc_token}"})
         check({m.get("id") for m in json.loads(body.decode("utf-8")).get("data", [])} == {"ma"}, "scoped models")
 
@@ -173,31 +195,32 @@ def _gateway(goethe: Path, home: Path, gpu: int, g2: int) -> None:
         code, cbody = chat("mb", sc_token, 1)
         check(code == 404 and b"Model Not Found" in cbody, "scoped model 404")
         _engine_key_checks(home, ma, [token, adm_token, sc_token])
-        goethe_ok("alias", "set", "chat", "ma")
+        _litellm_checks(base, token)
+        goethe_ok("alias", "--set", "chat", "--model", "ma")
         code, cbody = chat("chat", token)
         check(code == 200 and b"model=ma" in cbody, "alias routes")
-        goethe_ok("alias", "remove", "chat")
+        goethe_ok("alias", "--remove", "chat")
         check(chat("missing-model-xyz", token, 1)[0] == 404, "unknown model")
-        rpm_token = _token(goethe_ok("key", "create", "--name", "rpm3", "--raw", "--rpm", "3"))
+        rpm_token = _token(goethe_ok("key", "--create", "rpm3", "--raw", "--rpm", "3"))
         for _ in range(3):
             check(chat("ma", rpm_token, 1)[0] == 200, "rpm chat under limit")
         check(chat("ma", rpm_token, 1)[0] == 429, "rpm chat 429")
-        token2 = _token(goethe_ok("key", "create", "--name", "burst", "--raw"))
+        token2 = _token(goethe_ok("key", "--create", "burst", "--raw"))
         with ThreadPoolExecutor(max_workers=16) as pool:
             burst = list(
                 pool.map(lambda _: http_get(f"{base}/v1/models", {"Authorization": f"Bearer {token2}"})[0], range(120))
             )
         check(429 in burst, "rate limit 429")
         time.sleep(2.5)
-        stream_token = _token(goethe_ok("key", "create", "--name", "stream", "--raw"))
-        goethe_ok("key", "revoke", str(key_id))
+        stream_token = _token(goethe_ok("key", "--create", "stream", "--raw"))
+        goethe_ok("key", "--revoke", str(key_id))
         check(http_get(f"{base}/v1/models", headers=auth)[0] == 401, "revoked key")
         check(http_get(f"http://127.0.0.1:{test_public_port(home)}/v1/models")[0] == 0, "plain http fails")
         big = b"x" * (11 * 1024 * 1024)
         check(http_post(f"{base}/v1/chat/completions", big, {"Authorization": f"Bearer {token2}"})[0] == 413, "413")
         _streams(base, stream_token, home, env, goethe)
         _stop_nginx(home)
-        down_token = _token(goethe_ok("key", "create", "--name", "down", "--raw"))
+        down_token = _token(goethe_ok("key", "--create", "down", "--raw"))
         check("goethe_sk_" not in keys_conf.read_text(encoding="utf-8"), "hash-only api_keys")
         code, _ = http_get(
             f"http://127.0.0.1:{test_mux_port(home)}/v1/models", headers={"Authorization": f"Bearer {down_token}"}
@@ -248,8 +271,8 @@ def _streams(base: str, stream_token: str, home: Path, env: dict[str, str], goet
     th = threading.Thread(target=_long_stream)
     th.start()
     time.sleep(0.5)
-    run_goethe([str(goethe), "key", "create", "--name", "reload", "--raw"], env=env)
-    run_goethe([str(goethe), "allowlist", "add", "127.0.0.2/32"], env=env)
+    run_goethe([str(goethe), "key", "--create", "reload", "--raw"], env=env)
+    run_goethe([str(goethe), "allowlist", "--add", "127.0.0.2/32"], env=env)
     th.join(timeout=60)
     check(done.is_set() and len(chunks) >= 22, f"stream completed across nginx reloads ({len(chunks)} events)")
 

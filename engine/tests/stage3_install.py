@@ -80,7 +80,7 @@ def main() -> None:
             encoding="utf-8",
         )
         run_goethe(
-            [str(goethe), "install", model, "--no-load", "--ctx", "512", "--max-conc", "2"],
+            [str(goethe), "install", "--model", model, "--no-load", "--ctx", "512", "--max-conc", "2"],
             env={
                 "GOETHE_HOME": str(home),
                 "GOETHE_REGISTRY_URL": f"file://{reg_hit}",
@@ -116,7 +116,7 @@ def main() -> None:
         reg_miss.write_text(json.dumps({"version": 1, "models": []}), encoding="utf-8")
         miss_model = "hf-internal-testing/tiny-random-gpt2"
         run_goethe(
-            [str(goethe), "install", miss_model, "--no-load"],
+            [str(goethe), "install", "--model", miss_model, "--no-load"],
             env={"GOETHE_HOME": str(home), "GOETHE_REGISTRY_URL": f"file://{reg_miss}"},
             timeout=600,
         )

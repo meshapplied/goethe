@@ -1,38 +1,82 @@
-// Custom domain TLS via ACME and public gateway bind.
+// Your own domain for the API: a DNS A record pointing at the gateway's address; goethe explains it and checks it.
 
-use crate::db;
 use crate::nginx;
 use crate::paths::goethe_home;
-use std::fs;
 use std::io::Read;
-use std::net::{IpAddr, Ipv4Addr, TcpListener, ToSocketAddrs};
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::net::{IpAddr, Ipv4Addr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-pub fn add(domain: &str) -> Result<String, String> {
+fn api_ip() -> Result<IpAddr, String> {
+    // The address other machines reach the API on: the bound IP, or the public IP when bound to all addresses.
+    let bind: IpAddr = nginx::public_bind(&goethe_home()).parse().map_err(|_| "unreadable gateway bind address".to_string())?;
+    if bind.is_loopback() {
+        return Err("the API only listens on this machine".to_string());
+    }
+    if bind.is_unspecified() {
+        return public_ipv4().and_then(|ip| ip.parse().map_err(|_| format!("invalid public IP {ip}")));
+    }
+    Ok(bind)
+}
+
+pub fn explain() -> Result<String, String> {
+    // A DNS A record is all it takes; works for public, VPN and LAN addresses alike.
+    let port = nginx::public_port_u16(&goethe_home());
+    let ip = match api_ip() {
+        Ok(ip) => ip.to_string(),
+        Err(why) => {
+            return Ok(format!(
+                "To use a domain name, other machines must reach the API first: {why}.\n\n{}",
+                crate::term::commands("Choose how they reach it:", &["goethe configure api"])
+            ))
+        }
+    };
+    Ok(format!(
+        "Give the API a name like api.example.com instead of its IP address.\n\n\
+         At your DNS provider, add an A record:\n\n\
+         \tapi.example.com  A  {ip}\n\n\
+         This works for public and private addresses alike; a VPN or LAN address only resolves to clients on that network.\n\
+         Clients then use https://api.example.com:{port}/v1, with the same certificate settings as for the IP address.\n\n{}",
+        crate::term::commands("Check that it worked:", &["goethe domain --check api.example.com"])
+    ))
+}
+
+pub fn check(domain: &str) -> Result<String, String> {
+    // The name resolves to the API's address and the gateway port answers there; Err when either fails.
     validate_domain(domain)?;
-    let home = goethe_home();
-    let _ = crate::paths::ensure_layout(&home);
-    let public_ip = public_ipv4()?;
-    check_dns(domain, &public_ip)?;
-    if Command::new("certbot").arg("--version").output().is_err() {
-        return Err("certbot not found; install with: apt-get install certbot".into());
+    let port = nginx::public_port_u16(&goethe_home());
+    let resolved: Vec<IpAddr> = format!("{domain}:{port}")
+        .to_socket_addrs()
+        .map(|a| a.map(|s| s.ip()).collect())
+        .unwrap_or_default();
+    let shown = |ips: &[IpAddr]| ips.iter().map(IpAddr::to_string).collect::<Vec<_>>().join(", ");
+    let dns = match (api_ip(), resolved.is_empty()) {
+        (_, true) => Err(format!("{domain} does not resolve yet")),
+        (Ok(ip), false) if resolved.contains(&ip) => Ok(format!("{domain} points to {ip}")),
+        (Ok(ip), false) => Err(format!("{domain} points to {}, the API is on {ip}", shown(&resolved))),
+        (Err(why), false) => Err(why),
+    };
+    let api = match resolved.first() {
+        Some(ip) => match TcpStream::connect_timeout(&std::net::SocketAddr::new(*ip, port), Duration::from_secs(3)) {
+            Ok(_) => Ok(format!("{domain}:{port} answers")),
+            Err(e) => Err(format!("{domain}:{port}: {e}")),
+        },
+        None => Err("nothing to connect to".to_string()),
+    };
+    let ok = dns.is_ok() && api.is_ok();
+    let mut table = crate::term::Table::new(&["CHECK", "STATUS", "DETAIL"]);
+    for (name, result) in [("DNS", dns), ("API", api)] {
+        let (status, detail) = match result {
+            Ok(d) => ("OK", d),
+            Err(d) => ("FAIL", d),
+        };
+        table.row(vec![name.to_string(), crate::term::status(status), detail]);
     }
-    if TcpListener::bind(("0.0.0.0", 80)).is_err() {
-        return Err("port 80 must be free for certbot standalone".into());
+    let text = table.render();
+    if ok {
+        Ok(format!("{text}\nClients can use: https://{domain}:{port}/v1\n"))
+    } else {
+        Err(format!("{text}\n{}", crate::term::commands("How to set it up:", &["goethe domain"])))
     }
-    run_certbot(&home, domain)?;
-    install_certs(&home, domain)?;
-    let con = db::open(&home).map_err(|e| e.to_string())?;
-    con.execute(
-        "INSERT OR REPLACE INTO goethe_settings (key, value) VALUES ('domain', ?1)",
-        [domain],
-    )
-    .map_err(|e| e.to_string())?;
-    nginx::set_public_bind(&home, "0.0.0.0")?;
-    let port = nginx::public_port_u16(&home);
-    Ok(format!("https://{domain}:{port}"))
 }
 
 pub fn public_ipv4() -> Result<String, String> {
@@ -89,84 +133,4 @@ fn validate_domain(domain: &str) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn check_dns(domain: &str, public_ip: &str) -> Result<(), String> {
-    let addrs: Vec<IpAddr> = format!("{domain}:443")
-        .to_socket_addrs()
-        .map_err(|e| format!("DNS lookup failed: {e}"))?
-        .map(|a| a.ip())
-        .collect();
-    let mut v4 = Vec::new();
-    for a in addrs {
-        if let IpAddr::V4(v) = a {
-            v4.push(v.to_string());
-        }
-    }
-    v4.sort();
-    v4.dedup();
-    if v4.iter().any(|ip| ip == public_ip) {
-        return Ok(());
-    }
-    let ips = if v4.is_empty() {
-        "none".to_string()
-    } else {
-        v4.join(", ")
-    };
-    Err(format!(
-        "DNS for {domain} resolves to {ips}, expected {public_ip}"
-    ))
-}
-
-fn run_certbot(home: &Path, domain: &str) -> Result<(), String> {
-    let config_dir = home.join("letsencrypt/config");
-    let work_dir = home.join("letsencrypt/work");
-    let logs_dir = home.join("letsencrypt/logs");
-    for p in [&config_dir, &work_dir, &logs_dir] {
-        fs::create_dir_all(p).map_err(|e| e.to_string())?;
-    }
-    let out = Command::new("certbot")
-        .args([
-            "certonly",
-            "--standalone",
-            "--non-interactive",
-            "--agree-tos",
-            "--register-unsafely-without-email",
-            "-d",
-            domain,
-            "--config-dir",
-            config_dir.to_str().unwrap(),
-            "--work-dir",
-            work_dir.to_str().unwrap(),
-            "--logs-dir",
-            logs_dir.to_str().unwrap(),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("certbot exec failed: {e}"))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let err = String::from_utf8_lossy(&out.stderr);
-    eprint!("{err}");
-    Err(format!("certbot failed: {err}"))
-}
-
-fn install_certs(home: &Path, domain: &str) -> Result<(), String> {
-    let live = home
-        .join("letsencrypt/config/live")
-        .join(domain);
-    let chain = live.join("fullchain.pem");
-    let key = live.join("privkey.pem");
-    if !chain.is_file() || !key.is_file() {
-        return Err("certbot did not produce certificate files".into());
-    }
-    let cert_dir = home.join("nginx/certs");
-    fs::create_dir_all(&cert_dir).map_err(|e| e.to_string())?;
-    fs::set_permissions(&cert_dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).map_err(|e| e.to_string())?;
-    let chain_pem = fs::read(&chain).map_err(|e| e.to_string())?;
-    let key_pem = fs::read(&key).map_err(|e| e.to_string())?;
-    nginx::write_private(&cert_dir.join("server.crt"), &chain_pem)?;
-    nginx::write_private(&cert_dir.join("server.key"), &key_pem)
 }

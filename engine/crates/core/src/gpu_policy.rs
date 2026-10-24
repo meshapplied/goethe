@@ -69,7 +69,9 @@ pub fn list_rows(con: &Connection, home: &Path) -> Result<Vec<GpuListRow>, Strin
             vram_total_mb: gpu.vram_total_mb,
             managed_mb,
             foreign_mb,
-            status: if is_denied {
+            status: if !crate::gpu_arch::is_supported(&gpu.compute_capability) {
+                "UNSUPPORTED".to_string()
+            } else if is_denied {
                 "DENIED".to_string()
             } else {
                 "ALLOWED".to_string()
@@ -85,7 +87,7 @@ pub fn validate_gpu_index(home: &Path, index: u32) -> Result<(), String> {
     if indices.contains(&index) {
         Ok(())
     } else {
-        Err(format!("GPU {index} is not in the hardware profile; run `goethe hw profile`"))
+        Err(format!("gpu{index} is not in the hardware profile; run `goethe hw profile`"))
     }
 }
 

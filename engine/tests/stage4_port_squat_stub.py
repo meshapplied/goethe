@@ -88,7 +88,7 @@ def main() -> None:
         env = {**os.environ, **home_goethe_env(home)}
         t_load = time.time()
         load = subprocess.Popen(
-            [str(goethe), "load", MODEL, "--gpus", str(gpu), "--yes"],
+            [str(goethe), "load", "--model", MODEL, "--gpus", str(gpu), "--yes"],
             env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         squatter: ThreadingHTTPServer | None = None

@@ -24,7 +24,7 @@ def main() -> None:
         card.write_text('model_id = "demo"\ncontext_length = 1024\nmax_running_requests = 4\n', encoding="utf-8")
         seed_installed_model(home, "demo", "models/org__demo", 1.0, 1000, 1024, 4, 1, max_ctx=4096)
         env = {"GOETHE_HOME": str(home)}
-        run_goethe([str(goethe), "config", "demo", "--ctx", "2048", "--max-conc", "8"], env=env)
+        run_goethe([str(goethe), "config", "--model", "demo", "--ctx", "2048", "--max-conc", "8"], env=env)
         text1 = card.read_text(encoding="utf-8")
         if _card_int(text1, "context_length") != 2048 or _card_int(text1, "max_running_requests") != 8:
             raise RuntimeError(f"card not updated in place: {text1!r}")
@@ -33,7 +33,7 @@ def main() -> None:
         row = sqlite_query(home / "state.db", ROW_SQL)
         if row != [(2048, 8)]:
             raise RuntimeError(f"installed_models defaults not updated: {row}")
-        run_goethe([str(goethe), "config", "demo", "--ctx", "2048", "--max-conc", "8"], env=env)
+        run_goethe([str(goethe), "config", "--model", "demo", "--ctx", "2048", "--max-conc", "8"], env=env)
         if card.read_text(encoding="utf-8") != text1 or sqlite_query(home / "state.db", ROW_SQL) != [(2048, 8)]:
             raise RuntimeError("config not idempotent")
     print("stage3_config ok")

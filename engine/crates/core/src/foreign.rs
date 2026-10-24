@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 pub struct GpuLive {
     pub index: u32,
     pub name: String,
-    pub cc_major: u32,
+    pub compute_capability: String,
     pub free_mb: u64,
     pub procs: Vec<(i32, u64)>,
 }
@@ -51,7 +51,7 @@ fn device_procs(dev: &Device) -> Vec<(i32, u64)> {
 
 pub fn snapshot() -> Result<Vec<GpuLive>, String> {
     // One pass over every GPU: name, compute capability, live free VRAM (unified memory aware) and its processes.
-    let nvml = Nvml::init().map_err(|e| format!("NVML init failed: {e}"))?;
+    let nvml = crate::nvidia_driver::nvml()?;
     let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
     let mut out = Vec::new();
     for index in 0..count {
@@ -61,7 +61,9 @@ pub fn snapshot() -> Result<Vec<GpuLive>, String> {
         out.push(GpuLive {
             index,
             name: dev.name().unwrap_or_default(),
-            cc_major: dev.cuda_compute_capability().map_or(0, |c| c.major.max(0) as u32),
+            compute_capability: dev
+                .cuda_compute_capability()
+                .map_or_else(|_| String::new(), |c| format!("{}.{}", c.major, c.minor)),
             free_mb: hw::gpu_free_mb_live(index)?,
             procs: device_procs(&dev),
         });

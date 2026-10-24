@@ -33,6 +33,7 @@ pub struct EngineSpec<'a> {
     pub tp: u64,
     pub mem_frac: f64,
     pub gpus: &'a [u32],
+    pub cc: &'a str,
     pub load_extra: &'a [String],
 }
 
@@ -104,6 +105,15 @@ fn expand_home(s: &str, home: &Path) -> String {
     s.replace("$GOETHE_HOME", &home.to_string_lossy())
 }
 
+fn default_cuda_home(home: &Path, card: &[(String, String)]) -> Vec<(String, String)> {
+    // Run-time kernel builds use the bundled toolkit, so no system CUDA is needed, unless goethed's env or the card names one.
+    let named = |k: &str| std::env::var_os(k).is_some() || card.iter().any(|(c, _)| c == k);
+    if named("CUDA_HOME") || named("CUDA_PATH") {
+        return Vec::new();
+    }
+    crate::cuda_toolkit::bundled_home(home).map(|d| vec![("CUDA_HOME".to_string(), d.to_string_lossy().into_owned())]).unwrap_or_default()
+}
+
 fn resolve_python(home: &Path) -> PathBuf {
     let p = home.join("py-env/bin/python");
     if p.is_file() {
@@ -112,6 +122,20 @@ fn resolve_python(home: &Path) -> PathBuf {
     std::env::var("GOETHE_PYTHON")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("python3"))
+}
+
+fn arch_env(home: &Path, cc: &str) -> Vec<(String, String)> {
+    // Run-time kernel builds target the engine's architecture; caches not keyed by architecture get one dir each.
+    let Some(arch) = crate::gpu_arch::lookup(cc) else {
+        return Vec::new();
+    };
+    let cache = home.join("cache").join("jit").join(arch.tag());
+    let dir = |name: &str| cache.join(name).to_string_lossy().into_owned();
+    vec![
+        ("TORCH_CUDA_ARCH_LIST".to_string(), arch.target.to_string()),
+        ("TORCH_EXTENSIONS_DIR".to_string(), dir("torch_extensions")),
+        ("TVM_FFI_CACHE_DIR".to_string(), dir("tvm-ffi")),
+    ]
 }
 
 fn card_env(spec: &EngineSpec) -> Vec<(String, String)> {
@@ -187,9 +211,12 @@ pub fn command(spec: &EngineSpec) -> Command {
     }
     cmd.args(&extras);
     let gpus: Vec<String> = spec.gpus.iter().map(|g| g.to_string()).collect();
+    let card_vars = card_env(spec);
     cmd.env_clear()
         .envs(kept_env())
-        .envs(card_env(spec))
+        .envs(default_cuda_home(spec.home, &card_vars))
+        .envs(arch_env(spec.home, spec.cc))
+        .envs(card_vars)
         .env("CUDA_VISIBLE_DEVICES", gpus.join(","))
         .env("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
         .env("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -222,6 +249,7 @@ mod tests {
             tp,
             mem_frac: 0.5,
             gpus: &[3, 2],
+            cc: "9.0",
             load_extra: &[],
         };
         command(&spec)
@@ -292,6 +320,31 @@ mod tests {
         let a = args(&plain);
         let k = a.iter().position(|x| x == "--api-key").unwrap();
         assert_eq!(a[k + 1].len(), 32);
+    }
+
+    #[test]
+    fn engines_get_the_bundled_cuda_toolkit_unless_one_is_named() {
+        let td = tempfile::tempdir().unwrap();
+        let cu = td.path().join("py-env/lib/python3.11/site-packages/nvidia/cu13");
+        std::fs::create_dir_all(cu.join("bin")).unwrap();
+        std::fs::write(cu.join("bin/nvcc"), b"").unwrap();
+        if std::env::var_os("CUDA_HOME").is_none() && std::env::var_os("CUDA_PATH").is_none() {
+            assert_eq!(default_cuda_home(td.path(), &[]), vec![("CUDA_HOME".to_string(), cu.to_string_lossy().into_owned())]);
+        }
+        let card = vec![("CUDA_HOME".to_string(), "/opt/cuda".to_string())];
+        assert!(default_cuda_home(td.path(), &card).is_empty(), "a card CUDA_HOME wins");
+        assert!(default_cuda_home(Path::new("/nonexistent"), &[]).is_empty());
+    }
+
+    #[test]
+    fn kernels_target_the_engine_architecture_with_per_architecture_caches() {
+        let e = envs(&spec_cmd("", 1));
+        assert_eq!(e.get("TORCH_CUDA_ARCH_LIST"), Some(&Some("9.0a".to_string())));
+        assert_eq!(e.get("TORCH_EXTENSIONS_DIR"), Some(&Some("/h/cache/jit/sm_90a/torch_extensions".to_string())));
+        assert_eq!(e.get("TVM_FFI_CACHE_DIR"), Some(&Some("/h/cache/jit/sm_90a/tvm-ffi".to_string())));
+        let mine = envs(&spec_cmd("[env]\nTORCH_CUDA_ARCH_LIST = \"9.0\"", 1));
+        assert_eq!(mine.get("TORCH_CUDA_ARCH_LIST"), Some(&Some("9.0".to_string())), "a card can still override");
+        assert!(arch_env(Path::new("/h"), "7.5").is_empty(), "unknown architectures keep library defaults");
     }
 
     #[test]
