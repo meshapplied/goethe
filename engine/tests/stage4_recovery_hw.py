@@ -83,7 +83,7 @@ def main() -> None:
     release = _acquire_gpu_flocks([gpu])
     md = _start(work, env)
     timings: list[str] = []
-    load = [str(goethe), "load", MODEL, "--gpus", str(gpu), "--yes"]
+    load = [str(goethe), "load", "--model", MODEL, "--gpus", str(gpu), "--yes"]
     try:
         t0 = time.time()
         run_goethe([*load, "--ctx", "65536", "--max-conc", "8"], env=env, timeout=900)
@@ -91,7 +91,7 @@ def main() -> None:
         row = _ps_row(goethe, env)
         if row.get("status") != "RUNNING":
             raise RuntimeError(f"not RUNNING after load: {row}")
-        out = run_goethe([str(goethe), "key", "create", "--name", "real", "--raw"], env=env).stdout
+        out = run_goethe([str(goethe), "key", "--create", "real", "--raw"], env=env).stdout
         token = next(t for t in out.split() if t.startswith("goethe_sk_"))
         t_obs = time.time()
         time.sleep(60)
@@ -124,7 +124,7 @@ def main() -> None:
             raise RuntimeError("restore after stop failed")
         used_before = gpu_mem_used_mb(gpu)
         t_v = time.time()
-        run_goethe([str(goethe), "unload", MODEL], env=env, timeout=120)
+        run_goethe([str(goethe), "unload", "--model", MODEL], env=env, timeout=120)
         if not wait_until(lambda: gpu_mem_used_mb(gpu) < used_before * 0.5 + 500, timeout=4.0):
             raise RuntimeError("VRAM not freed within 4s of unload")
         timings.append(f"vram_free={time.time() - t_v:.1f}s")

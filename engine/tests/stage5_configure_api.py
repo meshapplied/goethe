@@ -9,8 +9,8 @@ from lib.goethe_test import home_goethe_env, main_exit, require_cli, run, temp_h
 
 
 def _status(goethe: str, env: dict[str, str]) -> dict:
-    """gateway status --json as a dict."""
-    return json.loads(run([goethe, "gateway", "status", "--json"], env=env).stdout)
+    """goethe gateway --json as a dict."""
+    return json.loads(run([goethe, "gateway", "--json"], env=env).stdout)
 
 
 def main() -> None:
@@ -35,7 +35,7 @@ def main() -> None:
             raise RuntimeError(f"public mode must say when the public IP lookup is disabled: {rr.stdout}")
         if rr.returncode != 0 or "not recommended" not in rr.stdout or _status(goethe, env)["bind"] != "0.0.0.0":
             raise RuntimeError(f"public mode must warn and bind 0.0.0.0: {rr.stdout} {rr.stderr}")
-        allowed = run([goethe, "allowlist", "list"], env=env).stdout
+        allowed = run([goethe, "allowlist"], env=env).stdout
         if "203.0.113.7/32" not in allowed or "127.0.0.1/32" not in allowed:
             raise RuntimeError(f"public mode must allow the named client and this machine: {allowed}")
         rr = run([goethe, "configure", "api", "--mode", "vpn", "--yes", "--vpn-ip", "192.0.2.77"], env=env)

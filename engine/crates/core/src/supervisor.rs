@@ -1,7 +1,7 @@
 // goethed load, unload, adoption and watchdog supervision of SGLang engines.
 
 use crate::autostart;
-use crate::calc::{self, mem_fraction_from_free, shortfall, static_weight_gb, Need};
+use crate::calc::{self, mem_fraction_from_free, shortfall, Need};
 use crate::chooser::{self, ChooserInput, LoadPlan};
 use crate::coordinator;
 use crate::db;
@@ -123,6 +123,7 @@ struct Starting {
     model_path: PathBuf,
     card: toml::Value,
     gpus: Vec<u32>,
+    cc: String,
     ctx: u64,
     max_conc: u64,
     cancel: Arc<AtomicBool>,
@@ -198,7 +199,7 @@ pub fn handle_load(params: LoadParams) -> Result<(Value, String), LoadErr> {
     let denied = crate::gpu_policy::denied_set(&con).map_err(err1)?;
     if let Some(g) = pinned.iter().find(|g| denied.contains(g)) {
         return Err(err1(format!(
-            "GPU {g} is denied by policy; run `goethe gpu allow {g}` to use it"
+            "gpu{g} is denied by policy; run `goethe gpu --allow gpu{g}` to use it"
         )));
     }
     let req = LoadReq {
@@ -281,15 +282,11 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
     if let Some(tp) = req.pinned_tp {
         placement::ensure_eligible_for_tp(&netted, tp, &req.denied).map_err(err1)?;
     }
-    let candidates: Vec<u32> = match req.pinned.is_empty() {
-        true => netted.iter().map(|g| g.index).collect(),
-        false => req.pinned.clone(),
-    };
-    let base = chooser_input(req, &snap, &candidates, req.ctx, req.max_conc);
+    let base = chooser_input(req, req.ctx, req.max_conc);
     let pinned = (!req.pinned.is_empty()).then_some(req.pinned.as_slice());
     let tp = req.pinned_tp.or(req.default_tp);
-    let first_name = gpu_name(&snap, candidates.first().copied().unwrap_or(0));
-    let learned_at = |t: usize| crate::engine_overhead::read_learned(con, model_id, &first_name, t as u64);
+    let learned_at =
+        |t: usize, first: u32| crate::engine_overhead::read_learned(con, model_id, &gpu_name(&snap, first), t as u64);
     let plan = match chooser::plan_with(&base, &netted, req.hw.as_ref(), tp, pinned, &learned_at) {
         Ok(plan) => plan,
         Err(e) => chooser::plan_with(&base, &raw, req.hw.as_ref(), tp, pinned, &learned_at)
@@ -305,9 +302,9 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
         })
         .collect();
     let gpu_name = gpu_name(&snap, plan.gpus[0]);
-    let input = chooser_input(req, &snap, &plan.gpus, plan.ctx, plan.max_conc);
+    let input = chooser_input(req, plan.ctx, plan.max_conc);
     let learned = crate::engine_overhead::read_learned(con, model_id, &gpu_name, plan.tp as u64);
-    let need = chooser::with_learned(chooser::need(&input, plan.tp), learned);
+    let need = chooser::with_learned(chooser::need(&input, plan.tp, &plan.cc), learned);
     let found = foreign::foreign_on(&snap, &plan.gpus, &managed, &live);
     let short = plan.gpus.iter().find_map(|g| shortfall(&need, *g, free[g]));
     if let (Some(why), false) = (short, busy) {
@@ -402,6 +399,7 @@ fn start_engine(
         tp,
         mem_frac,
         gpus: &plan.gpus,
+        cc: &plan.cc,
         load_extra: &req.params.extra_sglang_args,
     };
     let (identity, log_offset) = spawn_engine(&spec, &log_path).map_err(err1)?;
@@ -466,6 +464,7 @@ fn start_engine(
         model_path: req.model_path.clone(),
         card: req.card.clone(),
         gpus: plan.gpus.clone(),
+        cc: plan.cc.clone(),
         ctx: plan.ctx,
         max_conc: plan.max_conc,
     })
@@ -473,6 +472,9 @@ fn start_engine(
 
 fn spawn_engine(spec: &EngineSpec, log_path: &Path) -> Result<(Identity, u64), String> {
     // Start the engine in its own session, capture its identity and register its run entry before anything else.
+    if let Err(e) = crate::cuda_toolkit::prepare(spec.home) {
+        eprintln!("bundled CUDA toolkit layout: {e}");
+    }
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -770,6 +772,7 @@ fn respawn(s: &mut Starting, need: Need, move_port: bool) -> Result<(), String> 
         tp: s.tp,
         mem_frac,
         gpus: &s.gpus,
+        cc: &s.cc,
         load_extra: &s.params.extra_sglang_args,
     };
     let (identity, offset) = spawn_engine(&spec, &s.log_path)?;
@@ -1147,15 +1150,11 @@ fn kv_bytes_per_token(row: &InstRow, card: &toml::Value) -> u64 {
     }
 }
 
-fn chooser_input(req: &LoadReq, snap: &[GpuLive], gpus: &[u32], ctx: u64, max_conc: u64) -> ChooserInput {
-    // Budget inputs for a GPU set: Marlin extra by the live compute capability, KV bytes from the card dtype.
+fn chooser_input(req: &LoadReq, ctx: u64, max_conc: u64) -> ChooserInput {
+    // Budget inputs from the card: KV bytes for its dtype, its Marlin copy and the compute capabilities it lists.
     let row = &req.row;
     ChooserInput {
-        static_vram_gb: static_weight_gb(
-            row.static_vram_gb,
-            req.card.get("marlin_extra_gb").and_then(|v| v.as_float()),
-            marlin_extra_applies(snap, gpus, &req.card),
-        ),
+        static_vram_gb: row.static_vram_gb,
         kv_bytes_per_token: kv_bytes_per_token(row, &req.card),
         num_attention_heads: row.num_attention_heads.unwrap_or(1) as u64,
         num_kv_heads: row.num_kv_heads.unwrap_or(1) as u64,
@@ -1163,18 +1162,9 @@ fn chooser_input(req: &LoadReq, snap: &[GpuLive], gpus: &[u32], ctx: u64, max_co
         max_ctx: row.max_ctx.unwrap_or(row.default_ctx) as u64,
         ctx,
         max_conc,
+        marlin_extra_gb: crate::install::card_marlin_extra_gb(&req.card),
+        supported_sm: crate::install::card_supported_sm(&req.card),
     }
-}
-
-fn marlin_extra_applies(snap: &[GpuLive], gpus: &[u32], card: &toml::Value) -> bool {
-    // The Marlin weight copy exists on live compute capability 10+ (NVML, not a cached profile) unless GOETHE_MARLIN=0.
-    let off = std::env::var("GOETHE_MARLIN").as_deref() == Ok("0")
-        || card
-            .get("env")
-            .and_then(|v| v.get("GOETHE_MARLIN"))
-            .and_then(|v| v.as_str())
-            == Some("0");
-    !off && snap.iter().any(|g| gpus.contains(&g.index) && g.cc_major >= 10)
 }
 
 fn gpu_name(snap: &[GpuLive], idx: u32) -> String {
@@ -1827,15 +1817,15 @@ mod tests {
     }
 
     #[test]
-    fn marlin_extra_follows_live_compute_capability() {
-        let live = |index, cc_major| GpuLive { index, name: "g".to_string(), cc_major, free_mb: 1, procs: Vec::new() };
-        let snap = vec![live(2, 12), live(3, 8)];
-        let card: toml::Value = toml::from_str("marlin_extra_gb = 7.8").unwrap();
-        assert!(marlin_extra_applies(&snap, &[2], &card));
-        assert!(!marlin_extra_applies(&snap, &[3], &card));
-        assert!(marlin_extra_applies(&snap, &[2, 3], &card));
-        let off: toml::Value = toml::from_str("[env]\nGOETHE_MARLIN = \"0\"").unwrap();
-        assert!(!marlin_extra_applies(&snap, &[2], &off));
+    fn gpu_names_come_from_the_live_snapshot() {
+        let live = |index| GpuLive {
+            index,
+            name: "g".to_string(),
+            compute_capability: "12.0".to_string(),
+            free_mb: 1,
+            procs: Vec::new(),
+        };
+        let snap = vec![live(2), live(3)];
         assert_eq!(gpu_name(&snap, 3), "g");
         assert_eq!(gpu_name(&snap, 9), "gpu");
     }

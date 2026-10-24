@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage 6 installer checks without network: version floors, truncation safety, no kills or nginx starts, unit owner.
+# Stage 6 installer checks without network: version floors, truncation safety, no kills, nginx or goethed starts, unit owner.
 
 set -euo pipefail
 
@@ -49,7 +49,9 @@ run_install() {
   home="$(mktemp -d "${WORK}/home-XXXXXX")"
   set +e
   env -i HOME="${WORK}" GOETHE_HOME="${home}/goethe" GOETHE_PKG_URL="file:///nonexistent" GOETHE_NO_LINK=1 \
-    GOETHE_REQUIRE_GPU="${GOETHE_REQUIRE_GPU:-}" PATH="${shim_dir}${path_tail:+:${path_tail}}" \
+    GOETHE_REQUIRE_GPU="${GOETHE_REQUIRE_GPU:-}" GOETHE_NVIDIA_VERSION_FILE="${GOETHE_NVIDIA_VERSION_FILE:-/nonexistent}" \
+    GOETHE_PCI_DIR="${GOETHE_PCI_DIR:-${WORK}/no-pci}" GOETHE_OS_RELEASE="${GOETHE_OS_RELEASE:-/nonexistent}" \
+    GOETHE_INSTALL_DRIVER="${GOETHE_INSTALL_DRIVER:-}" container="${container:-}" PATH="${shim_dir}${path_tail:+:${path_tail}}" \
     bash "${script}" 2>"${home}/stderr.txt" >/dev/null
   local rc=$?
   set -e
@@ -79,6 +81,23 @@ if grep -nE '(nginx|NGINX_BIN\}?"?) +-[cps]( |$)|nohup[^#]*nginx' "${INSTALL}"; 
   exit 1
 fi
 
+MAIN="$(sed -n '/^main() {/,/^}/p' "${INSTALL}")"
+if grep -nE 'goethe (up|recommend)|systemctl|(^|[^_a-z])start_goethed' <<<"${MAIN}" \
+  || [[ "$(grep -c 'restart_goethed' <<<"${MAIN}")" -ne 1 ]] \
+  || ! grep -A1 'if \[\[ "${RESTART}" -eq 1 \]\]; then' <<<"${MAIN}" | grep -q 'restart_goethed'; then
+  echo "install.sh main must not start goethed except to bring back one an upgrade stopped"
+  exit 1
+fi
+if [[ "$(grep -v '^}' <<<"${MAIN}" | tail -n 1)" != "  get_started" ]]; then
+  echo "install.sh must end with the Get started block"
+  exit 1
+fi
+GOT="$(LC_ALL=C bash -c "$(sed -n '/^get_started() {/,/^}/p' "${INSTALL}")"$'\n'get_started)"
+if [[ "${GOT}" != $'\nGet started:\n\n\t→ goethe start' ]]; then
+  echo "install.sh Get started block is wrong: ${GOT}"
+  exit 1
+fi
+
 SHIM="$(make_shim_dir "${WORK}/shim-curl")"
 fake "${SHIM}" curl "curl 7.40.0"
 expect_fail curl "curl 7.40.0 is below minimum 7.50" "${SHIM}" "/usr/bin:/bin"
@@ -100,10 +119,10 @@ fake "${SHIM}" nvidia-smi "575.57.08"
 expect_fail driver "575.57.08 is below minimum 580" "${SHIM}" "/usr/bin:/bin"
 
 SHIM="$(make_shim_dir "${WORK}/shim-nogpu")"
-GOETHE_REQUIRE_GPU=1 expect_fail require-gpu "nvidia-smi not found" "${SHIM}" ""
+GOETHE_REQUIRE_GPU=1 expect_fail require-gpu "no usable NVIDIA driver found" "${SHIM}" ""
 
 OUT="$(run_install "${SHIM}" "")"
-if ! grep -q "WARNING: nvidia-smi not found" <<<"${OUT}" || grep -q "below minimum" <<<"${OUT}"; then
+if ! grep -q "WARNING: no usable NVIDIA driver" <<<"${OUT}" || grep -q "below minimum" <<<"${OUT}"; then
   echo "missing-driver warning case: ${OUT}"
   exit 1
 fi
@@ -138,6 +157,64 @@ printf '[Service]\nEnvironment="GOETHE_HOME=/srv/my home/.goethe"\nEnvironmentFi
   >"${UNITS}/goethed.service"
 if [[ "$(unit_home)" != "/srv/my home/.goethe" ]]; then
   echo "system_unit_home misread goethe service enable's quoted unit: $(unit_home)"
+  exit 1
+fi
+
+recorder() {
+  # A shim tool that appends its name and arguments to calls.log; sudo runs the rest of its command line.
+  if [[ "$2" == "sudo" ]]; then
+    printf '#!/bin/sh\necho "sudo $*" >>"%s"\nexec "$@"\n' "${WORK}/calls.log" >"$1/sudo"
+  else
+    printf '#!/bin/sh\necho "%s $*" >>"%s"\nexit 0\n' "$2" "${WORK}/calls.log" >"$1/$2"
+  fi
+  chmod +x "$1/$2"
+}
+
+driver_case() {
+  # Run the installer on a machine with one NVIDIA GPU and no driver; $1 os-release text, then env assignments.
+  local release="$1" shim t
+  shift
+  shim="$(make_shim_dir "${WORK}/shim-drv-$RANDOM")"
+  for t in sudo apt-get ubuntu-drivers dpkg dnf modprobe; do recorder "${shim}" "${t}"; done
+  ln -sf "$(tool_path timeout)" "${shim}/timeout"
+  mkdir -p "${WORK}/pci/0000:01:00.0"
+  echo 0x10de >"${WORK}/pci/0000:01:00.0/vendor"
+  echo 0x030200 >"${WORK}/pci/0000:01:00.0/class"
+  printf '%s\n' "${release}" >"${WORK}/os-release"
+  : >"${WORK}/calls.log"
+  (
+    export GOETHE_PCI_DIR="${WORK}/pci" GOETHE_OS_RELEASE="${WORK}/os-release" "$@"
+    run_install "${shim}" ""
+  )
+}
+
+UBUNTU=$'ID=ubuntu\nID_LIKE=debian\nVERSION_ID="24.04"'
+OUT="$(driver_case "${UBUNTU}" GOETHE_INSTALL_DRIVER=1)"
+if ! grep -q "sudo timeout 900 ubuntu-drivers install --gpgpu nvidia:580-server-open" "${WORK}/calls.log" \
+  || ! grep -q "sudo modprobe nvidia" "${WORK}/calls.log" || grep -q "WARNING: no usable" <<<"${OUT}"; then
+  echo "ubuntu driver install case: $(cat "${WORK}/calls.log") ${OUT}"
+  exit 1
+fi
+OUT="$(driver_case "${UBUNTU}" GOETHE_INSTALL_DRIVER=0)"
+if [[ -s "${WORK}/calls.log" ]] || ! grep -q "skipping the driver install" <<<"${OUT}"; then
+  echo "declined driver install case: $(cat "${WORK}/calls.log") ${OUT}"
+  exit 1
+fi
+OUT="$(driver_case "${UBUNTU}" GOETHE_INSTALL_DRIVER=1 container=docker)"
+if [[ -s "${WORK}/calls.log" ]] || ! grep -q "this is a container, so install the NVIDIA driver" <<<"${OUT}"; then
+  echo "container driver case: $(cat "${WORK}/calls.log") ${OUT}"
+  exit 1
+fi
+OUT="$(driver_case "${UBUNTU}")"
+if [[ -s "${WORK}/calls.log" ]] || ! grep -q "rerun with GOETHE_INSTALL_DRIVER=1" <<<"${OUT}"; then
+  echo "no-terminal driver case: $(cat "${WORK}/calls.log") ${OUT}"
+  exit 1
+fi
+ROCKY=$'ID="rocky"\nID_LIKE="rhel centos fedora"\nVERSION_ID="9.4"'
+OUT="$(driver_case "${ROCKY}" GOETHE_INSTALL_DRIVER=1)"
+if ! grep -q "dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo" \
+  "${WORK}/calls.log" || ! grep -q "dnf -y install nvidia-open" "${WORK}/calls.log"; then
+  echo "rocky driver install case: $(cat "${WORK}/calls.log") ${OUT}"
   exit 1
 fi
 

@@ -85,7 +85,7 @@ pub fn allowlist_remove(cidr: &str) -> Result<(), String> {
         rows.filter_map(|r| r.ok()).collect()
     };
     if removed.is_empty() {
-        return Err(format!("{raw} is not in the allowlist (goethe allowlist list shows the entries)"));
+        return Err(format!("{raw} is not in the allowlist (goethe allowlist shows the entries)"));
     }
     con.execute(
         "DELETE FROM ip_allowlist WHERE cidr = ?1 OR cidr = ?2",
@@ -148,7 +148,7 @@ fn render_allowlist(con: &Connection) -> Result<String, String> {
             Ok(c) => {
                 let _ = writeln!(out, "allow {c};");
             }
-            Err(_) => eprintln!("warning: ignoring invalid allowlist entry {raw:?}; remove it with goethe allowlist remove"),
+            Err(_) => eprintln!("warning: ignoring invalid allowlist entry {raw:?}; remove it with goethe allowlist --remove"),
         }
     }
     Ok(out)
@@ -202,7 +202,7 @@ pub fn key_create(
     models: Option<&str>,
     admin: bool,
 ) -> Result<String, String> {
-    // Create a key with an independent random id; only the token's SHA-256 and a 4-hex prefix are stored.
+    // Create a key with an independent random id; the gateway checks its SHA-256, goethe api shows the stored key.
     let rpm_limit = rpm.unwrap_or(120);
     if rpm_limit < 0 {
         return Err(format!("rpm must be 0 (unlimited) or positive, got {rpm_limit}"));
@@ -219,8 +219,8 @@ pub fn key_create(
     let key_id = random_hex(6);
     let raw_prefix = token[..14].to_string();
     con.execute(
-        "INSERT INTO api_keys (key_id, name, token_hash, raw_prefix, rpm_limit, expires_at, model_scope, is_admin)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO api_keys (key_id, name, token_hash, raw_prefix, rpm_limit, expires_at, model_scope, is_admin, token)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         rusqlite::params![
             key_id,
             name,
@@ -230,6 +230,7 @@ pub fn key_create(
             expires_at,
             model_scope,
             i64::from(admin),
+            token,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -268,7 +269,7 @@ pub fn key_list_detailed() -> Result<Vec<serde_json::Value>, String> {
     let con = db::open(&home).map_err(|e| e.to_string())?;
     let mut stmt = con
         .prepare(
-            "SELECT key_id, name, rpm_limit, expires_at, model_scope, is_admin FROM api_keys ORDER BY created_at",
+            "SELECT key_id, name, rpm_limit, expires_at, model_scope, is_admin, raw_prefix, token FROM api_keys ORDER BY created_at",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -280,16 +281,20 @@ pub fn key_list_detailed() -> Result<Vec<serde_json::Value>, String> {
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, i64>(5)? != 0,
+                r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                r.get::<_, Option<String>>(7)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for row in rows.filter_map(|r| r.ok()) {
-        let (key_id, name, rpm, expires_at, model_scope, is_admin) = row;
+        let (key_id, name, rpm, expires_at, model_scope, is_admin, prefix, token) = row;
         let (req_t, pt_t, ct_t, req_all, pt_all, ct_all) =
             crate::key_usage::totals_for_key(&con, &key_id)?;
         out.push(serde_json::json!({
             "id": key_id,
+            "prefix": prefix,
+            "key": token,
             "name": name,
             "rpm": rpm,
             "expires": expires_at,

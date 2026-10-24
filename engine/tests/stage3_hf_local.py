@@ -178,7 +178,7 @@ def main() -> None:
                 "HF_HOME": str(home / "hf-home"),
                 "HF_HUB_DISABLE_XET": "1",
             }
-            cmd = [str(goethe), "install", REPO, "--no-load"]
+            cmd = [str(goethe), "install", "--model", REPO, "--no-load"]
             proc = subprocess.Popen(
                 cmd, env={**os.environ, **env}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, start_new_session=True,

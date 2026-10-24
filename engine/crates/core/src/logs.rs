@@ -62,7 +62,7 @@ pub fn run_logs(
         vec![home.join("logs/gateway.log"), ngx.join("error.log"), ngx.join("access.log")]
     } else {
         let Some(t) = target else {
-            return Err("usage: goethe logs <model|instance_id> or --daemon or --gateway".to_string());
+            return Err("usage: goethe logs --model <model|instance_id> or --daemon or --gateway".to_string());
         };
         vec![resolve_log_path(&home, t)?]
     };

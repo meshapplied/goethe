@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Goethe CDN installer: verified CDN artifacts, py-env, nginx binary, TLS material, goethed.
+# Goethe CDN installer: verified CDN artifacts, py-env, nginx binary, TLS material; goethe start brings goethed up.
 
 set -euo pipefail
 
@@ -7,6 +7,7 @@ GOETHE_RELEASE_PUB_PEM='__GOETHE_RELEASE_PUB_PEM__'
 DEFAULT_PKG_URL="https://pkg.meshapplied.com"
 DRIVER_MIN=580
 GLIBC_MIN=2.30
+DRIVER_REBOOT=0
 
 default_home() {
   # /workspace/.goethe (RunPod, Vast), else /var/lib/goethe for root or when writable, else ~/.goethe.
@@ -98,27 +99,155 @@ check_glibc() {
   fi
 }
 
-check_nvidia_driver() {
-  # torch cu130 in the py-env needs a CUDA 13 driver (580+) whenever a GPU driver is present.
-  local ver major
-  if ! command -v nvidia-smi >/dev/null 2>&1; then
-    if [[ "${GOETHE_REQUIRE_GPU:-}" == "1" ]]; then
-      echo "nvidia-smi not found (GOETHE_REQUIRE_GPU=1)" >&2
-      exit 1
+driver_version() {
+  # Loaded NVIDIA driver version from nvidia-smi, else from the kernel module; empty when none is usable.
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | awk 'NR == 1 {print $1}' || true
+  else
+    sed -n 's/^NVRM version:.*  \([0-9][0-9.]*\)  .*/\1/p' "${GOETHE_NVIDIA_VERSION_FILE:-/proc/driver/nvidia/version}" 2>/dev/null || true
+  fi
+}
+
+nvidia_pci_gpus() {
+  # Number of NVIDIA display or 3D controllers on the PCI bus.
+  local d vendor class n=0
+  for d in "${GOETHE_PCI_DIR:-/sys/bus/pci/devices}"/*; do
+    vendor="" class=""
+    read -r vendor <"${d}/vendor" 2>/dev/null || true
+    read -r class <"${d}/class" 2>/dev/null || true
+    [[ "${vendor}" == "0x10de" && "${class}" == 0x03* ]] && n=$((n + 1))
+  done
+  echo "${n}"
+}
+
+in_container() {
+  [[ -n "${container:-}" || -e /.dockerenv || -e /run/.containerenv ]]
+}
+
+os_field() {
+  # One field of os-release, unquoted.
+  sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" "${GOETHE_OS_RELEASE:-/etc/os-release}" 2>/dev/null | head -n 1
+}
+
+driver_install_steps() {
+  # Install the open NVIDIA driver 580+ with the distribution's tools or NVIDIA's CUDA repository; $1 is "" or sudo.
+  local sudo="$1" id like ver repo_arch tag
+  id="$(os_field ID)"
+  like="$(os_field ID_LIKE)"
+  ver="$(os_field VERSION_ID)"
+  repo_arch="x86_64"
+  [[ "${ARCH:-$(uname -m)}" == "aarch64" ]] && repo_arch="sbsa"
+  case " ${id} ${like} " in
+    *" ubuntu "*)
+      ${sudo} apt-get update -qq
+      ${sudo} env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ubuntu-drivers-common || true
+      if ${sudo} timeout 900 ubuntu-drivers install --gpgpu "nvidia:${DRIVER_MIN}-server-open"; then
+        return 0
+      fi
+      if ${sudo} env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "nvidia-driver-${DRIVER_MIN}-server-open"; then
+        return 0
+      fi
+      tag="ubuntu${ver//./}"
+      ;;
+    *" debian "*)
+      ${sudo} apt-get update -qq
+      ${sudo} env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "linux-headers-$(uname -r)" || true
+      tag="debian${ver%%.*}"
+      ;;
+    *" rhel "* | *" centos "* | *" fedora "*)
+      [[ "${id}" == "fedora" ]] && tag="fedora${ver%%.*}" || tag="rhel${ver%%.*}"
+      ${sudo} dnf -y install dnf-plugins-core "kernel-devel-$(uname -r)" kernel-headers || true
+      [[ "${id}" == "fedora" ]] || ${sudo} dnf -y install epel-release || true
+      ${sudo} dnf config-manager --add-repo \
+        "https://developer.download.nvidia.com/compute/cuda/repos/${tag}/${repo_arch}/cuda-${tag}.repo"
+      ${sudo} dnf -y install nvidia-open || ${sudo} dnf -y module install nvidia-driver:open-dkms
+      return
+      ;;
+    *)
+      echo "no automatic driver install for ${id:-this distribution}" >&2
+      return 1
+      ;;
+  esac
+  local keyring
+  keyring="$(mktemp)"
+  curl -fsSL -o "${keyring}" "https://developer.download.nvidia.com/compute/cuda/repos/${tag}/${repo_arch}/cuda-keyring_1.1-1_all.deb"
+  ${sudo} dpkg -i "${keyring}"
+  rm -f "${keyring}"
+  ${sudo} apt-get update -qq
+  ${sudo} env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nvidia-open
+}
+
+offer_driver_install() {
+  # Offer, then run, the driver install for a GPU without a usable driver; true when it ran, DRIVER_REBOOT=1 if needed.
+  local why="$1" choice="${GOETHE_INSTALL_DRIVER:-ask}" sudo="" answer
+  if in_container; then
+    echo "${why}; this is a container, so install the NVIDIA driver ${DRIVER_MIN}+ on the host and start the container with --gpus all" >&2
+    return 1
+  fi
+  if [[ "$(id -u)" -ne 0 ]]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+      echo "${why}; install the NVIDIA driver ${DRIVER_MIN}+ as root (rerun this installer as root to have it done)" >&2
+      return 1
     fi
-    echo "WARNING: nvidia-smi not found; GPU workloads need an NVIDIA driver ${DRIVER_MIN}+" >&2
-    return 0
+    sudo="sudo"
   fi
-  ver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | awk 'NR == 1 {print $1}' || true)"
-  if [[ -z "${ver}" ]]; then
-    echo "WARNING: could not read NVIDIA driver version from nvidia-smi" >&2
-    return 0
+  case "${choice}" in
+    0 | no) echo "${why}; skipping the driver install (GOETHE_INSTALL_DRIVER=0)" >&2; return 1 ;;
+    1 | yes) ;;
+    *)
+      if ! { : </dev/tty >/dev/tty; } 2>/dev/null; then
+        echo "${why}; rerun with GOETHE_INSTALL_DRIVER=1 to install the NVIDIA driver ${DRIVER_MIN}+ ($(os_field ID) packages)" >&2
+        return 1
+      fi
+      printf '%s.\nInstall the NVIDIA driver %s+ now with %s packages (needs %s, may need a reboot)? [Y/n] ' \
+        "${why}" "${DRIVER_MIN}" "$(os_field ID)" "${sudo:-root}" >/dev/tty
+      read -r answer </dev/tty || answer="n"
+      [[ -z "${answer}" || "${answer}" == [Yy]* ]] || return 1
+      ;;
+  esac
+  if mokutil --sb-state 2>/dev/null | grep -qi enabled; then
+    echo "Secure Boot is on: if the driver module is built locally, set the MOK password it asks for and enroll it at the next boot" >&2
   fi
+  if ! driver_install_steps "${sudo}"; then
+    echo "WARNING: the NVIDIA driver install failed; goethe doctor names the manual fix" >&2
+    return 1
+  fi
+  ${sudo} modprobe nvidia 2>/dev/null || true
+  local ver
+  ver="$(driver_version)"
+  if [[ -z "${ver}" || "$(version_major "${ver}")" -lt "${DRIVER_MIN}" ]]; then
+    DRIVER_REBOOT=1
+  fi
+  return 0
+}
+
+check_nvidia_driver() {
+  # torch cu130 in the py-env needs a CUDA 13 driver (580+); offer to install one where a GPU lacks it.
+  local ver major why
+  ver="$(driver_version)"
   major="$(version_major "${ver}")"
-  if [[ -z "${major}" ]] || ((major < DRIVER_MIN)); then
-    echo "NVIDIA driver ${ver} is below minimum ${DRIVER_MIN} (CUDA 13)" >&2
+  if [[ -n "${ver}" && -n "${major}" ]] && ((major >= DRIVER_MIN)); then
+    return 0
+  fi
+  if [[ -n "${ver}" ]]; then
+    why="NVIDIA driver ${ver} is below minimum ${DRIVER_MIN} (CUDA 13)"
+  elif [[ "$(nvidia_pci_gpus)" -gt 0 ]]; then
+    why="NVIDIA GPU found but no NVIDIA driver is loaded"
+  else
+    why=""
+  fi
+  if [[ -n "${why}" ]] && offer_driver_install "${why}"; then
+    return 0
+  fi
+  if [[ -n "${ver}" ]]; then
+    echo "${why}" >&2
     exit 1
   fi
+  if [[ "${GOETHE_REQUIRE_GPU:-}" == "1" ]]; then
+    echo "no usable NVIDIA driver found (GOETHE_REQUIRE_GPU=1); goethe doctor names the fix" >&2
+    exit 1
+  fi
+  echo "WARNING: no usable NVIDIA driver ${DRIVER_MIN}+ found; after the install, goethe doctor names the exact fix" >&2
 }
 
 curl_auth() {
@@ -389,14 +518,10 @@ write_system_unit() {
   systemctl daemon-reload
 }
 
-start_goethed() {
-  # systemd unit for root on systemd hosts unless another home owns it, else goethe up (start at boot), else nohup.
+restart_goethed() {
+  # Bring back the goethed an upgrade stopped: root's systemd unit unless another home owns it, else goethe up, else nohup.
   local other
-  if [[ "${STARTED:-0}" -eq 1 ]]; then
-    return
-  fi
-  if goethed_answers; then
-    echo "goethed already running for ${GOETHE_HOME}"
+  if [[ "${STARTED:-0}" -eq 1 ]] || goethed_answers; then
     return
   fi
   if systemd_root; then
@@ -424,6 +549,7 @@ apply_binaries() {
   local bin rc=0 old="" new unit=0 stop_err=""
   UPGRADE_NOTE=""
   STARTED=0
+  RESTART=0
   if [[ ${#STAGED[@]} -eq 0 ]]; then
     return
   fi
@@ -434,6 +560,7 @@ apply_binaries() {
     if systemd_root && write_system_unit; then
       unit=1
     fi
+    RESTART=1
     { stop_err="$("${GOETHE_HOME}/bin/goethe" down --keep-engines 2>&1 1>&3)"; } 3>&1 || rc=$?
     if [[ ${rc} -eq 2 ]]; then
       rc=0
@@ -496,34 +623,53 @@ wait_gateway() {
 }
 
 summary() {
-  # Ports, endpoints, cloud mappings and how the linked CLI finds a non-default home.
-  local port mux mapped
-  port="$(cat "${GOETHE_HOME}/nginx/public_port")"
-  mux="$(cat "${GOETHE_HOME}/nginx/mux_port" 2>/dev/null || echo "?")"
-  echo "Mux (loopback OpenAI router): http://127.0.0.1:${mux}"
-  echo "Gateway: https://127.0.0.1:${port} (default-deny: goethe allowlist add <cidr>; goethe key create --name <n>)"
-  mapped="RUNPOD_TCP_PORT_${port}"
-  if [[ -n "${RUNPOD_POD_ID:-}" ]]; then
-    if [[ -n "${RUNPOD_PUBLIC_IP:-}" && -n "${!mapped:-}" ]]; then
-      echo "RunPod public endpoint: https://${RUNPOD_PUBLIC_IP}:${!mapped}"
-    else
-      echo "RunPod: expose TCP port ${port} in the pod settings to reach the gateway from outside"
-    fi
-  fi
-  mapped="VAST_TCP_PORT_${port}"
-  if [[ -n "${PUBLIC_IPADDR:-}" && -n "${!mapped:-}" ]]; then
-    echo "Vast public endpoint: https://${PUBLIC_IPADDR}:${!mapped}"
-  elif [[ -n "${VAST_CONTAINERLABEL:-}" ]]; then
-    echo "Vast: map container port ${port} (-p ${port}:${port}) to reach the gateway from outside"
-  fi
+  # How the linked CLI finds a non-default home, then the driver reboot and PATH notes.
   if [[ "${GOETHE_HOME}" != "$(default_home)" ]]; then
     echo "GOETHE_HOME=${GOETHE_HOME} is not the default: ${GOETHE_HOME}/bin/goethe${LINK_DIR:+ and ${LINK_DIR}/goethe}" \
       "find it from their own location, no export needed"
   fi
+  if [[ "${DRIVER_REBOOT}" == "1" ]]; then
+    echo "Reboot to load the new NVIDIA driver, then check it with goethe doctor"
+  fi
+  if [[ -n "${LINK_DIR}" && ":${PATH}:" != *":${LINK_DIR}:"* ]]; then
+    echo "Add ${LINK_DIR} to PATH to use goethe"
+  fi
+  echo "Goethe install complete: GOETHE_HOME=${GOETHE_HOME}"
+}
+
+get_started() {
+  printf '\nGet started:\n\n\t→ goethe start\n'
+}
+
+show_banner() {
+  # The Goethe banner in light blue, on a fresh install in a terminal wide enough for it.
+  local cols
+  [[ -t 1 && ! -x "${GOETHE_HOME:-$(default_home)}/bin/goethe" ]] || return 0
+  cols="$(tput cols 2>/dev/null || echo "${COLUMNS:-0}")"
+  ((cols >= 143)) || return 0
+  [[ -z "${NO_COLOR:-}" ]] && printf '\033[1;38;5;117m'
+  cat <<'BANNER'
+ ██████╗ ██╗    ██╗███╗   ██╗    ██╗   ██╗ ██████╗ ██╗   ██╗██████╗     ██╗███╗   ██╗███████╗███████╗██████╗ ███████╗███╗   ██╗ ██████╗███████╗
+██╔═══██╗██║    ██║████╗  ██║    ╚██╗ ██╔╝██╔═══██╗██║   ██║██╔══██╗    ██║████╗  ██║██╔════╝██╔════╝██╔══██╗██╔════╝████╗  ██║██╔════╝██╔════╝
+██║   ██║██║ █╗ ██║██╔██╗ ██║     ╚████╔╝ ██║   ██║██║   ██║██████╔╝    ██║██╔██╗ ██║█████╗  █████╗  ██████╔╝█████╗  ██╔██╗ ██║██║     █████╗
+██║   ██║██║███╗██║██║╚██╗██║      ╚██╔╝  ██║   ██║██║   ██║██╔══██╗    ██║██║╚██╗██║██╔══╝  ██╔══╝  ██╔══██╗██╔══╝  ██║╚██╗██║██║     ██╔══╝
+╚██████╔╝╚███╔███╔╝██║ ╚████║       ██║   ╚██████╔╝╚██████╔╝██║  ██║    ██║██║ ╚████║██║     ███████╗██║  ██║███████╗██║ ╚████║╚██████╗███████╗
+ ╚═════╝  ╚══╝╚══╝ ╚═╝  ╚═══╝       ╚═╝    ╚═════╝  ╚═════╝ ╚═╝  ╚═╝    ╚═╝╚═╝  ╚═══╝╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝ ╚═════╝╚══════╝
+
+     ██╗       ██████╗  ██████╗ ███████╗████████╗██╗  ██╗███████╗
+     ╚██╗     ██╔════╝ ██╔═══██╗██╔════╝╚══██╔══╝██║  ██║██╔════╝
+█████╗╚██╗    ██║  ███╗██║   ██║█████╗     ██║   ███████║█████╗
+╚════╝██╔╝    ██║   ██║██║   ██║██╔══╝     ██║   ██╔══██║██╔══╝
+     ██╔╝     ╚██████╔╝╚██████╔╝███████╗   ██║   ██║  ██║███████╗
+     ╚═╝       ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
+BANNER
+  [[ -z "${NO_COLOR:-}" ]] && printf '\033[0m'
+  echo
 }
 
 main() {
-  # Verify prerequisites and the signed CDN, install everything under GOETHE_HOME, start goethed and wait for it.
+  # Verify prerequisites and the signed CDN, install everything under GOETHE_HOME; goethed stays down unless upgraded.
+  show_banner
   CDN="${GOETHE_PKG_URL:-${DEFAULT_PKG_URL}}"
   CDN="${CDN%/}"
   ARCH="$(normalize_arch "${GOETHE_ARCH:-$(uname -m)}")"
@@ -566,24 +712,17 @@ main() {
   ensure_certs
   write_goethe_env
   apply_binaries
-  start_goethed
-  wait_goethed
+  if [[ "${RESTART}" -eq 1 ]]; then
+    restart_goethed
+    wait_goethed
+    wait_gateway
+  fi
   if [[ -n "${UPGRADE_NOTE}" ]]; then
     echo "${UPGRADE_NOTE}"
   fi
-  wait_gateway
   goethe hw profile || echo "WARNING: goethe hw profile failed" >&2
-  local rec
-  if rec="$(goethe recommend 2>&1)"; then
-    { printf '%s\n' "${rec}" | head -n 20; } || true
-  else
-    echo "WARNING: goethe recommend failed: $(printf '%s' "${rec}" | tail -n 2)" >&2
-  fi
   summary
-  if [[ -n "${LINK_DIR}" && ":${PATH}:" != *":${LINK_DIR}:"* ]]; then
-    echo "Add ${LINK_DIR} to PATH to use goethe"
-  fi
-  echo "Goethe install complete: GOETHE_HOME=${GOETHE_HOME}"
+  get_started
 }
 
 main "$@"

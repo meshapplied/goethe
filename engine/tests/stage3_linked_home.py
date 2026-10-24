@@ -42,14 +42,14 @@ def main() -> None:
         md = start_goethed(home)
         link_dir = Path(tempfile.mkdtemp(prefix=run_temp_prefix("link"), dir="/tmp"))
         try:
-            run_goethe([str(goethe), "key", "create", "--name", "linked-key", "--raw"], env=home_goethe_env(home))
+            run_goethe([str(goethe), "key", "--create", "linked-key", "--raw"], env=home_goethe_env(home))
             linked = link_dir / "goethe"
             linked.symlink_to(home / "bin" / "goethe")
             ps = _bare_run(linked, link_dir, "ps", "--json")
             if ps.returncode != 0:
                 raise RuntimeError(f"linked goethe ps found no goethed (exit {ps.returncode}): {ps.stderr[-300:]}")
             json.loads(ps.stdout.strip() or "[]")
-            keys = _bare_run(linked, link_dir, "key", "list", "--json")
+            keys = _bare_run(linked, link_dir, "key", "--json")
             names = [k.get("name") for k in json.loads(keys.stdout or "[]")] if keys.returncode == 0 else []
             if "linked-key" not in names:
                 raise RuntimeError(f"linked goethe must use {home}: {keys.returncode} {names} {keys.stderr[-200:]}")

@@ -1,4 +1,4 @@
-// OpenAI multiplexer on 127.0.0.1 (persisted mux port): key auth, routing, metering and upstream auth.
+// API multiplexer on 127.0.0.1 (persisted mux port): OpenAI, Anthropic and LiteLLM routes, key auth, metering and upstream auth.
 
 use goethe_core::db;
 use goethe_core::gateway_cache::{GatewayCache, Route, Snapshot};
@@ -128,7 +128,11 @@ async fn serve(m: MuxRef, listener: TcpListener) {
 
 async fn handle(m: MuxRef, req: Request<Incoming>) -> Response<MuxBody> {
     let rid = request_id(req.headers());
+    let anthropic = is_anthropic(req.uri().path());
     let mut resp = dispatch(m, req, &rid).await;
+    if anthropic {
+        resp = anthropic_error(resp);
+    }
     if let Ok(v) = HeaderValue::from_str(&rid) {
         resp.headers_mut().insert(X_REQUEST_ID, v);
     }
@@ -136,11 +140,15 @@ async fn handle(m: MuxRef, req: Request<Incoming>) -> Response<MuxBody> {
 }
 
 async fn dispatch(m: MuxRef, req: Request<Incoming>, rid: &str) -> Response<MuxBody> {
-    // Health and metrics need no key; everything under /v1/ is authenticated.
+    // Health and metrics need no key; every API route is authenticated.
     let path = req.uri().path().to_string();
     let get = req.method() == Method::GET;
     match path.as_str() {
-        "/metrics" | "/health" | "/health/ready" if !get => method_not_allowed(&Method::GET),
+        "/metrics" | "/health" | "/health/ready" | "/health/liveliness" | "/health/liveness" | "/health/readiness"
+            if !get =>
+        {
+            method_not_allowed(&Method::GET)
+        }
         p if p.starts_with("/health/admin") && !get => method_not_allowed(&Method::GET),
         "/metrics" => match tokio::task::spawn_blocking(metrics::render_prometheus).await {
             Ok(text) => {
@@ -155,18 +163,46 @@ async fn dispatch(m: MuxRef, req: Request<Incoming>, rid: &str) -> Response<MuxB
         },
         "/health" => json_response(StatusCode::OK, json!({"status": "ok"})),
         "/health/ready" => health_ready(m, req.uri().query()).await,
+        "/health/liveliness" | "/health/liveness" => json_response(StatusCode::OK, json!("I'm alive!")),
+        "/health/readiness" => json_response(StatusCode::OK, json!({"status": "healthy"})),
         p if p.starts_with("/health/admin") => health_admin(m, req.headers()).await,
-        p if p.starts_with("/v1/") => v1(m, req, &path, rid).await,
-        _ => not_found(),
+        _ => api(m, req, &path, rid).await,
     }
 }
 
-async fn v1(m: MuxRef, req: Request<Incoming>, path: &str, rid: &str) -> Response<MuxBody> {
-    // Method check, key auth, per-key rpm, then the model list or a proxied completion/embedding call.
-    let allowed = match path {
-        "/v1/chat/completions" | "/v1/completions" | "/v1/embeddings" => Method::POST,
-        p if p == "/v1/models" || p.starts_with("/v1/models/") => Method::GET,
-        _ => return not_found(),
+enum Api {
+    Models,
+    Model(String),
+    ModelInfo { group: bool },
+    Proxy(String),
+}
+
+fn api_tail(path: &str) -> &str {
+    // LiteLLM serves every OpenAI route with and without the /v1 prefix.
+    path.strip_prefix("/v1").filter(|t| t.starts_with('/')).unwrap_or(path)
+}
+
+fn is_anthropic(path: &str) -> bool {
+    matches!(api_tail(path), "/messages" | "/messages/count_tokens")
+}
+
+fn api_route(path: &str) -> Option<(Method, Api)> {
+    // OpenAI, Anthropic Messages and LiteLLM paths; proxied calls go to the engine's /v1 path.
+    let tail = api_tail(path);
+    match tail {
+        "/chat/completions" | "/completions" | "/embeddings" | "/responses" | "/rerank" | "/messages"
+        | "/messages/count_tokens" => Some((Method::POST, Api::Proxy(format!("/v1{tail}")))),
+        "/models" => Some((Method::GET, Api::Models)),
+        "/model/info" => Some((Method::GET, Api::ModelInfo { group: false })),
+        "/model_group/info" => Some((Method::GET, Api::ModelInfo { group: true })),
+        t => t.strip_prefix("/models/").map(|id| (Method::GET, Api::Model(percent_decode(id, false)))),
+    }
+}
+
+async fn api(m: MuxRef, req: Request<Incoming>, path: &str, rid: &str) -> Response<MuxBody> {
+    // Method check, key auth, per-key rpm, then the model list or a proxied call.
+    let Some((allowed, route)) = api_route(path) else {
+        return not_found();
     };
     if req.method() != allowed {
         return method_not_allowed(&allowed);
@@ -179,30 +215,36 @@ async fn v1(m: MuxRef, req: Request<Incoming>, path: &str, rid: &str) -> Respons
         metrics::inc_rate_limited(&key.key_id);
         return rate_limited(retry);
     }
-    if path == "/v1/models" {
-        return list_models(m, &key);
+    match route {
+        Api::Models => list_models(m, &key),
+        Api::Model(id) => get_model(m, &key, &id),
+        Api::ModelInfo { group } => model_info(m, &key, group),
+        Api::Proxy(upstream) => route_post(m, req, &upstream, &key, rid).await,
     }
-    if let Some(id) = path.strip_prefix("/v1/models/") {
-        return get_model(m, &key, &percent_decode(id, false));
-    }
-    route_post(m, req, path, &key, rid).await
 }
 
 fn authenticate(
     m: &Mux,
     headers: &HeaderMap,
 ) -> Result<Arc<ResolvedKey>, (&'static str, &'static str)> {
-    // Bearer token to a cached key (a miss rechecks the DB); expired keys are refused.
-    let key = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(parse_bearer)
+    // Client token to a cached key (a miss rechecks the DB); expired keys are refused.
+    let key = client_token(headers)
         .and_then(|t| m.cache.resolve_token(t))
         .ok_or(("Invalid or missing Goethe API key", "invalid_api_key"))?;
     if security::key_expired(&key.expires_at) {
         return Err(("key expired", "key_expired"));
     }
     Ok(key)
+}
+
+fn client_token(headers: &HeaderMap) -> Option<&str> {
+    // Bearer in Authorization or x-litellm-api-key, else a bare key in x-litellm-api-key, x-api-key (Anthropic) or api-key (Azure).
+    let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    get(AUTHORIZATION.as_str())
+        .and_then(parse_bearer)
+        .or_else(|| get("x-litellm-api-key").map(|v| parse_bearer(v).unwrap_or(v.trim())))
+        .or_else(|| get("x-api-key").or_else(|| get("api-key")).map(str::trim))
+        .filter(|t| !t.is_empty() && !t.contains(|c: char| c.is_ascii_whitespace()))
 }
 
 fn parse_bearer(raw: &str) -> Option<&str> {
@@ -241,21 +283,45 @@ fn revoked() -> Response<MuxBody> {
     error(StatusCode::UNAUTHORIZED, "Invalid or missing Goethe API key", "auth_error", "invalid_api_key")
 }
 
+fn scoped_models<'a>(snap: &'a Snapshot, key: &ResolvedKey) -> Vec<&'a str> {
+    snap.serving_models().into_iter().filter(|id| security::model_allowed(&key.model_scope, id)).collect()
+}
+
 fn list_models(m: &Mux, key: &ResolvedKey) -> Response<MuxBody> {
     // Serving models in the key's scope; the exact snapshot also refuses a key revoked a moment ago.
     let snap = m.cache.exact();
     if !snap.has_key(key) {
         return revoked();
     }
-    let data: Vec<Value> = snap
-        .serving_models()
-        .into_iter()
-        .filter(|id| security::model_allowed(&key.model_scope, id))
-        .map(|id| model_object(&snap, id))
-        .collect();
+    let data: Vec<Value> = scoped_models(&snap, key).into_iter().map(|id| model_object(&snap, id)).collect();
     metrics::record_request("", 200, 0.0, 0, 0);
     m.cache.record_usage(&key.key_id, 0, 0);
     json_response(StatusCode::OK, json!({"object": "list", "data": data}))
+}
+
+fn model_info(m: &Mux, key: &ResolvedKey, group: bool) -> Response<MuxBody> {
+    // LiteLLM's /model/info and /model_group/info shapes for the serving models in the key's scope.
+    let snap = m.cache.exact();
+    if !snap.has_key(key) {
+        return revoked();
+    }
+    let data: Vec<Value> = scoped_models(&snap, key)
+        .into_iter()
+        .map(|id| {
+            if group {
+                json!({"model_group": id, "providers": ["openai"]})
+            } else {
+                json!({
+                    "model_name": id,
+                    "litellm_params": {"model": format!("openai/{id}")},
+                    "model_info": {"id": id, "created": snap.created(id), "owned_by": "goethe"},
+                })
+            }
+        })
+        .collect();
+    metrics::record_request("", 200, 0.0, 0, 0);
+    m.cache.record_usage(&key.key_id, 0, 0);
+    json_response(StatusCode::OK, json!({"data": data}))
 }
 
 fn get_model(m: &Mux, key: &ResolvedKey, raw: &str) -> Response<MuxBody> {
@@ -265,7 +331,7 @@ fn get_model(m: &Mux, key: &ResolvedKey, raw: &str) -> Response<MuxBody> {
         return revoked();
     }
     let id = snap.resolve_model(raw);
-    if security::model_allowed(&key.model_scope, id) && snap.serving_models().contains(&id) {
+    if scoped_models(&snap, key).contains(&id) {
         return json_response(StatusCode::OK, model_object(&snap, id));
     }
     model_not_found()
@@ -415,6 +481,7 @@ async fn proxy(
         done: Some((finish, guard, code)),
         sse,
         cut: false,
+        cut_event: if is_anthropic(path) { ANTHROPIC_CUT_EVENT } else { STREAM_CUT_EVENT },
     };
     Response::from_parts(parts, body.boxed())
 }
@@ -425,9 +492,11 @@ struct MeteredBody {
     done: Option<(Finish, inflight::InflightGuard, u16)>,
     sse: bool,
     cut: bool,
+    cut_event: &'static [u8],
 }
 
 const STREAM_CUT_EVENT: &[u8] = b"data: {\"error\":{\"message\":\"the engine stopped during this stream (model unloaded or engine crashed)\",\"type\":\"unavailable_error\",\"code\":\"engine_stopped\"}}\n\ndata: [DONE]\n\n";
+const ANTHROPIC_CUT_EVENT: &[u8] = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"the engine stopped during this stream (model unloaded or engine crashed)\"}}\n\n";
 
 impl MeteredBody {
     fn finish(&mut self) {
@@ -445,7 +514,7 @@ impl Body for MeteredBody {
     type Error = hyper::Error;
 
     fn poll_frame(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
-        // Frames pass through while data is metered; a cut SSE stream ends with an OpenAI error event, not a reset.
+        // Frames pass through while data is metered; a cut SSE stream ends with an error event in its API's shape, not a reset.
         let this = self.get_mut();
         if this.cut {
             return Poll::Ready(None);
@@ -460,7 +529,7 @@ impl Body for MeteredBody {
             Poll::Ready(Some(Err(_))) if this.sse => {
                 this.finish();
                 this.cut = true;
-                return Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(STREAM_CUT_EVENT)))));
+                return Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(this.cut_event)))));
             }
             Poll::Ready(None) | Poll::Ready(Some(Err(_))) => this.finish(),
             Poll::Pending => {}
@@ -485,10 +554,10 @@ impl Drop for MeteredBody {
 
 #[derive(Deserialize)]
 struct Usage {
-    #[serde(default)]
-    prompt_tokens: i64,
-    #[serde(default)]
-    completion_tokens: i64,
+    #[serde(default, alias = "input_tokens")]
+    prompt_tokens: Option<i64>,
+    #[serde(default, alias = "output_tokens")]
+    completion_tokens: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -499,10 +568,24 @@ struct UsageEnvelope {
 
 #[derive(Deserialize)]
 struct StreamChunk {
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
     #[serde(default)]
     usage: Option<Usage>,
     #[serde(default)]
+    message: Option<UsageEnvelope>,
+    #[serde(default)]
+    response: Option<UsageEnvelope>,
+    #[serde(default)]
     choices: Vec<StreamChoice>,
+}
+
+impl StreamChunk {
+    fn has_output(&self) -> bool {
+        // OpenAI choices with text, an Anthropic content_block_delta, or a Responses "*.delta" event.
+        self.choices.iter().any(StreamChoice::has_output)
+            || self.kind.as_deref().is_some_and(|k| k == "content_block_delta" || k.ends_with(".delta"))
+    }
 }
 
 #[derive(Deserialize)]
@@ -538,7 +621,8 @@ struct UsageMeter {
     sse: bool,
     started: Instant,
     buf: Vec<u8>,
-    usage: Option<(i64, i64)>,
+    prompt: Option<i64>,
+    completion: Option<i64>,
     chunks: i64,
     first_token: Option<Duration>,
     overflow: bool,
@@ -550,7 +634,8 @@ impl UsageMeter {
             sse,
             started,
             buf: Vec::new(),
-            usage: None,
+            prompt: None,
+            completion: None,
             chunks: 0,
             first_token: None,
             overflow: false,
@@ -583,7 +668,7 @@ impl UsageMeter {
     }
 
     fn sse_line(&mut self, line: &[u8]) {
-        // A final usage object wins; otherwise every chunk carrying output counts as one token.
+        // Reported usage wins (Anthropic splits it over message_start and message_delta); else each output chunk is one token.
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         let Some(data) = line.strip_prefix(b"data:") else {
             return;
@@ -595,10 +680,12 @@ impl UsageMeter {
         let Ok(chunk) = serde_json::from_slice::<StreamChunk>(data) else {
             return;
         };
-        if let Some(u) = chunk.usage {
-            self.usage = Some((u.prompt_tokens, u.completion_tokens));
+        let has_output = chunk.has_output();
+        for u in [chunk.usage, chunk.message.and_then(|e| e.usage), chunk.response.and_then(|e| e.usage)].into_iter().flatten() {
+            self.prompt = u.prompt_tokens.or(self.prompt);
+            self.completion = u.completion_tokens.or(self.completion);
         }
-        if chunk.choices.iter().any(StreamChoice::has_output) {
+        if has_output {
             self.chunks += 1;
             if self.first_token.is_none() {
                 self.first_token = Some(self.started.elapsed());
@@ -612,11 +699,14 @@ impl UsageMeter {
             return serde_json::from_slice::<UsageEnvelope>(&self.buf)
                 .ok()
                 .and_then(|e| e.usage)
-                .map_or((0, 0), |u| (u.prompt_tokens, u.completion_tokens));
+                .map_or((0, 0), |u| (u.prompt_tokens.unwrap_or(0), u.completion_tokens.unwrap_or(0)));
         }
         let rest = std::mem::take(&mut self.buf);
         self.sse_line(&rest);
-        self.usage.unwrap_or((0, self.chunks))
+        if self.prompt.is_none() && self.completion.is_none() {
+            return (0, self.chunks);
+        }
+        (self.prompt.unwrap_or(0), self.completion.unwrap_or(self.chunks))
     }
 
     fn ttft(&self) -> Option<f64> {
@@ -736,11 +826,7 @@ fn percent_decode(s: &str, form: bool) -> String {
 
 async fn health_admin(m: MuxRef, headers: &HeaderMap) -> Response<MuxBody> {
     // Admin keys only (anything else gets a plain 404); DB and NVML work runs on the blocking pool.
-    let key = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(parse_bearer)
-        .and_then(|t| m.cache.resolve_token(t));
+    let key = client_token(headers).and_then(|t| m.cache.resolve_token(t));
     if !key.is_some_and(|k| k.is_admin && !security::key_expired(&k.expires_at)) {
         return admin_not_found();
     }
@@ -841,11 +927,36 @@ fn json_response(status: StatusCode, v: Value) -> Response<MuxBody> {
     Response::from_parts(parts, body)
 }
 
+#[derive(Clone)]
+struct GoetheError(String);
+
 fn error(status: StatusCode, message: &str, kind: &str, code: &str) -> Response<MuxBody> {
-    json_response(
+    let mut resp = json_response(
         status,
         json!({"error": {"message": message, "type": kind, "param": null, "code": code}}),
-    )
+    );
+    resp.extensions_mut().insert(GoetheError(message.to_string()));
+    resp
+}
+
+fn anthropic_error(resp: Response<MuxBody>) -> Response<MuxBody> {
+    // Goethe's own errors on Anthropic routes in the Messages API shape; engine replies pass through untouched.
+    let Some(GoetheError(message)) = resp.extensions().get::<GoetheError>().cloned() else {
+        return resp;
+    };
+    let kind = match resp.status().as_u16() {
+        400 | 405 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        413 => "request_too_large",
+        429 => "rate_limit_error",
+        503 => "overloaded_error",
+        _ => "api_error",
+    };
+    let (parts, _) = resp.into_parts();
+    let body = json!({"type": "error", "error": {"type": kind, "message": message}});
+    Response::from_parts(parts, full(serde_json::to_vec(&body).unwrap_or_default()))
 }
 
 fn not_found() -> Response<MuxBody> {
@@ -952,6 +1063,80 @@ mod tests {
         assert_eq!(m.ttft(), None);
         let mut bad = meter_feed(false, &[b"not json"]);
         assert_eq!(bad.totals(), (0, 0));
+    }
+
+    #[test]
+    fn anthropic_and_responses_usage_is_metered() {
+        let mut a = meter_feed(
+            true,
+            &[
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\n",
+                b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
+                b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\n",
+            ],
+        );
+        assert_eq!(a.totals(), (9, 4));
+        assert!(a.ttft().is_some());
+        let mut r = meter_feed(
+            true,
+            &[
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n",
+                b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n",
+            ],
+        );
+        assert_eq!(r.totals(), (5, 2));
+        let mut j = meter_feed(false, &[b"{\"type\":\"message\",\"usage\":{\"input_tokens\":3,\"output_tokens\":8}}"]);
+        assert_eq!(j.totals(), (3, 8));
+    }
+
+    #[test]
+    fn litellm_routes_and_key_headers() {
+        let proxied = |p: &str| match api_route(p) {
+            Some((Method::POST, Api::Proxy(up))) => Some(up),
+            _ => None,
+        };
+        assert_eq!(proxied("/chat/completions").as_deref(), Some("/v1/chat/completions"));
+        assert_eq!(proxied("/v1/chat/completions").as_deref(), Some("/v1/chat/completions"));
+        assert_eq!(proxied("/v1/messages").as_deref(), Some("/v1/messages"));
+        assert_eq!(proxied("/responses").as_deref(), Some("/v1/responses"));
+        assert!(matches!(api_route("/models"), Some((Method::GET, Api::Models))));
+        assert!(matches!(api_route("/v1/models/org%2Fm"), Some((_, Api::Model(id))) if id == "org/m"));
+        assert!(matches!(api_route("/model/info"), Some((_, Api::ModelInfo { group: false }))));
+        assert!(matches!(api_route("/v1/model_group/info"), Some((_, Api::ModelInfo { group: true }))));
+        assert!(api_route("/v1").is_none() && api_route("/v1x/models").is_none() && api_route("/metrics").is_none());
+        assert!(is_anthropic("/messages") && is_anthropic("/v1/messages/count_tokens") && !is_anthropic("/v1/responses"));
+
+        let with = |pairs: &[(&'static str, &'static str)]| {
+            let mut h = HeaderMap::new();
+            for (k, v) in pairs {
+                h.insert(*k, HeaderValue::from_static(v));
+            }
+            h
+        };
+        assert_eq!(client_token(&with(&[("authorization", "Bearer a")])), Some("a"));
+        assert_eq!(client_token(&with(&[("x-litellm-api-key", "Bearer b")])), Some("b"));
+        assert_eq!(client_token(&with(&[("x-litellm-api-key", "b2")])), Some("b2"));
+        assert_eq!(client_token(&with(&[("x-api-key", "c")])), Some("c"));
+        assert_eq!(client_token(&with(&[("api-key", "d")])), Some("d"));
+        assert_eq!(client_token(&with(&[("authorization", "Basic z"), ("x-api-key", "c")])), Some("c"));
+        assert_eq!(client_token(&with(&[("x-api-key", "a b")])), None);
+        assert_eq!(client_token(&HeaderMap::new()), None);
+    }
+
+    #[tokio::test]
+    async fn goethe_errors_take_the_anthropic_shape_on_messages() {
+        let body = |r: Response<MuxBody>| async move {
+            serde_json::from_slice::<Value>(&r.into_body().collect().await.unwrap().to_bytes()).unwrap()
+        };
+        let resp = anthropic_error(rate_limited(3));
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.headers()[RETRY_AFTER], "3");
+        assert_eq!(
+            body(resp).await,
+            json!({"type": "error", "error": {"type": "rate_limit_error", "message": "Rate limit exceeded"}})
+        );
+        let engine = anthropic_error(json_response(StatusCode::OK, json!({"ok": true})));
+        assert_eq!(body(engine).await, json!({"ok": true}));
     }
 
     #[test]

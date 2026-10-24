@@ -42,7 +42,7 @@ pub struct VpnAddr {
 const TAILSCALE_RANGE: &str = "100.64.0.0/10";
 const PUBLIC_WARNING: &str = "exposing the API on a public network is not recommended.
   - Anyone who can reach this machine can attempt to connect; only the allowlist and API keys stop them.
-  - Allow only the client IPs you trust (goethe allowlist add <ip>/32) and give every client its own key.
+  - Allow only the client IPs you trust (goethe allowlist --add <ip>/32) and give every client its own key.
   - Open the gateway port in your firewall or router yourself; Goethe does not change them.
   - The certificate is self-signed, so clients must trust it or skip verification.";
 
@@ -289,7 +289,7 @@ fn configure_public(opts: &ApiOpts) -> Result<String, String> {
         allow(r, "public client")?;
     }
     if ranges.is_empty() {
-        println!("No client addresses were added: only addresses already on the allowlist can connect (goethe allowlist add <ip>/32).");
+        println!("No client addresses were added: only addresses already on the allowlist can connect (goethe allowlist --add <ip>/32).");
     }
     Ok(public_host.unwrap_or_else(|| "0.0.0.0".to_string()))
 }
@@ -332,13 +332,13 @@ fn public_ip_lines(ip: Result<IpAddr, String>, port: u16, local: &[InterfaceAddr
 }
 
 fn offer_key(yes: bool) -> Result<(), String> {
-    // Without any API key no client can call the API, so offer one; the token is shown once.
+    // Without any API key no client can call the API, so offer one; goethe api shows it again later.
     if !security::key_list_detailed()?.is_empty() {
-        println!("API keys: {} exist (goethe key list; goethe key create --name <client> for each new client)", security::key_list_detailed()?.len());
+        println!("API keys: {} exist (goethe key; goethe key --create <client> for each new client)", security::key_list_detailed()?.len());
         return Ok(());
     }
     if !interactive() && !yes {
-        println!("No API keys yet: goethe key create --name <client>");
+        println!("No API keys yet: goethe key --create <client>");
         return Ok(());
     }
     if !confirm("No API keys exist yet. Create one now?", true, yes)? {
@@ -347,12 +347,12 @@ fn offer_key(yes: bool) -> Result<(), String> {
     let name = if yes { "default".to_string() } else { ask("Key name [default]:", "default")? };
     let token = security::key_create(&name, true, None, None, None, false)?;
     println!("API key ({name}): {token}");
-    println!("Store it now: Goethe keeps only its hash and cannot show it again.");
+    println!("goethe api shows it again at any time.");
     Ok(())
 }
 
-pub fn run_api(opts: ApiOpts) -> Result<(), String> {
-    // Show the current setup, pick a mode (asked on a terminal), apply bind and allowlist, offer a key, print the URL.
+pub fn apply_access(opts: &ApiOpts) -> Result<String, String> {
+    // Show the current setup, pick a mode (asked on a terminal), apply bind and allowlist; returns the API base URL.
     println!("{}", current_text()?);
     let vpns = vpn_addrs(&nginx::interface_addrs().unwrap_or_default());
     let mode = match opts.mode {
@@ -362,13 +362,22 @@ pub fn run_api(opts: ApiOpts) -> Result<(), String> {
     };
     let bound = match mode {
         Mode::Local => configure_local()?,
-        Mode::Vpn => configure_vpn(&opts, &vpns)?,
-        Mode::Public => configure_public(&opts)?,
+        Mode::Vpn => configure_vpn(opts, &vpns)?,
+        Mode::Public => configure_public(opts)?,
     };
-    offer_key(opts.yes)?;
     let port = nginx::public_port_u16(&goethe_home());
-    let host = if bound == "0.0.0.0" { "<this machine's address>".to_string() } else { bound };
-    println!("API: https://{host}:{port}/v1 (goethe get api shows it with the loaded models)");
+    let host = match bound.as_str() {
+        "0.0.0.0" => lookup_public_ip().map_or_else(|_| "<this machine's address>".to_string(), |ip| ip.to_string()),
+        _ => bound,
+    };
+    Ok(format!("https://{host}:{port}/v1"))
+}
+
+pub fn run_api(opts: ApiOpts) -> Result<(), String> {
+    // goethe configure api: who can reach the API, then a key if none exists, then the URL.
+    let api = apply_access(&opts)?;
+    offer_key(opts.yes)?;
+    println!("\nAPI: {api}\n\n{}", crate::term::commands("For the models and keys run:", &["goethe api"]));
     Ok(())
 }
 

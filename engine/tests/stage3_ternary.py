@@ -64,7 +64,7 @@ def main() -> None:
             encoding="utf-8",
         )
         run_goethe(
-            [str(goethe), "install", model_id, "--no-load"],
+            [str(goethe), "install", "--model", model_id, "--no-load"],
             env={"GOETHE_HOME": str(home), "GOETHE_REGISTRY_URL": f"file://{reg}"},
             timeout=600,
         )

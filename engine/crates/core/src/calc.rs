@@ -24,14 +24,6 @@ pub fn vram_per_gpu_gb(w_gb: f64, l_ctx: u64, k_bytes: u64, c_max: u64, tp: u64)
     (w_gb + kv) / tp + 1.8
 }
 
-pub fn static_weight_gb(base_gb: f64, marlin_extra_gb: Option<f64>, apply_marlin: bool) -> f64 {
-    base_gb + if apply_marlin {
-        marlin_extra_gb.unwrap_or(0.0)
-    } else {
-        0.0
-    }
-}
-
 pub fn missing_gb(need: &Need, free_gb: f64) -> f64 {
     // GB a budget lacks: the whole budget leaves the safety margin and the static pool stays within 95% of free.
     (need.total() - (free_gb - SAFETY_MARGIN_GB))

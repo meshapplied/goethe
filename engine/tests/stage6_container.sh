@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage 6 container gate: install.sh as root in Ubuntu 22.04 (no systemd, no nvidia runtime) must leave a working gateway.
+# Stage 6 container gate: install.sh as root in Ubuntu 22.04 (no systemd, no nvidia runtime), then goethe up gives a working gateway.
 
 set -euo pipefail
 
@@ -46,16 +46,22 @@ docker run --rm --name "${NAME}" -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
     fi
     echo "install took $(( $(date +%s) - t0 ))s"
     grep -q "Goethe install complete" /workspace/install.log
-    grep -q "Mux (loopback OpenAI router)" /workspace/install.log
+    test "$(tail -n 1 /workspace/install.log)" = "$(printf "\t\342\206\222 goethe start")"
+    grep -qx "Get started:" /workspace/install.log
     "${H}/nginx-root/usr/sbin/nginx" -v
+    if goethe ps >/dev/null 2>&1; then
+      echo "install.sh started goethed"
+      exit 1
+    fi
+    goethe up >/dev/null
     goethe ps >/dev/null
     grep -qx "GOETHE_PKG_URL=file:///cdn" "${H}/goethe.env"
     grep -qx "GOETHE_REGISTRY_URL=file:///cdn/v1/registry.json" "${H}/goethe.env"
     test "$(stat -c %a "${H}/goethe.env")" = 600
     port=$(cat "${H}/nginx/public_port")
     test "$(curl -sk -o /dev/null -w "%{http_code}" "https://127.0.0.1:${port}/v1/models")" = 403
-    goethe allowlist add 127.0.0.1/32 >/dev/null
-    token=$(goethe key create --name c --raw | grep "^goethe_sk_")
+    goethe allowlist --add 127.0.0.1/32 >/dev/null
+    token=$(goethe key --create c --raw | grep "^goethe_sk_")
     test "$(curl -sk -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${token}" "https://127.0.0.1:${port}/v1/models")" = 200
     goethe down >/dev/null
     echo "container gateway ok on ${port}"

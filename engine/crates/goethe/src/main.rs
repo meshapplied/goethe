@@ -17,13 +17,31 @@ use goethe_core::security;
 use goethe_core::shutdown;
 use serde_json::{json, Value};
 
+const KEY_HELP: &str = "Create a key (goethe api lists it again later):
+
+\t→ goethe key --create my-app
+
+With an expiry (days like 30d, or a date like 2026-12-31), a rate limit and admin rights:
+
+\t→ goethe key --create ops --expires 90d --rpm 300 --admin
+
+Only some models, or just the key for a script:
+
+\t→ goethe key --create bot --models deepseek-ai/DeepSeek-V4.1-Flash-1017
+\t→ API_KEY=$(goethe key --create ci --raw)
+
+List keys, or revoke one:
+
+\t→ goethe key
+\t→ goethe key --revoke <key-id>";
+
 #[derive(Parser)]
 #[command(
     name = "goethe",
     disable_version_flag = true,
     about = "Goethe: serve LLMs on your NVIDIA GPUs behind one OpenAI-compatible gateway",
-    after_help = "Examples:\n  goethe up\n  goethe install Qwen/Qwen3-8B --load\n  goethe scan\n  goethe load Qwen/Qwen3-8B --gpus 2,3 --ctx 65536\n  goethe get api\n  goethe key create --name ops --raw\n  goethe down\n\ngoethe down stops goethed but keeps loaded models for the next goethe up. \
-                  goethe unload removes all instances of a model and it is not restored."
+    after_help = "Examples:\n\n\t→ goethe up\n\t→ goethe install --model deepseek-ai/DeepSeek-V4.1-Flash-1017 --load\n\t→ goethe load --model deepseek-ai/DeepSeek-V4.1-Flash-1017 --gpus 0,1,2,3 --ctx 65536\n\t→ goethe key --create my-app\n\t→ goethe api\n\t→ goethe down\n\n\
+                  goethe down stops goethed but keeps loaded models for the next goethe up; goethe unload stops a model for good."
 )]
 struct Cli {
     #[arg(short = 'V', long = "version", help = "Print version, git commit and build date.")]
@@ -39,19 +57,23 @@ enum Commands {
         #[command(subcommand)]
         cmd: HwCommands,
     },
-    #[command(about = "List GPUs and manage allow/deny policy.")]
+    #[command(about = "List GPUs, or allow or deny placement on one.")]
     Gpu {
-        #[command(subcommand)]
-        cmd: GpuCommands,
+        #[arg(long, num_args = 1.., value_name = "gpuN", value_parser = parse_gpu_name, conflicts_with = "deny", help = "Allow new models on these GPUs again, for example gpu0 gpu1.")]
+        allow: Vec<u32>,
+        #[arg(long, num_args = 1.., value_name = "gpuN", value_parser = parse_gpu_name, help = "Keep new models off these GPUs (running ones stay), for example gpu0 gpu1.")]
+        deny: Vec<u32>,
+        #[arg(long, help = "Emit JSON.")]
+        json: bool,
     },
-    #[command(about = "List registry models that fit this machine.")]
+    #[command(about = "List catalog models that fit the free VRAM of the allowed GPUs.", alias = "recommended")]
     Recommend {
         #[arg(long, help = "Emit JSON instead of a table.")]
         json: bool,
     },
     #[command(about = "Download, verify, and register a model (from Hugging Face or a local path). With --load, waits for RUNNING like goethe load unless --no-wait.")]
     Install {
-        #[arg(help = "Hugging Face repo id or local directory path.")]
+        #[arg(long = "model", value_name = "ID_OR_PATH", help = "Hugging Face repo id or local directory path.")]
         model_id: String,
         #[arg(long, help = "Default context length for the model card.")]
         ctx: Option<u64>,
@@ -77,6 +99,8 @@ enum Commands {
         yes: bool,
         #[arg(long, help = "Skip sha256 verification.")]
         no_verify: bool,
+        #[arg(long = "hf-token", help = "Ask for a Hugging Face token (gated or private models); it is used for this download only.")]
+        hf_token: bool,
         #[arg(long, help = "Registered model id for local installs.")]
         name: Option<String>,
         #[arg(long, help = "Copy local tree instead of symlinking.")]
@@ -86,7 +110,7 @@ enum Commands {
     },
     #[command(about = "Register model folders you downloaded yourself and moved into GOETHE_HOME/models.")]
     Scan {
-        #[arg(help = "One folder inside GOETHE_HOME/models (default: all of them).")]
+        #[arg(long, value_name = "FOLDER", help = "One folder inside GOETHE_HOME/models (default: all of them).")]
         dir: Option<String>,
         #[arg(long, help = "Add every supported model without asking.")]
         yes: bool,
@@ -109,8 +133,8 @@ enum Commands {
     },
     #[command(about = "Remove an installed model: unload it, delete files goethe downloaded, or unregister a local folder.")]
     Remove {
-        #[arg(help = "Installed model id to remove.")]
-        model_id: String,
+        #[arg(long = "model", required = true, num_args = 1.., value_name = "ID", help = "Installed model ids to remove.")]
+        model_id: Vec<String>,
         #[arg(long, help = "Do not ask; also unloads the model if it is loaded.")]
         yes: bool,
         #[arg(long, help = "When unloading first, skip draining in-flight requests.")]
@@ -118,7 +142,7 @@ enum Commands {
     },
     #[command(about = "Change default load settings stored on the model card.")]
     Config {
-        #[arg(help = "Installed model id to update.")]
+        #[arg(long = "model", value_name = "ID", help = "Installed model id to update.")]
         model_id: String,
         #[arg(long, help = "Default context length.")]
         ctx: Option<u64>,
@@ -135,10 +159,10 @@ enum Commands {
     },
     #[command(
         about = "Load a model onto GPUs and wait until this instance is ready.",
-        after_help = "Extra SGLang flags go after --, for example: goethe load org/model --ctx 32768 -- --chunked-prefill-size 4096"
+        after_help = "Extra SGLang flags go after --, for example:\n\n\t→ goethe load --model deepseek-ai/DeepSeek-V4.1-Flash-1017 --ctx 32768 -- --chunked-prefill-size 4096"
     )]
     Load {
-        #[arg(help = "Model id to load.")]
+        #[arg(long = "model", value_name = "ID", help = "Model id to load.")]
         model_id: String,
         #[arg(long, help = "Comma-separated GPU indices.")]
         gpus: Option<String>,
@@ -165,8 +189,8 @@ enum Commands {
     },
     #[command(about = "Stop instances and clear desired load rows for a model.")]
     Unload {
-        #[arg(help = "Model id to unload (all slots), or omit with --all.")]
-        model_id: Option<String>,
+        #[arg(long = "model", num_args = 1.., value_name = "ID", conflicts_with = "all", help = "Model ids to unload (all their instances).")]
+        model_id: Vec<String>,
         #[arg(long, help = "Unload every loaded model.")]
         all: bool,
         #[arg(long, help = "Skip connection draining and tear down immediately.")]
@@ -182,17 +206,26 @@ enum Commands {
         #[arg(long = "no-boot", help = "Start now without turning on start at boot.")]
         no_boot: bool,
     },
+    #[command(about = "Show whether goethed is running, the API address and the API keys.")]
+    Status,
     #[command(about = "Stop goethed and its engines and turn off start at boot (loaded models come back on the next goethe up).")]
     Down {
         #[arg(long = "keep-engines", help = "Leave loaded engines serving; the next goethed adopts them.")]
         keep_engines: bool,
     },
-    #[command(about = "Guided setup.")]
+    #[command(about = "Choose who can reach the API.")]
     Configure {
         #[command(subcommand)]
         cmd: ConfigureCommands,
     },
-    #[command(about = "Print connection details.")]
+    #[command(about = "Guided setup: install a model, serve it through the API and set up access.")]
+    Start,
+    #[command(about = "The API address, its keys and the models it serves.")]
+    Api {
+        #[arg(long, help = "JSON with api, goethed_running, keys and models.")]
+        json: bool,
+    },
+    #[command(hide = true, about = "Print connection details (same as goethe api).")]
     Get {
         #[command(subcommand)]
         cmd: GetCommands,
@@ -209,19 +242,21 @@ enum Commands {
         #[arg(long = "probe-public", help = "Probe public gateway reachability.")]
         probe_public: bool,
     },
-    #[command(about = "Show or change where the public gateway listens.")]
+    #[command(about = "Show where the public gateway listens, or change it.")]
     Gateway {
-        #[command(subcommand)]
-        cmd: GatewayCommands,
+        #[arg(long, value_name = "ADDRESS", help = "Listen on 127.0.0.1 (this host only), 0.0.0.0 (all addresses) or one IP of this host.")]
+        bind: Option<String>,
+        #[arg(long, help = "Emit JSON.")]
+        json: bool,
     },
-    #[command(about = "Configure a public DNS name and TLS certificate.")]
+    #[command(about = "How to reach the API by a domain name, and a check that it works.")]
     Domain {
-        #[command(subcommand)]
-        cmd: DomainCommands,
+        #[arg(long, value_name = "DOMAIN", help = "Check that the domain points at the API and the gateway answers there.")]
+        check: Option<String>,
     },
     #[command(about = "Tail engine, goethed, or gateway logs.")]
     Logs {
-        #[arg(help = "Model id, or omit with --daemon / --gateway.")]
+        #[arg(long = "model", value_name = "ID", help = "Model id or instance id whose engine log to show.")]
         target: Option<String>,
         #[arg(short = 'f', long, help = "Follow log output.")]
         follow: bool,
@@ -254,20 +289,42 @@ enum Commands {
         #[arg(long, help = "Skip confirmation.")]
         yes: bool,
     },
-    #[command(about = "Manage CIDRs allowed to reach the public gateway.")]
+    #[command(about = "List the client addresses allowed to reach the gateway, or add or remove one.")]
     Allowlist {
-        #[command(subcommand)]
-        cmd: AllowlistCommands,
+        #[arg(long, num_args = 1.., value_name = "CIDR", conflicts_with = "remove", help = "Allow these client addresses or ranges, for example 203.0.113.7/32.")]
+        add: Vec<String>,
+        #[arg(long, value_name = "TEXT", requires = "add", help = "Note stored with the new entries.")]
+        description: Option<String>,
+        #[arg(long, num_args = 1.., value_name = "CIDR", help = "Remove these addresses or ranges.")]
+        remove: Vec<String>,
     },
-    #[command(about = "Create, list, or revoke API keys for the gateway.")]
+    #[command(about = "List API keys, or create or revoke one.", after_help = KEY_HELP)]
     Key {
-        #[command(subcommand)]
-        cmd: KeyCommands,
+        #[arg(long, value_name = "NAME", conflicts_with = "revoke", help = "Create a key with this name.")]
+        create: Option<String>,
+        #[arg(long, value_name = "WHEN", requires = "create", help = "Expiry: days from now like 30d, or a date like 2026-12-31.")]
+        expires: Option<String>,
+        #[arg(long, value_name = "N", requires = "create", help = "Requests per minute (default 120, 0 = unlimited).")]
+        rpm: Option<i64>,
+        #[arg(long, value_name = "IDS", requires = "create", help = "Only these models, comma-separated.")]
+        models: Option<String>,
+        #[arg(long, requires = "create", help = "Admin key: health endpoints and every model.")]
+        admin: bool,
+        #[arg(long, requires = "create", help = "Print only the key, for scripts.")]
+        raw: bool,
+        #[arg(long, num_args = 1.., value_name = "KEY_ID", help = "Revoke the keys with these ids (from goethe key).")]
+        revoke: Vec<String>,
+        #[arg(long, help = "Emit JSON.")]
+        json: bool,
     },
-    #[command(about = "Map gateway model aliases to installed model ids.")]
+    #[command(about = "List model aliases, or set or remove one.")]
     Alias {
-        #[command(subcommand)]
-        cmd: AliasCommands,
+        #[arg(long, value_name = "ALIAS", conflicts_with = "remove", requires = "model", help = "Alias name clients may use as the model field.")]
+        set: Option<String>,
+        #[arg(long, value_name = "ID", requires = "set", help = "Installed model id the alias points to.")]
+        model: Option<String>,
+        #[arg(long, num_args = 1.., value_name = "ALIAS", help = "Remove these aliases.")]
+        remove: Vec<String>,
     },
 }
 
@@ -296,99 +353,10 @@ enum GetCommands {
 }
 
 #[derive(Subcommand)]
-enum GatewayCommands {
-    #[command(about = "Listen address: 127.0.0.1 (default, this host only), 0.0.0.0 (all addresses) or one IP of this host.")]
-    Bind {
-        #[arg(help = "0.0.0.0, 127.0.0.1 or an IP address of this host.")]
-        addr: String,
-    },
-    #[command(about = "Show the bind address, port, URL, state and allowlist size.")]
-    Status {
-        #[arg(long, help = "Emit JSON.")]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum DomainCommands {
-    #[command(about = "Obtain TLS for a domain and bind the gateway publicly.")]
-    Add {
-        #[arg(help = "DNS name (must resolve to this host).")]
-        domain: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum AllowlistCommands {
-    #[command(about = "Allow a CIDR to reach the public gateway.")]
-    Add {
-        #[arg(help = "IPv4/IPv6 CIDR.")]
-        cidr: String,
-        #[arg(long, help = "Optional note stored with the entry.")]
-        description: Option<String>,
-    },
-    #[command(about = "Remove a CIDR from the allowlist.")]
-    Remove {
-        #[arg(help = "CIDR to remove.")]
-        cidr: String,
-    },
-    #[command(about = "List allowed CIDRs.")]
-    List,
-}
-
-#[derive(Subcommand)]
-#[command(after_help = "Without stream_options.include_usage, streaming usage counts SSE chunks with delta content as approximate completion tokens (prompt tokens 0).")]
-enum KeyCommands {
-    #[command(about = "Create an API key for the public gateway.")]
-    Create {
-        #[arg(long, help = "Human-readable label stored with the key.")]
-        name: String,
-        #[arg(long, help = "Print only the token on stdout (for API_KEY=$(goethe key create --raw ...)).")]
-        raw: bool,
-        #[arg(long, help = "Requests-per-minute limit.")]
-        rpm: Option<i64>,
-        #[arg(long, help = "Expiry like 30d or an ISO date.")]
-        expires: Option<String>,
-        #[arg(long, help = "Comma-separated model scope.")]
-        models: Option<String>,
-        #[arg(long, help = "Grant admin health and unrestricted scope when models is unset.")]
-        admin: bool,
-    },
-    #[command(about = "Revoke an API key by id.")]
-    Revoke {
-        #[arg(help = "Key id from goethe key list.")]
-        key_id: String,
-    },
-    #[command(about = "List API keys.")]
-    List {
-        #[arg(long, help = "Emit JSON.")]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum AliasCommands {
-    #[command(about = "Set an alias to an installed model id.")]
-    Set {
-        #[arg(help = "Alias name clients may use as the model field.")]
-        alias: String,
-        #[arg(help = "Installed model id.")]
-        model: String,
-    },
-    #[command(about = "List model aliases.")]
-    List,
-    #[command(about = "Remove a model alias.")]
-    Remove {
-        #[arg(help = "Alias to remove.")]
-        alias: String,
-    },
-}
-
-#[derive(Subcommand)]
 enum RegistryCommands {
     #[command(about = "Check a registry JSON file (local path or URL).")]
     Validate {
-        #[arg(help = "Path or URL to registry JSON.")]
+        #[arg(long, value_name = "PATH_OR_URL", help = "Registry JSON to check.")]
         source: String,
         #[arg(long, help = "Fetch remote sha256 metadata.")]
         online: bool,
@@ -399,7 +367,7 @@ enum RegistryCommands {
     },
     #[command(about = "Generate registry stub entries for repo ids.")]
     Entry {
-        #[arg(help = "Hugging Face repo ids.")]
+        #[arg(long = "repo", value_name = "ID", help = "Hugging Face repo id (repeatable).")]
         repo_ids: Vec<String>,
         #[arg(long, help = "Runtime: sglang or ternary.")]
         runtime: Option<String>,
@@ -412,7 +380,7 @@ enum RegistryCommands {
     },
     #[command(about = "Register models from a registry JSON file.")]
     Add {
-        #[arg(help = "Hugging Face repo ids to add from the file.")]
+        #[arg(long = "repo", value_name = "ID", help = "Hugging Face repo id to add from the file (repeatable).")]
         repo_ids: Vec<String>,
         #[arg(long, help = "Read repo ids from a file.")]
         ids_file: Option<String>,
@@ -443,25 +411,6 @@ enum ServiceCommands {
         off: bool,
         #[arg(long, help = "Enable restore on start.")]
         on: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum GpuCommands {
-    #[command(about = "Show GPUs with policy status.")]
-    List {
-        #[arg(long, help = "Emit JSON.")]
-        json: bool,
-    },
-    #[command(about = "Deny new placement on a GPU.")]
-    Deny {
-        #[arg(help = "GPU index.")]
-        id: u32,
-    },
-    #[command(about = "Allow placement on a GPU.")]
-    Allow {
-        #[arg(help = "GPU index.")]
-        id: u32,
     },
 }
 
@@ -503,11 +452,51 @@ fn installed_id(id: &str, strict: bool) -> String {
     }
 }
 
+fn corrected_command(args: &[String], stray: &str) -> Option<String> {
+    // The command with the flag a stray value belongs to: --model for model commands, --verb for old "verb value" forms.
+    let at = args.iter().position(|a| a == stray).filter(|&i| i >= 2 && !stray.starts_with('-'))?;
+    let flag = match (args[1].as_str(), stray) {
+        ("install" | "load" | "unload" | "remove" | "config" | "logs", _) => "--model".to_string(),
+        ("scan", _) => "--dir".to_string(),
+        ("domain", "check") | ("gateway", "bind") => format!("--{stray}"),
+        ("domain", _) => "--check".to_string(),
+        ("gateway", _) => "--bind".to_string(),
+        ("gpu", "allow" | "deny") | ("key", "create" | "revoke") | ("allowlist" | "alias", "add" | "remove" | "set") => {
+            format!("--{stray}")
+        }
+        _ => return None,
+    };
+    let mut out: Vec<String> = args[1..at].to_vec();
+    if flag.trim_start_matches('-') == stray {
+        out.push(flag);
+    } else {
+        out.extend([flag, stray.to_string()]);
+    }
+    out.extend(args[at + 1..].iter().cloned());
+    Some(format!("goethe {}", out.join(" ")))
+}
+
+fn each<T>(items: Vec<T>, act: impl Fn(T) -> Result<(), String>) -> Result<(), String> {
+    // Apply one action to every value given; all are tried, and the errors are reported together.
+    let errors: Vec<String> = items.into_iter().filter_map(|item| act(item).err()).collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
+}
+
 fn checked_id(id: &str) -> &str {
     if let Err(e) = validate_model_id(id) {
         usage(e);
     }
     id
+}
+
+fn parse_gpu_name(raw: &str) -> Result<u32, String> {
+    // "gpu2", as goethe gpu lists it; a bare index is accepted too.
+    let t = raw.trim().to_ascii_lowercase();
+    t.strip_prefix("gpu").unwrap_or(&t).parse().map_err(|_| format!("{raw} is not a GPU name like gpu2 (goethe gpu lists them)"))
 }
 
 fn parse_gpus(raw: &str) -> Result<Vec<u32>, String> {
@@ -522,7 +511,14 @@ fn main() {
         println!("{}", goethe_core::build_info::version_line());
         return;
     }
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|e| {
+        let stray = e.get(clap::error::ContextKind::InvalidArg).map(|v| v.to_string());
+        if let Some(fixed) = stray.and_then(|v| corrected_command(&args, &v)) {
+            eprintln!("error: values go after a flag. Did you mean:\n\n{}\n", goethe_core::term::command(&fixed));
+            std::process::exit(2);
+        }
+        e.exit()
+    });
     if cli.version {
         println!("{}", goethe_core::build_info::version_line());
         return;
@@ -534,10 +530,10 @@ fn main() {
         Commands::Hw {
             cmd: HwCommands::PickGpus { tp, model },
         } => hw::run_pick_gpus(tp, model.as_deref().map(checked_id)),
-        Commands::Gpu { cmd } => match cmd {
-            GpuCommands::List { json } => do_gpu_list(json),
-            GpuCommands::Deny { id } => do_gpu_deny(id),
-            GpuCommands::Allow { id } => do_gpu_allow(id),
+        Commands::Gpu { allow, deny, json } => match (allow.is_empty(), deny.is_empty()) {
+            (false, _) => each(allow, do_gpu_allow),
+            (_, false) => each(deny, do_gpu_deny),
+            _ => do_gpu_list(json),
         },
         Commands::Recommend { json } => recommend::run(json),
         Commands::Install {
@@ -554,10 +550,17 @@ fn main() {
             trust_remote_code,
             yes,
             no_verify,
+            hf_token,
             name,
             copy,
             sglang_arg,
         } => {
+            if hf_token {
+                let token = goethe_core::term::ask_secret("Hugging Face token:").unwrap_or_else(|e| usage(e));
+                let account = goethe_core::hf::whoami(&token).unwrap_or_else(|e| usage(e));
+                eprintln!("token accepted for {account}");
+                goethe_core::hf::set_token(Some(token));
+            }
             let gpus_parsed = match gpus.as_deref().map(parse_gpus) {
                 Some(Ok(v)) => Some(v),
                 Some(Err(e)) => usage(e),
@@ -631,7 +634,7 @@ fn main() {
             model_id,
             yes,
             force,
-        } => models::run_remove(&installed_id(&model_id, false), yes, force),
+        } => each(model_id, |id| models::run_remove(&installed_id(&id, false), yes, force)),
         Commands::Config {
             model_id,
             ctx,
@@ -690,19 +693,16 @@ fn main() {
             no_wait,
             json,
         }),
-        Commands::Unload { model_id, all, force } => {
-            let model_id = model_id.map(|id| installed_id(&id, false));
-            match (&model_id, all) {
-                (Some(_), false) => {}
-                (None, false) => usage("give a model id or --all"),
-                (Some(_), true) => usage("give either a model id or --all, not both"),
-                (None, true) => {}
-            }
-            do_unload(model_id.as_deref(), force)
-        }
+        Commands::Unload { model_id, all, force } => match (model_id.is_empty(), all) {
+            (true, false) => usage("give --model <id> or --all"),
+            (true, true) => do_unload(None, force),
+            _ => each(model_id, |id| do_unload(Some(&installed_id(&id, false)), force)),
+        },
         Commands::Ps { json } => do_ps(json),
         Commands::Up { no_boot } => do_up(!no_boot),
-        Commands::Get { cmd: GetCommands::Api { json } } => do_get_api(json),
+        Commands::Status => do_status(),
+        Commands::Get { cmd: GetCommands::Api { json } } | Commands::Api { json } => do_api(json),
+        Commands::Start => goethe_core::onboard::run(),
         Commands::Configure { cmd: ConfigureCommands::Api { mode, vpn_ip, allow, yes } } => {
             let mode = mode.as_deref().map(goethe_core::configure::Mode::parse).transpose().unwrap_or_else(|e| usage(e));
             goethe_core::configure::run_api(goethe_core::configure::ApiOpts { mode, vpn_ip, allow, yes })
@@ -728,21 +728,13 @@ fn main() {
             }
         },
         Commands::Doctor { json, probe_public } => goethe_core::doctor::run(json, probe_public),
-        Commands::Gateway { cmd } => match cmd {
-            GatewayCommands::Bind { addr } => do_gateway_bind(&addr),
-            GatewayCommands::Status { json } => do_gateway_status(json),
+        Commands::Gateway { bind, json } => match bind {
+            Some(addr) => do_gateway_bind(&addr),
+            None => do_gateway_status(json),
         },
-        Commands::Domain { cmd } => match cmd {
-            DomainCommands::Add { domain } => match goethe_core::domain::add(&domain) {
-                Ok(url) => {
-                    println!("{url}");
-                    Ok(())
-                }
-                Err(e) => {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
-            },
+        Commands::Domain { check } => match check {
+            Some(domain) => goethe_core::domain::check(&domain).map(|text| print!("{text}")),
+            None => goethe_core::domain::explain().map(|text| print!("{text}")),
         },
         Commands::Logs {
             target,
@@ -777,97 +769,43 @@ fn main() {
             purge_models,
             yes,
         }),
-        Commands::Allowlist { cmd } => match cmd {
-            AllowlistCommands::Add { cidr, description } => {
-                security::allowlist_add(&cidr, description.as_deref()).map(|()| {
-                    println!("allowlist: added {}", security::canonical_cidr(&cidr).unwrap_or(cidr));
-                })
-            }
-            AllowlistCommands::Remove { cidr } => security::allowlist_remove(&cidr).map(|()| {
-                println!("allowlist: removed {}", security::canonical_cidr(&cidr).unwrap_or(cidr));
+        Commands::Allowlist { add, description, remove } => match (add.is_empty(), remove.is_empty()) {
+            (false, _) => each(add, |cidr| {
+                security::allowlist_add(&cidr, description.as_deref())
+                    .map(|()| println!("Allowed {}", security::canonical_cidr(&cidr).unwrap_or(cidr)))
             }),
-            AllowlistCommands::List => security::allowlist_list().map(|rows| {
-                for cidr in &rows {
-                    println!("{cidr}");
-                }
-                if rows.is_empty() {
-                    eprintln!("the allowlist is empty, so the gateway refuses every client: goethe allowlist add <client-ip>/32");
-                }
-                print_gateway_line();
+            (_, false) => each(remove, |cidr| {
+                security::allowlist_remove(&cidr).map(|()| println!("Removed {}", security::canonical_cidr(&cidr).unwrap_or(cidr)))
             }),
+            _ => security::allowlist_list().map(|rows| print!("{}", allowlist_text(&rows))),
         },
-        Commands::Key { cmd } => match cmd {
-            KeyCommands::Create {
-                name,
-                raw,
-                rpm,
-                expires,
-                models,
-                admin,
-            } => {
-                if name.trim().is_empty() {
-                    usage("--name must not be empty");
-                }
-                if let Some(Err(e)) = models.as_deref().map(security::model_scope_list) {
-                    usage(e);
-                }
-                security::key_create(&name, true, rpm, expires.as_deref(), models.as_deref(), admin).map(|token| {
-                    print!("{}", key_create_stdout(&token, &key_id_for_token(&token), &name, raw));
-                    if let Some(line) = nginx::format_gateway_line(&goethe_home()) {
-                        eprintln!("{line}");
-                    }
-                })
+        Commands::Key { create: Some(name), expires, rpm, models, admin, raw, .. } => {
+            if name.trim().is_empty() {
+                usage("--create needs a key name");
             }
-            KeyCommands::Revoke { key_id } => security::key_revoke(&key_id).map(|()| println!("revoked key {key_id}")),
-            KeyCommands::List { json } => {
-                if json {
-                    match security::key_list_detailed() {
-                        Ok(rows) => {
-                            println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".into()));
-                            Ok(())
-                        }
-                        Err(e) => Err(e),
-                    }
-                } else {
-                    match security::key_list_detailed() {
-                        Ok(rows) => {
-                            for row in rows {
-                                let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                let rpm = rpm_text(row.get("rpm").and_then(|v| v.as_i64()).unwrap_or(0));
-                                let exp = row.get("expires").and_then(|v| v.as_str()).unwrap_or("-");
-                                let models = row.get("models").and_then(|v| v.as_str()).unwrap_or("");
-                                let admin = row
-                                    .get("admin")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(false);
-                                let admin_s = if admin { "yes" } else { "no" };
-                                let rt = row.get("requests_today").and_then(|v| v.as_i64()).unwrap_or(0);
-                                let tt = row.get("tokens_today").and_then(|v| v.as_i64()).unwrap_or(0);
-                                println!(
-                                    "{id}\t{name}\tADMIN={admin_s}\trpm={rpm}\texpires={exp}\tmodels={models}\ttoday_req={rt}\ttoday_tok={tt}"
-                                );
-                            }
-                            Ok(())
-                        }
-                        Err(e) => Err(e),
-                    }
-                }
+            if let Some(Err(e)) = models.as_deref().map(security::model_scope_list) {
+                usage(e);
             }
-        },
-        Commands::Alias { cmd } => match cmd {
-            AliasCommands::Set { alias: a, model } => alias::set(&a, &model).map(|()| println!("alias {a} -> {model}")),
-            AliasCommands::List => match alias::list() {
-                Ok(rows) => {
-                    for (a, model) in rows {
-                        println!("{a}\t{model}");
-                    }
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            },
-            AliasCommands::Remove { alias: a } => alias::remove(&a).map(|()| println!("removed alias {a}")),
-        },
+            security::key_create(&name, true, rpm, expires.as_deref(), models.as_deref(), admin)
+                .map(|token| print!("{}", key_create_stdout(&token, &key_id_for_token(&token), &name, raw)))
+        }
+        Commands::Key { revoke, .. } if !revoke.is_empty() => {
+            each(revoke, |id| security::key_revoke(&id).map(|()| println!("Revoked key {id}")))
+        }
+        Commands::Key { json, .. } => security::key_list_detailed().map(|rows| {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".into()));
+            } else {
+                print!("{}", key_list_text(&rows));
+            }
+        }),
+        Commands::Alias { set: Some(a), model: Some(model), .. } => {
+            alias::set(&a, &model).map(|()| println!("Alias {a} now points to {model}"))
+        }
+        Commands::Alias { remove, .. } if !remove.is_empty() => {
+            each(remove, |a| alias::remove(&a).map(|()| println!("Removed alias {a}")))
+        }
+        Commands::Alias { .. } => alias::list().map(|rows| print!("{}", alias_text(&rows))),
     };
     match result {
         Ok(()) => {}
@@ -954,13 +892,95 @@ fn rpm_text(rpm: i64) -> String {
 }
 
 fn key_create_stdout(token: &str, id: &str, name: &str, raw: bool) -> String {
-    // --raw prints exactly the token; otherwise the token once, its id, and a store-it-now note.
+    // --raw prints exactly the token; otherwise the token once, its name and id, and a store-it-now note.
     if raw {
         return format!("{token}\n");
     }
     format!(
-        "API key: {token}\nKey id:  {id} (name {name})\nStore this key now: goethe keeps only its hash and cannot show it again.\n"
+        "API key for {name} (id {id}):\n\n\t{token}\n\ngoethe api shows it again at any time.\n"
     )
+}
+
+fn create_first_key() -> String {
+    goethe_core::term::commands("Create your first API key:", &["goethe key --create my-app"])
+}
+
+fn key_list_text(rows: &[Value]) -> String {
+    // One row per key with its limits and today's use, or how to create the first one.
+    if rows.is_empty() {
+        return create_first_key();
+    }
+    let field = |r: &Value, k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let mut table = goethe_core::term::Table::new(&["NAME", "KEY ID", "ADMIN", "RPM", "EXPIRES", "MODELS", "TODAY"]);
+    for r in rows {
+        let admin = r.get("admin").and_then(Value::as_bool).unwrap_or(false);
+        let today = format!(
+            "{} req, {} tok",
+            r.get("requests_today").and_then(Value::as_i64).unwrap_or(0),
+            r.get("tokens_today").and_then(Value::as_i64).unwrap_or(0)
+        );
+        let models = field(r, "models");
+        table.row(vec![
+            field(r, "name"),
+            field(r, "id"),
+            if admin { "yes" } else { "no" }.to_string(),
+            rpm_text(r.get("rpm").and_then(Value::as_i64).unwrap_or(0)),
+            Some(field(r, "expires")).filter(|e| !e.is_empty()).unwrap_or_else(|| "never".to_string()),
+            if models.is_empty() { "all".to_string() } else { models },
+            today,
+        ]);
+    }
+    table.render()
+}
+
+fn api_keys_text(rows: &[Value]) -> String {
+    // Each key in full with its name, admin and expiry; keys made before keys were stored show their first characters.
+    if rows.is_empty() {
+        return create_first_key();
+    }
+    let field = |r: &Value, k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let mut table = goethe_core::term::Table::new(&["NAME", "API KEY", "ADMIN", "EXPIRES"]);
+    for r in rows {
+        let admin = r.get("admin").and_then(Value::as_bool).unwrap_or(false);
+        let key = match (field(r, "key"), field(r, "prefix")) {
+            (k, _) if !k.is_empty() => k,
+            (_, p) if !p.is_empty() => format!("{p}... (older key, only its start is kept)"),
+            _ => "-".to_string(),
+        };
+        table.row(vec![
+            field(r, "name"),
+            key,
+            if admin { "yes" } else { "no" }.to_string(),
+            Some(field(r, "expires")).filter(|e| !e.is_empty()).unwrap_or_else(|| "never".to_string()),
+        ]);
+    }
+    table.render()
+}
+
+fn allowlist_text(rows: &[String]) -> String {
+    // The allowed client ranges, or why an empty list refuses everyone and how to add a client.
+    if rows.is_empty() {
+        return goethe_core::term::commands(
+            "No client may reach the gateway yet. Allow one with:",
+            &["goethe allowlist --add <client-ip>/32"],
+        );
+    }
+    let mut table = goethe_core::term::Table::new(&["ALLOWED CLIENTS"]);
+    for cidr in rows {
+        table.row(vec![cidr.clone()]);
+    }
+    table.render()
+}
+
+fn alias_text(rows: &[(String, String)]) -> String {
+    if rows.is_empty() {
+        return goethe_core::term::commands("No aliases yet. Set one with:", &["goethe alias --set <alias> --model <model-id>"]);
+    }
+    let mut table = goethe_core::term::Table::new(&["ALIAS", "MODEL"]);
+    for (a, m) in rows {
+        table.row(vec![a.clone(), m.clone()]);
+    }
+    table.render()
 }
 
 fn rpc_daemon_err(e: String) -> String {
@@ -981,7 +1001,7 @@ fn do_gpu_list(json: bool) -> Result<(), String> {
     }
     let mut table = goethe_core::term::Table::new(&["GPU", "NAME", "SM", "VRAM TOTAL", "GOETHE", "FOREIGN", "STATUS"]);
     let gb = |mb: u64| format!("{:.1} GB", mb as f64 / 1024.0);
-    for r in rows {
+    for r in &rows {
         table.row(vec![
             format!("gpu{}", r.index),
             r.name.clone(),
@@ -993,6 +1013,14 @@ fn do_gpu_list(json: bool) -> Result<(), String> {
         ]);
     }
     table.print();
+    let notes: Vec<String> = rows
+        .iter()
+        .filter_map(|r| goethe_core::gpu_arch::unsupported_reason(&r.compute_capability).map(|why| format!("gpu{}: {why}", r.index)))
+        .collect();
+    if !notes.is_empty() {
+        println!("\nGoethe will not place models on these GPUs:\n");
+        notes.iter().for_each(|n| println!("\t{n}"));
+    }
     Ok(())
 }
 
@@ -1002,11 +1030,11 @@ fn do_gpu_deny(id: u32) -> Result<(), String> {
     gpu_policy::validate_gpu_index(&home, id)?;
     let con = db::open(&home).map_err(|e| e.to_string())?;
     gpu_policy::set_denied(&con, id, true)?;
-    println!("GPU {id} denied");
+    println!("gpu{id} denied: new models will not be placed on it");
     let running = gpu_policy::instances_on_gpu(&con, id)?;
     if !running.is_empty() {
         println!(
-            "note: {} instance(s) still on GPU {id}; new loads will not use it",
+            "{} instance(s) keep running on gpu{id}",
             running.len()
         );
     }
@@ -1019,7 +1047,7 @@ fn do_gpu_allow(id: u32) -> Result<(), String> {
     gpu_policy::validate_gpu_index(&home, id)?;
     let con = db::open(&home).map_err(|e| e.to_string())?;
     gpu_policy::set_denied(&con, id, false)?;
-    println!("GPU {id} allowed");
+    println!("gpu{id} allowed");
     Ok(())
 }
 
@@ -1037,7 +1065,7 @@ fn do_unload(model_id: Option<&str>, force: bool) -> Result<(), String> {
     }
     let what = model_id.unwrap_or("all models");
     match (live, known) {
-        (_, 0) if model_id.is_some() => Err(format!("{what} is not loaded (goethe ps lists loaded models)")),
+        (_, 0) if model_id.is_some() => Err(format!("{what} is not loaded; goethe ps lists loaded models")),
         (_, 0) => {
             println!("nothing was loaded");
             Ok(())
@@ -1101,7 +1129,7 @@ fn ps_status(row: &Value, now: i64) -> String {
 fn print_ps_table(rows: &[Value]) {
     // Loaded instances as an aligned table with colored status, or a hint when nothing is loaded.
     if rows.is_empty() {
-        println!("no models loaded (goethe load <model> starts one; goethe models lists installed models)");
+        print!("{}", no_models_text());
         return;
     }
     let now = std::time::SystemTime::now()
@@ -1143,6 +1171,17 @@ fn print_ps_table(rows: &[Value]) {
     table.print();
 }
 
+fn no_models_text() -> String {
+    goethe_core::term::commands("No models loaded. Pick one and load it:", &["goethe models", "goethe load --model <model-id>"])
+}
+
+fn empty_allowlist_text() -> String {
+    goethe_core::term::commands(
+        "The allowlist is empty, so every client is refused. Allow one with:",
+        &["goethe allowlist --add <client-ip>/32"],
+    )
+}
+
 fn do_ps(json: bool) -> Result<(), String> {
     let reply = rpc::call("ps", json!(null)).map_err(rpc_daemon_err)?;
     if reply.code != 0 {
@@ -1162,11 +1201,11 @@ fn do_ps(json: bool) -> Result<(), String> {
 
 fn logs_target_error(target: Option<&str>, daemon: bool, gateway: bool, prune: bool) -> Option<&'static str> {
     if target.is_some_and(|t| t.trim().is_empty()) {
-        return Some("the log target is empty: give a model id or instance id, or --daemon or --gateway");
+        return Some("the log target is empty: give --model <id>, --daemon or --gateway");
     }
     match [target.is_some(), daemon, gateway].iter().filter(|b| **b).count() {
-        0 if !prune => Some("give a model id or instance id, or --daemon or --gateway"),
-        n if n > 1 => Some("give one log target: a model or instance id, --daemon, or --gateway"),
+        0 if !prune => Some("give --model <id> (a model or instance id), --daemon or --gateway"),
+        n if n > 1 => Some("give one log target: --model <id>, --daemon or --gateway"),
         _ => None,
     }
 }
@@ -1181,7 +1220,7 @@ fn do_gateway_bind(addr: &str) -> Result<(), String> {
     ensure_layout(&home).map_err(|e| format!("layout: {e}"))?;
     println!("{}", nginx::set_public_bind(&home, &ip.to_string())?);
     if !ip.is_loopback() && security::allowlist_list()?.is_empty() {
-        println!("the allowlist is empty, so every client is refused: goethe allowlist add <client-ip>/32");
+        print!("\n{}", empty_allowlist_text());
     }
     Ok(())
 }
@@ -1209,13 +1248,13 @@ fn gateway_status_text(bind: &str, port: u16, url: &str, running: bool, allowlis
     // Bind and who can reach it, port, local URL, state, allowlist size, then provider endpoint hints.
     let loopback = bind.parse::<std::net::IpAddr>().map_or(true, |ip| ip.is_loopback());
     let scope = if loopback {
-        "this host only; `goethe gateway bind 0.0.0.0` accepts remote clients"
+        "this host only; `goethe gateway --bind 0.0.0.0` accepts remote clients"
     } else {
         "remote clients reach it when allowlisted"
     };
     let state = if running { "running" } else { "not running (goethed starts it; see goethe logs --gateway)" };
     let list = match allowlist {
-        0 => "empty, every client is refused (goethe allowlist add <client-ip>/32)".to_string(),
+        0 => "empty, every client is refused (goethe allowlist --add <client-ip>/32)".to_string(),
         n => format!("{n} entr{}", if n == 1 { "y" } else { "ies" }),
     };
     let mut out = format!("bind: {bind} ({scope})\nport: {port}\nurl: {url}\nstate: {state}\nallowlist: {list}\n");
@@ -1226,22 +1265,61 @@ fn gateway_status_text(bind: &str, port: u16, url: &str, running: bool, allowlis
 }
 
 fn do_up(boot: bool) -> Result<(), String> {
-    // Start goethed, give the gateway a few seconds to listen, then print where the API is.
+    // Start goethed, give the gateway a few seconds to listen, then show the same summary as goethe status.
     goethe_core::service::run_up(boot)?;
     let home = goethe_home();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while nginx::format_gateway_line(&home).is_none() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
-    match nginx::format_gateway_line(&home) {
-        Some(_) => println!("API: https://{}/v1 (goethe get api lists the loaded models)", nginx::gateway_connect_addr(&home)),
-        None => println!("the gateway is not listening yet (goethe logs --gateway shows why)"),
+    do_status()
+}
+
+fn do_status() -> Result<(), String> {
+    // Running or not; when running, the API address and the keys clients can use.
+    let home = goethe_home();
+    if !goethe_core::service::goethed_running() {
+        print!("{}", status_text(None, &[]));
+        return Ok(());
     }
+    let api = match nginx::format_gateway_line(&home) {
+        Some(_) => format!("https://{}/v1", nginx::gateway_connect_addr(&home)),
+        None => "not listening yet (goethe logs --gateway shows why)".to_string(),
+    };
+    let keys: Vec<(String, String)> = security::key_list_detailed()?
+        .iter()
+        .map(|r| {
+            let field = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+            (field("name"), field("id"))
+        })
+        .collect();
+    print!("{}", status_text(Some(&api), &keys));
     Ok(())
 }
 
-fn do_get_api(json: bool) -> Result<(), String> {
-    // The base URL clients point an OpenAI SDK at, then one row per loaded model with its state and GPUs.
+fn status_text(api: Option<&str>, keys: &[(String, String)]) -> String {
+    // goethe up and goethe status: the state word in color, then the API, its keys and where to read more.
+    use goethe_core::term::{commands, paint, Color, Table};
+    let Some(api) = api else {
+        return format!("goethe: {}\n\n{}", paint("not running", Color::Red), commands("Start it with:", &["goethe up"]));
+    };
+    let mut out = format!("goethe: {}\n\nAPI: {api}\n\n", paint("running", Color::Green));
+    if keys.is_empty() {
+        out.push_str(&create_first_key());
+    } else {
+        let mut table = Table::new(&["API KEY NAME", "KEY ID"]);
+        for (name, id) in keys {
+            table.row(vec![name.clone(), id.clone()]);
+        }
+        out.push_str(&table.render());
+    }
+    out.push('\n');
+    out.push_str(&commands("For more details run:", &["goethe api"]));
+    out
+}
+
+fn do_api(json: bool) -> Result<(), String> {
+    // The endpoint, the models it serves, the keys that may call it, and one curl command to try it.
     let home = goethe_home();
     let api = format!("https://{}/v1", nginx::gateway_connect_addr(&home));
     let ps = rpc::call("ps", json!(null)).ok().filter(|r| r.code == 0);
@@ -1260,37 +1338,46 @@ fn do_get_api(json: bool) -> Result<(), String> {
         }
     }
     let state = |s: &[String]| if s.iter().any(|x| x == "RUNNING") { "RUNNING".to_string() } else { s[0].clone() };
+    let keys = security::key_list_detailed()?;
     if json {
         let list: Vec<Value> = models
             .iter()
             .map(|(id, st, g)| json!({"model": id, "status": state(st), "instances": st.len(), "gpus": g}))
             .collect();
-        println!("{}", json!({"api": api, "goethed_running": ps.is_some(), "models": list}));
+        println!("{}", json!({"api": api, "schemas": ["openai", "anthropic", "litellm"], "goethed_running": ps.is_some(), "keys": keys, "models": list}));
         return Ok(());
     }
-    println!("API: {api}");
-    println!("Auth: Authorization: Bearer <key>   (goethe key create --name <name>)");
+    use goethe_core::term::{commands, paint, Color, Table};
+    println!("API endpoint: {api}");
+    println!("Accepts: OpenAI, Anthropic (/v1/messages) and LiteLLM (routes with or without /v1, x-litellm-api-key)");
     for e in goethe_core::host::probe_environment(nginx::public_port_u16(&home)).public_endpoints {
         println!("Public endpoint: {e}");
     }
-    if security::allowlist_list()?.is_empty() {
-        println!("note: the allowlist is empty, so every client is refused (goethe allowlist add 127.0.0.1/32)");
-    }
-    println!();
+    println!("\n{}", paint("Models running", Color::Bold));
     if ps.is_none() {
-        println!("goethed is not running, so no models are served (goethe up starts it)");
-        return Ok(());
+        println!("{}", commands("goethed is not running, so no models are served. Start it with:", &["goethe up"]));
+    } else if models.is_empty() {
+        println!("{}", no_models_text());
+    } else {
+        let mut table = Table::new(&["MODEL", "STATUS", "INSTANCES", "GPUS"]);
+        for (id, st, g) in &models {
+            table.row(vec![id.clone(), goethe_core::term::status(&state(st)), st.len().to_string(), g.join(" ")]);
+        }
+        println!("{}", table.render());
     }
-    if models.is_empty() {
-        println!("no models loaded (goethe load <model>; goethe models lists installed models)");
-        return Ok(());
+    println!("{}\n{}", paint("API keys", Color::Bold), api_keys_text(&keys));
+    if security::allowlist_list()?.is_empty() {
+        println!("{}", empty_allowlist_text());
     }
-    let mut table = goethe_core::term::Table::new(&["MODEL", "STATUS", "INSTANCES", "GPUS"]);
-    for (id, st, g) in &models {
-        table.row(vec![id.clone(), goethe_core::term::status(&state(st)), st.len().to_string(), g.join(" ")]);
-    }
-    table.print();
+    print!("{}", commands("Query the API:", &[&curl_example(&api)]));
     Ok(())
+}
+
+fn curl_example(api: &str) -> String {
+    format!(
+        "curl -k {api}/chat/completions -H \"Authorization: Bearer <your_bearer_token>\" -H \"Content-Type: application/json\" \
+         -d '{{\"model\": \"<model_name>\", \"messages\": [{{\"role\": \"user\", \"content\": \"Hello!\"}}]}}'"
+    )
 }
 
 fn print_gateway_line() {
@@ -1365,13 +1452,67 @@ mod tests {
     #[test]
     fn gateway_status_explains_scope_and_allowlist() {
         let local = gateway_status_text("127.0.0.1", 8443, "https://127.0.0.1:8443", true, 0, &[]);
-        assert!(local.starts_with("bind: 127.0.0.1 (this host only; `goethe gateway bind 0.0.0.0`"), "{local}");
+        assert!(local.starts_with("bind: 127.0.0.1 (this host only; `goethe gateway --bind 0.0.0.0`"), "{local}");
         assert!(local.contains("port: 8443\nurl: https://127.0.0.1:8443\nstate: running\n"), "{local}");
         assert!(local.contains("allowlist: empty, every client is refused"), "{local}");
         let open = gateway_status_text("0.0.0.0", 9443, "https://127.0.0.1:9443", false, 2, &["tcp://1.2.3.4:4000 -> port 9443".into()]);
         assert!(open.contains("bind: 0.0.0.0 (remote clients reach it when allowlisted)"), "{open}");
         assert!(open.contains("state: not running"), "{open}");
         assert!(open.contains("allowlist: 2 entries\nendpoint: tcp://1.2.3.4:4000 -> port 9443\n"), "{open}");
+    }
+
+    #[test]
+    fn status_says_running_with_the_api_and_keys_or_how_to_start() {
+        let stopped = status_text(None, &[]);
+        assert!(stopped.starts_with("goethe: ") && stopped.contains("not running"), "{stopped}");
+        assert!(stopped.ends_with("Start it with:\n\n\t→ goethe up\n"), "{stopped}");
+        let fresh = status_text(Some("https://10.0.0.2:8443/v1"), &[]);
+        assert!(fresh.contains("running\n\nAPI: https://10.0.0.2:8443/v1\n\nCreate your first API key:\n\n\t→ goethe key --create my-app\n"), "{fresh}");
+        assert!(fresh.ends_with("\nFor more details run:\n\n\t→ goethe api\n"), "{fresh}");
+        let keyed = status_text(Some("https://h/v1"), &[("ops".into(), "a1b2c3d4e5f6".into())]);
+        assert!(keyed.contains("ops") && keyed.contains("a1b2c3d4e5f6") && !keyed.contains("Create your first"), "{keyed}");
+    }
+
+    #[test]
+    fn empty_lists_say_how_to_add_the_first_entry() {
+        assert!(key_list_text(&[]).ends_with("\t→ goethe key --create my-app\n"));
+        assert!(allowlist_text(&[]).ends_with("\t→ goethe allowlist --add <client-ip>/32\n"));
+        assert!(alias_text(&[]).ends_with("\t→ goethe alias --set <alias> --model <model-id>\n"));
+    }
+
+    #[test]
+    fn every_user_value_is_a_flag() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+        let parse = |v: &[&str]| Cli::try_parse_from(std::iter::once("goethe").chain(v.iter().copied()));
+        assert!(parse(&["domain", "--check", "api.example.com"]).is_ok());
+        assert!(parse(&["domain", "add", "api.example.com"]).is_err() && parse(&["domain", "--add", "x.y"]).is_err());
+        assert!(parse(&["load", "--model", "org/m", "--gpus", "2"]).is_ok());
+        assert!(parse(&["load", "org/m"]).is_err());
+        assert!(parse(&["key", "--create", "ops", "--expires", "30d", "--admin"]).is_ok());
+        assert!(parse(&["key", "--admin"]).is_err(), "--admin only goes with --create");
+        assert!(parse(&["key", "--create", "a", "--revoke", "b"]).is_err());
+        assert!(parse(&["gpu", "--allow", "gpu2"]).is_ok() && parse(&["alias", "--set", "fast"]).is_err());
+        let Commands::Gpu { allow, .. } = parse(&["gpu", "--allow", "gpu0", "gpu1"]).unwrap().command else { panic!() };
+        assert_eq!(allow, vec![0, 1]);
+        assert!(parse(&["key", "--revoke", "a1", "b2"]).is_ok() && parse(&["allowlist", "--add", "10.0.0.1/32", "10.0.0.2/32"]).is_ok());
+        assert!(parse(&["unload", "--model", "org/a", "org/b", "--force"]).is_ok() && parse(&["remove"]).is_err());
+        assert_eq!(parse_gpu_name("gpu3"), Ok(3));
+        assert_eq!(parse_gpu_name("GPU0"), Ok(0));
+        assert!(parse_gpu_name("gpux").is_err());
+    }
+
+    #[test]
+    fn values_without_their_flag_get_the_corrected_command() {
+        let args = |v: &[&str]| std::iter::once("goethe").chain(v.iter().copied()).map(String::from).collect::<Vec<_>>();
+        let unload = args(&["unload", "org/a", "org/b"]);
+        assert_eq!(corrected_command(&unload, "org/a").as_deref(), Some("goethe unload --model org/a org/b"));
+        let gpu = args(&["gpu", "allow", "gpu0", "gpu1"]);
+        assert_eq!(corrected_command(&gpu, "allow").as_deref(), Some("goethe gpu --allow gpu0 gpu1"));
+        let load = args(&["load", "org/a", "--gpus", "2"]);
+        assert_eq!(corrected_command(&load, "org/a").as_deref(), Some("goethe load --model org/a --gpus 2"));
+        assert_eq!(corrected_command(&args(&["domain", "api.example.com"]), "api.example.com").as_deref(), Some("goethe domain --check api.example.com"));
+        assert_eq!(corrected_command(&args(&["status", "x"]), "x"), None);
     }
 
     #[test]
@@ -1401,10 +1542,10 @@ mod tests {
         assert_eq!(key_create_stdout(token, "a1b2c3d4e5f6", "ops", true), format!("{token}\n"));
         let human = key_create_stdout(token, "a1b2c3d4e5f6", "ops", false);
         assert!(human.contains(token));
-        assert!(human.contains("Key id:  a1b2c3d4e5f6 (name ops)"));
+        assert!(human.starts_with("API key for ops (id a1b2c3d4e5f6):\n\n\t"), "{human}");
         assert_eq!(rpm_text(0), "unlimited");
         assert_eq!(rpm_text(120), "120");
-        assert!(human.contains("Store this key now"));
+        assert!(human.contains("goethe api shows it again"));
         assert_eq!(human.matches(token).count(), 1);
     }
 }

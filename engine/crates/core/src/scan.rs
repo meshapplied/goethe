@@ -178,7 +178,78 @@ fn add_model(home: &Path, id: &str, dir: &Path, entry: Option<crate::registry::R
     let planned = install::plan_in_place(home, id, dir, entry)?;
     let mut out: Box<dyn Write> = if json { Box::new(std::io::stderr()) } else { Box::new(std::io::stdout()) };
     install::commit(home, &planned, "added", &mut out)?;
-    writeln!(out, "next: goethe load {id}").map_err(|e| e.to_string())
+    writeln!(out, "next: goethe load --model {id}").map_err(|e| e.to_string())
+}
+
+pub struct Found {
+    pub id: String,
+    pub path: PathBuf,
+    pub in_models: bool,
+    pub problem: Option<String>,
+}
+
+pub fn found_on_this_machine(home: &Path) -> Vec<Found> {
+    // Model folders Goethe could register: unregistered ones in GOETHE_HOME/models, then the Hugging Face download cache.
+    let Ok(con) = crate::db::open(home) else {
+        return Vec::new();
+    };
+    let m = machine(home, &con);
+    let installed: BTreeSet<String> = registered_dirs(home, &con).into_values().collect();
+    let mut out: Vec<Found> = survey(home, &con, candidate_dirs(home, None).unwrap_or_default(), &m)
+        .into_iter()
+        .filter_map(|f| match f.state {
+            State::Registered(_) => None,
+            State::Unsupported(why) => Some(Found { id: f.name, path: f.path, in_models: true, problem: Some(why) }),
+            State::Supported { id, .. } => Some(Found { id, path: f.path, in_models: true, problem: None }),
+        })
+        .collect();
+    for (id, path) in hf_cache_models() {
+        if installed.contains(&id) || out.iter().any(|f| f.id == id) {
+            continue;
+        }
+        let problem = match classify(&path, &m) {
+            Verdict::Supported { .. } => None,
+            Verdict::Unsupported(why) => Some(why),
+        };
+        out.push(Found { id, path, in_models: false, problem });
+    }
+    out
+}
+
+fn hf_cache_models() -> Vec<(String, PathBuf)> {
+    // org/name and the snapshot folder of every model in the Hugging Face cache (refs/main, else the newest snapshot).
+    let hub = std::env::var_os("HF_HUB_CACHE")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HF_HOME").map(|h| PathBuf::from(h).join("hub")))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/huggingface/hub")));
+    let Some(entries) = hub.and_then(|h| fs::read_dir(h).ok()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(id) = name.strip_prefix("models--").map(|r| r.replacen("--", "/", 1)) else {
+            continue;
+        };
+        let snaps = e.path().join("snapshots");
+        let main = fs::read_to_string(e.path().join("refs/main")).ok().map(|r| snaps.join(r.trim()));
+        let newest = || {
+            fs::read_dir(&snaps).ok()?.flatten().max_by_key(|s| s.metadata().and_then(|m| m.modified()).ok()).map(|s| s.path())
+        };
+        if let Some(snap) = main.filter(|p| p.is_dir()).or_else(newest).filter(|p| p.join("config.json").is_file()) {
+            out.push((id, snap));
+        }
+    }
+    out.sort();
+    out
+}
+
+pub fn register_found(home: &Path, f: &Found) -> Result<(), String> {
+    // A folder in GOETHE_HOME/models is registered like goethe scan does; one elsewhere is linked in like goethe install does.
+    if f.in_models {
+        return add_model(home, &f.id, &f.path, None, false);
+    }
+    install::run(install::InstallOpts { model_id: f.path.display().to_string(), name: Some(f.id.clone()), ..Default::default() })
 }
 
 fn candidate_dirs(home: &Path, dir: Option<&str>) -> Result<Vec<PathBuf>, String> {
@@ -199,7 +270,7 @@ fn candidate_dirs(home: &Path, dir: Option<&str>) -> Result<Vec<PathBuf>, String
         Ok(rel) if !rel.as_os_str().is_empty() => Ok(vec![models.join(rel)]),
         _ => {
             eprintln!(
-                "error: {} is not inside {}: move it there and run goethe scan, or register it where it is with goethe install {}",
+                "error: {} is not inside {}: move it there and run goethe scan, or register it where it is with goethe install --model {}",
                 canonical.display(),
                 models.display(),
                 canonical.display()
@@ -253,7 +324,7 @@ pub fn survey(home: &Path, con: &Connection, dirs: Vec<PathBuf>, m: &Machine) ->
             continue;
         }
         if meta.is_ok_and(|m| m.file_type().is_symlink()) {
-            let why = format!("a symlink; register the folder it points to with goethe install {}", canonical.display());
+            let why = format!("a symlink; register the folder it points to with goethe install --model {}", canonical.display());
             out.push(Finding { path, name, state: State::Unsupported(why) });
             continue;
         }

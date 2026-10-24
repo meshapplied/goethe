@@ -974,7 +974,7 @@ def ensure_schema(home: Path) -> None:
     db = home / "state.db"
     if db.is_file() and sqlite_query(db, "PRAGMA user_version")[0][0] > 0:
         return
-    rr = run([str(require_cli("goethe")), "alias", "list"], env={"GOETHE_HOME": str(home)}, timeout=60)
+    rr = run([str(require_cli("goethe")), "alias"], env={"GOETHE_HOME": str(home)}, timeout=60)
     if rr.returncode != 0 or not db.is_file():
         raise RuntimeError(f"goethe could not create state.db: {_goethe_error_snippet(rr)}")
 

@@ -173,13 +173,11 @@ pub fn run_up(boot: bool) -> Result<(), String> {
     // Turn on start at boot (unless opted out), start this home's goethed (through its unit when ours) and wait for it.
     let home = goethe_home();
     if boot && !autostart_opted_out() {
-        match enable_boot(&home) {
-            Ok(lines) => lines.iter().filter(|l| !l.contains("goethed with nohup")).for_each(|l| println!("{l}")),
-            Err(e) => println!("goethed will not start at boot: {e}"),
+        if let Err(e) = enable_boot(&home) {
+            eprintln!("warning: goethed will not start at boot: {e}");
         }
     }
     if goethed_running() {
-        println!("goethed is already running (GOETHE_HOME {})", home.display());
         return Ok(());
     }
     match systemctl_restart_args() {
@@ -192,9 +190,8 @@ pub fn run_up(boot: bool) -> Result<(), String> {
         }
         None => spawn_goethed(&home)?,
     }
-    wait_goethed(std::time::Duration::from_secs(60))?;
-    println!("goethed is up (GOETHE_HOME {}); goethe ps shows loaded models, goethe get api the endpoint", home.display());
-    Ok(())
+    wait_goethed(std::time::Duration::from_secs(60))
+
 }
 
 pub fn wait_goethed(timeout: std::time::Duration) -> Result<(), String> {
