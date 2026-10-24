@@ -132,8 +132,8 @@ def main() -> None:
 
 def _scenarios(goethe: Path, home: Path, env: dict[str, str], model_a: Path, gpu: int) -> None:
     """The drain, force and idle unload scenarios in order against one goethed and its gateway."""
-    load = [str(goethe), "load", "a", "--gpus", str(gpu), "--yes"]
-    rr_key = run_goethe([str(goethe), "key", "create", "--name", "d", "--raw"], env=env)
+    load = [str(goethe), "load", "--model", "a", "--gpus", str(gpu), "--yes"]
+    rr_key = run_goethe([str(goethe), "key", "--create", "d", "--raw"], env=env)
     token = next(ln for ln in rr_key.stdout.splitlines() if ln.startswith("goethe_sk_"))
     hdr = {"Authorization": f"Bearer {token}"}
     chat_body = json.dumps({"model": "a", "messages": [{"role": "user", "content": "n"}], "max_tokens": 1}).encode()
@@ -152,7 +152,7 @@ def _scenarios(goethe: Path, home: Path, env: dict[str, str], model_a: Path, gpu
 
     def _graceful_unload() -> None:
         try:
-            run_goethe([str(goethe), "unload", "a"], env=env, timeout=180)
+            run_goethe([str(goethe), "unload", "--model", "a"], env=env, timeout=180)
         except Exception as exc:
             unload_err.append(str(exc))
         finally:
@@ -189,7 +189,7 @@ def _scenarios(goethe: Path, home: Path, env: dict[str, str], model_a: Path, gpu
         fst.join(timeout=30)
         raise RuntimeError("force stream never started")
     t_force = time.time()
-    run_goethe([str(goethe), "unload", "a", "--force"], env=env, timeout=30)
+    run_goethe([str(goethe), "unload", "--model", "a", "--force"], env=env, timeout=30)
     if time.time() - t_force >= 2.0:
         raise RuntimeError("force unload exceeded 2s")
     fst.join(timeout=15)
@@ -199,7 +199,7 @@ def _scenarios(goethe: Path, home: Path, env: dict[str, str], model_a: Path, gpu
     assert_no_stub_engines(home)
     assert_no_zombies(home)
 
-    run_goethe([str(goethe), "allowlist", "add", "127.0.0.1/32"], env=env)
+    run_goethe([str(goethe), "allowlist", "--add", "127.0.0.1/32"], env=env)
     health = f"https://127.0.0.1:{test_public_port(home)}/health"
     if not wait_until(lambda: http_get(health, timeout=3)[0] == 200, timeout=20):
         raise RuntimeError(f"gateway did not answer /health: {http_get(health, timeout=3)[0]}")
@@ -208,7 +208,7 @@ def _scenarios(goethe: Path, home: Path, env: dict[str, str], model_a: Path, gpu
     try:
         if not wait_until(lambda: _in_flight(goethe, env, "a") >= 1, timeout=10.0):
             raise RuntimeError("gateway force stream never started")
-        run_goethe([str(goethe), "unload", "a", "--force"], env=env, timeout=30)
+        run_goethe([str(goethe), "unload", "--model", "a", "--force"], env=env, timeout=30)
         out, err = curl.communicate(timeout=30)
     finally:
         if curl.poll() is None:
@@ -222,7 +222,7 @@ def _scenarios(goethe: Path, home: Path, env: dict[str, str], model_a: Path, gpu
 
     run_goethe(load, env=env, timeout=120)
     t_idle = time.time()
-    run_goethe([str(goethe), "unload", "a"], env=env, timeout=30)
+    run_goethe([str(goethe), "unload", "--model", "a"], env=env, timeout=30)
     if time.time() - t_idle >= 2.0:
         raise RuntimeError("idle unload exceeded 2s")
     assert_no_stub_engines(home)

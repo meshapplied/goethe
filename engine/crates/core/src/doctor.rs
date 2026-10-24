@@ -35,6 +35,7 @@ pub fn run(json: bool, probe_public: bool) -> Result<(), String> {
             table.row(vec![c.name.clone(), crate::term::status(&c.status), c.hint.clone()]);
         }
         table.print();
+        println!("\nSupported microarchitectures: {}", crate::gpu_arch::microarchitectures_text());
     }
     if probe_public {
         probe_public_reachability(&home);
@@ -173,7 +174,7 @@ fn probe_public_reachability(home: &Path) {
 
 fn print_public_security_advisory() {
     println!(
-        "Public mode exposes the gateway to the internet. Keep the allowlist tight (goethe allowlist add/remove), use API keys with scopes and rpm limits, and rotate keys."
+        "Public mode exposes the gateway to the internet. Keep the allowlist tight (goethe allowlist --add/--remove), use API keys with scopes and rpm limits, and rotate keys."
     );
 }
 

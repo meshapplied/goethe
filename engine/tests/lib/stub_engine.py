@@ -265,6 +265,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._embeddings(req)
         elif path in ("/v1/chat/completions", "/v1/completions"):
             self._generate(req, chat=path == "/v1/chat/completions")
+        elif path == "/v1/messages":
+            self._message(req)
         else:
             self._json(404, {"detail": "Not Found"})
 
@@ -278,6 +280,20 @@ class _Handler(BaseHTTPRequestHandler):
             data.append({"object": "embedding", "index": i, "embedding": [b / 255.0 for b in digest[:8]]})
         usage = {"prompt_tokens": len(items), "total_tokens": len(items)}
         self._json(200, {"object": "list", "data": data, "model": self.config["served_model_name"], "usage": usage})
+
+    def _message(self, req: dict[str, Any]) -> None:
+        """Non-streaming Anthropic Messages reply naming the served model."""
+        tokens = int(req.get("max_tokens") or 3)
+        name = self.config["served_model_name"]
+        self._json(200, {
+            "id": f"msg_{uuid.uuid4().hex[:12]}",
+            "type": "message",
+            "role": "assistant",
+            "model": name,
+            "content": [{"type": "text", "text": f"model={name}"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 3, "output_tokens": tokens},
+        })
 
     def _chunk(self, payload: dict[str, Any] | str) -> None:
         """Write one SSE event as an HTTP/1.1 chunk."""

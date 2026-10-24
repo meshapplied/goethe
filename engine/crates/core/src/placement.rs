@@ -47,7 +47,7 @@ pub fn ensure_eligible_for_tp(
     let mut ids: Vec<String> = denied.iter().map(|i| i.to_string()).collect();
     ids.sort();
     Err(format!(
-        "need {tp} eligible GPUs but only {} available; denied GPUs: {}; run `goethe gpu allow <id>`",
+        "need {tp} eligible GPUs but only {} available; denied GPUs: {}; run `goethe gpu --allow gpu<index>`",
         inputs.len(),
         ids.join(",")
     ))

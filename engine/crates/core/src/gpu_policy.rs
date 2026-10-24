@@ -87,7 +87,7 @@ pub fn validate_gpu_index(home: &Path, index: u32) -> Result<(), String> {
     if indices.contains(&index) {
         Ok(())
     } else {
-        Err(format!("GPU {index} is not in the hardware profile; run `goethe hw profile`"))
+        Err(format!("gpu{index} is not in the hardware profile; run `goethe hw profile`"))
     }
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Goethe CDN installer: verified CDN artifacts, py-env, nginx binary, TLS material, goethed.
+# Goethe CDN installer: verified CDN artifacts, py-env, nginx binary, TLS material; goethe start brings goethed up.
 
 set -euo pipefail
 
@@ -518,14 +518,10 @@ write_system_unit() {
   systemctl daemon-reload
 }
 
-start_goethed() {
-  # systemd unit for root on systemd hosts unless another home owns it, else goethe up (start at boot), else nohup.
+restart_goethed() {
+  # Bring back the goethed an upgrade stopped: root's systemd unit unless another home owns it, else goethe up, else nohup.
   local other
-  if [[ "${STARTED:-0}" -eq 1 ]]; then
-    return
-  fi
-  if goethed_answers; then
-    echo "goethed already running for ${GOETHE_HOME}"
+  if [[ "${STARTED:-0}" -eq 1 ]] || goethed_answers; then
     return
   fi
   if systemd_root; then
@@ -553,6 +549,7 @@ apply_binaries() {
   local bin rc=0 old="" new unit=0 stop_err=""
   UPGRADE_NOTE=""
   STARTED=0
+  RESTART=0
   if [[ ${#STAGED[@]} -eq 0 ]]; then
     return
   fi
@@ -563,6 +560,7 @@ apply_binaries() {
     if systemd_root && write_system_unit; then
       unit=1
     fi
+    RESTART=1
     { stop_err="$("${GOETHE_HOME}/bin/goethe" down --keep-engines 2>&1 1>&3)"; } 3>&1 || rc=$?
     if [[ ${rc} -eq 2 ]]; then
       rc=0
@@ -625,34 +623,53 @@ wait_gateway() {
 }
 
 summary() {
-  # Ports, endpoints, cloud mappings and how the linked CLI finds a non-default home.
-  local port mux mapped
-  port="$(cat "${GOETHE_HOME}/nginx/public_port")"
-  mux="$(cat "${GOETHE_HOME}/nginx/mux_port" 2>/dev/null || echo "?")"
-  echo "Mux (loopback OpenAI router): http://127.0.0.1:${mux}"
-  echo "Gateway: https://127.0.0.1:${port} (default-deny: goethe allowlist add <cidr>; goethe key create --name <n>)"
-  mapped="RUNPOD_TCP_PORT_${port}"
-  if [[ -n "${RUNPOD_POD_ID:-}" ]]; then
-    if [[ -n "${RUNPOD_PUBLIC_IP:-}" && -n "${!mapped:-}" ]]; then
-      echo "RunPod public endpoint: https://${RUNPOD_PUBLIC_IP}:${!mapped}"
-    else
-      echo "RunPod: expose TCP port ${port} in the pod settings to reach the gateway from outside"
-    fi
-  fi
-  mapped="VAST_TCP_PORT_${port}"
-  if [[ -n "${PUBLIC_IPADDR:-}" && -n "${!mapped:-}" ]]; then
-    echo "Vast public endpoint: https://${PUBLIC_IPADDR}:${!mapped}"
-  elif [[ -n "${VAST_CONTAINERLABEL:-}" ]]; then
-    echo "Vast: map container port ${port} (-p ${port}:${port}) to reach the gateway from outside"
-  fi
+  # How the linked CLI finds a non-default home, then the driver reboot and PATH notes.
   if [[ "${GOETHE_HOME}" != "$(default_home)" ]]; then
     echo "GOETHE_HOME=${GOETHE_HOME} is not the default: ${GOETHE_HOME}/bin/goethe${LINK_DIR:+ and ${LINK_DIR}/goethe}" \
       "find it from their own location, no export needed"
   fi
+  if [[ "${DRIVER_REBOOT}" == "1" ]]; then
+    echo "Reboot to load the new NVIDIA driver, then check it with goethe doctor"
+  fi
+  if [[ -n "${LINK_DIR}" && ":${PATH}:" != *":${LINK_DIR}:"* ]]; then
+    echo "Add ${LINK_DIR} to PATH to use goethe"
+  fi
+  echo "Goethe install complete: GOETHE_HOME=${GOETHE_HOME}"
+}
+
+get_started() {
+  printf '\nGet started:\n\n\t→ goethe start\n'
+}
+
+show_banner() {
+  # The Goethe banner in light blue, on a fresh install in a terminal wide enough for it.
+  local cols
+  [[ -t 1 && ! -x "${GOETHE_HOME:-$(default_home)}/bin/goethe" ]] || return 0
+  cols="$(tput cols 2>/dev/null || echo "${COLUMNS:-0}")"
+  ((cols >= 143)) || return 0
+  [[ -z "${NO_COLOR:-}" ]] && printf '\033[1;38;5;117m'
+  cat <<'BANNER'
+ ██████╗ ██╗    ██╗███╗   ██╗    ██╗   ██╗ ██████╗ ██╗   ██╗██████╗     ██╗███╗   ██╗███████╗███████╗██████╗ ███████╗███╗   ██╗ ██████╗███████╗
+██╔═══██╗██║    ██║████╗  ██║    ╚██╗ ██╔╝██╔═══██╗██║   ██║██╔══██╗    ██║████╗  ██║██╔════╝██╔════╝██╔══██╗██╔════╝████╗  ██║██╔════╝██╔════╝
+██║   ██║██║ █╗ ██║██╔██╗ ██║     ╚████╔╝ ██║   ██║██║   ██║██████╔╝    ██║██╔██╗ ██║█████╗  █████╗  ██████╔╝█████╗  ██╔██╗ ██║██║     █████╗
+██║   ██║██║███╗██║██║╚██╗██║      ╚██╔╝  ██║   ██║██║   ██║██╔══██╗    ██║██║╚██╗██║██╔══╝  ██╔══╝  ██╔══██╗██╔══╝  ██║╚██╗██║██║     ██╔══╝
+╚██████╔╝╚███╔███╔╝██║ ╚████║       ██║   ╚██████╔╝╚██████╔╝██║  ██║    ██║██║ ╚████║██║     ███████╗██║  ██║███████╗██║ ╚████║╚██████╗███████╗
+ ╚═════╝  ╚══╝╚══╝ ╚═╝  ╚═══╝       ╚═╝    ╚═════╝  ╚═════╝ ╚═╝  ╚═╝    ╚═╝╚═╝  ╚═══╝╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝ ╚═════╝╚══════╝
+
+     ██╗       ██████╗  ██████╗ ███████╗████████╗██╗  ██╗███████╗
+     ╚██╗     ██╔════╝ ██╔═══██╗██╔════╝╚══██╔══╝██║  ██║██╔════╝
+█████╗╚██╗    ██║  ███╗██║   ██║█████╗     ██║   ███████║█████╗
+╚════╝██╔╝    ██║   ██║██║   ██║██╔══╝     ██║   ██╔══██║██╔══╝
+     ██╔╝     ╚██████╔╝╚██████╔╝███████╗   ██║   ██║  ██║███████╗
+     ╚═╝       ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
+BANNER
+  [[ -z "${NO_COLOR:-}" ]] && printf '\033[0m'
+  echo
 }
 
 main() {
-  # Verify prerequisites and the signed CDN, install everything under GOETHE_HOME, start goethed and wait for it.
+  # Verify prerequisites and the signed CDN, install everything under GOETHE_HOME; goethed stays down unless upgraded.
+  show_banner
   CDN="${GOETHE_PKG_URL:-${DEFAULT_PKG_URL}}"
   CDN="${CDN%/}"
   ARCH="$(normalize_arch "${GOETHE_ARCH:-$(uname -m)}")"
@@ -695,27 +712,17 @@ main() {
   ensure_certs
   write_goethe_env
   apply_binaries
-  start_goethed
-  wait_goethed
+  if [[ "${RESTART}" -eq 1 ]]; then
+    restart_goethed
+    wait_goethed
+    wait_gateway
+  fi
   if [[ -n "${UPGRADE_NOTE}" ]]; then
     echo "${UPGRADE_NOTE}"
   fi
-  wait_gateway
   goethe hw profile || echo "WARNING: goethe hw profile failed" >&2
-  local rec
-  if rec="$(goethe recommend 2>&1)"; then
-    { printf '%s\n' "${rec}" | head -n 20; } || true
-  else
-    echo "WARNING: goethe recommend failed: $(printf '%s' "${rec}" | tail -n 2)" >&2
-  fi
   summary
-  if [[ "${DRIVER_REBOOT}" == "1" ]]; then
-    echo "Reboot to load the new NVIDIA driver, then check it with goethe doctor"
-  fi
-  if [[ -n "${LINK_DIR}" && ":${PATH}:" != *":${LINK_DIR}:"* ]]; then
-    echo "Add ${LINK_DIR} to PATH to use goethe"
-  fi
-  echo "Goethe install complete: GOETHE_HOME=${GOETHE_HOME}"
+  get_started
 }
 
 main "$@"

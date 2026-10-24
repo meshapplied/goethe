@@ -22,7 +22,7 @@ from lib.goethe_test import (
 
 def _gpu_list_json(goethe, env: dict) -> list[dict]:
     out = subprocess.check_output(
-        [str(goethe), "gpu", "list", "--json"],
+        [str(goethe), "gpu", "--json"],
         env=env,
         text=True,
     )
@@ -57,12 +57,12 @@ def main() -> None:
                 raise RuntimeError(f"bad status {st!r} for gpu {row.get('index')}")
         gpu_idx = _pick_test_gpu(indices)
         try:
-            run_goethe([str(goethe), "gpu", "deny", str(gpu_idx)], env=env)
+            run_goethe([str(goethe), "gpu", "--deny", f"gpu{gpu_idx}"], env=env)
             rows = _gpu_list_json(goethe, env)
             st = next(r["status"] for r in rows if int(r["index"]) == gpu_idx)
             if st != "DENIED":
                 raise RuntimeError(f"expected DENIED got {st}")
-            rr99 = run([str(goethe), "gpu", "deny", "99"], env=env)
+            rr99 = run([str(goethe), "gpu", "--deny", "gpu99"], env=env)
             if rr99.returncode == 0:
                 raise RuntimeError("deny 99 should fail")
             goethed = spawn([str(require_cli("goethed"))], env=env)
@@ -78,7 +78,7 @@ def main() -> None:
                 )
                 load_env = {**env, "CUDA_VISIBLE_DEVICES": str(gpu_idx)}
                 rr_load = run(
-                    [str(goethe), "load", "gp", "--gpus", str(gpu_idx), "--yes"],
+                    [str(goethe), "load", "--model", "gp", "--gpus", str(gpu_idx), "--yes"],
                     env=load_env,
                     timeout=60,
                 )
@@ -88,7 +88,7 @@ def main() -> None:
                 if "denied by policy" not in err:
                     raise RuntimeError(f"missing denied by policy: {err[-400:]}")
                 assert_no_stub_engines(home)
-                rr_ep = run([str(goethe), "load", "gp", "--ep", "0"], env=env, timeout=30)
+                rr_ep = run([str(goethe), "load", "--model", "gp", "--ep", "0"], env=env, timeout=30)
                 if rr_ep.returncode == 0:
                     raise RuntimeError("--ep 0 should fail")
                 if "at least 1" not in (rr_ep.stderr or rr_ep.stdout or ""):
@@ -96,7 +96,7 @@ def main() -> None:
             finally:
                 goethed.stop()
         finally:
-            run([str(goethe), "gpu", "allow", str(gpu_idx)], env=env)
+            run([str(goethe), "gpu", "--allow", f"gpu{gpu_idx}"], env=env)
     print("stage2_gpu_policy ok")
 
 

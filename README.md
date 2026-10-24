@@ -2,23 +2,27 @@
 
 **Share the LLMs on your GPUs through one IP address, in three steps, and run them fast.**
 
-Goethe turns a Linux machine with an NVIDIA GPU into your own OpenAI-compatible API. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
+Goethe turns a Linux machine with an NVIDIA GPU into your own API, compatible with OpenAI, Anthropic and LiteLLM clients. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
 
 ```bash
-# 1. Install
 curl -fsSL https://meshapplied.com/install.sh | bash
-
-# 2. Start Goethe and load a model
-goethe up
-goethe install Qwen/Qwen3-8B --load
-
-# 3. Share it
-goethe configure api                  # this machine only, your VPN (recommended), or a public address
-goethe key create --name my-laptop    # one key per app or person
-goethe get api                        # the address to give your apps
+goethe start
 ```
 
-Anything that speaks the OpenAI API can use it right away: the OpenAI SDKs, LangChain, LlamaIndex, Open WebUI, coding assistants, or plain `curl`.
+`goethe start` starts Goethe and walks you through three steps: install a model, serve it through the API, and configure who can reach it. If you prefer plain commands, these do the same:
+
+```bash
+# 1. Start Goethe and load a model
+goethe up
+goethe install --model Qwen/Qwen3-8B --load
+
+# 2. Share it
+goethe configure api                 # this machine only, your VPN (recommended), or a public address
+goethe key --create my-laptop        # one key per app or person
+goethe api                           # the address to give your apps
+```
+
+Anything that speaks the OpenAI, Anthropic or LiteLLM API can use it right away, all at the same address: the OpenAI and Anthropic SDKs, LiteLLM, LangChain, LlamaIndex, Open WebUI, coding assistants, or plain `curl`.
 
 ```python
 from openai import OpenAI

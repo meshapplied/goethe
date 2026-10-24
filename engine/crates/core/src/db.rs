@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     expires_at TEXT,
     model_scope TEXT,
-    is_admin INTEGER NOT NULL DEFAULT 0
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    token TEXT
 );
 
 CREATE TABLE IF NOT EXISTS key_usage (
@@ -184,7 +185,7 @@ fn init_schema(con: &Connection) -> rusqlite::Result<()> {
     // Create the schema in one immediate transaction, or refuse a database from a newer goethe.
     let ver = user_version(con)?;
     if ver == SCHEMA_VERSION {
-        return Ok(());
+        return ensure_columns(con);
     }
     if ver > SCHEMA_VERSION {
         return Err(newer_schema(ver));
@@ -203,11 +204,20 @@ fn init_schema(con: &Connection) -> rusqlite::Result<()> {
         Ok(())
     })();
     match result {
-        Ok(()) => con.execute_batch("COMMIT;"),
+        Ok(()) => con.execute_batch("COMMIT;").and_then(|()| ensure_columns(con)),
         Err(e) => {
             let _ = con.execute_batch("ROLLBACK;");
             Err(e)
         }
+    }
+}
+
+fn ensure_columns(con: &Connection) -> rusqlite::Result<()> {
+    // Columns added after schema version 1, without a version bump so an older goethe still opens the database.
+    let has_token = || con.prepare("SELECT token FROM api_keys LIMIT 0").is_ok();
+    match has_token() {
+        true => Ok(()),
+        false => con.execute_batch("ALTER TABLE api_keys ADD COLUMN token TEXT;").or_else(|e| if has_token() { Ok(()) } else { Err(e) }),
     }
 }
 

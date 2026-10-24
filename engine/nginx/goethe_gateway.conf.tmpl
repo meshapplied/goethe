@@ -59,13 +59,13 @@ server {
         proxy_pass http://goethe_mux;
     }
 
-    location /v1/ {
-        limit_conn goethe_conn 32;
-        proxy_pass http://goethe_mux;
+    location = /metrics {
+        return 404;
     }
 
     location / {
-        return 404;
+        limit_conn goethe_conn 32;
+        proxy_pass http://goethe_mux;
     }
 
     location @close {

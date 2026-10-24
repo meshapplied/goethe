@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage 6 installer checks without network: version floors, truncation safety, no kills or nginx starts, unit owner.
+# Stage 6 installer checks without network: version floors, truncation safety, no kills, nginx or goethed starts, unit owner.
 
 set -euo pipefail
 
@@ -78,6 +78,23 @@ if grep -nE '(^|[^_a-z])(kill|pkill|killall|fuser)([^_a-z]|$)' "${INSTALL}"; the
 fi
 if grep -nE '(nginx|NGINX_BIN\}?"?) +-[cps]( |$)|nohup[^#]*nginx' "${INSTALL}"; then
   echo "install.sh must not start or signal nginx (goethed manages it)"
+  exit 1
+fi
+
+MAIN="$(sed -n '/^main() {/,/^}/p' "${INSTALL}")"
+if grep -nE 'goethe (up|recommend)|systemctl|(^|[^_a-z])start_goethed' <<<"${MAIN}" \
+  || [[ "$(grep -c 'restart_goethed' <<<"${MAIN}")" -ne 1 ]] \
+  || ! grep -A1 'if \[\[ "${RESTART}" -eq 1 \]\]; then' <<<"${MAIN}" | grep -q 'restart_goethed'; then
+  echo "install.sh main must not start goethed except to bring back one an upgrade stopped"
+  exit 1
+fi
+if [[ "$(grep -v '^}' <<<"${MAIN}" | tail -n 1)" != "  get_started" ]]; then
+  echo "install.sh must end with the Get started block"
+  exit 1
+fi
+GOT="$(LC_ALL=C bash -c "$(sed -n '/^get_started() {/,/^}/p' "${INSTALL}")"$'\n'get_started)"
+if [[ "${GOT}" != $'\nGet started:\n\n\t→ goethe start' ]]; then
+  echo "install.sh Get started block is wrong: ${GOT}"
   exit 1
 fi
 

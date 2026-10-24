@@ -111,7 +111,7 @@ def stub_rows(model_dir: Path, method: str, path: str) -> list[dict]:
 
 def new_key(goethe: Path, home: Path, *extra: str) -> tuple[str, str]:
     """Create a raw key and return (token, key_id)."""
-    rr = run_goethe([str(goethe), "key", "create", "--name", "hard", "--raw", *extra], env=home_goethe_env(home))
+    rr = run_goethe([str(goethe), "key", "--create", "hard", "--raw", *extra], env=home_goethe_env(home))
     token = [ln for ln in rr.stdout.splitlines() if ln.startswith("goethe_sk_")][0]
     rows = sqlite_query(
         home / "state.db", "SELECT key_id, raw_prefix FROM api_keys WHERE token_hash = ?", (sha256_hex(token),)
@@ -129,7 +129,7 @@ def check_allowlist(goethe: Path, home: Path, public: int) -> None:
     status, headers, body = request(public, "GET", "/v1/models")
     err = json_error(status, headers, body, 403, "empty allowlist")
     check(err.get("code") == "forbidden", f"403 code {err}")
-    run_goethe([str(goethe), "allowlist", "add", "127.0.0.1/32"], env=env)
+    run_goethe([str(goethe), "allowlist", "--add", "127.0.0.1/32"], env=env)
     status, _, body = request(public, "GET", "/health")
     check(status == 200 and json.loads(body).get("status") == "ok", "allowlisted health")
     allow = home / "nginx" / "allowlist.conf"
@@ -139,7 +139,7 @@ def check_allowlist(goethe: Path, home: Path, public: int) -> None:
     status, headers, body = request(public, "GET", "/health", source="127.0.0.2")
     json_error(status, headers, body, 403, "other loopback source denied")
     before = allow.read_text(encoding="utf-8")
-    rr = run([str(goethe), "allowlist", "add", "10.0.0.0/8; allow all"], env=env)
+    rr = run([str(goethe), "allowlist", "--add", "10.0.0.0/8; allow all"], env=env)
     check(rr.returncode != 0 and "invalid CIDR" in (rr.stderr + rr.stdout), f"injection refused: {rr.stderr}")
     check(allow.read_text(encoding="utf-8") == before, "allowlist file untouched by injection")
     rows = sqlite_query(home / "state.db", "SELECT cidr FROM ip_allowlist")
@@ -148,11 +148,11 @@ def check_allowlist(goethe: Path, home: Path, public: int) -> None:
     json_error(status, headers, body, 403, "still denied after injection attempt")
     status, _, _ = request(public, "GET", "/health")
     check(status == 200, "gateway still serves after injection attempt")
-    run_goethe([str(goethe), "allowlist", "add", "10.1.2.3/8"], env=env)
-    listed = run_goethe([str(goethe), "allowlist", "list"], env=env).stdout
+    run_goethe([str(goethe), "allowlist", "--add", "10.1.2.3/8"], env=env)
+    listed = run_goethe([str(goethe), "allowlist"], env=env).stdout
     check("10.0.0.0/8" in listed and "10.1.2.3/8" not in listed, f"canonical CIDR stored: {listed}")
-    run_goethe([str(goethe), "allowlist", "remove", "10.1.2.3/8"], env=env)
-    listed = run_goethe([str(goethe), "allowlist", "list"], env=env).stdout
+    run_goethe([str(goethe), "allowlist", "--remove", "10.1.2.3/8"], env=env)
+    listed = run_goethe([str(goethe), "allowlist"], env=env).stdout
     check("10.0.0.0/8" not in listed, "remove matches the canonical form")
 
 
@@ -173,7 +173,7 @@ def check_models_and_revocation(goethe: Path, home: Path, public: int) -> str:
     victim, victim_id = new_key(goethe, home)
     status, _, _ = request(public, "GET", "/v1/models", headers={"Authorization": f"Bearer {victim}"})
     check(status == 200, "fresh key works on its first request")
-    run_goethe([str(goethe), "key", "revoke", victim_id], env=home_goethe_env(home))
+    run_goethe([str(goethe), "key", "--revoke", victim_id], env=home_goethe_env(home))
     t0 = time.time()
     refused_after = None
     while time.time() - t0 < 2.0:
@@ -310,7 +310,7 @@ def main() -> None:
             wait_goethed_socket(home)
             seed_installed_model(home, MODEL, str(model_dir.relative_to(home)), 5.0, 512, 512, 2, 1)
             env = {**home_goethe_env(home), "CUDA_VISIBLE_DEVICES": str(gpu)}
-            run_goethe([str(goethe), "load", MODEL, "--gpus", str(gpu), "--yes"], env=env, timeout=300)
+            run_goethe([str(goethe), "load", "--model", MODEL, "--gpus", str(gpu), "--yes"], env=env, timeout=300)
             public = test_public_port(home)
             check(wait_until(lambda: (home / "nginx" / "nginx.pid").is_file(), timeout=10), "gateway up")
             check_allowlist(goethe, home, public)

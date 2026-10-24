@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 5: `goethe gateway bind` moves the gateway listener: wildcard changes restart nginx, others reload (F5)."""
+"""Stage 5: `goethe gateway --bind` moves the gateway listener: wildcard changes restart nginx, others reload (F5)."""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def _answers(addr: str, port: int) -> bool:
 
 
 class Bind:
-    """Runs goethe gateway bind/status for one home and checks the listener, the master and who answers."""
+    """Runs goethe gateway --bind and goethe gateway for one home; checks the listener, the master and who answers."""
 
     def __init__(self, goethe: str, home: Path) -> None:
         self.goethe, self.home, self.env = goethe, home, home_goethe_env(home)
@@ -68,7 +68,7 @@ class Bind:
         """Bind addr; a wildcard change must restart the master, others must hot-reload it; returns answer delay."""
         before = _master(self.home)
         t0 = time.time()
-        rr = run([self.goethe, "gateway", "bind", addr], env=self.env, timeout=60)
+        rr = run([self.goethe, "gateway", "--bind", addr], env=self.env, timeout=60)
         if rr.returncode != 0:
             raise RuntimeError(f"gateway bind {addr} failed (exit {rr.returncode}): {rr.stderr[-300:]}")
         if not wait_until(lambda: self.listen() == [f"{addr}:{self.port}"], timeout=15):
@@ -87,7 +87,7 @@ class Bind:
         return _listen(self.conf)
 
     def status_shows(self, addr: str) -> None:
-        status = run([self.goethe, "gateway", "status"], env=self.env)
+        status = run([self.goethe, "gateway"], env=self.env)
         if status.returncode != 0 or addr not in status.stdout:
             raise RuntimeError(f"gateway status must show the {addr} bind: {status.stdout[-300:]!r}")
 
@@ -118,7 +118,7 @@ def main() -> None:
             if not wait_until(lambda: not _answers("127.0.0.1", gw.port), timeout=10):
                 raise RuntimeError("after bind 127.0.0.2 the gateway still answers on 127.0.0.1")
             delays.append(gw.move("127.0.0.1", restart=False))
-            refused = run([goethe, "gateway", "bind", "192.0.2.1"], env=gw.env)
+            refused = run([goethe, "gateway", "--bind", "192.0.2.1"], env=gw.env)
             if refused.returncode == 0 or "not an address of this host" not in refused.stderr + refused.stdout:
                 raise RuntimeError(f"a non-local bind must be refused: exit {refused.returncode} {refused.stderr!r}")
             if gw.listen() != [f"127.0.0.1:{gw.port}"] or not _answers("127.0.0.1", gw.port):
@@ -126,7 +126,7 @@ def main() -> None:
             gw.status_shows("127.0.0.1")
         finally:
             if gw.listen() != [f"127.0.0.1:{gw.port}"]:
-                run([goethe, "gateway", "bind", "127.0.0.1"], env=gw.env, timeout=60)
+                run([goethe, "gateway", "--bind", "127.0.0.1"], env=gw.env, timeout=60)
             md.stop()
         if not wait_until(lambda: not home_process_tree(home), timeout=10):
             raise RuntimeError(f"processes left after goethed stopped: {sorted(home_process_tree(home))}")

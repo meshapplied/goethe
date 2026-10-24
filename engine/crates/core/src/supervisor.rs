@@ -199,7 +199,7 @@ pub fn handle_load(params: LoadParams) -> Result<(Value, String), LoadErr> {
     let denied = crate::gpu_policy::denied_set(&con).map_err(err1)?;
     if let Some(g) = pinned.iter().find(|g| denied.contains(g)) {
         return Err(err1(format!(
-            "GPU {g} is denied by policy; run `goethe gpu allow {g}` to use it"
+            "gpu{g} is denied by policy; run `goethe gpu --allow gpu{g}` to use it"
         )));
     }
     let req = LoadReq {

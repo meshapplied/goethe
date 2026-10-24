@@ -22,15 +22,15 @@ def main() -> None:
             encoding="utf-8",
         )
         seed_installed_model(home, model_id, str(model_dir.relative_to(home)), 5.0, 512, 512, 2, 1)
-        run_goethe([str(goethe), "alias", "set", alias_name, model_id], env=env)
-        lst = subprocess.check_output([str(goethe), "alias", "list"], env=env, text=True)
-        if f"{alias_name}\t{model_id}" not in lst:
+        run_goethe([str(goethe), "alias", "--set", alias_name, "--model", model_id], env=env)
+        lst = subprocess.check_output([str(goethe), "alias"], env=env, text=True)
+        if [alias_name, model_id] not in [ln.split() for ln in lst.splitlines()]:
             raise RuntimeError(f"alias list missing row: {lst!r}")
-        rr_bad = run([str(goethe), "alias", "set", alias_name, "missing-model"], env=env)
+        rr_bad = run([str(goethe), "alias", "--set", alias_name, "--model", "missing-model"], env=env)
         if rr_bad.returncode == 0:
             raise RuntimeError("alias set to missing model should fail")
-        run_goethe([str(goethe), "alias", "remove", alias_name], env=env)
-        lst2 = subprocess.check_output([str(goethe), "alias", "list"], env=env, text=True)
+        run_goethe([str(goethe), "alias", "--remove", alias_name], env=env)
+        lst2 = subprocess.check_output([str(goethe), "alias"], env=env, text=True)
         if alias_name in lst2:
             raise RuntimeError(f"alias still listed: {lst2!r}")
         out_models = subprocess.check_output([str(goethe), "models"], env=env, text=True)

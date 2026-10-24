@@ -197,7 +197,13 @@ fn fetch_http_uncached(home: &Path, url: &str) -> Result<Registry, String> {
             }
         }
     }
+    let cached = || -> Result<Registry, String> {
+        let text = std::fs::read_to_string(&cache_path).map_err(|e| e.to_string())?;
+        let c: RegistryCache = serde_json::from_str(&text).map_err(|e| format!("registry cache: {e}"))?;
+        parse_registry(&c.body)
+    };
     match req.call() {
+        Ok(resp) if resp.status() == 304 => cached(),
         Ok(resp) => {
             let etag = resp.header("etag").map(String::from);
             let body = resp.into_string().map_err(|e| format!("registry body: {e}"))?;
@@ -214,19 +220,12 @@ fn fetch_http_uncached(home: &Path, url: &str) -> Result<Registry, String> {
             }
             parse_registry(&body)
         }
-        Err(ureq::Error::Status(304, _)) => {
-            let text = std::fs::read_to_string(&cache_path).map_err(|e| e.to_string())?;
-            let c: RegistryCache =
-                serde_json::from_str(&text).map_err(|e| format!("registry cache: {e}"))?;
-            parse_registry(&c.body)
-        }
         Err(e) if offline => {
-            let text = std::fs::read_to_string(&cache_path)
-                .map_err(|_| format!("registry unreachable ({e}) and no registry.cache.json"))?;
+            if !cache_path.is_file() {
+                return Err(format!("registry unreachable ({e}) and no registry.cache.json"));
+            }
             eprintln!("warning: registry fetch failed ({e}); using cached registry");
-            let c: RegistryCache =
-                serde_json::from_str(&text).map_err(|e| format!("registry cache: {e}"))?;
-            parse_registry(&c.body)
+            cached()
         }
         Err(e) => Err(format!("registry unreachable at {url}: {e}")),
     }
@@ -401,7 +400,7 @@ fn online_checks(m: &RegistryModel, opts: &ValidateOpts, errors: &mut Vec<String
             }
             let entry_gated = m.gated.unwrap_or(false);
             if p.gated && entry_gated {
-                eprintln!("note: {}: gated; goethe does not log in, so its files are not checked", m.id);
+                eprintln!("note: {}: gated; registry checks use no Hugging Face token, so its files are not checked", m.id);
             } else if p.gated && !entry_gated {
                 errors.push(format!(
                     "{}: Hugging Face reports gated but registry entry gated is not true",
@@ -660,7 +659,7 @@ pub fn infer_one_entry(
     let rev = revision.unwrap_or("main");
     let pre = hf::preflight_model_opts(repo_id, Some(rev), true)?;
     if pre.gated {
-        return Err("gated on Hugging Face and goethe does not log in: write this entry by hand (set \"gated\": true)".to_string());
+        return Err("gated on Hugging Face and registry inference uses no token: write this entry by hand (set \"gated\": true)".to_string());
     }
     let sha = pre
         .sha

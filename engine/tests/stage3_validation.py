@@ -41,13 +41,13 @@ def main() -> None:
         md = start_goethed(home)
         try:
             for value in ("0", "999999999"):
-                rr = run([goethe, "config", "demo", "--ctx", value], env=env)
+                rr = run([goethe, "config", "--model", "demo", "--ctx", value], env=env)
                 expect(rr, rr.returncode != 0, f"config --ctx {value} refused")
             expect(rr, card.read_text(encoding="utf-8") == card_before, "refused config left the card unchanged")
             q = "SELECT default_ctx, default_max_conc FROM installed_models WHERE model_id='demo'"
             defaults = sqlite_query(db, q)
             expect(rr, defaults == [(1024, 4)], f"refused config left the DB defaults unchanged {defaults}")
-            load = [goethe, "load", "demo", "--gpus", str(gpu), "--yes", "--no-wait"]
+            load = [goethe, "load", "--model", "demo", "--gpus", str(gpu), "--yes", "--no-wait"]
             for flag in (["--ctx", "0"], ["--max-conc", "0"]):
                 rr = run([*load, *flag], env=env)
                 expect(rr, rr.returncode != 0, f"load {flag[0]} 0 refused")
@@ -56,17 +56,18 @@ def main() -> None:
                 expect(rr, rr.returncode == 2, f"load {flag[0]} is a usage error (exit 2)")
             rows = sqlite_query(db, "SELECT COUNT(*) FROM loaded_instances")[0][0]
             expect(rr, rows == 0, f"refused loads started nothing ({rows} instance rows)")
-            for args in (["--name", ""], ["--name", "scoped", "--models", ""]):
-                rr = run([goethe, "key", "create", *args, "--raw"], env=env)
+            for args in ([""], ["scoped", "--models", ""]):
+                rr = run([goethe, "key", "--create", *args, "--raw"], env=env)
                 expect(rr, rr.returncode != 0 and "goethe_sk_" not in rr.stdout, f"key create {args} refused")
-            rr = run([goethe, "key", "create", "--name", "zero", "--rpm", "0", "--raw"], env=env)
-            text = run([goethe, "key", "list"], env=env).stdout
-            line = next((ln for ln in text.splitlines() if "\tzero\t" in ln), "")
-            expect(rr, rr.returncode == 0 and "rpm=unlimited" in line, f"--rpm 0 is listed as rpm=unlimited: {line!r}")
+            rr = run([goethe, "key", "--create", "zero", "--rpm", "0", "--raw"], env=env)
+            text = run([goethe, "key"], env=env).stdout
+            line = next((ln for ln in text.splitlines() if ln.split()[:1] == ["zero"]), "")
+            unlimited = line.split()[3:4] == ["unlimited"]
+            expect(rr, rr.returncode == 0 and unlimited, f"--rpm 0 is listed as unlimited: {line!r}")
             keys = sqlite_query(db, "SELECT name FROM api_keys WHERE name IN ('', 'scoped')")
             expect(rr, keys == [], f"refused keys were stored {keys}")
             for alias in (["", "demo"], ["other", "demo"]):
-                rr = run([goethe, "alias", "set", *alias], env=env)
+                rr = run([goethe, "alias", "--set", alias[0], "--model", alias[1]], env=env)
                 expect(rr, rr.returncode != 0, f"alias set {alias} refused (empty name or a model id)")
             aliases = sqlite_query(db, "SELECT alias FROM model_aliases")
             expect(rr, aliases == [], f"refused aliases were stored {aliases}")
@@ -74,13 +75,13 @@ def main() -> None:
             expect(rr, rr.returncode == 2, "service restore --on --off is a usage error")
             rr = run([goethe, "logs"], env=env)
             expect(rr, rr.returncode == 2, "logs without a target is a usage error")
-            rr = run([goethe, "logs", ""], env=env)
+            rr = run([goethe, "logs", "--model", ""], env=env)
             expect(rr, rr.returncode == 2, "logs with an empty target is a usage error")
-            rr = run([goethe, "logs", "demo", "--daemon"], env=env)
+            rr = run([goethe, "logs", "--model", "demo", "--daemon"], env=env)
             expect(rr, rr.returncode == 2, "logs <model> --daemon is a usage error, not a silently ignored model")
-            rr = run([goethe, "unload", "no-such-model"], env=env)
+            rr = run([goethe, "unload", "--model", "no-such-model"], env=env)
             expect(rr, rr.returncode == 1, "unload of an unknown model exits 1")
-            rr = run([goethe, "allowlist", "remove", "10.9.9.9/32"], env=env)
+            rr = run([goethe, "allowlist", "--remove", "10.9.9.9/32"], env=env)
             expect(rr, rr.returncode == 1, "allowlist remove of an absent entry exits 1")
         finally:
             run([goethe, "unload", "--all"], env=env)

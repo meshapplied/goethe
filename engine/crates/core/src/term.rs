@@ -79,6 +79,19 @@ pub fn visible_width(s: &str) -> usize {
     width
 }
 
+pub fn commands(intro: &str, lines: &[&str]) -> String {
+    // A lead-in, a blank line, then each command on its own indented line behind an arrow that marks it as a command.
+    let mut out = format!("{intro}\n\n");
+    for line in lines {
+        out.push_str(&format!("{}\n", command(line)));
+    }
+    out
+}
+
+pub fn command(line: &str) -> String {
+    format!("\t\u{2192} {line}")
+}
+
 pub struct Table {
     header: Vec<String>,
     rows: Vec<Vec<String>>,
@@ -172,14 +185,43 @@ fn parse_keys(bytes: &[u8]) -> Vec<Key> {
     keys
 }
 
-fn step(selected: usize, len: usize, key: Key) -> usize {
-    // The highlighted row after one key; arrows wrap around, a digit in range jumps to its row.
+fn step(options: &[String], selected: usize, key: Key) -> usize {
+    // The highlighted row after one key: arrows wrap around and skip blank spacer rows, digit n jumps to the nth choice.
+    let choices: Vec<usize> = (0..options.len()).filter(|&i| !options[i].is_empty()).collect();
+    let at = choices.iter().position(|&i| i == selected).unwrap_or(0);
+    let n = choices.len().max(1);
     match key {
-        Key::Up => (selected + len - 1) % len,
-        Key::Down => (selected + 1) % len,
-        Key::Digit(d) if d < len => d,
+        Key::Up => choices[(at + n - 1) % n],
+        Key::Down => choices[(at + 1) % n],
+        Key::Digit(d) if d < choices.len() => choices[d],
         _ => selected,
     }
+}
+
+pub fn ask(question: &str, default: &str) -> Result<String, String> {
+    // One line typed on the terminal; an empty answer takes the default.
+    eprint!("{question} ");
+    std::io::stderr().flush().ok();
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf).map_err(|e| e.to_string())?;
+    let answer = buf.trim();
+    Ok(if answer.is_empty() { default.to_string() } else { answer.to_string() })
+}
+
+pub fn ask_secret(question: &str) -> Result<String, String> {
+    // Like ask, without echoing what is typed (tokens and passwords).
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    let quiet = unsafe { libc::tcgetattr(0, &mut saved) } == 0 && {
+        let mut t = saved;
+        t.c_lflag &= !libc::ECHO;
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &t) == 0 }
+    };
+    let answer = ask(question, "");
+    if quiet {
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &saved) };
+        eprintln!();
+    }
+    answer
 }
 
 struct RawMode(libc::termios);
@@ -217,7 +259,7 @@ fn terminal_width() -> usize {
 }
 
 fn draw_menu(options: &[String], selected: usize, redraw: bool) {
-    // Draw the options on stderr, the selected one bold behind a marker; a redraw first moves back up over them.
+    // Draw the options on stderr, the selected one in light blue behind a light blue dot; a redraw first moves back up over them.
     let mut out = String::new();
     if redraw {
         out.push_str(&format!("\x1b[{}A", options.len()));
@@ -225,12 +267,14 @@ fn draw_menu(options: &[String], selected: usize, redraw: bool) {
     let width = terminal_width().saturating_sub(3).max(10);
     for (i, o) in options.iter().enumerate() {
         let o: String = if o.chars().count() > width { o.chars().take(width - 1).chain(['.']).collect() } else { o.clone() };
-        let line = if i == selected { format!("> \x1b[1m{o}\x1b[0m") } else { format!("  {o}") };
+        let line = if i == selected { format!("\x1b[1;38;5;117m\u{25CF} {o}\x1b[0m") } else { format!("  {o}") };
         out.push_str(&format!("\r\x1b[2K{line}\n"));
     }
     eprint!("{out}");
     std::io::stderr().flush().ok();
 }
+
+static HINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn select(options: &[String], default: usize) -> Result<Option<usize>, String> {
     // Arrow-key menu on a terminal: Ok(Some(i)) on Enter, Ok(None) when cancelled, Err when no terminal or raw mode.
@@ -239,9 +283,14 @@ pub fn select(options: &[String], default: usize) -> Result<Option<usize>, Strin
         return Err("no terminal for a menu".to_string());
     }
     let raw = RawMode::enter().ok_or("could not switch the terminal to raw mode")?;
-    eprintln!("(up/down to move, Enter to select)");
+    if !HINTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("(up/down to move, Enter to select, q to go back)");
+    }
     eprint!("\x1b[?25l");
     let mut selected = default.min(options.len() - 1);
+    if options[selected].is_empty() {
+        selected = step(options, selected, Key::Down);
+    }
     draw_menu(options, selected, false);
     let mut buf = [0u8; 8];
     loop {
@@ -261,7 +310,7 @@ pub fn select(options: &[String], default: usize) -> Result<Option<usize>, Strin
                     return Ok(None);
                 }
                 _ => {
-                    let next = step(selected, options.len(), key);
+                    let next = step(options, selected, key);
                     if next != selected {
                         selected = next;
                         draw_menu(options, selected, true);
@@ -275,6 +324,11 @@ pub fn select(options: &[String], default: usize) -> Result<Option<usize>, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_sit_under_their_lead_in_with_a_tab() {
+        assert_eq!(commands("Start it with:", &["goethe up"]), "Start it with:\n\n\t\u{2192} goethe up\n");
+    }
 
     fn strip(s: &str) -> String {
         // Text without SGR sequences.
@@ -329,11 +383,16 @@ mod tests {
         assert_eq!(parse_key(b"\x1b"), Key::Cancel);
         assert_eq!(parse_key(b"3"), Key::Digit(2));
         assert_eq!(parse_keys(b"\x1b[B\x1b[B\r"), vec![Key::Down, Key::Down, Key::Enter]);
-        assert_eq!(step(0, 3, Key::Up), 2);
-        assert_eq!(step(2, 3, Key::Down), 0);
-        assert_eq!(step(1, 3, Key::Digit(0)), 0);
-        assert_eq!(step(1, 3, Key::Digit(7)), 1);
-        assert_eq!(step(1, 3, Key::Other), 1);
+        let three: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(step(&three, 0, Key::Up), 2);
+        assert_eq!(step(&three, 2, Key::Down), 0);
+        assert_eq!(step(&three, 1, Key::Digit(0)), 0);
+        assert_eq!(step(&three, 1, Key::Digit(7)), 1);
+        assert_eq!(step(&three, 1, Key::Other), 1);
+        let spaced: Vec<String> = ["a", "", "b"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(step(&spaced, 0, Key::Down), 2, "the blank spacer row is skipped");
+        assert_eq!(step(&spaced, 2, Key::Up), 0);
+        assert_eq!(step(&spaced, 0, Key::Digit(1)), 2, "digits count choices, not rows");
     }
 
     #[test]

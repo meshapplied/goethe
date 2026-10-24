@@ -450,7 +450,7 @@ fn gpu_table(gpus: &[GpuState]) -> crate::term::Table {
     // One row per GPU: name with SM, NUMA and unified memory below it, VRAM, PCIe, and its processes stacked in one cell.
     use crate::term::{paint, Color};
     let pid_width = gpus.iter().flat_map(|g| &g.running_processes).map(|p| p.pid.to_string().len()).max().unwrap_or(0);
-    let mut table = crate::term::Table::new(&["GPU", "NAME", "VRAM TOTAL", "VRAM FREE", "PCIe NOW/MAX", "PROCESSES"]);
+    let mut table = crate::term::Table::new(&["GPU", "NAME", "VRAM TOTAL", "VRAM FREE", "PCIE", "PROCESSES"]);
     for gpu in gpus {
         let mut notes = vec![format!("SM {}", gpu.compute_capability)];
         notes.extend(gpu.numa_node.map(|n| format!("NUMA {n}")));
@@ -472,7 +472,7 @@ fn gpu_table(gpus: &[GpuState]) -> crate::term::Table {
             format!("{}\n{}", gpu.name, notes.join(", ")),
             gb(gpu.vram_total_mb),
             gb(gpu.vram_free_mb),
-            format!("gen {}/{} x{}", gpu.pcie_gen, gpu.pcie_gen_max, gpu.pcie_width),
+            format!("PCIe {} x{}", gpu.pcie_gen_max.max(gpu.pcie_gen), gpu.pcie_width_max.max(gpu.pcie_width)),
             if procs.is_empty() { "-".to_string() } else { procs.join("\n") },
         ]);
     }

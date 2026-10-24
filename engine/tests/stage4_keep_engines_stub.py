@@ -123,16 +123,16 @@ def main() -> None:
         k = Keep(goethe, home, start_goethed(home))
         pid = 0
         try:
-            run_goethe([goethe, "load", MODEL, "--gpus", str(gpu), "--yes"], env=k.env, timeout=120)
-            out = run_goethe([goethe, "key", "create", "--name", "k", "--raw"], env=k.env).stdout
+            run_goethe([goethe, "load", "--model", MODEL, "--gpus", str(gpu), "--yes"], env=k.env, timeout=120)
+            out = run_goethe([goethe, "key", "--create", "k", "--raw"], env=k.env).stdout
             k.hdr = {"Authorization": f"Bearer {next(ln for ln in out.splitlines() if ln.startswith('goethe_sk_'))}"}
-            run_goethe([goethe, "allowlist", "add", "127.0.0.1/32"], env=k.env)
+            run_goethe([goethe, "allowlist", "--add", "127.0.0.1/32"], env=k.env)
             if k.chat(k.mux)[0] != 200 or not wait_until(lambda: k.chat(k.public)[0] == 200, timeout=20):
                 raise RuntimeError("the stub must serve through the mux and the gateway before the restart")
             pid = int(k.rows()[0][1])
             k.restart("rpc")
             k.restart("cli")
-            run_goethe([goethe, "unload", MODEL], env=k.env, timeout=60)
+            run_goethe([goethe, "unload", "--model", MODEL], env=k.env, timeout=60)
             if not wait_until(lambda: not pid_alive(pid), timeout=10):
                 raise RuntimeError(f"unload after adoption left engine {pid} running")
         finally:
