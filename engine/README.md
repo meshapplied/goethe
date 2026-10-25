@@ -1,6 +1,6 @@
 # Goethe
 
-Serves LLMs on NVIDIA GPUs (Ampere, Hopper and Blackwell, SM 8.0 to 12.1) behind one API that accepts the OpenAI, Anthropic (`/v1/messages`) and LiteLLM schemas at once. Rust control plane (`goethe` CLI and `goethed` daemon), SGLang engines, nginx gateway. Linux only (glibc 2.30 or newer, x86_64 and aarch64).
+Serves LLMs on NVIDIA GPUs (Ampere, Ada, Hopper and Blackwell, SM 8.0 to 12.1) behind one API that accepts the OpenAI, Anthropic (`/v1/messages`) and LiteLLM schemas at once. Rust control plane (`goethe` CLI and `goethed` daemon), SGLang engines, nginx gateway. Linux only (glibc 2.30 or newer, x86_64 and aarch64).
 
 This README is for building and releasing Goethe. To install and use it, see the [user guide](../docs/user-guide.md).
 

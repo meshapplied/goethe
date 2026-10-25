@@ -20,9 +20,15 @@ pub fn run() -> Result<(), String> {
         print!("{}", no_terminal_text());
         return Ok(());
     }
+    let (blocking, notes) = readiness();
+    if !blocking.is_empty() {
+        print!("{}", not_ready_text(&blocking));
+        return Ok(());
+    }
     crate::service::run_up(true)?;
     crate::placement::ensure_hw_profile(&goethe_home())?;
-    screen("Serve a model through your own API in three steps", None);
+    let note = (!notes.is_empty()).then(|| notes.iter().map(|n| format!("{} {n}", paint("Note:", Color::Yellow))).collect::<Vec<_>>().join("\n"));
+    screen("Serve a model through your own API in three steps", note.as_deref());
     match choose(&["Guided setup (Recommended)", "Advanced setup"], 0)? {
         Some(0) => guided(),
         Some(_) => advanced(),
@@ -31,6 +37,51 @@ pub fn run() -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+fn readiness() -> (Vec<String>, Vec<String>) {
+    // What stops this machine from serving (driver, GPUs that did not start, no supported GPU) and what only limits it.
+    let mut blocking = Vec::new();
+    let mut notes = Vec::new();
+    let probe = crate::nvidia_driver::probe();
+    if let Some(why) = crate::nvidia_driver::diagnose(&probe) {
+        blocking.push(why);
+    } else {
+        match crate::nvidia_driver::unstarted(&probe, &crate::nvidia_driver::started_bus_ids()) {
+            Some((true, why)) => blocking.push(why),
+            Some((false, note)) => notes.push(note),
+            None => {}
+        }
+        if blocking.is_empty() {
+            if let Ok(hw) = crate::hw::profile(&goethe_home()) {
+                let reasons: Vec<String> = hw
+                    .gpus
+                    .iter()
+                    .filter_map(|g| crate::gpu_arch::unsupported_reason(&g.compute_capability).map(|w| format!("gpu{} {}: {w}", g.index, g.name)))
+                    .collect();
+                if !hw.gpus.is_empty() && reasons.len() == hw.gpus.len() {
+                    blocking.extend(reasons);
+                } else {
+                    notes.extend(reasons.into_iter().map(|r| format!("{r} (it is skipped)")));
+                }
+            }
+        }
+    }
+    if let crate::host_compiler::Verdict::Unusable(why) =
+        crate::host_compiler::verdict(crate::host_compiler::find().as_ref(), &probe.distro)
+    {
+        notes.push(why);
+    }
+    (blocking, notes)
+}
+
+fn not_ready_text(blocking: &[String]) -> String {
+    let list: Vec<String> = blocking.iter().map(|b| format!("  \u{2022} {b}")).collect();
+    format!(
+        "Goethe cannot serve models on this machine yet:\n\n{}\n\n{}",
+        list.join("\n"),
+        term::commands("Fix it, then check and start again:", &["goethe doctor", "goethe start"])
+    )
 }
 
 fn guided() -> Result<(), String> {

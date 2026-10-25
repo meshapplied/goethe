@@ -26,8 +26,13 @@ if [[ ! -f "${LOCK}" ]]; then
   exit 1
 fi
 
+export UV_LINK_MODE="${UV_LINK_MODE:-copy}"
+QUIET=()
+if [[ "${GOETHE_PYENV_QUIET:-0}" == "1" ]]; then
+  QUIET=(--quiet)
+fi
 if [[ ! -x "${VENV}/bin/python" || "${GOETHE_PYENV_RESET:-0}" == "1" ]]; then
-  "${UV}" venv "${VENV}" --python 3.11 --clear
+  "${UV}" venv "${QUIET[@]}" "${VENV}" --python 3.11 --clear
 fi
 PREFIX="$("${VENV}/bin/python" -c 'import sys; print(sys.prefix)')"
 if [[ "$(cd "${PREFIX}" && pwd -P)" != "$(cd "${VENV}" && pwd -P)" ]]; then
@@ -35,9 +40,9 @@ if [[ "$(cd "${PREFIX}" && pwd -P)" != "$(cd "${VENV}" && pwd -P)" ]]; then
   exit 1
 fi
 
-"${UV}" pip install --python "${VENV}/bin/python" --require-hashes -r "${LOCK}"
+"${UV}" pip install "${QUIET[@]}" --python "${VENV}/bin/python" --require-hashes -r "${LOCK}"
 if [[ -n "${GOETHE_SGLANG_WHEEL:-}" ]]; then
-  "${UV}" pip install --python "${VENV}/bin/python" --no-deps "${GOETHE_SGLANG_WHEEL}"
+  "${UV}" pip install "${QUIET[@]}" --python "${VENV}/bin/python" --no-deps "${GOETHE_SGLANG_WHEEL}"
 else
   SGLANG_BUILD_RUST_EXTS=none "${UV}" pip install --python "${VENV}/bin/python" --no-deps -e "${FORK_ROOT}/python"
 fi

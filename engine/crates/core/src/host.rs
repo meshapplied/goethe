@@ -145,6 +145,11 @@ pub fn detect_environment(root: &Path, env: &BTreeMap<String, String>, public_po
     }
 }
 
+pub fn container_kind() -> Option<String> {
+    // The container runtime this process runs in (kubernetes, podman, docker, lxc), None on a host or VM.
+    detect_container(Path::new("/"), &std::env::vars().collect())
+}
+
 fn detect_container(root: &Path, env: &BTreeMap<String, String>) -> Option<String> {
     // Kubernetes, podman, docker, then lxc markers, in that order.
     let cgroup = std::fs::read_to_string(root.join("proc/1/cgroup")).unwrap_or_default();

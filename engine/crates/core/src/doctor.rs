@@ -82,6 +82,7 @@ const CHECKS: &[(&str, CheckFn)] = &[
     ("huggingface", check_hf),
     ("registry", check_registry),
     ("nvidia_driver", |_| check_nvidia_driver()),
+    ("compiler", |_| check_compiler()),
 ];
 
 fn collect_checks(home: &Path) -> Vec<Check> {
@@ -113,12 +114,27 @@ fn check(name: &str, status: &str, hint: impl Into<String>) -> Check {
 }
 
 fn check_nvidia_driver() -> Check {
-    // The kernel module version, or the first blocker (no GPU, no driver, too old, no devices, no libraries) and its fix.
+    // The kernel module version, or the first blocker (no GPU, no driver, too old, no devices, no libraries, GPU not started).
     let probe = crate::nvidia_driver::probe();
-    match (crate::nvidia_driver::diagnose(&probe), probe.module_version) {
-        (Some(why), _) => check("nvidia_driver", "FAIL", why),
-        (None, Some(version)) => check("nvidia_driver", "OK", version),
-        (None, None) => check("nvidia_driver", "WARN", "could not read the driver version"),
+    if let Some(why) = crate::nvidia_driver::diagnose(&probe) {
+        return check("nvidia_driver", "FAIL", why);
+    }
+    let version = probe.module_version.clone().unwrap_or_else(|| "version unknown".into());
+    match crate::nvidia_driver::unstarted(&probe, &crate::nvidia_driver::started_bus_ids()) {
+        Some((true, why)) => check("nvidia_driver", "FAIL", why),
+        Some((false, note)) => check("nvidia_driver", "WARN", format!("{version}; {note}")),
+        None if probe.module_version.is_some() => check("nvidia_driver", "OK", version),
+        None => check("nvidia_driver", "WARN", "could not read the driver version"),
+    }
+}
+
+fn check_compiler() -> Check {
+    // The C++ compiler run-time kernel builds use (nvcc 13.0 takes gcc 9 to 15 or clang up to 20).
+    let distro = crate::nvidia_driver::probe().distro;
+    match crate::host_compiler::verdict(crate::host_compiler::find().as_ref(), &distro) {
+        crate::host_compiler::Verdict::Ok(label) => check("compiler", "OK", label),
+        crate::host_compiler::Verdict::TooNew(why) => check("compiler", "WARN", why),
+        crate::host_compiler::Verdict::Unusable(why) => check("compiler", "FAIL", why),
     }
 }
 
@@ -211,9 +227,17 @@ fn check_hardware(home: &Path) -> Check {
     }
     let ccs: Vec<(u32, &str)> = hw.gpus.iter().map(|g| (g.index, g.compute_capability.as_str())).collect();
     lines.extend(mixed_arch_note(&ccs));
+    lines.extend(hw.unavailable.iter().map(|u| format!("{u} (not answering; skipped)")));
+    if hw.gpus.is_empty() {
+        let probe = crate::nvidia_driver::probe();
+        let why = crate::nvidia_driver::diagnose(&probe)
+            .or_else(|| crate::nvidia_driver::unstarted(&probe, &[]).map(|(_, w)| w))
+            .unwrap_or_else(|| "no usable NVIDIA GPU".into());
+        lines.push(why);
+    }
     let status = if hw.gpus.is_empty() || unsupported == hw.gpus.len() {
         "FAIL"
-    } else if unsupported > 0 {
+    } else if unsupported > 0 || !hw.unavailable.is_empty() {
         "WARN"
     } else {
         "OK"

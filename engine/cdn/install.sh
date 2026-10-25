@@ -67,7 +67,7 @@ require_tool_version() {
   local tool="$1" min="$2" ver_cmd="$3" ver stripped
   ver="$(${ver_cmd} 2>/dev/null | head -n1 || true)"
   if [[ -z "${ver}" ]]; then
-    echo "${tool} is required" >&2
+    echo "${tool} is required: install it (apt-get install ${tool}, dnf install ${tool}) and rerun" >&2
     exit 1
   fi
   stripped="${ver}"
@@ -113,17 +113,190 @@ driver_version() {
   fi
 }
 
-nvidia_pci_gpus() {
-  # Number of NVIDIA display or 3D controllers on the PCI bus.
-  local d vendor class n=0
+nvidia_pci_ids() {
+  # PCI device ids of the NVIDIA display or 3D controllers, one per line.
+  local d vendor class device
   for d in "${GOETHE_PCI_DIR:-/sys/bus/pci/devices}"/*; do
-    vendor="" class=""
+    vendor="" class="" device=""
     read -r vendor <"${d}/vendor" 2>/dev/null || true
     read -r class <"${d}/class" 2>/dev/null || true
-    [[ "${vendor}" == "0x10de" && "${class}" == 0x03* ]] && n=$((n + 1))
+    read -r device <"${d}/device" 2>/dev/null || true
+    if [[ "${vendor}" == "0x10de" && "${class}" == 0x03* ]]; then
+      echo "${device:-0x0000}"
+    fi
   done
-  echo "${n}"
 }
+
+nvidia_pci_gpus() {
+  # Number of NVIDIA display or 3D controllers on the PCI bus.
+  nvidia_pci_ids | grep -c . || true
+}
+
+blackwell_pci() {
+  # True when an NVIDIA GPU on the PCI bus is Blackwell or newer (device id 0x2900 and up), which needs the open module.
+  local id
+  while read -r id; do
+    if [[ "${id}" =~ ^0x[0-9a-fA-F]{4}$ ]] && ((16#${id#0x} >= 16#2900)); then
+      return 0
+    fi
+  done < <(nvidia_pci_ids)
+  return 1
+}
+
+open_module() {
+  grep -q "Open Kernel Module" "${GOETHE_NVIDIA_VERSION_FILE:-/proc/driver/nvidia/version}" 2>/dev/null
+}
+
+module_installed() {
+  modinfo nvidia >/dev/null 2>&1
+}
+
+started_gpus() {
+  # GPUs nvidia-smi can open.
+  nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true
+}
+
+root_cmd() {
+  # "" as root, "sudo" when sudo exists; fails when neither can run root commands.
+  if [[ "$(id -u)" -eq 0 ]]; then
+    echo ""
+  elif command -v sudo >/dev/null 2>&1; then
+    echo "sudo"
+  else
+    return 1
+  fi
+}
+
+pkg_manager() {
+  local m
+  for m in apt-get dnf yum zypper; do
+    if command -v "${m}" >/dev/null 2>&1; then
+      echo "${m}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+can_ask() {
+  { : </dev/tty >/dev/tty; } 2>/dev/null
+}
+
+agree() {
+  # Consent for a system change: setting $3 is 1 (yes), 0 (no) or unset (ask on the terminal); $4=auto lets root skip asking.
+  local why="$1" question="$2" setting="$3" choice="${!3:-ask}" answer
+  case "${choice}" in
+    0 | no) echo "${why}; skipped (${setting}=0)" >&2; return 1 ;;
+    1 | yes) echo "${why}; going ahead (${setting}=1): ${question}" >&2; return 0 ;;
+  esac
+  if [[ "${4:-}" == auto && "$(id -u)" -eq 0 ]]; then
+    echo "${why}; going ahead as root: ${question}" >&2
+    return 0
+  fi
+  if ! can_ask; then
+    echo "${why}; rerun with ${setting}=1 to let the installer do it" >&2
+    return 1
+  fi
+  printf '%s.\n%s? [Y/n] ' "${why}" "${question}" >/dev/tty
+  read -r answer </dev/tty || answer="n"
+  [[ -z "${answer}" || "${answer}" == [Yy]* ]]
+}
+
+install_packages() {
+  # Install packages with the system package manager as root, after consent; $1 says why.
+  local why="$1" mgr sudo
+  shift
+  if ! mgr="$(pkg_manager)"; then
+    echo "${why}; install $* with your package manager" >&2
+    return 1
+  fi
+  if ! sudo="$(root_cmd)"; then
+    echo "${why}; install $* as root (${mgr} install $*)" >&2
+    return 1
+  fi
+  agree "${why}" "Install $* with ${mgr}${sudo:+ (uses sudo)}" GOETHE_INSTALL_DEPS auto || return 1
+  case "${mgr}" in
+    apt-get)
+      ${sudo} apt-get update -qq >/dev/null || echo "WARNING: apt-get update reported errors; installing from the current package lists" >&2
+      ${sudo} env DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes apt-get install -y -qq "$@" >/dev/null
+      ;;
+    dnf | yum) ${sudo} "${mgr}" -y -q install "$@" >/dev/null ;;
+    zypper) ${sudo} zypper -n -q install "$@" >/dev/null ;;
+  esac
+}
+
+ensure_prerequisites() {
+  # curl, zstd, openssl and CA certificates; missing ones are installed (root without asking).
+  local missing=() tool
+  for tool in curl zstd openssl; do
+    command -v "${tool}" >/dev/null 2>&1 || missing+=("${tool}")
+  done
+  if [[ ! -e /etc/ssl/certs/ca-certificates.crt && ! -e /etc/pki/tls/certs/ca-bundle.crt && ! -e /etc/ssl/ca-bundle.pem ]]; then
+    missing+=(ca-certificates)
+  fi
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    install_packages "missing ${missing[*]}" "${missing[@]}" || true
+  fi
+}
+
+compiler_packages() {
+  case "$(pkg_manager || true)" in
+    apt-get) echo build-essential ;;
+    dnf | yum | zypper) echo gcc gcc-c++ make ;;
+  esac
+}
+
+check_compiler() {
+  # nvcc builds kernels on a model's first load with the system C++ compiler (gcc 9 to 15); offer one when missing.
+  local cxx major pkgs=()
+  for cxx in "${CXX:-}" c++ g++ clang++; do
+    if [[ -n "${cxx}" ]] && command -v "${cxx}" >/dev/null 2>&1; then
+      major="$("${cxx}" -dumpversion 2>/dev/null | cut -d. -f1 || true)"
+      if [[ "${major}" =~ ^[0-9]+$ ]] && ((major < 9)) && ! "${cxx}" --version 2>/dev/null | grep -q clang; then
+        echo "WARNING: ${cxx} is gcc ${major}; GPU kernel builds need gcc 9 or newer (goethe doctor shows the fix)" >&2
+      fi
+      return 0
+    fi
+  done
+  read -r -a pkgs <<<"$(compiler_packages)"
+  if install_packages "no C++ compiler, which Goethe needs to build GPU kernels on a model's first load" "${pkgs[@]}"; then
+    return 0
+  fi
+  echo "WARNING: without a C++ compiler, models whose kernels are built on first load (NVFP4) cannot start; goethe doctor shows the fix" >&2
+}
+
+no_gpu() {
+  # Warn and continue, or stop when GOETHE_REQUIRE_GPU=1 asks for a working GPU.
+  if [[ "${GOETHE_REQUIRE_GPU:-}" == "1" ]]; then
+    echo "$1 (GOETHE_REQUIRE_GPU=1)" >&2
+    exit 1
+  fi
+  echo "WARNING: $1" >&2
+}
+
+check_gpu_arch() {
+  # GPUs older than compute capability 8.0 are not used; say so instead of failing at the first load.
+  local idx name cc legacy=() total=0
+  command -v nvidia-smi >/dev/null 2>&1 || return 0
+  while IFS=, read -r idx name cc; do
+    cc="${cc// /}"
+    [[ "${cc}" =~ ^[0-9]+\.[0-9]+$ ]] || continue
+    total=$((total + 1))
+    if ((${cc%%.*} * 10 + ${cc#*.} < 80)); then
+      legacy+=("gpu${idx// /}${name:+ ${name# }} (SM ${cc})")
+    fi
+  done < <(nvidia-smi --query-gpu=index,name,compute_cap --format=csv,noheader 2>/dev/null || true)
+  if [[ ${#legacy[@]} -eq 0 ]]; then
+    return 0
+  fi
+  if [[ ${#legacy[@]} -eq ${total} ]]; then
+    no_gpu "no supported GPU: $(IFS=';'; echo "${legacy[*]}" | sed 's/;/, /g'). Goethe needs compute capability 8.0 or newer (Ampere, Ada, Hopper, Blackwell)"
+  else
+    echo "note: $(IFS=';'; echo "${legacy[*]}" | sed 's/;/, /g') is older than Goethe supports (compute capability 8.0+) and will not be used" >&2
+  fi
+}
+
+FAILED_INIT="the card failed to initialise (sudo dmesg | grep -i nvrm shows why): power the machine fully off and on (on a VM, stop and start the instance), and check the GPU power cables and that Above 4G decoding is on in the BIOS"
 
 in_container() {
   [[ -n "${container:-}" || -e /.dockerenv || -e /run/.containerenv ]]
@@ -144,8 +317,8 @@ driver_install_steps() {
   [[ "${ARCH:-$(uname -m)}" == "aarch64" ]] && repo_arch="sbsa"
   case " ${id} ${like} " in
     *" ubuntu "*)
-      ${sudo} apt-get update -qq
-      ${sudo} env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ubuntu-drivers-common || true
+      ${sudo} apt-get update -qq || true
+      ${sudo} env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ubuntu-drivers-common "linux-headers-$(uname -r)" || true
       if ${sudo} timeout 900 ubuntu-drivers install --gpgpu "nvidia:${DRIVER_MIN}-server-open"; then
         return 0
       fi
@@ -155,7 +328,7 @@ driver_install_steps() {
       tag="ubuntu${ver//./}"
       ;;
     *" debian "*)
-      ${sudo} apt-get update -qq
+      ${sudo} apt-get update -qq || true
       ${sudo} env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "linux-headers-$(uname -r)" || true
       tag="debian${ver%%.*}"
       ;;
@@ -183,35 +356,40 @@ driver_install_steps() {
 }
 
 offer_driver_install() {
-  # Offer, then run, the driver install for a GPU without a usable driver; true when it ran, DRIVER_REBOOT=1 if needed.
-  local why="$1" choice="${GOETHE_INSTALL_DRIVER:-ask}" sudo="" answer
+  # Offer, then run, the fix for $1: $2 is load (modprobe), open (switch to the open module) or install; true when done.
+  local why="$1" action="$2" sudo question err
   if in_container; then
-    echo "${why}; this is a container, so install the NVIDIA driver ${DRIVER_MIN}+ on the host and start the container with --gpus all" >&2
+    echo "${why}; this is a container, so fix the NVIDIA driver (${DRIVER_MIN}+) on the host and start the container with --gpus all" >&2
     return 1
   fi
-  if [[ "$(id -u)" -ne 0 ]]; then
-    if ! command -v sudo >/dev/null 2>&1; then
-      echo "${why}; install the NVIDIA driver ${DRIVER_MIN}+ as root (rerun this installer as root to have it done)" >&2
-      return 1
-    fi
-    sudo="sudo"
+  if ! sudo="$(root_cmd)"; then
+    echo "${why}; fix it as root (rerun this installer as root to have it done)" >&2
+    return 1
   fi
-  case "${choice}" in
-    0 | no) echo "${why}; skipping the driver install (GOETHE_INSTALL_DRIVER=0)" >&2; return 1 ;;
-    1 | yes) ;;
-    *)
-      if ! { : </dev/tty >/dev/tty; } 2>/dev/null; then
-        echo "${why}; rerun with GOETHE_INSTALL_DRIVER=1 to install the NVIDIA driver ${DRIVER_MIN}+ ($(os_field ID) packages)" >&2
-        return 1
-      fi
-      printf '%s.\nInstall the NVIDIA driver %s+ now with %s packages (needs %s, may need a reboot)? [Y/n] ' \
-        "${why}" "${DRIVER_MIN}" "$(os_field ID)" "${sudo:-root}" >/dev/tty
-      read -r answer </dev/tty || answer="n"
-      [[ -z "${answer}" || "${answer}" == [Yy]* ]] || return 1
-      ;;
+  case "${action}" in
+    load) question="Load it now with modprobe nvidia${sudo:+ (uses sudo)}" ;;
+    open) question="Switch to NVIDIA's open kernel module ${DRIVER_MIN}+ with $(os_field ID) packages${sudo:+ (uses sudo)}; needs a reboot" ;;
+    *) question="Install the NVIDIA driver ${DRIVER_MIN}+ now with $(os_field ID) packages${sudo:+ (uses sudo)}; may need a reboot" ;;
   esac
+  agree "${why}" "${question}" GOETHE_INSTALL_DRIVER || return 1
+  if [[ "${action}" == load ]]; then
+    if err="$(${sudo} modprobe nvidia 2>&1)"; then
+      return 0
+    fi
+    if [[ "${err}" == *"Key was rejected"* ]]; then
+      echo "Secure Boot blocks the NVIDIA module: enroll its key (sudo mokutil --import /var/lib/shim-signed/mok/MOK.der, then reboot and confirm) or turn Secure Boot off" >&2
+    else
+      echo "modprobe nvidia failed: ${err}; after a driver or kernel update a reboot usually fixes this" >&2
+      DRIVER_REBOOT=1
+    fi
+    return 1
+  fi
   if mokutil --sb-state 2>/dev/null | grep -qi enabled; then
     echo "Secure Boot is on: if the driver module is built locally, set the MOK password it asks for and enroll it at the next boot" >&2
+  fi
+  if command -v nvidia-uninstall >/dev/null 2>&1; then
+    echo "removing the driver installed from NVIDIA's .run file first, so the packaged driver can replace it" >&2
+    ${sudo} nvidia-uninstall --silent || true
   fi
   if ! driver_install_steps "${sudo}"; then
     echo "WARNING: the NVIDIA driver install failed; goethe doctor names the manual fix" >&2
@@ -220,39 +398,72 @@ offer_driver_install() {
   ${sudo} modprobe nvidia 2>/dev/null || true
   local ver
   ver="$(driver_version)"
-  if [[ -z "${ver}" || "$(version_major "${ver}")" -lt "${DRIVER_MIN}" ]]; then
+  if [[ "${action}" == open || -z "${ver}" || "$(version_major "${ver}")" -lt "${DRIVER_MIN}" ]]; then
     DRIVER_REBOOT=1
   fi
   return 0
 }
 
 check_nvidia_driver() {
-  # torch cu130 in the py-env needs a CUDA 13 driver (580+); offer to install one where a GPU lacks it.
-  local ver major why
+  # Driver and GPU state; offers to install, load or replace the driver (with consent), otherwise warns and continues.
+  local pci ver major why="" action=install listed
+  pci="$(nvidia_pci_gpus)"
   ver="$(driver_version)"
   major="$(version_major "${ver}")"
-  if [[ -n "${ver}" && -n "${major}" ]] && ((major >= DRIVER_MIN)); then
+  if [[ -z "${ver}" && "${pci}" -eq 0 ]]; then
+    if in_container; then
+      no_gpu "no NVIDIA GPU in this container; start it with the GPU attached (docker run --gpus all)"
+    else
+      no_gpu "no NVIDIA GPU found on this machine (on a VM, attach the GPU with PCI passthrough or vGPU); Goethe installs, but needs one to serve models"
+    fi
     return 0
   fi
-  if [[ -n "${ver}" ]]; then
-    why="NVIDIA driver ${ver} is below minimum ${DRIVER_MIN} (CUDA 13)"
-  elif [[ "$(nvidia_pci_gpus)" -gt 0 ]]; then
-    why="NVIDIA GPU found but no NVIDIA driver is loaded"
-  else
-    why=""
-  fi
-  if [[ -n "${why}" ]] && offer_driver_install "${why}"; then
+  if [[ -n "${ver}" ]] && in_container && [[ ! -e "${GOETHE_DEV_DIR:-/dev}/nvidiactl" ]]; then
+    no_gpu "this container has no GPU attached; start it with the GPU passed through (docker run --gpus all)"
     return 0
   fi
-  if [[ -n "${ver}" ]]; then
-    echo "${why}" >&2
+  if [[ -z "${ver}" ]]; then
+    if module_installed; then
+      why="the NVIDIA driver is installed but its kernel module is not loaded"
+      action=load
+    else
+      why="NVIDIA GPU found but no NVIDIA driver is installed"
+    fi
+  elif ((major < DRIVER_MIN)); then
+    why="NVIDIA driver ${ver} is older than ${DRIVER_MIN} (CUDA 13)"
+  elif ! in_container && command -v nvidia-smi >/dev/null 2>&1; then
+    listed="$(started_gpus)"
+    if ((listed == 0)) && ! open_module && blackwell_pci; then
+      why="NVIDIA driver ${ver} is the proprietary kernel module, which cannot start Blackwell GPUs"
+      action=open
+    elif ((listed == 0 && pci > 0)); then
+      no_gpu "NVIDIA driver ${ver} is loaded but the GPU did not start; ${FAILED_INIT}"
+      return 0
+    elif ((listed < pci)); then
+      echo "WARNING: $((pci - listed)) of ${pci} NVIDIA GPUs did not start and will be skipped; ${FAILED_INIT}" >&2
+    fi
+  fi
+  if [[ -z "${why}" ]]; then
+    check_gpu_arch
+    return 0
+  fi
+  if offer_driver_install "${why}" "${action}"; then
+    return 0
+  fi
+  no_gpu "${why}; Goethe installs anyway, and goethe doctor names the fix"
+}
+
+check_disk() {
+  # The Python environment needs about 12 GB; stop before downloading when the disk cannot hold it.
+  local need_gb=12 free_kb
+  if [[ -x "${GOETHE_HOME}/py-env/bin/python" ]]; then
+    return 0
+  fi
+  free_kb="$(df -Pk "${GOETHE_HOME}" 2>/dev/null | awk 'NR == 2 {print $4}')"
+  if [[ "${free_kb}" =~ ^[0-9]+$ ]] && ((free_kb < need_gb * 1024 * 1024)); then
+    echo "only $((free_kb / 1024 / 1024)) GB free at ${GOETHE_HOME}; Goethe needs about ${need_gb} GB for its Python environment, plus room for models. Free space or set GOETHE_HOME to a larger disk, then rerun" >&2
     exit 1
   fi
-  if [[ "${GOETHE_REQUIRE_GPU:-}" == "1" ]]; then
-    echo "no usable NVIDIA driver found (GOETHE_REQUIRE_GPU=1); goethe doctor names the fix" >&2
-    exit 1
-  fi
-  echo "WARNING: no usable NVIDIA driver ${DRIVER_MIN}+ found; after the install, goethe doctor names the exact fix" >&2
 }
 
 curl_auth() {
@@ -270,19 +481,36 @@ fetch_raw() {
   curl_auth "${CDN}/$1" -o "$2"
 }
 
-verify_file_sum() {
-  # Exit unless path matches the signed SHA256SUMS entry for rel.
-  local rel="$1" path="$2" expected got
-  expected="$(awk -v p="${rel}" '$2 == p { print $1; exit }' "${SUMS_FILE}")"
+expected_sum() {
+  awk -v p="$1" '$2 == p { print $1; exit }' "${SUMS_FILE}"
+}
+
+sum_matches() {
+  # True when path matches the signed SHA256SUMS entry for rel; a missing entry is fatal.
+  local rel="$1" path="$2" expected
+  expected="$(expected_sum "${rel}")"
   if [[ -z "${expected}" ]]; then
     echo "SHA256SUMS missing entry for ${rel}" >&2
     exit 1
   fi
-  got="$(sha256sum "${path}" | awk '{print $1}')"
-  if [[ "${got}" != "${expected}" ]]; then
-    echo "checksum mismatch for ${rel}" >&2
-    exit 1
-  fi
+  [[ "$(sha256sum "${path}" | awk '{print $1}')" == "${expected}" ]]
+}
+
+verify_file_sum() {
+  # Exit unless path matches; a fresh release can mix old and new files in the CDN cache, so retry every 30 s first.
+  local rel="$1" path="$2" try tries="${GOETHE_FETCH_RETRIES:-24}"
+  for ((try = 1; try <= tries; try++)); do
+    if sum_matches "${rel}" "${path}"; then
+      return 0
+    fi
+    [[ ${try} -eq 1 ]] && echo "the package host is still switching to a new release (its cache keeps files up to 10 minutes); retrying every 30 s" >&2
+    sleep "${GOETHE_FETCH_RETRY_SECS:-30}"
+    load_sums
+    fetch_raw "${rel}" "${path}"
+  done
+  sum_matches "${rel}" "${path}" && return 0
+  echo "checksum mismatch for ${rel}; rerun the installer in a few minutes" >&2
+  exit 1
 }
 
 fetch() {
@@ -292,6 +520,25 @@ fetch() {
     verify_file_sum "$1" "$2.part"
   fi
   mv "$2.part" "$2"
+}
+
+load_sums() {
+  # Fetch SHA256SUMS and its signature and check them against the embedded key (a mismatched pair is retried too).
+  local try=0
+  while true; do
+    fetch_raw "SHA256SUMS.sig" "${GOETHE_HOME}/SHA256SUMS.sig"
+    fetch_raw "SHA256SUMS" "${SUMS_FILE}"
+    if openssl dgst -sha256 -verify "${GOETHE_HOME}/release_pub.pem" -signature "${GOETHE_HOME}/SHA256SUMS.sig" \
+      "${SUMS_FILE}" >/dev/null 2>&1; then
+      return 0
+    fi
+    try=$((try + 1))
+    [[ ${try} -gt ${GOETHE_FETCH_RETRIES:-24} ]] && break
+    [[ ${try} -eq 1 ]] && echo "SHA256SUMS and its signature do not match yet (new release still propagating); retrying every 30 s" >&2
+    sleep "${GOETHE_FETCH_RETRY_SECS:-30}"
+  done
+  echo "signature verification failed" >&2
+  exit 1
 }
 
 verify_cdn() {
@@ -312,13 +559,7 @@ verify_cdn() {
     exit 1
   fi
   SUMS_FILE="${GOETHE_HOME}/SHA256SUMS"
-  fetch_raw "SHA256SUMS.sig" "${GOETHE_HOME}/SHA256SUMS.sig"
-  fetch_raw "SHA256SUMS" "${SUMS_FILE}"
-  if ! openssl dgst -sha256 -verify "${GOETHE_HOME}/release_pub.pem" -signature "${GOETHE_HOME}/SHA256SUMS.sig" \
-    "${SUMS_FILE}" >/dev/null 2>&1; then
-    echo "signature verification failed" >&2
-    exit 1
-  fi
+  load_sums
   local rel
   for rel in "bin/linux-${ARCH}/goethe" "bin/linux-${ARCH}/goethed" "bin/linux-${ARCH}/uv" "pyenv/${LOCK}"; do
     if ! awk -v a="${rel}" '$2 == a { found = 1; exit } END { exit !found }' "${SUMS_FILE}"; then
@@ -350,8 +591,9 @@ install_pyenv() {
     exit 1
   fi
   fetch "wheels/${wheel_name}" "${GOETHE_HOME}/pyenv/${wheel_name}"
+  echo "Setting up the Python environment (about 8 GB; a few minutes on a fast connection)..."
   GOETHE_ARCH="${ARCH}" UV="${GOETHE_HOME}/bin/uv" GOETHE_SGLANG_WHEEL="${GOETHE_HOME}/pyenv/${wheel_name}" \
-    bash "${GOETHE_HOME}/pyenv/bootstrap.sh"
+    GOETHE_PYENV_QUIET=1 bash "${GOETHE_HOME}/pyenv/bootstrap.sh"
 }
 
 install_ternary() {
@@ -428,7 +670,7 @@ install_binaries() {
 }
 
 nginx_missing() {
-  echo "the gateway needs nginx: $1. Install it (apt-get install nginx-core) or set NGINX_BIN, then re-run" >&2
+  echo "the gateway needs nginx: $1. Install it (apt-get install nginx-core, dnf install nginx) or set NGINX_BIN, then re-run" >&2
   exit 1
 }
 
@@ -443,6 +685,10 @@ resolve_nginx() {
     fi
   done
   if ! command -v apt-get >/dev/null 2>&1 || ! command -v dpkg-deb >/dev/null 2>&1; then
+    if install_packages "the gateway needs nginx" nginx && command -v nginx >/dev/null 2>&1; then
+      NGINX_BIN="$(command -v nginx)"
+      return
+    fi
     nginx_missing "none found and no apt-get/dpkg-deb to extract one"
   fi
   mkdir -p "${GOETHE_HOME}/nginx/debs" "${root}"
@@ -456,6 +702,10 @@ resolve_nginx() {
       return
     fi
   done
+  if install_packages "the gateway needs nginx and none could be extracted" nginx-core && command -v nginx >/dev/null 2>&1; then
+    NGINX_BIN="$(command -v nginx)"
+    return
+  fi
   nginx_missing "nginx, nginx-core and nginx-light extracted under ${root} gave no working ${NGINX_BIN}"
 }
 
@@ -538,7 +788,7 @@ restart_goethed() {
     echo "goethed.service already starts goethed for ${other}; this home starts now but gets no autostart." >&2
     echo "To move autostart here: GOETHE_HOME=${other} goethe service disable, then goethe service enable." >&2
   fi
-  if [[ "${GOETHE_NO_AUTOSTART:-0}" != "1" ]] && "${GOETHE_HOME}/bin/goethe" up; then
+  if [[ "${GOETHE_NO_AUTOSTART:-0}" != "1" ]] && "${GOETHE_HOME}/bin/goethe" up >/dev/null; then
     return
   fi
   local launcher=(nohup)
@@ -674,6 +924,8 @@ BANNER
 
 main() {
   # Verify prerequisites and the signed CDN, install everything under GOETHE_HOME; goethed stays down unless upgraded.
+  HOME="${HOME:-$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)}"
+  export HOME
   show_banner
   CDN="${GOETHE_PKG_URL:-${DEFAULT_PKG_URL}}"
   CDN="${CDN%/}"
@@ -689,23 +941,18 @@ main() {
   SECURE=0
   SUMS_FILE=""
   LINK_DIR=""
-  if [[ "$(id -u)" -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
-    apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates openssl zstd
-  fi
-  if ! command -v curl >/dev/null 2>&1; then
-    echo "curl is required" >&2
-    exit 1
-  fi
+  check_glibc
+  ensure_prerequisites
   require_tool_version curl 7.50 'curl --version'
   require_tool_version zstd 1.3 'zstd --version'
   require_tool_version openssl 1.1.1 'openssl version'
-  check_glibc
-  check_nvidia_driver
   GOETHE_HOME="${GOETHE_HOME:-$(default_home)}"
   export GOETHE_HOME
   mkdir -p "${GOETHE_HOME}/bin" "${GOETHE_HOME}/logs" "${GOETHE_HOME}/models" "${GOETHE_HOME}/nginx/certs" \
     "${GOETHE_HOME}/goethe"
+  check_disk
+  check_nvidia_driver
+  check_compiler
   verify_cdn
   install_pyenv
   install_ternary
@@ -725,7 +972,10 @@ main() {
   if [[ -n "${UPGRADE_NOTE}" ]]; then
     echo "${UPGRADE_NOTE}"
   fi
-  goethe hw profile || echo "WARNING: goethe hw profile failed" >&2
+  local profile
+  if ! profile="$(goethe hw profile 2>&1)"; then
+    echo "note: no GPU profile yet (${profile##*$'\n'}); goethe doctor shows the state once the GPU is usable" >&2
+  fi
   summary
   get_started
 }

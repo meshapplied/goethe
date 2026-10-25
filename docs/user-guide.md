@@ -61,24 +61,41 @@ curl -k https://127.0.0.1:8443/v1/chat/completions \
 
 - Linux on x86_64 or ARM64, with glibc 2.30 or newer: Ubuntu 20.04+, Debian 11+ and similar.
 - A [supported NVIDIA GPU](#hardware) with driver **580 or newer**. Check with `nvidia-smi`.
-- `curl`, `zstd` and `openssl`. Most systems have them; on Ubuntu run `sudo apt-get install -y curl zstd openssl`.
-- Disk space for your models, plus about 10 GB for Goethe itself.
+- `curl`, `zstd`, `openssl` and a C++ compiler (`g++`). The installer installs any that are missing.
+- Disk space for your models, plus about 12 GB for Goethe itself.
 
-### If the GPU driver is missing
+### What the installer takes care of
 
-Goethe brings its own CUDA compiler, so you do not install the CUDA toolkit. It needs only the NVIDIA driver 580 or newer.
+Goethe brings its own CUDA compiler, so you never install the CUDA toolkit. Everything else the installer checks before it downloads anything. It fixes what it can and names the fix for the rest; a GPU problem never stops the install.
 
-The installer checks the driver first. If it is there and new enough, nothing happens. If a GPU has no driver, or the driver is older than 580, the installer says so and asks whether to install it. It uses `ubuntu-drivers` on Ubuntu and NVIDIA's CUDA repository on Debian and on RHEL, Rocky, AlmaLinux and Fedora, with `sudo` when you are not root. It then loads the driver, or tells you to reboot. Set `GOETHE_INSTALL_DRIVER=1` to install without asking, or `GOETHE_INSTALL_DRIVER=0` to never install. Inside a container it never installs, because the driver belongs on the host.
+| What it finds | What it does |
+|---|---|
+| Missing `curl`, `zstd`, `openssl` or CA certificates | Installs them with apt, dnf, yum or zypper |
+| No C++ compiler (needed to build GPU kernels the first time a model loads) | Installs `build-essential` (Debian, Ubuntu) or `gcc-c++` (RHEL, Fedora, SUSE) |
+| A GPU without a driver, or a driver older than 580 | Installs the open NVIDIA driver 580+ (`ubuntu-drivers` on Ubuntu, NVIDIA's CUDA repository on Debian and the RHEL family), replacing a driver installed from NVIDIA's `.run` file, then loads it or asks for a reboot |
+| The driver is installed but not loaded | Loads it (`modprobe nvidia`); if Secure Boot blocks it, says how to enroll the key |
+| NVIDIA's proprietary kernel module with a Blackwell GPU (RTX 50, RTX PRO 6000, B200) | Switches to the open kernel module, which Blackwell needs |
+| A GPU that did not start (for example after the card crashed) | Explains: a full power cycle (on a VM, stop and start the instance), power cables, Above 4G decoding in the BIOS |
+| Some GPUs did not start, or are older than Goethe supports | Says which ones are skipped |
+| No NVIDIA GPU (a VM without passthrough, a container without `--gpus all`) | Says how to attach one; Goethe installs anyway |
+| Not enough disk space | Stops before downloading, with the numbers |
+| A new release still reaching the package host's cache | Waits and retries for up to 12 minutes |
 
-On a machine where Goethe is already installed, run `goethe doctor`. If the driver is not usable, its hardware line names the cause and the fix:
+Before installing packages or a driver, the installer asks (as root it installs the small prerequisites and the compiler without asking). `GOETHE_INSTALL_DEPS=1` and `GOETHE_INSTALL_DRIVER=1` say yes in advance, `=0` says no. Inside a container it never installs a driver, because the driver belongs on the host. `GOETHE_REQUIRE_GPU=1` makes a missing or broken GPU stop the install instead of warning.
+
+On a machine where Goethe is already installed, `goethe doctor` names the cause and the fix for each of these, `goethe start` explains them before the first step, and a model that fails to load because of one of them says so:
 
 | What `goethe doctor` finds | Fix it names |
 |---|---|
 | No NVIDIA GPU visible | Attach the GPU to the VM (PCI passthrough or vGPU), or start the container with `--gpus all` |
 | A GPU but no driver loaded | The driver package for your distribution, for example `sudo ubuntu-drivers install --gpgpu nvidia:580-server-open`, then a reboot |
 | A driver older than 580 | The same, to update it |
+| The proprietary module with a Blackwell GPU | The open module (`nvidia-driver-580-server-open`, `nvidia-open`) |
+| A GPU the driver did not start | A full power cycle, power cables, Above 4G decoding |
 | A driver but no `/dev/nvidia*` | Pass the devices into the container, or `sudo nvidia-modprobe -u -c=0` on the host |
 | A driver but no `libcuda.so.1` or `libnvidia-ml.so.1` | The NVIDIA Container Toolkit for containers, or the matching user-space driver (`libnvidia-compute-<version>`) |
+| No C++ compiler, or gcc older than 9 | `sudo apt install build-essential` or `sudo dnf install gcc-c++` |
+| gcc newer than 15 | Nothing: Goethe tells nvcc to accept it, and names `gcc-15` in case a build still fails |
 
 ### Install Goethe
 
@@ -528,16 +545,17 @@ Models that were loaded when Goethe stopped come back by themselves when it star
 | Blackwell data center | B100, B200, GB200 | 10.0 | Native FP4 | Supported |
 | Blackwell Ultra data center | B300, GB300 | 10.3 | Native FP4 | Supported |
 | Hopper | H100, H200, GH200 | 9.0 | Marlin (4-bit weights, 16-bit math) | Supported |
+| Ada | GeForce RTX 4090, RTX 6000 Ada, L40S, L4 | 8.9 | Marlin (4-bit weights, 16-bit math) | Supported |
 | Ampere | GeForce RTX 3090, RTX A6000, A40, A10 | 8.6 | Marlin (4-bit weights, 16-bit math) | Supported |
 | Ampere data center | A100, A30 | 8.0 | Marlin (4-bit weights, 16-bit math) | Supported |
 
 - **Several GPUs:** a model can be split across several GPUs in one machine (`--tp`), and mixture-of-experts models can also use expert parallelism (`--ep`).
-- **Mixed GPUs:** one machine can hold GPUs of different architectures, for example two RTX PRO 6000 and an H100. Each model loads on GPUs it runs on, and a model split across GPUs always uses GPUs of one architecture; `goethe load --gpus` refuses a set that mixes them. Kernels that SGLang builds on first use are compiled for each architecture separately (`sm_80`, `sm_86`, `sm_90a`, `sm_100a`, `sm_103a`, `sm_120a`, `sm_121a`) and cached under `$GOETHE_HOME/cache/jit/<target>`. `goethe doctor` lists the architectures it finds.
-- **Catalog models:** a model validated on Ampere (8.6) also runs on A100 (8.0) and Hopper (9.0), which take the same NVFP4 path with more shared memory; a model validated on consumer Blackwell (12.x) also runs on data-center Blackwell (10.x).
+- **Mixed GPUs:** one machine can hold GPUs of different architectures, for example two RTX PRO 6000 and an H100. Each model loads on GPUs it runs on, and a model split across GPUs always uses GPUs of one architecture; `goethe load --gpus` refuses a set that mixes them. Kernels that SGLang builds on first use are compiled for each architecture separately (`sm_80`, `sm_86`, `sm_89`, `sm_90a`, `sm_100a`, `sm_103a`, `sm_120a`, `sm_121a`) and cached under `$GOETHE_HOME/cache/jit/<target>`. `goethe doctor` lists the architectures it finds.
+- **Catalog models:** a model validated on Ampere (8.6) also runs on A100 (8.0), Ada (8.9) and Hopper (9.0), which take the same NVFP4 path with more shared memory; a model validated on consumer Blackwell (12.x) also runs on data-center Blackwell (10.x).
 - **Operating system:** Linux on x86_64 or ARM64 with glibc 2.30 or newer, and NVIDIA driver 580 or newer. Goethe brings its own CUDA compiler.
 - **Where it runs:** bare metal, virtual machines and containers (Docker, Podman, Kubernetes, LXC). Cloud GPU providers are detected automatically: RunPod, Vast.ai, Lambda, AWS, Google Cloud, Azure, Oracle Cloud, CoreWeave and Paperspace.
 
-Other NVIDIA GPUs, such as the L40S or RTX 4090 (8.9) and anything older than Ampere, are not supported by this version.
+GPUs older than Ampere (Volta, Turing and earlier) are not supported; Goethe names them and skips them.
 
 ### Model families
 
