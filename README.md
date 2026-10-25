@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="docs/assets/goethe-banner.svg" alt="Own your inference → Goethe" width="100%">
+  <img src="docs/assets/goethe-banner.svg" alt="Goethe" width="480">
 </h1>
 
 <p align="center">
