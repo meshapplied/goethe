@@ -1,6 +1,7 @@
 // Tensor parallel size and GPU set selection for goethe load.
 
 use crate::calc::{missing_gb, shortfall, Need, BASE_OVERHEAD_GB};
+use crate::memory_spec::MemorySpec;
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 use crate::engine_overhead::Learned;
@@ -20,7 +21,7 @@ pub struct ChooserInput {
     pub max_conc: u64,
     pub marlin_extra_gb: f64,
     pub supported_sm: Vec<String>,
-    pub linear_state_bytes: u64,
+    pub memory: Option<MemorySpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,22 +70,57 @@ pub fn kv_tokens(ctx: u64, max_conc: u64) -> u64 {
     ctx.max((max_conc.max(1) * ctx).div_ceil(4))
 }
 
-pub fn state_slots(max_conc: u64) -> u64 {
-    // Linear-attention state slots goethe asks SGLang for: two per parallel request (the second keeps prefix states).
-    (2 * max_conc).max(4)
+pub fn state_slots(m: &MemorySpec, max_conc: u64) -> u64 {
+    // State slots SGLang needs for max_conc requests with prefix caching (5 per request on extra-buffer models, else 3).
+    m.state_slots_per_request * max_conc.max(1)
+}
+
+pub fn swa_ratio(m: &MemorySpec, ctx: u64, max_conc: u64) -> f64 {
+    // --swa-full-tokens-ratio that gives the window pool exactly the tokens max_conc requests need (at most 1).
+    (m.swa_tokens(max_conc) as f64 / kv_tokens(ctx, max_conc).max(1) as f64).clamp(1e-6, 1.0)
+}
+
+pub fn engine_args(m: &MemorySpec, ctx: u64, max_conc: u64) -> Vec<String> {
+    // The pool sizes the budget assumed, pinned for SGLang.
+    let mut out = Vec::new();
+    if m.state_bytes_per_slot > 0 {
+        out.extend(["--max-mamba-cache-size".to_string(), state_slots(m, max_conc).to_string()]);
+    }
+    if m.swa_bytes_per_token > 0 {
+        out.extend(["--swa-full-tokens-ratio".to_string(), format!("{:.6}", swa_ratio(m, ctx, max_conc))]);
+    }
+    if m.chunked_prefill > 0 {
+        out.extend(["--chunked-prefill-size".to_string(), m.chunked_prefill.to_string()]);
+    }
+    out
 }
 
 pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
-    // Per GPU: sharded weights (plus the Marlin copy where cc keeps one), the sharded KV pool, the state slots, 1.8 GB.
-    let shard = kv_shard(tp, input.num_kv_heads, &input.attention);
+    // Per GPU: sharded weights (plus the Marlin copy where cc keeps one), the KV pools SGLang builds, state, overhead.
     let marlin = if gpu_arch::nvfp4_dual_copy(cc) { input.marlin_extra_gb } else { 0.0 };
-    let state_gb = input.linear_state_bytes as f64 / GIB;
-    let installed_state = 4.0 * state_gb;
+    let tokens = kv_tokens(input.ctx, input.max_conc) as f64;
+    let conc = input.max_conc.max(1);
+    let request_table = ((conc + 1) * (input.ctx + 4) * 4) as f64 / GIB;
+    let Some(m) = &input.memory else {
+        let shard = kv_shard(tp, input.num_kv_heads, &input.attention);
+        return Need {
+            weights: (input.static_vram_gb + marlin) / tp as f64,
+            kv: tokens * input.kv_bytes_per_token as f64 / GIB / shard,
+            overhead: BASE_OVERHEAD_GB + request_table,
+            ..Need::default()
+        };
+    };
+    let split = |heads: u64| if heads == 0 { 1.0 } else { (tp as f64).min(heads as f64) };
+    let swa_tokens = (m.swa_tokens(conc) as f64).min(tokens);
+    let slots = if m.state_bytes_per_slot > 0 { state_slots(m, conc) + 1 } else { 0 };
     Need {
-        weights: ((input.static_vram_gb - installed_state).max(0.0) + marlin) / tp as f64,
-        kv: kv_tokens(input.ctx, input.max_conc) as f64 * input.kv_bytes_per_token as f64 * 1e-9 / shard,
-        state: state_slots(input.max_conc) as f64 * state_gb / tp as f64,
-        overhead: BASE_OVERHEAD_GB,
+        weights: ((input.static_vram_gb - m.static_state_bytes as f64 / GIB).max(0.0) + marlin) / tp as f64,
+        kv: tokens * (m.kv_bytes_for(cc) as f64 / split(m.kv_heads) + m.kv_replicated_bytes_per_token as f64) / GIB,
+        window: swa_tokens * m.swa_bytes_per_token as f64 / split(m.swa_heads) / GIB,
+        state: (slots as f64 * m.state_bytes_per_slot as f64 / tp as f64
+            + ((conc + 1) * m.request_bytes + m.fixed_bytes) as f64)
+            / GIB,
+        overhead: BASE_OVERHEAD_GB + request_table,
     }
 }
 
@@ -352,7 +388,7 @@ mod tests {
             max_conc: 4,
             marlin_extra_gb: 0.0,
             supported_sm: Vec::new(),
-            linear_state_bytes: 0,
+            memory: None,
         }
     }
 
@@ -508,31 +544,61 @@ mod tests {
         assert_eq!(kv_tokens(131072, 4), 131072);
         assert_eq!(kv_tokens(131072, 8), 262144);
         assert_eq!(kv_tokens(8192, 32), 65536);
-        assert_eq!((state_slots(1), state_slots(8)), (4, 16));
+        let hybrid = MemorySpec { state_slots_per_request: 5, ..MemorySpec::default() };
+        assert_eq!((state_slots(&hybrid, 1), state_slots(&hybrid, 8)), (5, 40));
     }
 
     #[test]
-    fn hybrid_models_budget_their_state_slots_instead_of_four_requests_in_the_weights() {
+    fn hybrid_models_budget_their_state_slots_as_sglang_allocates_them() {
         let state: u64 = 48 * (48 * 128 * 128 * 4 + (2 * 16 * 128 + 48 * 128) * 3 * 2);
         let gib = 1024.0_f64.powi(3);
+        let spec = MemorySpec {
+            kv_bytes_per_token: 65536,
+            kv_heads: 4,
+            state_bytes_per_slot: state,
+            state_slots_per_request: 5,
+            static_state_bytes: 4 * state,
+            ..MemorySpec::default()
+        };
         let m = ChooserInput {
             static_vram_gb: 21.0,
-            kv_bytes_per_token: 65536,
             num_attention_heads: 24,
             num_kv_heads: 4,
             attention: "hybrid".to_string(),
             ctx: 131072,
             max_conc: 8,
-            linear_state_bytes: state,
+            memory: Some(spec.clone()),
             ..inp()
         };
-        let n = need(&m, 1, "9.0");
+        let n = need(&m, 1, "12.0");
         assert!((n.weights - (21.0 - 4.0 * state as f64 / gib)).abs() < 1e-9, "{n:?}");
-        assert!((n.kv - 262144.0 * 65536.0 * 1e-9).abs() < 1e-9, "17.2 GB, not 4 full contexts: {n:?}");
-        assert!((n.state - 16.0 * state as f64 / gib).abs() < 1e-9 && n.state > 2.2 && n.state < 2.4, "{n:?}");
-        let two = need(&m, 2, "9.0");
+        assert!((n.kv - 262144.0 * 65536.0 / gib).abs() < 1e-9, "16 GiB, not 4 full contexts: {n:?}");
+        assert!((n.state - 41.0 * state as f64 / gib).abs() < 1e-9, "5 slots per request plus the padding slot: {n:?}");
+        assert_eq!(engine_args(&spec, 131072, 8), vec!["--max-mamba-cache-size".to_string(), "40".to_string()]);
+        let two = need(&m, 2, "12.0");
         assert!((two.state - n.state / 2.0).abs() < 1e-9 && (two.kv - n.kv / 2.0).abs() < 1e-9);
         assert_eq!(need(&inp(), 1, "9.0").state, 0.0);
+    }
+
+    #[test]
+    fn window_models_pin_the_window_pool_to_what_requests_need() {
+        let spec = MemorySpec {
+            kv_bytes_per_token: 20_480,
+            kv_heads: 2,
+            swa_bytes_per_token: 204_800,
+            swa_heads: 8,
+            swa_window: 1024,
+            chunked_prefill: 8192,
+            ..MemorySpec::default()
+        };
+        let m = ChooserInput { ctx: 262_144, max_conc: 8, memory: Some(spec.clone()), ..inp() };
+        let n = need(&m, 1, "12.0");
+        let swa_tokens = 8 * (1024 + 128 + 256 + 4 * (1024 + 128)) + 2 * 8192 + 128;
+        assert!((n.window - swa_tokens as f64 * 204_800.0 / 1024f64.powi(3)).abs() < 1e-9, "{n:?}");
+        let args = engine_args(&spec, 262_144, 8);
+        assert_eq!(args[0], "--swa-full-tokens-ratio");
+        assert!((args[1].parse::<f64>().unwrap() - swa_tokens as f64 / 524_288.0).abs() < 1e-6, "{args:?}");
+        assert_eq!(&args[2..], &["--chunked-prefill-size".to_string(), "8192".to_string()]);
     }
 
     #[test]

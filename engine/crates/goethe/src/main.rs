@@ -516,10 +516,24 @@ fn gpu_list(gpu: Vec<u32>, gpus: Option<String>) -> Option<Vec<u32>> {
     Some(raw.split(',').map(|s| parse_gpu_name(s).unwrap_or_else(|e| usage(e))).collect())
 }
 
+fn print_version() {
+    // The version; on a terminal also whether a newer one is published, with the command to get it.
+    println!("{}", goethe_core::build_info::version_line());
+    if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        if let Some(newer) = goethe_core::update::newer_published() {
+            println!("\nUpdate available: goethe {newer}\n\n{}", goethe_core::term::command("goethe update"));
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 2 && (args[1] == "--version" || args[1] == "-V") {
-        println!("{}", goethe_core::build_info::version_line());
+        print_version();
+        return;
+    }
+    if args.len() == 2 && args[1] == "--build-info" {
+        println!("{}", goethe_core::build_info::build_line());
         return;
     }
     let cli = Cli::try_parse().unwrap_or_else(|e| {
@@ -531,7 +545,7 @@ fn main() {
         e.exit()
     });
     if cli.version {
-        println!("{}", goethe_core::build_info::version_line());
+        print_version();
         return;
     }
     let result = match cli.command {

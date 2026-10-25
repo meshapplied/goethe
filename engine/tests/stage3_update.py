@@ -27,7 +27,7 @@ def _binaries(cdn: Path, tag: bytes) -> None:
 
 def _same_version(goethe: Path, cdn: Path, key: Path, pub: Path, base: str) -> None:
     """At the binary's own version: the CDN's binaries are up to date, another BUILDINFO commit is another build."""
-    found = re.search(r"goethe (\S+) \(commit ([^,)\s]+)", run([str(goethe), "--version"]).stdout)
+    found = re.search(r"goethe (\S+) \(commit ([^,)\s]+)", run([str(goethe), "--build-info"]).stdout)
     if not found:
         raise RuntimeError("goethe --version does not name its version and commit")
     version, commit = found.group(1), found.group(2)

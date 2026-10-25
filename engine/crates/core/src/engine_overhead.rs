@@ -33,6 +33,16 @@ pub fn parse_shortfall_gb(log_text: &str) -> Option<f64> {
     None
 }
 
+pub fn parse_weight_gb(log_text: &str) -> Option<f64> {
+    // Per-GPU weight memory SGLang reports once loading ends ("Load weight end. ... mem usage=48.87 GB").
+    log_text
+        .lines()
+        .filter(|l| l.contains("Load weight end"))
+        .filter_map(|l| l.split("mem usage=").nth(1))
+        .filter_map(|rest| rest.split_whitespace().next()?.parse::<f64>().ok())
+        .next_back()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Learned {
     pub static_gb: f64,
@@ -43,13 +53,38 @@ pub struct Learned {
 pub enum Kind {
     Static,
     Overhead,
+    Context,
 }
+
+pub const DEFAULT_CONTEXT_GB: f64 = 1.4;
+const ANY_MODEL: &str = "*";
 
 fn key(gpu_name: &str, kind: Kind) -> String {
     match kind {
         Kind::Static => format!("{gpu_name} static"),
         Kind::Overhead => gpu_name.to_string(),
+        Kind::Context => format!("{gpu_name} context"),
     }
+}
+
+pub fn parse_pre_load_gb(log_text: &str) -> Option<f64> {
+    // Free memory SGLang sees once its CUDA context exists ("Load weight begin. avail mem=74.86 GB").
+    log_text
+        .lines()
+        .filter(|l| l.contains("Load weight begin"))
+        .filter_map(|l| l.split("avail mem=").nth(1))
+        .filter_map(|rest| rest.split_whitespace().next()?.parse::<f64>().ok())
+        .next_back()
+}
+
+pub fn read_context(con: &Connection, gpu_name: &str, tp: u64) -> f64 {
+    // What an engine's CUDA context takes on this GPU type and tp before its pools are sized; 1.4 GB until learned.
+    let learned = read(con, ANY_MODEL, &key(gpu_name, Kind::Context), tp);
+    if learned > 0.0 { learned } else { DEFAULT_CONTEXT_GB }
+}
+
+pub fn store_context(con: &Connection, gpu_name: &str, tp: u64, gb: f64) -> rusqlite::Result<()> {
+    store_learned(con, ANY_MODEL, gpu_name, tp, Kind::Context, gb)
 }
 
 fn read(con: &Connection, model_id: &str, gpu_name: &str, tp: u64) -> f64 {
@@ -136,6 +171,24 @@ mod tests {
         let log = "RuntimeError: Hybrid (mamba/linear-attention) state cache is too small to serve any requests. \
                    max_mamba_cache_size=3, mamba_ratio=4, resulting max_num_reqs=0. Try: (1) reduce";
         assert_eq!(parse_shortfall_gb(log), Some(4.0));
+    }
+
+    #[test]
+    fn the_engine_context_is_learned_per_gpu_type() {
+        assert_eq!(parse_pre_load_gb("[t] Load weight begin. avail mem=74.86 GB\n"), Some(74.86));
+        let dir = tempfile::tempdir().unwrap();
+        let con = crate::db::open(dir.path()).unwrap();
+        assert_eq!(read_context(&con, "RTX", 1), DEFAULT_CONTEXT_GB);
+        store_context(&con, "RTX", 1, 1.36).unwrap();
+        assert_eq!(read_context(&con, "RTX", 1), 1.36);
+        assert_eq!(read_context(&con, "RTX", 2), DEFAULT_CONTEXT_GB);
+    }
+
+    #[test]
+    fn parses_the_loaded_weight_size() {
+        let log = "[t] Load weight begin. avail mem=74.86 GB\n[t] Load weight end. elapsed=2.94 s, type=Gemma4, avail mem=25.99 GB, mem usage=48.87 GB.\n";
+        assert_eq!(parse_weight_gb(log), Some(48.87));
+        assert_eq!(parse_weight_gb("[t] Memory pool end. avail mem=10.21 GB"), None);
     }
 
     #[test]
