@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.2 (2026-10-25)
+
+- The installer no longer stops with `No: unbound variable` when `nvidia-smi` is installed but finds no usable GPU ("No devices were found", for example after the GPU crashed). Only output shaped like a driver version is used. Otherwise the version comes from the loaded kernel module (`/proc/driver/nvidia/version`), and with neither the machine is treated as having no driver.
+
 ## 0.1.1 (2026-10-25)
 
 - The API accepts the OpenAI, Anthropic and LiteLLM schemas at the same time, at the same address and with the same keys. New routes: `/v1/messages` and `/v1/messages/count_tokens` (Anthropic Messages, with Anthropic-shaped errors), `/v1/responses` and `/v1/rerank`; every route also without `/v1`, plus `/model/info`, `/model_group/info`, `/health/liveliness` and `/health/readiness` as a LiteLLM proxy serves them. Keys are accepted from `Authorization: Bearer`, `x-litellm-api-key`, `x-api-key` and `api-key`. Usage metering and `goethe key` counts cover Anthropic and Responses replies. `goethe api` names the accepted schemas. `/metrics` stays private.
