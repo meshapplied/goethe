@@ -100,11 +100,16 @@ check_glibc() {
 }
 
 driver_version() {
-  # Loaded NVIDIA driver version from nvidia-smi, else from the kernel module; empty when none is usable.
+  # Loaded NVIDIA driver version from nvidia-smi, else from the kernel module; empty unless it looks like 580.82.07.
+  local v=""
   if command -v nvidia-smi >/dev/null 2>&1; then
-    nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | awk 'NR == 1 {print $1}' || true
-  else
-    sed -n 's/^NVRM version:.*  \([0-9][0-9.]*\)  .*/\1/p' "${GOETHE_NVIDIA_VERSION_FILE:-/proc/driver/nvidia/version}" 2>/dev/null || true
+    v="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | awk 'NR == 1 {print $1}' || true)"
+  fi
+  if [[ ! "${v}" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+    v="$(sed -n 's/^NVRM version:.*  \([0-9][0-9.]*\)  .*/\1/p' "${GOETHE_NVIDIA_VERSION_FILE:-/proc/driver/nvidia/version}" 2>/dev/null || true)"
+  fi
+  if [[ "${v}" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+    echo "${v}"
   fi
 }
 
