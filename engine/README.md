@@ -39,10 +39,10 @@ Or step by step:
 
 ## Choosing GPUs
 
-- `--gpus 2,3` uses exactly those GPUs; tensor parallelism is the number listed.
+- `--gpu gpu2 gpu3` uses exactly those GPUs; tensor parallelism is the number listed. A count the model's heads cannot be split over is refused with the counts that work, and a set too small says which larger `--gpu` list fits. The older `--gpus 2,3` still works.
 - `--tp N` alone picks N GPUs.
 - Neither: Goethe chooses the smallest valid TP that fits, preferring GPUs without foreign processes, then most free VRAM, then GPUs on the same NUMA node. If nothing fits it shrinks the context, then the concurrency, then fails with the exact shortfall.
-- The decision is printed with the budget in parts, for example `auto: tp=2 on GPUs 2,3: 33.4 GB per GPU (weights 23.6 + KV 8.0 + overhead 1.8)`. `goethe hw pick-gpus --model <id> [--tp N]` shows where a load would go right now without loading anything.
+- The decision is printed with the budget in parts, for example `auto: tp=2 on GPUs 2,3: 33.4 GB per GPU (weights 23.6 + KV 8.0 + overhead 1.8)`. The KV part holds max(ctx, max_conc x ctx / 4) tokens: one request at the full context, or every parallel request at a quarter of it. Hybrid models (linear attention or Mamba layers) add `linear-attention state` for 2 x max_conc slots (at least 4), which Goethe passes to SGLang as `--max-mamba-cache-size` so the rest of the pool is KV cache. `goethe hw pick-gpus --model <id> [--tp N]` shows where a load would go right now without loading anything.
 - Goethe never stops a process it did not start. When a target GPU runs other software, the load lists each process (PID, name, user, VRAM) with the command to stop it yourself, asks for confirmation on a terminal, and exits 3 without one. `--yes` loads alongside them; if they leave too little VRAM, the error says how much is missing and which processes hold it.
 
 ## Models
@@ -56,7 +56,7 @@ Any public Hugging Face repo can be installed. Gated and private repos need `--h
     goethe models                         # installed and available: loaded instances, or fits: N.N GB per GPU / does not fit
     goethe remove --model org/model       # deletes what Goethe downloaded, copied or scanned
 
-Downloads resume per file, every weight is checked against its Hugging Face sha256 (a changed file is hashed again on re-install), and free disk is checked first. Engine flags are inferred from `config.json` (Qwen3-family models get `--reasoning-parser qwen3`, and the chat template picks `--tool-call-parser qwen3_coder` or `qwen25`; registry and your own flags win) and can be set with `--sglang-arg` on `install` and `config`, or `goethe load --model <id> -- <args>` for one run. Flags Goethe sets itself (`--host`, `--port`, `--tp-size`, `--context-length`, `--max-running-requests`, `--mem-fraction-static`, `--api-key`, `--served-model-name`) are refused there; use `--gpus`, `--tp`, `--ctx` and `--max-conc` instead. Repos that ship their own Python code need `goethe install --trust-remote-code`.
+Downloads resume per file, every weight is checked against its Hugging Face sha256 (a changed file is hashed again on re-install), and free disk is checked first. Engine flags are inferred from `config.json` (Qwen3-family models get `--reasoning-parser qwen3`, and the chat template picks `--tool-call-parser qwen3_coder` or `qwen25`; registry and your own flags win) and can be set with `--sglang-arg` on `install` and `config`, or `goethe load --model <id> -- <args>` for one run. Flags Goethe sets itself (`--host`, `--port`, `--tp-size`, `--context-length`, `--max-running-requests`, `--mem-fraction-static`, `--max-mamba-cache-size`, `--api-key`, `--served-model-name`) are refused there; use `--gpu`, `--tp`, `--ctx` and `--max-conc` instead. Repos that ship their own Python code need `goethe install --trust-remote-code`.
 
 `goethe remove` on a folder installed in place (`goethe install --model ./dir`) only unregisters it and prints the `rm -rf` command, because Goethe does not delete files it did not create. A loaded model is drained and unloaded first (asks on a terminal, `--yes` in scripts).
 
@@ -72,12 +72,12 @@ A model folder you placed yourself goes into `$GOETHE_HOME/models`, and Goethe r
 
 ## Daily use
 
-    goethe load --model <id> [--gpus csv] [--tp N] [--ep N] [--ctx N] [--max-conc N] [--replica] [--no-wait] [--json] [-- <sglang flags>]
+    goethe load --model <id> [--gpu gpuN ...] [--tp N] [--ep N] [--ctx N] [--max-conc N] [--replica] [--no-wait] [--json] [-- <sglang flags>]
     goethe unload --model <id> [--force] | --all  # drains in-flight requests (new ones get 503), then unloads; --force cuts them
     goethe list                               # alias of goethe models
     goethe alias [--set <alias> --model <id> | --remove <alias>]   # no flags lists them; an alias is not empty and not an installed id; installing that id later removes it
     goethe gpu [--json]                       # index, compute capability, managed and foreign VRAM, ALLOWED or DENIED
-    goethe gpu --deny gpuN | --allow gpuN     # denied GPUs are skipped by automatic placement and refused with --gpus
+    goethe gpu --deny gpuN | --allow gpuN     # denied GPUs are skipped by automatic placement and refused with --gpu
     goethe config --model <id> --ctx 32768 --max-conc 4
     goethe logs --model <id> [-f] [-n 200]  # also --daemon, --gateway, --prune
     goethe doctor [--json] [--probe-public]  # checks with a fix hint each; probe-public needs GOETHE_CANARY_URL for a real answer
@@ -169,4 +169,4 @@ The gate first builds, runs `cargo test` and clippy, and uses those fresh binari
 
 ## Troubleshooting
 
-Run `goethe doctor` first. Gated or private model: accept its license on Hugging Face, then `goethe install --model <id> --hf-token`. A load exits 3 or reports missing VRAM because of other software on the GPU: the message lists the processes and the command to stop each one yourself, or pick other GPUs with `--gpus`. `nginx binary not found`: install nginx or set `NGINX_BIN`. Logs: `goethe logs --model <id>`, `goethe logs --daemon`, `goethe logs --gateway`.
+Run `goethe doctor` first. Gated or private model: accept its license on Hugging Face, then `goethe install --model <id> --hf-token`. A load exits 3 or reports missing VRAM because of other software on the GPU: the message lists the processes and the command to stop each one yourself, or pick other GPUs with `--gpu`. `nginx binary not found`: install nginx or set `NGINX_BIN`. Logs: `goethe logs --model <id>`, `goethe logs --daemon`, `goethe logs --gateway`.

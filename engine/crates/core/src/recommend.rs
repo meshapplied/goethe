@@ -127,11 +127,7 @@ impl View {
             crate::engine_overhead::read_learned(c, model_id, &self.gpu_name(plan.gpus[0]), plan.tp as u64)
         });
         let learned = learned.unwrap_or_default();
-        let need = Need {
-            weights: base.weights + learned.static_gb,
-            kv: base.kv,
-            overhead: base.overhead + learned.overhead_gb,
-        };
+        let need = chooser::with_learned(base, learned);
         for g in &plan.gpus {
             let free = self.gpus.iter().find(|x| x.index == *g).map_or(0.0, |x| x.free_vram_mb as f64 / 1024.0);
             if let Some(why) = calc::shortfall(&need, *g, free) {
@@ -285,6 +281,7 @@ pub fn registry_input(m: &RegistryModel) -> ChooserInput {
         max_conc: m.default_max_conc.unwrap_or(8),
         marlin_extra_gb: 0.0,
         supported_sm: m.supported_sm.clone(),
+        linear_state_bytes: 0,
     }
 }
 

@@ -5,29 +5,29 @@ const MAX_MEM_FRACTION: f64 = 0.95;
 pub const BASE_OVERHEAD_GB: f64 = 1.8;
 const LEARN_SLACK_GB: f64 = 0.25;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Need {
     pub weights: f64,
     pub kv: f64,
+    pub state: f64,
     pub overhead: f64,
 }
 
 impl Need {
-    pub fn total(&self) -> f64 {
-        self.weights + self.kv + self.overhead
+    pub fn pool(&self) -> f64 {
+        // What SGLang's mem_fraction_static covers: weights, the KV cache and the linear-attention state slots.
+        self.weights + self.kv + self.state
     }
-}
 
-pub fn vram_per_gpu_gb(w_gb: f64, l_ctx: u64, k_bytes: u64, c_max: u64, tp: u64) -> f64 {
-    let tp = tp.max(1) as f64;
-    let kv = l_ctx as f64 * k_bytes as f64 * (c_max.min(4) as f64) * 1e-9;
-    (w_gb + kv) / tp + 1.8
+    pub fn total(&self) -> f64 {
+        self.pool() + self.overhead
+    }
 }
 
 pub fn missing_gb(need: &Need, free_gb: f64) -> f64 {
     // GB a budget lacks: the whole budget leaves the safety margin and the static pool stays within 95% of free.
     (need.total() - (free_gb - SAFETY_MARGIN_GB))
-        .max(need.weights + need.kv - MAX_MEM_FRACTION * free_gb)
+        .max(need.pool() - MAX_MEM_FRACTION * free_gb)
         .max(0.0)
 }
 
@@ -37,8 +37,9 @@ fn tenth(x: f64) -> f64 {
 
 pub fn describe(need: &Need) -> String {
     // The budget in parts, rounded so the parts add up to the shown total.
-    let (w, k, o) = (tenth(need.weights), tenth(need.kv), tenth(need.overhead));
-    format!("{:.1} GB per GPU (weights {w:.1} + KV {k:.1} + overhead {o:.1})", w + k + o)
+    let (w, k, s, o) = (tenth(need.weights), tenth(need.kv), tenth(need.state), tenth(need.overhead));
+    let state = if s > 0.0 { format!(" + linear-attention state {s:.1}") } else { String::new() };
+    format!("{:.1} GB per GPU (weights {w:.1} + KV {k:.1}{state} + overhead {o:.1})", w + k + s + o)
 }
 
 pub fn shortfall(need: &Need, gpu: u32, free_gb: f64) -> Option<String> {
@@ -46,17 +47,17 @@ pub fn shortfall(need: &Need, gpu: u32, free_gb: f64) -> Option<String> {
     if missing_gb(need, free_gb) <= 0.0 {
         return None;
     }
-    let (w, k, o, f) = (tenth(need.weights), tenth(need.kv), tenth(need.overhead), tenth(free_gb));
-    let n = w + k + o;
+    let (w, k, s, o, f) = (tenth(need.weights), tenth(need.kv), tenth(need.state), tenth(need.overhead), tenth(free_gb));
+    let n = w + k + s + o;
     let head = format!("needs {}; GPU {gpu} has {f:.1} GB free", describe(need));
     let by_margin = n - (f - SAFETY_MARGIN_GB);
     let cap = tenth(MAX_MEM_FRACTION * f);
-    let by_cap = w + k - cap;
+    let by_cap = w + k + s - cap;
     if by_cap > by_margin {
         return Some(format!(
-            "{head}, and its static pool (weights + KV, {:.1} GB) may use at most 95% of it ({cap:.1} GB): \
-             missing {:.1} GB",
-            w + k,
+            "{head}, and its static pool ({}, {:.1} GB) may use at most 95% of it ({cap:.1} GB): missing {:.1} GB",
+            if s > 0.0 { "weights, KV and state" } else { "weights + KV" },
+            w + k + s,
             by_cap.max(0.1)
         ));
     }
@@ -64,7 +65,7 @@ pub fn shortfall(need: &Need, gpu: u32, free_gb: f64) -> Option<String> {
 }
 
 pub fn mem_fraction_from_free(need: &Need, min_free_gb: f64) -> Result<f64, String> {
-    // mem_fraction_static for weights + KV only; CUDA graphs, activations and context land on top, in the overhead.
+    // mem_fraction_static for the static pool only; CUDA graphs, activations and context land on top, in the overhead.
     let missing = missing_gb(need, min_free_gb);
     if min_free_gb <= 0.0 || missing > 0.0 {
         return Err(format!(
@@ -72,7 +73,7 @@ pub fn mem_fraction_from_free(need: &Need, min_free_gb: f64) -> Result<f64, Stri
             need.total()
         ));
     }
-    Ok((need.weights + need.kv) / min_free_gb)
+    Ok(need.pool() / min_free_gb)
 }
 
 pub fn learned_overhead(used_gb: f64, need: &Need, learned_gb: f64) -> Option<f64> {
@@ -86,7 +87,16 @@ mod tests {
     use super::*;
 
     fn need(weights: f64, kv: f64, overhead: f64) -> Need {
-        Need { weights, kv, overhead }
+        Need { weights, kv, state: 0.0, overhead }
+    }
+
+    #[test]
+    fn linear_attention_state_is_part_of_the_static_pool() {
+        let n = Need { weights: 20.0, kv: 17.2, state: 2.5, overhead: 1.8 };
+        assert!((n.pool() - 39.7).abs() < 1e-9 && (n.total() - 41.5).abs() < 1e-9);
+        assert_eq!(describe(&n), "41.5 GB per GPU (weights 20.0 + KV 17.2 + linear-attention state 2.5 + overhead 1.8)");
+        assert!((mem_fraction_from_free(&n, 50.0).unwrap() - 39.7 / 50.0).abs() < 1e-9);
+        assert!(shortfall(&n, 3, 41.0).unwrap().contains("missing"));
     }
 
     #[test]

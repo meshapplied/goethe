@@ -40,7 +40,7 @@ List keys, or revoke one:
     name = "goethe",
     disable_version_flag = true,
     about = "Goethe: serve LLMs on your NVIDIA GPUs behind one OpenAI-compatible gateway",
-    after_help = "Examples:\n\n\t→ goethe up\n\t→ goethe install --model deepseek-ai/DeepSeek-V4.1-Flash-1017 --load\n\t→ goethe load --model deepseek-ai/DeepSeek-V4.1-Flash-1017 --gpus 0,1,2,3 --ctx 65536\n\t→ goethe key --create my-app\n\t→ goethe api\n\t→ goethe down\n\n\
+    after_help = "Examples:\n\n\t→ goethe up\n\t→ goethe install --model deepseek-ai/DeepSeek-V4.1-Flash-1017 --load\n\t→ goethe load --model deepseek-ai/DeepSeek-V4.1-Flash-1017 --gpu gpu0 gpu1 gpu2 gpu3 --ctx 65536\n\t→ goethe key --create my-app\n\t→ goethe api\n\t→ goethe down\n\n\
                   goethe down stops goethed but keeps loaded models for the next goethe up; goethe unload stops a model for good."
 )]
 struct Cli {
@@ -81,7 +81,9 @@ enum Commands {
         max_conc: Option<u64>,
         #[arg(long, help = "Tensor parallel size (0 = auto).")]
         tp: Option<u64>,
-        #[arg(long, help = "Comma-separated GPU indices.")]
+        #[arg(long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "GPUs to load on after installing, as goethe gpu lists them: --gpu gpu2 gpu3.")]
+        gpu: Vec<u32>,
+        #[arg(long, hide = true, conflicts_with = "gpu", help = "Comma-separated GPU indices (older form of --gpu).")]
         gpus: Option<String>,
         #[arg(long, group = "load_mode", help = "Load the model after install.")]
         load: bool,
@@ -150,7 +152,9 @@ enum Commands {
         max_conc: Option<u64>,
         #[arg(long, help = "Default tensor parallel size.")]
         tp: Option<u64>,
-        #[arg(long, help = "Preferred GPU indices.")]
+        #[arg(long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "Default GPUs for this model, as goethe gpu lists them: --gpu gpu2 gpu3.")]
+        gpu: Vec<u32>,
+        #[arg(long, hide = true, conflicts_with = "gpu", help = "Comma-separated GPU indices (older form of --gpu).")]
         gpus: Option<String>,
         #[arg(long = "sglang-arg", allow_hyphen_values = true, help = "Append SGLang flags.")]
         sglang_arg: Vec<String>,
@@ -164,7 +168,9 @@ enum Commands {
     Load {
         #[arg(long = "model", value_name = "ID", help = "Model id to load.")]
         model_id: String,
-        #[arg(long, help = "Comma-separated GPU indices.")]
+        #[arg(long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "GPUs to load on, as goethe gpu lists them: --gpu gpu3, or --gpu gpu2 gpu3 to split the model across both (the number of GPUs is the tensor-parallel size).")]
+        gpu: Vec<u32>,
+        #[arg(long, hide = true, conflicts_with = "gpu", help = "Comma-separated GPU indices (older form of --gpu).")]
         gpus: Option<String>,
         #[arg(long, help = "Context length for this load.")]
         ctx: Option<u64>,
@@ -501,10 +507,13 @@ fn parse_gpu_name(raw: &str) -> Result<u32, String> {
     t.strip_prefix("gpu").unwrap_or(&t).parse().map_err(|_| format!("{raw} is not a GPU name like gpu2 (goethe gpu lists them)"))
 }
 
-fn parse_gpus(raw: &str) -> Result<Vec<u32>, String> {
-    raw.split(',')
-        .map(|s| s.trim().parse::<u32>().map_err(|_| format!("invalid gpu index: {s}")))
-        .collect()
+fn gpu_list(gpu: Vec<u32>, gpus: Option<String>) -> Option<Vec<u32>> {
+    // --gpu gpu2 gpu3 (or the older --gpus 2,3) as indices; None when neither was given.
+    if !gpu.is_empty() {
+        return Some(gpu);
+    }
+    let raw = gpus?;
+    Some(raw.split(',').map(|s| parse_gpu_name(s).unwrap_or_else(|e| usage(e))).collect())
 }
 
 fn main() {
@@ -543,6 +552,7 @@ fn main() {
             ctx,
             max_conc,
             tp,
+            gpu,
             gpus,
             load,
             no_load: _,
@@ -563,11 +573,7 @@ fn main() {
                 eprintln!("token accepted for {account}");
                 goethe_core::hf::set_token(Some(token));
             }
-            let gpus_parsed = match gpus.as_deref().map(parse_gpus) {
-                Some(Ok(v)) => Some(v),
-                Some(Err(e)) => usage(e),
-                None => None,
-            };
+            let gpus_parsed = gpu_list(gpu, gpus);
             if !std::path::Path::new(&model_id).is_dir() && !model_id.starts_with(['.', '/', '~']) {
                 checked_id(&model_id);
             }
@@ -642,15 +648,12 @@ fn main() {
             ctx,
             max_conc,
             tp,
+            gpu,
             gpus,
             sglang_arg,
             clear_sglang_args,
         } => {
-            let gpus_parsed = match gpus.as_deref().map(parse_gpus) {
-                Some(Ok(v)) => Some(v),
-                Some(Err(e)) => usage(e),
-                None => None,
-            };
+            let gpus_parsed = gpu_list(gpu, gpus);
             if let Some(msg) = goethe_core::sglang_infer::reserved_flag_error(&sglang_arg) {
                 usage(msg);
             }
@@ -670,6 +673,7 @@ fn main() {
         }
         Commands::Load {
             model_id,
+            gpu,
             gpus,
             ctx,
             max_conc,
@@ -683,7 +687,7 @@ fn main() {
             extra,
         } => do_load(DoLoadArgs {
             model_id: installed_id(&model_id, true),
-            gpus,
+            gpus: gpu_list(gpu, gpus).map(|v| v.iter().map(u32::to_string).collect::<Vec<_>>().join(",")),
             ctx,
             max_conc,
             tp,
@@ -1488,6 +1492,13 @@ mod tests {
         assert!(parse(&["domain", "--check", "api.example.com"]).is_ok());
         assert!(parse(&["domain", "add", "api.example.com"]).is_err() && parse(&["domain", "--add", "x.y"]).is_err());
         assert!(parse(&["load", "--model", "org/m", "--gpus", "2"]).is_ok());
+        assert!(parse(&["load", "--model", "org/m", "--gpu", "gpu2", "gpu3"]).is_ok());
+        assert!(parse(&["load", "--model", "org/m", "--gpu", "gpu2,gpu3", "--ctx", "4096"]).is_ok());
+        assert!(parse(&["load", "--model", "org/m", "--gpu", "gpux"]).is_err());
+        assert!(parse(&["load", "--model", "org/m", "--gpu", "gpu2", "--gpus", "3"]).is_err());
+        assert_eq!(gpu_list(vec![2, 3], None), Some(vec![2, 3]));
+        assert_eq!(gpu_list(Vec::new(), Some("gpu1,0".into())), Some(vec![1, 0]));
+        assert_eq!(gpu_list(Vec::new(), None), None);
         assert!(parse(&["load", "org/m"]).is_err());
         assert!(parse(&["key", "--create", "ops", "--expires", "30d", "--admin"]).is_ok());
         assert!(parse(&["key", "--admin"]).is_err(), "--admin only goes with --create");
@@ -1509,8 +1520,8 @@ mod tests {
         assert_eq!(corrected_command(&unload, "org/a").as_deref(), Some("goethe unload --model org/a org/b"));
         let gpu = args(&["gpu", "allow", "gpu0", "gpu1"]);
         assert_eq!(corrected_command(&gpu, "allow").as_deref(), Some("goethe gpu --allow gpu0 gpu1"));
-        let load = args(&["load", "org/a", "--gpus", "2"]);
-        assert_eq!(corrected_command(&load, "org/a").as_deref(), Some("goethe load --model org/a --gpus 2"));
+        let load = args(&["load", "org/a", "--gpu", "gpu2"]);
+        assert_eq!(corrected_command(&load, "org/a").as_deref(), Some("goethe load --model org/a --gpu gpu2"));
         assert_eq!(corrected_command(&args(&["domain", "api.example.com"]), "api.example.com").as_deref(), Some("goethe domain --check api.example.com"));
         assert_eq!(corrected_command(&args(&["status", "x"]), "x"), None);
     }
