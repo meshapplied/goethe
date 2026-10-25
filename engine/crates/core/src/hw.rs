@@ -134,7 +134,7 @@ pub fn run_pick_gpus(tp: Option<u64>, model: Option<&str>) -> Result<(), String>
                 max_conc: 1,
                 marlin_extra_gb: 0.0,
                 supported_sm: Vec::new(),
-                linear_state_bytes: 0,
+                memory: None,
             };
             let fit = view.fit("", &empty, Some(t));
             (String::new(), fit.map(|f| (format!("tp={} on GPU {}", f.tp, crate::placement::format_gpu_list(&f.gpus)), f.gpus)))

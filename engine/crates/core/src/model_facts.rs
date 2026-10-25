@@ -90,7 +90,11 @@ pub fn facts_from_config(
     // Derive KV per token from full-attention layers only, plus per-request window and state sizes.
     let lm = resolve_language_config(cfg).map_err(|_| format!("{model_id}: cannot read language model config"))?;
     let num_attention_heads = require_u64(lm, cfg, &["num_attention_heads", "n_head"], model_id)?;
-    let layers = require_u64(lm, cfg, &["num_hidden_layers", "n_layer"], model_id)?;
+    let block_layers = lm.get("layers_block_type").and_then(|v| v.as_array()).map(|b| b.len() as u64);
+    let layers = match read_u64(lm, cfg, &["num_hidden_layers", "n_layer"]).or(block_layers) {
+        Some(n) => n,
+        None => require_u64(lm, cfg, &["num_hidden_layers", "n_layer"], model_id)?,
+    };
     let max_ctx = read_u64(lm, cfg, &["max_position_embeddings", "n_positions"]).unwrap_or(4096);
     let plan = layer_plan(lm, layers);
     let kv = attention_kv(cfg, lm, layers, plan, max_ctx, num_attention_heads, model_id)?;
@@ -119,6 +123,17 @@ pub fn layer_plan(lm: &Value, layers: u64) -> LayerPlan {
     if let Some(ids) = full_ids {
         let full = ids.len() as u64;
         return LayerPlan { full, swa: 0, linear: layers.saturating_sub(full) };
+    }
+    if let Some(pattern) = lm.get("hybrid_layer_pattern").and_then(|v| v.as_array()) {
+        let swa = pattern.iter().filter(|v| v.as_u64() == Some(1)).count() as u64;
+        return LayerPlan { full: pattern.len() as u64 - swa, swa, linear: 0 };
+    }
+    if let Some(blocks) = lm.get("layers_block_type").and_then(|v| v.as_array()) {
+        let count = |k: &str| blocks.iter().filter(|b| b.as_str() == Some(k)).count() as u64;
+        return LayerPlan { full: count("attention"), swa: 0, linear: count("mamba") };
+    }
+    if let Some(g) = lm.get("layer_group_size").and_then(|v| v.as_u64()).filter(|g| *g > 1 && lm.get("short_conv_kernel_size").is_some()) {
+        return LayerPlan { full: layers / g, swa: 0, linear: layers - layers / g };
     }
     if let Some(types) = lm.get("layer_types").and_then(|v| v.as_array()) {
         let mut p = LayerPlan::default();
@@ -185,7 +200,7 @@ fn attention_kv(
         }
     };
     if lm.get("compress_ratios").is_some() || (lm.get("sliding_window").is_some() && kv_heads == 1) {
-        eprintln!("warning: {model_id}: compressed attention, kv estimate is an upper bound");
+        eprintln!("note: {model_id}: compressed attention; the legacy kv_elems_per_token is an upper bound, the memory spec is exact");
         return Ok(KvShape {
             elems: 2 * layers * head_dim,
             heads: 1,
@@ -225,6 +240,10 @@ pub fn linear_state_bytes(lm: &Value, plan: LayerPlan) -> u64 {
         return per_layer * plan.linear;
     }
     let kda = |k: &str| lm.pointer(&format!("/linear_attn_config/{k}")).and_then(|v| v.as_u64());
+    if let (Some(k), None) = (get("short_conv_kernel_size"), lm.get("linear_attn_config")) {
+        let (h, d) = (get("num_attention_heads").unwrap_or(0), get("head_dim").unwrap_or(0));
+        return (h * d * d * 4 + 3 * h * d * (k.max(1) - 1) * 2) * plan.linear;
+    }
     if let (Some(h), Some(d)) = (kda("num_heads"), kda("head_dim")) {
         let kernel = kda("short_conv_kernel_size").unwrap_or(4).max(1);
         return (h * d * d * 4 + 3 * h * d * (kernel - 1) * 2) * plan.linear;
@@ -277,7 +296,7 @@ fn is_moe(cfg: &Value, lm: &Value, _model_id: &str) -> bool {
     arch.contains("Moe") || arch.contains("MoE")
 }
 
-fn read_u64(lm: &Value, root: &Value, keys: &[&str]) -> Option<u64> {
+pub(crate) fn read_u64(lm: &Value, root: &Value, keys: &[&str]) -> Option<u64> {
     for key in keys {
         if let Some(v) = lm.get(key).and_then(|v| v.as_u64()) {
             return Some(v);
