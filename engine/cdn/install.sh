@@ -726,6 +726,25 @@ resolve_nginx() {
   nginx_missing "nginx, nginx-core and nginx-light extracted under ${root} gave no working ${NGINX_BIN}"
 }
 
+install_notices() {
+  # Goethe's license and the third-party notices and license texts, when this package carries them.
+  local f got=0
+  for f in LICENSE THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.txt; do
+    if [[ "${SECURE}" -eq 1 ]] && [[ -z "$(expected_sum "${f}")" ]]; then
+      continue
+    fi
+    if [[ "${SECURE}" -eq 1 ]]; then
+      fetch "${f}" "${GOETHE_HOME}/${f}"
+    else
+      fetch_raw "${f}" "${GOETHE_HOME}/${f}" 2>/dev/null || continue
+    fi
+    got=1
+  done
+  if [[ ${got} -eq 1 ]]; then
+    done_line "licenses: ${GOETHE_HOME}/THIRD_PARTY_NOTICES.md"
+  fi
+}
+
 write_goethe_env() {
   # Record the CDN (and its registry and token) in GOETHE_HOME/goethe.env, mode 0600, for the CLI and goethed.
   local registry="${GOETHE_REGISTRY_URL:-}"
@@ -1036,6 +1055,7 @@ main() {
   done_line "nginx: ${NGINX_BIN}"
   ensure_certs
   done_line "TLS certificate: ${GOETHE_HOME}/nginx/certs/server.crt"
+  install_notices
   write_goethe_env
   apply_binaries
   if [[ "${RESTART}" -eq 1 ]]; then

@@ -78,3 +78,5 @@ Our models are on [Hugging Face](https://huggingface.co/meshapplied) and at [mes
 ## License
 
 Apache-2.0 for this repository. The license of each model you serve still applies.
+
+Goethe is built on open-source software, notably [SGLang](https://github.com/sgl-project/sglang) (Apache-2.0, shipped in a modified build), PyTorch, FlashInfer, Triton, Hugging Face Transformers, uv and nginx, and installs NVIDIA's CUDA libraries under NVIDIA's license. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists every component and its license; the installer places it, with the full license texts, in `$GOETHE_HOME`.
