@@ -281,7 +281,7 @@ pub fn registry_input(m: &RegistryModel) -> ChooserInput {
         max_conc: m.default_max_conc.unwrap_or(8),
         marlin_extra_gb: 0.0,
         supported_sm: m.supported_sm.clone(),
-        linear_state_bytes: 0,
+        memory: m.memory.clone(),
     }
 }
 

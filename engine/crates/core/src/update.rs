@@ -201,6 +201,18 @@ pub fn pkg_base_url() -> String {
         .to_string()
 }
 
+pub fn newer_published() -> Option<String> {
+    // The published version when it is newer than this goethe; None when equal, older or unreachable within 2 s.
+    let url = format!("{}/VERSION", pkg_base_url());
+    let mut req = crate::net::agent().get(&url).timeout(std::time::Duration::from_secs(2));
+    if let Some(tok) = crate::paths::setting("GOETHE_PKG_TOKEN") {
+        req = req.set("Authorization", &format!("Bearer {}", tok.trim()));
+    }
+    let remote = req.call().ok()?.into_string().ok()?.trim().to_string();
+    let valid = !remote.is_empty() && remote.len() < 40 && remote.chars().all(|c| c.is_ascii_alphanumeric() || ".-+".contains(c));
+    (valid && compare_versions(&remote, &local_version()) == Ordering::Greater).then_some(remote)
+}
+
 fn local_version() -> String {
     crate::runtime::goethe_version().to_string()
 }

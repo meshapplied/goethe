@@ -233,8 +233,11 @@ fn configure_vpn(opts: &ApiOpts, vpns: &[VpnAddr]) -> Result<String, String> {
     let v = pick_vpn(opts, vpns)?;
     let ranges = if opts.allow.is_empty() {
         let default = v.range.clone();
-        if interactive() && !opts.yes {
-            ask(&format!("Allow which VPN addresses? (CIDR, comma separated) [{default}]:"), &default)?
+        let specific = interactive()
+            && !opts.yes
+            && confirm(&format!("Allow only specific addresses instead of the whole VPN range {default}?"), false, false)?;
+        if specific {
+            ask("Addresses or ranges to allow, comma separated (e.g. 100.64.0.7/32):", &default)?
         } else {
             default
         }
@@ -270,8 +273,8 @@ fn configure_public(opts: &ApiOpts) -> Result<String, String> {
         return Err("nothing changed (goethe configure api again to pick local or VPN)".to_string());
     }
     let mut ranges = opts.allow.clone();
-    if ranges.is_empty() && interactive() && !opts.yes {
-        let a = ask("Client IPs or ranges to allow, comma separated (e.g. 203.0.113.7/32) []:", "")?;
+    if ranges.is_empty() && interactive() && !opts.yes && confirm("Allow specific client IP addresses now?", true, false)? {
+        let a = ask("Client IPs or ranges to allow, comma separated (e.g. 203.0.113.7/32):", "")?;
         ranges = a.split(',').map(str::trim).filter(|r| !r.is_empty()).map(String::from).collect();
     }
     for r in &ranges {

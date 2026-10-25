@@ -14,6 +14,7 @@ const OWNED_FLAGS: &[&str] = &[
     "--context-length",
     "--max-running-requests",
     "--max-mamba-cache-size",
+    "--swa-full-tokens-ratio",
     "--api-key",
     "--served-model-name",
 ];
@@ -139,12 +140,12 @@ fn arch_env(home: &Path, cc: &str) -> Vec<(String, String)> {
     ]
 }
 
-fn state_slot_args(model_path: &Path, max_conc: u64) -> Vec<String> {
-    // Hybrid models get exactly the linear-attention state slots goethe budgeted, so the rest of the pool is KV cache.
-    if crate::model_facts::linear_state_bytes_in_dir(model_path) == 0 {
-        return Vec::new();
-    }
-    vec!["--max-mamba-cache-size".to_string(), crate::chooser::state_slots(max_conc).to_string()]
+fn memory_args(spec: &EngineSpec, extras: &[String]) -> Vec<String> {
+    // The window ratio, state slots and chunk size the budget assumed; a chunk size the user set wins.
+    let Some(m) = crate::memory_spec::installed(spec.model_path, spec.card) else { return Vec::new() };
+    let args = crate::chooser::engine_args(&m, spec.ctx, spec.max_conc);
+    let user_chunk = extras.iter().any(|a| a.starts_with("--chunked-prefill-size"));
+    args.chunks(2).filter(|p| !(user_chunk && p[0] == "--chunked-prefill-size")).flatten().cloned().collect()
 }
 
 fn compiler_env() -> Vec<(String, String)> {
@@ -202,7 +203,6 @@ pub fn command(spec: &EngineSpec) -> Command {
         .arg(spec.ctx.to_string())
         .arg("--max-running-requests")
         .arg(spec.max_conc.to_string())
-        .args(state_slot_args(spec.model_path, spec.max_conc))
         .arg("--mem-fraction-static")
         .arg(format!("{:.6}", spec.mem_frac))
         .arg("--served-model-name")
@@ -210,6 +210,7 @@ pub fn command(spec: &EngineSpec) -> Command {
         .arg("--uvicorn-access-log-exclude-prefixes")
         .args(QUIET_PATHS);
     let extras: Vec<String> = card_extra_args(spec.card).into_iter().chain(spec.load_extra.iter().cloned()).collect();
+    cmd.args(memory_args(spec, &extras));
     if !multi_tokenizer(&extras) {
         cmd.arg("--api-key").arg(spec.engine_key);
     }
@@ -386,14 +387,16 @@ mod tests {
     #[test]
     fn hybrid_models_get_the_state_slots_goethe_budgeted() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = r#"{"num_hidden_layers": 8, "num_attention_heads": 24, "num_key_value_heads": 4, "head_dim": 256,
+        let cfg = r#"{"architectures": ["Qwen3_5ForConditionalGeneration"], "num_hidden_layers": 8, "num_attention_heads": 24, "num_key_value_heads": 4, "head_dim": 256,
             "full_attention_interval": 4, "layer_types": ["linear_attention", "linear_attention", "linear_attention",
             "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention"],
             "linear_num_value_heads": 48, "linear_num_key_heads": 16, "linear_key_head_dim": 128,
             "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4}"#;
         std::fs::write(dir.path().join("config.json"), cfg).unwrap();
-        assert_eq!(state_slot_args(dir.path(), 8), vec!["--max-mamba-cache-size".to_string(), "16".to_string()]);
-        assert!(state_slot_args(Path::new("/nonexistent"), 8).is_empty());
+        let card: toml::Value = toml::from_str("").unwrap();
+        let m = crate::memory_spec::installed(dir.path(), &card).unwrap();
+        assert_eq!(crate::chooser::engine_args(&m, 4096, 8), vec!["--max-mamba-cache-size".to_string(), "40".to_string()]);
+        assert!(crate::memory_spec::installed(Path::new("/nonexistent"), &card).is_none());
         assert!(check_extra_args(&["--max-mamba-cache-size=4".to_string()]).is_err());
     }
 }
