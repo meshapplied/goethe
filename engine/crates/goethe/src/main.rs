@@ -282,9 +282,11 @@ enum Commands {
         #[arg(long = "allow-downgrade", help = "Install the published version even if it is older.")]
         allow_downgrade: bool,
     },
-    #[command(about = "Remove goethe binaries and optionally delete downloaded models.")]
+    #[command(about = "Remove goethe and the models it installed (folders of your own files stay).")]
     Uninstall {
-        #[arg(long, help = "Also delete GOETHE_HOME/models.")]
+        #[arg(long, help = "Keep the installed models in GOETHE_HOME/models.")]
+        keep_models: bool,
+        #[arg(long, hide = true, help = "Deleting the installed models is the default now.")]
         purge_models: bool,
         #[arg(long, help = "Skip confirmation.")]
         yes: bool,
@@ -763,12 +765,10 @@ fn main() {
             allow_downgrade,
         }),
         Commands::Uninstall {
-            purge_models,
+            keep_models,
+            purge_models: _,
             yes,
-        } => goethe_core::uninstall::run(goethe_core::uninstall::UninstallOpts {
-            purge_models,
-            yes,
-        }),
+        } => goethe_core::uninstall::run(goethe_core::uninstall::UninstallOpts { keep_models, yes }),
         Commands::Allowlist { add, description, remove } => match (add.is_empty(), remove.is_empty()) {
             (false, _) => each(add, |cidr| {
                 security::allowlist_add(&cidr, description.as_deref())

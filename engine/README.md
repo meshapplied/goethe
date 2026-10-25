@@ -88,7 +88,7 @@ A model folder you placed yourself goes into `$GOETHE_HOME/models`, and Goethe r
     goethe down [--keep-engines]          # stop daemon and engines (loaded models return on next up); --keep-engines leaves engines serving
     goethe api [--json]                   # API base URL, auth hint, endpoint, models running, API keys in full, one curl example
     goethe update [--check] [--engine] [--ternary]  # signed self-update; compares the installed binaries, engine wheel and ternary pack
-    goethe uninstall [--purge-models]
+    goethe uninstall [--keep-models]       # deletes the installed models unless --keep-models; your own registered folders stay
 
 `goethe update` notices another build at the same version (the installed `bin/goethe` and `bin/goethed` against the signed checksums, shown as `0.1.0 (commit A) -> 0.1.0 (commit B)`), swaps both binaries, then stops the old goethed with `--keep-engines` and starts the new one (through systemd when this home has a unit, whose `KillMode=process` lets engines outlive goethed), so loaded models keep serving.
 
