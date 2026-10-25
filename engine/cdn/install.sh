@@ -254,6 +254,8 @@ check_compiler() {
       major="$("${cxx}" -dumpversion 2>/dev/null | cut -d. -f1 || true)"
       if [[ "${major}" =~ ^[0-9]+$ ]] && ((major < 9)) && ! "${cxx}" --version 2>/dev/null | grep -q clang; then
         echo "WARNING: ${cxx} is gcc ${major}; GPU kernel builds need gcc 9 or newer (goethe doctor shows the fix)" >&2
+      else
+        done_line "C++ compiler: $(command -v "${cxx}") ${major}"
       fi
       return 0
     fi
@@ -445,6 +447,11 @@ check_nvidia_driver() {
   fi
   if [[ -z "${why}" ]]; then
     check_gpu_arch
+    if [[ -n "${listed:-}" && "${listed}" -gt 0 ]]; then
+      done_line "NVIDIA driver ${ver}, ${listed} GPU$( ((listed == 1)) || echo s) ready"
+    else
+      done_line "NVIDIA driver ${ver}"
+    fi
     return 0
   fi
   if offer_driver_install "${why}" "${action}"; then
@@ -478,6 +485,16 @@ curl_auth() {
 }
 
 fetch_raw() {
+  # Download rel to dest; with a label ($3) on a terminal, show it and curl's progress bar.
+  if [[ -n "${3:-}" && "${PROGRESS:-0}" -eq 1 ]]; then
+    local auth=()
+    if [[ -n "${GOETHE_PKG_TOKEN:-}" ]]; then
+      auth=(-H "Authorization: Bearer ${GOETHE_PKG_TOKEN}")
+    fi
+    echo "  $3"
+    curl -fL --progress-bar "${auth[@]}" "${CDN}/$1" -o "$2"
+    return
+  fi
   curl_auth "${CDN}/$1" -o "$2"
 }
 
@@ -514,8 +531,8 @@ verify_file_sum() {
 }
 
 fetch() {
-  # Download rel to dest; verified against SHA256SUMS unless GOETHE_INSECURE=1.
-  fetch_raw "$1" "$2.part"
+  # Download rel to dest (with a progress label $3 on a terminal); verified against SHA256SUMS unless GOETHE_INSECURE=1.
+  fetch_raw "$1" "$2.part" "${3:-}"
   if [[ "${SECURE}" -eq 1 ]]; then
     verify_file_sum "$1" "$2.part"
   fi
@@ -574,7 +591,7 @@ install_pyenv() {
   # Fetch uv, the arch lock and bootstrap.sh, then build the hermetic py-env with the SGLang wheel.
   local wheel_name
   if [[ ! -x "${GOETHE_HOME}/bin/uv" ]]; then
-    fetch "bin/linux-${ARCH}/uv" "${GOETHE_HOME}/bin/uv"
+    fetch "bin/linux-${ARCH}/uv" "${GOETHE_HOME}/bin/uv" "Downloading uv, the Python package installer"
     chmod +x "${GOETHE_HOME}/bin/uv"
   fi
   mkdir -p "${GOETHE_HOME}/pyenv"
@@ -590,10 +607,10 @@ install_pyenv() {
     echo "invalid wheel name in wheels/LATEST: ${wheel_name}" >&2
     exit 1
   fi
-  fetch "wheels/${wheel_name}" "${GOETHE_HOME}/pyenv/${wheel_name}"
-  echo "Setting up the Python environment (about 8 GB; a few minutes on a fast connection)..."
+  fetch "wheels/${wheel_name}" "${GOETHE_HOME}/pyenv/${wheel_name}" "Downloading Goethe's SGLang build"
+  echo "  Installing PyTorch, SGLang and the CUDA libraries (about 8 GB; a few minutes on a fast connection)"
   GOETHE_ARCH="${ARCH}" UV="${GOETHE_HOME}/bin/uv" GOETHE_SGLANG_WHEEL="${GOETHE_HOME}/pyenv/${wheel_name}" \
-    GOETHE_PYENV_QUIET=1 bash "${GOETHE_HOME}/pyenv/bootstrap.sh"
+    bash "${GOETHE_HOME}/pyenv/bootstrap.sh"
 }
 
 install_ternary() {
@@ -644,7 +661,7 @@ install_binaries() {
     if binary_current "${bin}"; then
       continue
     fi
-    fetch "bin/linux-${ARCH}/${bin}" "${GOETHE_HOME}/bin/.${bin}.new"
+    fetch "bin/linux-${ARCH}/${bin}" "${GOETHE_HOME}/bin/.${bin}.new" "Downloading ${bin}"
     chmod +x "${GOETHE_HOME}/bin/.${bin}.new"
     if [[ "${bin}" == goethe ]] && ! "${GOETHE_HOME}/bin/.goethe.new" --version >/dev/null; then
       echo "the downloaded goethe does not run on this host; nothing was replaced" >&2
@@ -892,17 +909,60 @@ summary() {
   echo "Goethe install complete: GOETHE_HOME=${GOETHE_HOME}"
 }
 
+stage() {
+  # A numbered step header, light blue on a terminal.
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    printf '\n\033[1;38;5;117m[%s/%s]\033[0m \033[1m%s\033[0m\n' "$1" "${STAGES}" "$2"
+  else
+    printf '\n[%s/%s] %s\n' "$1" "${STAGES}" "$2"
+  fi
+}
+
+done_line() {
+  # One indented result line under a step.
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    printf '  \033[32m%s\033[0m %s\n' "●" "$1"
+  else
+    printf '  ok: %s\n' "$1"
+  fi
+}
+
 get_started() {
   printf '\nGet started:\n\n\t→ goethe start\n'
 }
 
 show_banner() {
-  # The Goethe banner in light blue, on a fresh install in a terminal wide enough for it.
+  # The Goethe banner in light blue on a fresh install: full, compact or one line, by terminal width.
   local cols
   [[ -t 1 && ! -x "${GOETHE_HOME:-$(default_home)}/bin/goethe" ]] || return 0
-  cols="$(tput cols 2>/dev/null || echo "${COLUMNS:-0}")"
-  ((cols >= 143)) || return 0
+  cols="$(tput cols 2>/dev/null || true)"
+  [[ "${cols}" =~ ^[0-9]+$ && "${cols}" -gt 0 ]] || cols="$(stty size </dev/tty 2>/dev/null | awk '{print $2}' || true)"
+  [[ "${cols}" =~ ^[0-9]+$ ]] || cols=80
   [[ -z "${NO_COLOR:-}" ]] && printf '\033[1;38;5;117m'
+  if ((cols >= 143)); then
+    banner_full
+  elif ((cols >= 60)); then
+    banner_compact
+  else
+    echo "OWN YOUR INFERENCE -> GOETHE"
+  fi
+  [[ -z "${NO_COLOR:-}" ]] && printf '\033[0m'
+  echo
+}
+
+banner_compact() {
+  cat <<'BANNER'
+ ██████╗  ██████╗ ███████╗████████╗██╗  ██╗███████╗
+██╔════╝ ██╔═══██╗██╔════╝╚══██╔══╝██║  ██║██╔════╝
+██║  ███╗██║   ██║█████╗     ██║   ███████║█████╗
+██║   ██║██║   ██║██╔══╝     ██║   ██╔══██║██╔══╝
+╚██████╔╝╚██████╔╝███████╗   ██║   ██║  ██║███████╗
+ ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
+            O W N   Y O U R   I N F E R E N C E
+BANNER
+}
+
+banner_full() {
   cat <<'BANNER'
  ██████╗ ██╗    ██╗███╗   ██╗    ██╗   ██╗ ██████╗ ██╗   ██╗██████╗     ██╗███╗   ██╗███████╗███████╗██████╗ ███████╗███╗   ██╗ ██████╗███████╗
 ██╔═══██╗██║    ██║████╗  ██║    ╚██╗ ██╔╝██╔═══██╗██║   ██║██╔══██╗    ██║████╗  ██║██╔════╝██╔════╝██╔══██╗██╔════╝████╗  ██║██╔════╝██╔════╝
@@ -918,8 +978,6 @@ show_banner() {
      ██╔╝     ╚██████╔╝╚██████╔╝███████╗   ██║   ██║  ██║███████╗
      ╚═╝       ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
 BANNER
-  [[ -z "${NO_COLOR:-}" ]] && printf '\033[0m'
-  echo
 }
 
 main() {
@@ -941,6 +999,10 @@ main() {
   SECURE=0
   SUMS_FILE=""
   LINK_DIR=""
+  STAGES=5
+  PROGRESS=0
+  [[ -t 2 ]] && PROGRESS=1
+  stage 1 "Checking this machine"
   check_glibc
   ensure_prerequisites
   require_tool_version curl 7.50 'curl --version'
@@ -953,15 +1015,27 @@ main() {
   check_disk
   check_nvidia_driver
   check_compiler
+  stage 2 "Verifying the signed package"
   verify_cdn
+  if [[ "${SECURE}" -eq 1 ]]; then
+    done_line "SHA256SUMS signed by the Goethe release key; every download is checked against it"
+  fi
+  stage 3 "Setting up the Python environment"
   install_pyenv
+  stage 4 "Installing goethe and goethed"
   install_ternary
   install_binaries
+  local staged="${GOETHE_HOME}/bin/.goethe.new"
+  [[ -x "${staged}" ]] || staged="${GOETHE_HOME}/bin/goethe"
+  done_line "$("${staged}" --version 2>/dev/null || echo goethe)"
   export PATH="${GOETHE_HOME}/bin:${PATH}"
   NGINX_BIN="${NGINX_BIN:-}"
+  stage 5 "Setting up the gateway"
   resolve_nginx
   export NGINX_BIN
+  done_line "nginx: ${NGINX_BIN}"
   ensure_certs
+  done_line "TLS certificate: ${GOETHE_HOME}/nginx/certs/server.crt"
   write_goethe_env
   apply_binaries
   if [[ "${RESTART}" -eq 1 ]]; then

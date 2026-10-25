@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.4 (2026-10-25)
+
+- The installer shows what it is doing: numbered steps (checking the machine, verifying the signed package, setting up the Python environment, installing goethe and goethed, setting up the gateway), a result line for each check (driver and GPUs, compiler, signature, version, nginx, TLS certificate), progress bars for downloads, and uv's live download and install progress for the Python environment. The banner now also shows in normal-width terminals, in a compact form, and as one line in narrow ones.
+
 ## 0.1.3 (2026-10-25)
 
 - The installer handles far more machines without stopping. It installs missing `curl`, `zstd`, `openssl`, CA certificates, a C++ compiler and nginx with apt, dnf, yum or zypper (asking first unless root; `GOETHE_INSTALL_DEPS=1`/`0`). For the GPU it tells apart: no GPU, no driver, a driver installed but not loaded (it runs `modprobe`, and names Secure Boot when that blocks it), a driver older than 580, NVIDIA's proprietary module on a Blackwell GPU (it switches to the open module), a GPU that did not start (it explains the power cycle), some GPUs not starting, and GPUs older than compute capability 8.0. A driver installed from NVIDIA's `.run` file is removed before the packaged driver replaces it. GPU problems warn and the install continues; `GOETHE_REQUIRE_GPU=1` still stops. It checks disk space before downloading, says what it does when consent was given in advance, and survives an unset `HOME`.
