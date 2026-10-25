@@ -28,6 +28,7 @@ docker run --rm --name "goethe-build-portable-${ARCH}" \
   -e CARGO_HOME=/cache/cargo -e RUSTUP_HOME=/cache/rustup -e CARGO_TARGET_DIR=/src/target-portable \
   -v "${ROOT}:/src" -v "${CACHE}:/cache" -w /src \
   ubuntu:20.04 bash -c '
+    set -euo pipefail
     trap "chown -R $HOST_UID:$HOST_GID /src/target-portable /src/Cargo.lock /cache" EXIT
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
