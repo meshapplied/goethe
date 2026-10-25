@@ -73,6 +73,14 @@ pub fn facts_from_install_dir(dir: &Path, registry_arch: Option<&str>) -> Result
     facts_from_config(&cfg, weights_gb(dir)?, registry_arch, &model_id)
 }
 
+pub fn linear_state_bytes_in_dir(dir: &Path) -> u64 {
+    // Per-request linear-attention state of the model in dir, 0 for models without such layers or an unreadable config.
+    let Ok(cfg) = read_config(dir) else { return 0 };
+    let Ok(lm) = resolve_language_config(&cfg) else { return 0 };
+    let layers = read_u64(lm, &cfg, &["num_hidden_layers", "n_layer"]).unwrap_or(0);
+    linear_state_bytes(lm, layer_plan(lm, layers))
+}
+
 pub fn facts_from_config(
     cfg: &Value,
     static_gb: f64,

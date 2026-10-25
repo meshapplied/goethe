@@ -249,6 +249,7 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
                     max_conc: r.get::<_, i64>(4)?.max(1) as u64,
                     marlin_extra_gb: install::card_marlin_extra_gb(&card),
                     supported_sm: install::card_supported_sm(&card),
+                    linear_state_bytes: crate::model_facts::linear_state_bytes_in_dir(&home.join(r.get::<_, String>(11)?)),
                 },
             })
         })
@@ -432,6 +433,45 @@ fn removal_plan(home: &Path, con: &Connection, model_id: &str, local_path: &str,
         plan.delete.push(c);
     }
     Ok(plan)
+}
+
+pub struct UninstallModels {
+    pub delete: Vec<PathBuf>,
+    pub keep: Vec<(PathBuf, String)>,
+    pub sources: Vec<String>,
+    pub ids: Vec<String>,
+    pub gb: f64,
+}
+
+pub fn uninstall_plan(home: &Path) -> Result<UninstallModels, String> {
+    // Every installed model at once, with goethe remove's rules: delete what goethe owns, keep folders of your own files.
+    let con = db::open(home).map_err(|e| e.to_string())?;
+    let mut stmt = con.prepare("SELECT model_id, local_path, managed FROM installed_models ORDER BY model_id").map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+    let mut out = UninstallModels { delete: Vec::new(), keep: Vec::new(), sources: Vec::new(), ids: Vec::new(), gb: 0.0 };
+    for (id, rel, managed) in rows {
+        let Ok(plan) = removal_plan(home, &con, &id, &rel, managed != 0) else { continue };
+        out.ids.push(id);
+        out.sources.extend(plan.source);
+        let shared = plan.keep.iter().filter(|(_, why)| why.starts_with("still used by")).map(|(p, _)| p.clone());
+        for p in plan.delete.into_iter().chain(shared) {
+            if !out.delete.contains(&p) {
+                out.delete.push(p);
+            }
+        }
+        out.keep.extend(plan.keep.into_iter().filter(|(_, why)| !why.starts_with("still used by")));
+    }
+    out.delete.retain(|p| !out.keep.iter().any(|(k, _)| k == p));
+    out.gb = out.delete.iter().map(|p| dir_usage_gb(p).1).sum();
+    Ok(out)
+}
+
+pub fn delete_owned(home: &Path, p: &Path) -> Result<(), String> {
+    remove_owned(home, p)
 }
 
 pub fn ternary_dirs_of(home: &Path, dir: &Path) -> Vec<PathBuf> {

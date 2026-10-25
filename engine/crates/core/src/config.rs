@@ -147,7 +147,7 @@ fn config_summary(opts: &ConfigOpts, new_args: &[String], table: &toml::Table, k
     if parts.is_empty() {
         let get = |k: &str| table.get(k).and_then(|v| v.as_integer()).map_or_else(|| "default".to_string(), |v| v.to_string());
         return format!(
-            "{}: nothing changed (ctx {}, max-conc {}); use --ctx, --max-conc, --tp, --gpus or --sglang-arg",
+            "{}: nothing changed (ctx {}, max-conc {}); use --ctx, --max-conc, --tp, --gpu or --sglang-arg",
             opts.model_id,
             get("context_length"),
             get("max_running_requests")

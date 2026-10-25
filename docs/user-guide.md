@@ -131,7 +131,7 @@ Where Goethe keeps its files (models, keys, logs), in order of preference:
 ```bash
 goethe update --check      # is there a new version?
 goethe update              # install it; loaded models keep serving
-goethe uninstall           # remove Goethe; add --purge-models to delete your models too
+goethe uninstall           # remove Goethe and the models it installed; add --keep-models to keep them
 ```
 
 ## First run: goethe start
@@ -235,10 +235,12 @@ The first load of a model on a new machine takes a few extra minutes while GPU k
 
 Choosing where and how:
 
+How much memory a load takes: the weights, a KV cache with room for one request at the full context (or every parallel request at a quarter of it, whichever is larger), for hybrid models such as Qwen3.5 and Qwen3-Next the linear-attention state of two slots per parallel request, and about 2 GB of working memory. `goethe load` prints these parts, and `goethe hw pick-gpus --model <model>` shows them without loading.
+
 ```bash
-goethe load --model Qwen/Qwen3-8B --gpus 1            # a specific GPU
-goethe load --model big/model --tp 2                  # split across 2 GPUs
-goethe load --model big/model --gpus 0,1              # split across GPUs 0 and 1
+goethe load --model Qwen/Qwen3-8B --gpu gpu1          # a specific GPU (goethe gpu lists them)
+goethe load --model big/model --tp 2                  # split across 2 GPUs Goethe picks
+goethe load --model big/model --gpu gpu0 gpu1         # split across GPUs 0 and 1
 goethe load --model Qwen/Qwen3-8B --ctx 65536         # longer context
 goethe load --model Qwen/Qwen3-8B --max-conc 32       # more requests at the same time
 goethe load --model Qwen/Qwen3-8B --replica           # another copy, to serve more traffic
@@ -550,7 +552,7 @@ Models that were loaded when Goethe stopped come back by themselves when it star
 | Ampere data center | A100, A30 | 8.0 | Marlin (4-bit weights, 16-bit math) | Supported |
 
 - **Several GPUs:** a model can be split across several GPUs in one machine (`--tp`), and mixture-of-experts models can also use expert parallelism (`--ep`).
-- **Mixed GPUs:** one machine can hold GPUs of different architectures, for example two RTX PRO 6000 and an H100. Each model loads on GPUs it runs on, and a model split across GPUs always uses GPUs of one architecture; `goethe load --gpus` refuses a set that mixes them. Kernels that SGLang builds on first use are compiled for each architecture separately (`sm_80`, `sm_86`, `sm_89`, `sm_90a`, `sm_100a`, `sm_103a`, `sm_120a`, `sm_121a`) and cached under `$GOETHE_HOME/cache/jit/<target>`. `goethe doctor` lists the architectures it finds.
+- **Mixed GPUs:** one machine can hold GPUs of different architectures, for example two RTX PRO 6000 and an H100. Each model loads on GPUs it runs on, and a model split across GPUs always uses GPUs of one architecture; `goethe load --gpu` refuses a set that mixes them. Kernels that SGLang builds on first use are compiled for each architecture separately (`sm_80`, `sm_86`, `sm_89`, `sm_90a`, `sm_100a`, `sm_103a`, `sm_120a`, `sm_121a`) and cached under `$GOETHE_HOME/cache/jit/<target>`. `goethe doctor` lists the architectures it finds.
 - **Catalog models:** a model validated on Ampere (8.6) also runs on A100 (8.0), Ada (8.9) and Hopper (9.0), which take the same NVFP4 path with more shared memory; a model validated on consumer Blackwell (12.x) also runs on data-center Blackwell (10.x).
 - **Operating system:** Linux on x86_64 or ARM64 with glibc 2.30 or newer, and NVIDIA driver 580 or newer. Goethe brings its own CUDA compiler.
 - **Where it runs:** bare metal, virtual machines and containers (Docker, Podman, Kubernetes, LXC). Cloud GPU providers are detected automatically: RunPod, Vast.ai, Lambda, AWS, Google Cloud, Azure, Oracle Cloud, CoreWeave and Paperspace.
@@ -619,17 +621,17 @@ Exit codes:
 | Command | What it does | Arguments and options |
 |---|---|---|
 | `goethe recommend` | Catalog models that fit your GPUs, with their size | `--json` |
-| `goethe install --model <model>` | Download a Hugging Face model, or register a local folder | `--model`: repo id or folder path<br>`--load`: load after installing<br>`--no-load`: only install<br>`--no-wait`: with `--load`, don't wait for it to be ready<br>`--ctx N`: default context length<br>`--max-conc N`: default parallel requests<br>`--tp N`: default number of GPUs (0 = automatic)<br>`--gpus 0,1`: preferred GPUs<br>`--trust-remote-code`: allow model-provided code<br>`--yes`: with `--load`, share GPUs without asking<br>`--force`: download again<br>`--reset`: forget saved settings for this model<br>`--no-verify`: skip the download checksum check<br>`--name ID`: id for a local folder<br>`--copy`: copy a local folder instead of linking it<br>`--sglang-arg FLAG`: extra SGLang option to save with the model<br>`--hf-token`: ask for a Hugging Face token, used for this download only |
+| `goethe install --model <model>` | Download a Hugging Face model, or register a local folder | `--model`: repo id or folder path<br>`--load`: load after installing<br>`--no-load`: only install<br>`--no-wait`: with `--load`, don't wait for it to be ready<br>`--ctx N`: default context length<br>`--max-conc N`: default parallel requests<br>`--tp N`: default number of GPUs (0 = automatic)<br>`--gpu gpu0 gpu1`: GPUs to load on<br>`--trust-remote-code`: allow model-provided code<br>`--yes`: with `--load`, share GPUs without asking<br>`--force`: download again<br>`--reset`: forget saved settings for this model<br>`--no-verify`: skip the download checksum check<br>`--name ID`: id for a local folder<br>`--copy`: copy a local folder instead of linking it<br>`--sglang-arg FLAG`: extra SGLang option to save with the model<br>`--hf-token`: ask for a Hugging Face token, used for this download only |
 | `goethe scan` | Add model folders you put into Goethe's `models` folder | `--dir FOLDER`: one folder (default: all)<br>`--yes`: add all supported models without asking<br>`--json` |
 | `goethe models` | Installed and catalog models, and whether each fits | `--installed`, `--available`, `--json` |
-| `goethe config --model <model>` | Change a model's default settings | `--ctx N`, `--max-conc N`, `--tp N`, `--gpus 0,1`, `--sglang-arg FLAG`, `--clear-sglang-args` |
+| `goethe config --model <model>` | Change a model's default settings | `--ctx N`, `--max-conc N`, `--tp N`, `--gpu gpu0 gpu1`, `--sglang-arg FLAG`, `--clear-sglang-args` |
 | `goethe remove --model <model>` | Unload and delete a model (or unregister a folder) | `--yes`: don't ask<br>`--force`: don't wait for requests in progress |
 
 ### Running
 
 | Command | What it does | Arguments and options |
 |---|---|---|
-| `goethe load --model <model>` | Load a model and wait until it's ready | `--gpus 0,1`: which GPUs<br>`--tp N`: number of GPUs<br>`--ep N`: expert parallel size<br>`--ctx N`: context length<br>`--max-conc N`: parallel requests<br>`--replica`: start another copy<br>`--yes` / `--force`: share busy GPUs without asking<br>`--no-wait`: return right away<br>`--json`<br>`-- <SGLang options>`: extra engine options |
+| `goethe load --model <model>` | Load a model and wait until it's ready | `--gpu gpu0 gpu1`: which GPUs (several split the model)<br>`--tp N`: number of GPUs<br>`--ep N`: expert parallel size<br>`--ctx N`: context length<br>`--max-conc N`: parallel requests<br>`--replica`: start another copy<br>`--yes` / `--force`: share busy GPUs without asking<br>`--no-wait`: return right away<br>`--json`<br>`-- <SGLang options>`: extra engine options |
 | `goethe unload --model <model>` | Stop a model, letting requests in progress finish | `--all`: every model instead<br>`--force`: stop right away |
 | `goethe ps` | Running models with GPU, status and speed | `--json` |
 | `goethe logs --model <model>` | Show a model's log | `-f`: follow<br>`-n N`: number of lines (default 100)<br>`--daemon`: Goethe's own log<br>`--gateway`: the API gateway's log<br>`--prune`: clean up old logs |
@@ -667,7 +669,7 @@ Exit codes:
 | `goethe gpu --allow gpu<index>` | Allow a GPU again | |
 | `goethe doctor` | Check the setup, with a fix for each problem | `--json`<br>`--probe-public`: also test the public address |
 | `goethe update` | Install the latest Goethe | `--check`: only show what's available<br>`--yes`: don't ask<br>`--engine`: also update the inference engine<br>`--allow-downgrade` |
-| `goethe uninstall` | Remove Goethe | `--purge-models`: also delete models<br>`--yes` |
+| `goethe uninstall` | Remove Goethe and the models it installed; folders of your own files that you registered stay | `--keep-models`: keep the installed models<br>`--yes` |
 | `goethe --version` | Version and build | |
 
 ## Settings

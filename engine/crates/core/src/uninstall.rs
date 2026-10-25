@@ -6,25 +6,59 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub struct UninstallOpts {
-    pub purge_models: bool,
+    pub keep_models: bool,
     pub yes: bool,
 }
 
 pub fn run(opts: UninstallOpts) -> Result<(), String> {
-    // Validate the home, confirm, stop goethed (or abort), drop autostart, then delete.
+    // Validate the home, confirm, stop goethed (or abort), drop autostart, delete the installed models, then the rest.
     let home = goethe_home();
     validate_home(&home)?;
-    let mut plan = vec!["stop goethed and remove its autostart entry".to_string(), format!("delete {}", home.display())];
-    if !opts.purge_models {
-        plan.push(format!("keep {}", home.join("models").display()));
+    let models = if opts.keep_models {
+        None
+    } else {
+        Some(crate::models::uninstall_plan(&home).unwrap_or(crate::models::UninstallModels {
+            delete: Vec::new(),
+            keep: Vec::new(),
+            sources: Vec::new(),
+            ids: Vec::new(),
+            gb: 0.0,
+        }))
+    };
+    let mut plan = vec!["stop goethed and remove its autostart entry".to_string()];
+    match &models {
+        None => plan.push(format!("keep {} (--keep-models)", home.join("models").display())),
+        Some(m) => {
+            if !m.ids.is_empty() {
+                plan.push(format!("delete {} installed model(s), {:.1} GB: {}", m.ids.len(), m.gb, m.ids.join(", ")));
+            }
+            plan.extend(m.sources.iter().map(|s| format!("keep your files in {s} (registered in place; only goethe's links go)")));
+            plan.extend(m.keep.iter().map(|(p, why)| format!("keep {} ({why})", p.display())));
+        }
     }
+    plan.push(format!("delete everything else in {}", home.display()));
     plan.push("remove installer symlinks that point into GOETHE_HOME".to_string());
+    if opts.yes {
+        println!("goethe uninstall will:\n  {}", plan.join("\n  "));
+    }
     crate::host::confirm(&format!("goethe uninstall will:\n  {}\nProceed?", plan.join("\n  ")), opts.yes)?;
     shutdown::run_down().map_err(|e| format!("could not stop goethed ({e}); stop it, then run goethe uninstall again"))?;
     crate::service::run_disable()?;
     remove_installer_symlinks(&home);
-    remove_home_contents(&home, opts.purge_models)?;
+    let kept: Vec<PathBuf> = match &models {
+        Some(m) => {
+            for p in &m.delete {
+                crate::models::delete_owned(&home, p)?;
+            }
+            m.keep.iter().map(|(p, _)| p.clone()).collect()
+        }
+        None => Vec::new(),
+    };
+    remove_home_contents(&home, models.is_none(), &kept)?;
     println!("uninstalled goethe from {}", home.display());
+    for p in &kept {
+        println!("kept {} (your files)", p.display());
+    }
     Ok(())
 }
 
@@ -61,18 +95,38 @@ fn remove_installer_symlinks(home: &Path) {
     }
 }
 
-fn remove_home_contents(home: &Path, purge_models: bool) -> Result<(), String> {
+fn remove_home_contents(home: &Path, keep_models: bool, kept: &[PathBuf]) -> Result<(), String> {
+    // Everything in the home; models/ stays with --keep-models, and keeps the folders of your own files otherwise.
     for entry in fs::read_dir(home).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
-        if entry.file_name() == "models" && !purge_models {
+        let path = entry.path();
+        let is_dir = entry.file_type().map_err(|e| e.to_string())?.is_dir();
+        if entry.file_name() == "models" {
+            if keep_models {
+                continue;
+            }
+            if is_dir && !kept.is_empty() {
+                remove_except(&path, kept)?;
+                continue;
+            }
+        }
+        let r = if is_dir { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+        r.map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn remove_except(dir: &Path, kept: &[PathBuf]) -> Result<(), String> {
+    // Delete the entries of dir except kept paths (symlinks are removed, never followed).
+    let kept: Vec<PathBuf> = kept.iter().filter_map(|k| fs::canonicalize(k.parent()?).ok().map(|p| p.join(k.file_name().unwrap_or_default()))).collect();
+    let base = fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if kept.contains(&base.join(entry.file_name())) {
             continue;
         }
         let path = entry.path();
-        let r = if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
-            fs::remove_dir_all(&path)
-        } else {
-            fs::remove_file(&path)
-        };
+        let r = if entry.file_type().map_err(|e| e.to_string())?.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
         r.map_err(|e| format!("{}: {e}", path.display()))?;
     }
     Ok(())
@@ -97,5 +151,30 @@ mod tests {
         fs::write(h.join("bin/goethe"), "bin").unwrap();
         assert!(validate_home(&h).is_ok());
         assert!(validate_home(Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn models_go_except_folders_of_your_own_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = dir.path().join("home");
+        let models = h.join("models");
+        for d in ["org__a", "org__mine", ".partial"] {
+            fs::create_dir_all(models.join(d)).unwrap();
+            fs::write(models.join(d).join("w.safetensors"), "x").unwrap();
+        }
+        let elsewhere = dir.path().join("user-folder");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join("config.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, models.join("org__linked")).unwrap();
+        fs::create_dir_all(h.join("logs")).unwrap();
+        remove_home_contents(&h, false, &[models.join("org__mine")]).unwrap();
+        assert!(models.join("org__mine/w.safetensors").exists(), "your own files stay");
+        assert!(!models.join("org__a").exists() && !models.join(".partial").exists() && !h.join("logs").exists());
+        assert!(!models.join("org__linked").exists() && elsewhere.join("config.json").exists(), "links go, their targets stay");
+        fs::create_dir_all(h.join("logs")).unwrap();
+        remove_home_contents(&h, true, &[]).unwrap();
+        assert!(models.join("org__mine").exists() && !h.join("logs").exists(), "--keep-models keeps models/");
+        remove_home_contents(&h, false, &[]).unwrap();
+        assert!(!models.exists());
     }
 }

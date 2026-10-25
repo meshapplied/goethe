@@ -1164,6 +1164,7 @@ fn chooser_input(req: &LoadReq, ctx: u64, max_conc: u64) -> ChooserInput {
         max_conc,
         marlin_extra_gb: crate::install::card_marlin_extra_gb(&req.card),
         supported_sm: crate::install::card_supported_sm(&req.card),
+        linear_state_bytes: crate::model_facts::linear_state_bytes_in_dir(&req.model_path),
     }
 }
 
@@ -1174,13 +1175,13 @@ fn gpu_name(snap: &[GpuLive], idx: u32) -> String {
 }
 
 fn pinned_gpus(raw: Option<&str>, card: &toml::Value, tp: Option<u64>) -> Result<Vec<u32>, String> {
-    // --gpus (else the card's preferred_gpus) as sorted indices; it must agree with --tp and list no GPU twice.
+    // --gpu (else the card's preferred_gpus) as sorted indices; it must agree with --tp and list no GPU twice.
     let list: Vec<u32> = match raw {
         Some(s) => s
             .split(',')
             .map(str::trim)
             .filter(|p| !p.is_empty())
-            .map(|p| p.parse::<u32>().map_err(|_| format!("invalid GPU index '{p}' in --gpus")))
+            .map(|p| p.parse::<u32>().map_err(|_| format!("invalid GPU '{p}' in --gpu")))
             .collect::<Result<_, _>>()?,
         None => card
             .get("preferred_gpus")
@@ -1192,13 +1193,13 @@ fn pinned_gpus(raw: Option<&str>, card: &toml::Value, tp: Option<u64>) -> Result
     };
     if let Some(t) = tp {
         if !list.is_empty() && t as usize != list.len() {
-            return Err(format!("--tp {t} disagrees with {} GPUs on --gpus", list.len()));
+            return Err(format!("--tp {t} disagrees with {} GPUs on --gpu", list.len()));
         }
     }
     let mut sorted = list;
     sorted.sort_unstable();
     if let Some(w) = sorted.windows(2).find(|w| w[0] == w[1]) {
-        return Err(format!("GPU {} is listed twice in --gpus", w[0]));
+        return Err(format!("gpu{} is listed twice in --gpu", w[0]));
     }
     Ok(sorted)
 }

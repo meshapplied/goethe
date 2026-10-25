@@ -13,6 +13,7 @@ const OWNED_FLAGS: &[&str] = &[
     "--mem-fraction-static",
     "--context-length",
     "--max-running-requests",
+    "--max-mamba-cache-size",
     "--api-key",
     "--served-model-name",
 ];
@@ -138,6 +139,14 @@ fn arch_env(home: &Path, cc: &str) -> Vec<(String, String)> {
     ]
 }
 
+fn state_slot_args(model_path: &Path, max_conc: u64) -> Vec<String> {
+    // Hybrid models get exactly the linear-attention state slots goethe budgeted, so the rest of the pool is KV cache.
+    if crate::model_facts::linear_state_bytes_in_dir(model_path) == 0 {
+        return Vec::new();
+    }
+    vec!["--max-mamba-cache-size".to_string(), crate::chooser::state_slots(max_conc).to_string()]
+}
+
 fn compiler_env() -> Vec<(String, String)> {
     // The host compiler for run-time kernel builds; CXX and CC from goethed's environment win.
     let inherited = std::env::var("NVCC_APPEND_FLAGS").ok();
@@ -193,6 +202,7 @@ pub fn command(spec: &EngineSpec) -> Command {
         .arg(spec.ctx.to_string())
         .arg("--max-running-requests")
         .arg(spec.max_conc.to_string())
+        .args(state_slot_args(spec.model_path, spec.max_conc))
         .arg("--mem-fraction-static")
         .arg(format!("{:.6}", spec.mem_frac))
         .arg("--served-model-name")
@@ -371,5 +381,19 @@ mod tests {
         assert_eq!(a.len(), 32);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn hybrid_models_get_the_state_slots_goethe_budgeted() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = r#"{"num_hidden_layers": 8, "num_attention_heads": 24, "num_key_value_heads": 4, "head_dim": 256,
+            "full_attention_interval": 4, "layer_types": ["linear_attention", "linear_attention", "linear_attention",
+            "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention"],
+            "linear_num_value_heads": 48, "linear_num_key_heads": 16, "linear_key_head_dim": 128,
+            "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4}"#;
+        std::fs::write(dir.path().join("config.json"), cfg).unwrap();
+        assert_eq!(state_slot_args(dir.path(), 8), vec!["--max-mamba-cache-size".to_string(), "16".to_string()]);
+        assert!(state_slot_args(Path::new("/nonexistent"), 8).is_empty());
+        assert!(check_extra_args(&["--max-mamba-cache-size=4".to_string()]).is_err());
     }
 }
