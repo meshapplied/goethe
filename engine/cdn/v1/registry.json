@@ -790,12 +790,12 @@
       "download_gb": 360.023351514,
       "description": "Qwen3.8 Flash-Next, 180B MoE with Gated DeltaNet linear attention and one full-attention layer in four; BF16.",
       "family": "Qwen",
+      "license": "other",
+      "released": "2026-08-24",
       "modalities": [
         "text",
         "image"
-      ],
-      "license": "other",
-      "released": "2026-08-24"
+      ]
     },
     {
       "id": "zai-org/GLM-5.2",
@@ -831,11 +831,11 @@
       "download_gb": 1506.69303698,
       "description": "GLM-5.2, 753B MoE with MLA and DeepSeek sparse attention; BF16. Hopper and Blackwell only.",
       "family": "GLM",
+      "license": "mit",
+      "released": "2026-06-16",
       "modalities": [
         "text"
-      ],
-      "license": "mit",
-      "released": "2026-06-16"
+      ]
     },
     {
       "id": "MiniMaxAI/MiniMax-M3",
@@ -874,12 +874,12 @@
       "download_gb": 854.200504173,
       "description": "MiniMax-M3, 427B MoE with block-sparse attention and an index cache; BF16.",
       "family": "MiniMax",
+      "license": "other",
+      "released": "2026-06-02",
       "modalities": [
         "text",
         "image"
-      ],
-      "license": "other",
-      "released": "2026-06-02"
+      ]
     },
     {
       "id": "microsoft/Phi-4-multimodal-instruct",
@@ -1003,7 +1003,8 @@
         "swa_bytes_per_token": 307200,
         "swa_heads": 8,
         "swa_window": 128,
-        "chunked_prefill": 8192
+        "chunked_prefill": 8192,
+        "load_peak_bytes": 53905195008
       },
       "extra_sglang_args": [
         "--trust-remote-code",
@@ -1013,13 +1014,13 @@
       "runtime": "sglang",
       "revision": "b61f21852680ee02a29e946e18cf8697f4844061",
       "download_gb": 573.492067396,
+      "description": "Xiaomi MiMo-V2.6 Pro (RL), 1.02T-parameter MoE with hybrid sliding-window attention; FP8 weights with MXFP4 experts. Its experts need the flashinfer_mxfp4 MoE runner, available on Hopper and Blackwell.",
       "family": "MiMo",
       "license": "mit",
       "released": "2026-09-21",
       "modalities": [
         "text"
-      ],
-      "description": "Xiaomi MiMo-V2.6 Pro (RL), 1.02T-parameter MoE with hybrid sliding-window attention; FP8 weights with MXFP4 experts. Its experts need the flashinfer_mxfp4 MoE runner, available on Hopper and Blackwell."
+      ]
     },
     {
       "id": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
@@ -1046,19 +1047,20 @@
         "kv_heads": 0,
         "request_bytes": 53919744,
         "fixed_bytes": 388710400,
-        "chunked_prefill": 8192
+        "chunked_prefill": 8192,
+        "load_peak_bytes": 50536120320
       },
       "runtime": "sglang",
       "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
       "download_gb": 510.311045295,
+      "description": "DeepSeek-V4.1 Flash (1017), 763B MoE with compressed sparse attention and cross-layer KV sharing; FP8 weights with FP4 experts. Hopper and Blackwell only.",
       "family": "DeepSeek",
       "license": "mit",
       "released": "2026-10-17",
       "modalities": [
         "text",
         "image"
-      ],
-      "description": "DeepSeek-V4.1 Flash (1017), 763B MoE with compressed sparse attention and cross-layer KV sharing; FP8 weights with FP4 experts. Hopper and Blackwell only."
+      ]
     },
     {
       "id": "zai-org/GLM-5.3-Flash",
@@ -1089,14 +1091,14 @@
       "runtime": "sglang",
       "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
       "download_gb": 328.366173639,
+      "description": "GLM-5.3 Flash, 321B MoE mixing DeepSeek sparse attention with KDA linear attention; FP8. In this SGLang build only data-center Blackwell (B200, B300) runs its attention by default.",
       "family": "GLM",
       "license": "mit",
       "released": "2026-08-25",
       "modalities": [
         "text",
         "image"
-      ],
-      "description": "GLM-5.3 Flash, 321B MoE mixing DeepSeek sparse attention with KDA linear attention; FP8. In this SGLang build only data-center Blackwell (B200, B300) runs its attention by default."
+      ]
     },
     {
       "id": "inclusionAI/Ling-3.1-flash",
@@ -1131,13 +1133,13 @@
       "runtime": "sglang",
       "revision": "e5623f6e4c34e9f2ca40bec867b9210db42ac76c",
       "download_gb": 573.813968364,
+      "description": "Ling-3.1 flash, 572B MoE with one MLA layer in eight and KDA linear attention elsewhere; FP8 (Ada and newer).",
       "family": "Ling",
       "license": "mit",
       "released": "2026-10-13",
       "modalities": [
         "text"
-      ],
-      "description": "Ling-3.1 flash, 572B MoE with one MLA layer in eight and KDA linear attention elsewhere; FP8 (Ada and newer)."
+      ]
     },
     {
       "id": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
@@ -1165,7 +1167,8 @@
         "swa_bytes_per_token": 199680,
         "swa_heads": 8,
         "swa_window": 128,
-        "chunked_prefill": 8192
+        "chunked_prefill": 8192,
+        "load_peak_bytes": 23957864448
       },
       "extra_sglang_args": [
         "--trust-remote-code",
@@ -1175,13 +1178,13 @@
       "runtime": "sglang",
       "revision": "dcd3fd83fb181622fbc606fbb1709901982a62c2",
       "download_gb": 177.767644198,
+      "description": "Xiaomi MiMo-V2.6 Flash (RL), 311B MoE with hybrid sliding-window attention; FP8 weights with MXFP4 experts. Its experts need the flashinfer_mxfp4 MoE runner, available on Hopper and Blackwell.",
       "family": "MiMo",
       "license": "mit",
       "released": "2026-09-21",
       "modalities": [
         "text"
-      ],
-      "description": "Xiaomi MiMo-V2.6 Flash (RL), 311B MoE with hybrid sliding-window attention; FP8 weights with MXFP4 experts. Its experts need the flashinfer_mxfp4 MoE runner, available on Hopper and Blackwell."
+      ]
     },
     {
       "id": "deepseek-ai/DeepSeek-V4-Flash-0731",
@@ -1206,18 +1209,19 @@
       "memory": {
         "kv_bytes_per_token": 7750,
         "kv_heads": 0,
-        "request_bytes": 10485760
+        "request_bytes": 10485760,
+        "load_peak_bytes": 23957864448
       },
       "runtime": "sglang",
       "revision": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
       "download_gb": 166.898661074,
+      "description": "DeepSeek-V4 Flash (0731), 304B MoE with compressed sparse attention; FP8 weights with FP4 experts. Hopper and Blackwell only.",
       "family": "DeepSeek",
       "license": "mit",
       "released": "2026-07-31",
       "modalities": [
         "text"
-      ],
-      "description": "DeepSeek-V4 Flash (0731), 304B MoE with compressed sparse attention; FP8 weights with FP4 experts. Hopper and Blackwell only."
+      ]
     },
     {
       "id": "Qwen/Qwen3.8-27B",
@@ -1248,14 +1252,14 @@
       "runtime": "sglang",
       "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
       "download_gb": 55.586114863,
+      "description": "Qwen3.8 27B, dense model with Gated DeltaNet linear attention and one full-attention layer in four; BF16.",
       "family": "Qwen",
       "license": "apache-2.0",
       "released": "2026-08-05",
       "modalities": [
         "text",
         "image"
-      ],
-      "description": "Qwen3.8 27B, dense model with Gated DeltaNet linear attention and one full-attention layer in four; BF16."
+      ]
     },
     {
       "id": "moonshotai/Kimi-K2.6",
@@ -1287,14 +1291,14 @@
       "runtime": "sglang",
       "revision": "7eb5002f6aadc958aed6a9177b7ed26bb94011bb",
       "download_gb": 595.204999341,
+      "description": "Kimi K2.6, 1.03T MoE with MLA; INT4 experts (compressed-tensors). Reasoning and non-reasoning modes are chosen per request.",
       "family": "Kimi",
       "license": "other",
       "released": "2026-04-14",
       "modalities": [
         "text",
         "image"
-      ],
-      "description": "Kimi K2.6, 1.03T MoE with MLA; INT4 experts (compressed-tensors). Reasoning and non-reasoning modes are chosen per request."
+      ]
     },
     {
       "id": "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
@@ -1329,6 +1333,7 @@
       "runtime": "sglang",
       "revision": "fb0ee0bc6b3f70342afd8d84cb80dbadbaa8a1fe",
       "download_gb": 248.937282385,
+      "description": "NVIDIA Nemotron 3.5 Super VL, 124B hybrid Mamba-2 / attention MoE (A12B); BF16. Its default MoE runner needs Ada or newer.",
       "family": "Nemotron",
       "license": "other",
       "released": "2026-10-12",
@@ -1336,8 +1341,7 @@
         "text",
         "image",
         "audio"
-      ],
-      "description": "NVIDIA Nemotron 3.5 Super VL, 124B hybrid Mamba-2 / attention MoE (A12B); BF16. Its default MoE runner needs Ada or newer."
+      ]
     },
     {
       "id": "moonshotai/Kimi-K2.7-Code",
@@ -1369,14 +1373,14 @@
       "runtime": "sglang",
       "revision": "74797c9c62378b951a1f6fcf5c4631024e9b8bef",
       "download_gb": 595.204984507,
+      "description": "Kimi K2.7 Code, 1.03T MoE with MLA tuned for coding; INT4 experts (compressed-tensors).",
       "family": "Kimi",
       "license": "other",
       "released": "2026-06-11",
       "modalities": [
         "text",
         "image"
-      ],
-      "description": "Kimi K2.7 Code, 1.03T MoE with MLA tuned for coding; INT4 experts (compressed-tensors)."
+      ]
     },
     {
       "id": "inclusionAI/Ling-3.0-flash",
@@ -1410,13 +1414,13 @@
       "runtime": "sglang",
       "revision": "fcc60a52b34c69c6271d0ac8a8cb0815020b6a43",
       "download_gb": 254.999502763,
+      "description": "Ling-3.0 flash, 128B MoE with one MLA layer in six and KDA linear attention elsewhere; BF16.",
       "family": "Ling",
       "license": "mit",
       "released": "2026-08-02",
       "modalities": [
         "text"
-      ],
-      "description": "Ling-3.0 flash, 128B MoE with one MLA layer in six and KDA linear attention elsewhere; BF16."
+      ]
     },
     {
       "id": "meta-models/Muse-Glimmer-30B",
@@ -1449,14 +1453,14 @@
       "runtime": "sglang",
       "revision": "cec94fcfd6512f2cfe708138c32533b346ea4f69",
       "download_gb": 59.581830875,
+      "description": "Muse Glimmer 30B, dense model with sliding-window attention on three layers in four; BF16.",
       "family": "Muse",
       "license": "apache-2.0",
       "released": "2026-08-09",
       "modalities": [
         "text",
         "image"
-      ],
-      "description": "Muse Glimmer 30B, dense model with sliding-window attention on three layers in four; BF16."
+      ]
     },
     {
       "id": "google/gemma-4-26B-A4B-it",
@@ -1489,14 +1493,14 @@
       "runtime": "sglang",
       "revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
       "download_gb": 51.644340088,
+      "description": "Gemma 4 26B-A4B instruct, MoE with sliding-window attention and wide global layers; BF16.",
       "family": "Gemma",
       "license": "apache-2.0",
       "released": "2026-03-11",
       "modalities": [
         "text",
         "image"
-      ],
-      "description": "Gemma 4 26B-A4B instruct, MoE with sliding-window attention and wide global layers; BF16."
+      ]
     }
   ]
 }

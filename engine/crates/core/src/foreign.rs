@@ -3,7 +3,7 @@
 use crate::hw;
 use crate::proc_ident;
 use nvml_wrapper::enums::device::UsedGpuMemory;
-use nvml_wrapper::{Device, Nvml};
+use nvml_wrapper::Device;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
@@ -169,7 +169,7 @@ pub fn wait_released(gpus: &[u32], pids: &[i32], timeout: Duration) -> bool {
     if gpus.is_empty() || pids.is_empty() {
         return true;
     }
-    let Ok(nvml) = Nvml::init() else {
+    let Ok(nvml) = crate::nvidia_driver::init_nvml() else {
         return false;
     };
     let deadline = Instant::now() + timeout;
