@@ -1,0 +1,37 @@
+name: ci-badge
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [requested, completed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-badge
+  cancel-in-progress: false
+
+jobs:
+  badge:
+    if: github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the state of CI on main to the badges branch
+        env:
+          ACTION: ${{ github.event.action }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          case "${ACTION}:${CONCLUSION}" in
+            requested:*) msg=running color=yellow ;;
+            *:success) msg=passing color=brightgreen ;;
+            *:failure | *:timed_out | *:startup_failure) msg=failing color=red ;;
+            *) msg="${CONCLUSION:-unknown}" color=lightgrey ;;
+          esac
+          mkdir badges && cd badges
+          git init -q -b badges
+          printf '{"schemaVersion":1,"label":"CI","message":"%s","color":"%s","cacheSeconds":300}\n' "${msg}" "${color}" >ci.json
+          git add ci.json
+          git -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com commit -q -m "CI ${msg}"
+          git push -q -f "https://x-access-token:${TOKEN}@github.com/${REPO}.git" badges
