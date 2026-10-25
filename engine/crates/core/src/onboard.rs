@@ -257,7 +257,7 @@ fn run_your_own() -> Result<Option<String>, String> {
 fn step_serve(model: &str) -> Result<(), String> {
     // Load the model on the GPUs that fit it; goethed waits until it answers.
     heading(2, "Serve through an API", None);
-    println!("Starting {model} on your GPUs. The first start can take a few minutes while kernels are built.\n");
+    println!("Loading {model} into VRAM...\n");
     let params = serde_json::json!({
         "model_id": model, "gpus": null, "ctx": null, "max_conc": null, "tp": null,
         "force": false, "yes": false, "replica": false, "extra_sglang_args": [], "async_finish": true,

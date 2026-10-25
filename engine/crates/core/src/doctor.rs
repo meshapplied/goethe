@@ -119,7 +119,14 @@ fn check_nvidia_driver() -> Check {
     if let Some(why) = crate::nvidia_driver::diagnose(&probe) {
         return check("nvidia_driver", "FAIL", why);
     }
-    let version = probe.module_version.clone().unwrap_or_else(|| "version unknown".into());
+    let mut version = probe.module_version.clone().unwrap_or_else(|| "version unknown".into());
+    let home = crate::paths::goethe_home();
+    if crate::cuda_compat::lib_dir(&home).is_some() {
+        if let Err(why) = crate::cuda_compat::check(&home) {
+            return check("nvidia_driver", "FAIL", format!("{version} is older than 580 (CUDA 13) and {why}; upgrade the driver to 580 or newer"));
+        }
+        version.push_str(" with CUDA 13 forward compatibility");
+    }
     match crate::nvidia_driver::unstarted(&probe, &crate::nvidia_driver::started_bus_ids()) {
         Some((true, why)) => check("nvidia_driver", "FAIL", why),
         Some((false, note)) => check("nvidia_driver", "WARN", format!("{version}; {note}")),

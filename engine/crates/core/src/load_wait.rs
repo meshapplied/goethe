@@ -18,6 +18,7 @@ pub fn wait_after_load_stdout(stdout: &str, no_wait: bool) -> Result<(), String>
 
 pub fn wait_for_instance(instance_id: &str, timeout: Duration) -> Result<(), String> {
     // Poll ps until the instance is RUNNING, printing its notices; a final status or a vanished row ends the wait.
+    eprintln!("Loading into VRAM...");
     let deadline = Instant::now() + timeout;
     let mut printed_notices = 0usize;
     while Instant::now() < deadline {

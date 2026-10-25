@@ -245,6 +245,7 @@ pub fn command(spec: &EngineSpec) -> Command {
         .env("PATH", engine_path(spec.home))
         .envs(default_cuda_home(spec.home, &card_vars))
         .envs(arch_env(spec.home, spec.cc))
+        .envs(crate::cuda_compat::env(spec.home))
         .envs(compiler_env())
         .envs(card_vars)
         .env("CUDA_VISIBLE_DEVICES", gpus.join(","))
