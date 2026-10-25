@@ -325,6 +325,19 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
         gpu_csv(&plan.gpus),
         calc::describe(&need)
     );
+    let mut reduced = Vec::new();
+    if plan.ctx < req.ctx {
+        reduced.push(format!("context {} (asked {})", plan.ctx, req.ctx));
+    }
+    if plan.max_conc < req.max_conc {
+        reduced.push(format!("{} parallel requests (asked {})", plan.max_conc, req.max_conc));
+    }
+    if !reduced.is_empty() {
+        notices.push_str(&format!(
+            "reduced to fit: {}; pick more GPUs with --gpu, or set --ctx / --max-conc\n",
+            reduced.join(", ")
+        ));
+    }
     if !copies.is_empty() {
         let list: Vec<String> = copies.iter().map(|c| format!("{} on GPU {} (port {})", c.0, c.2, c.3)).collect();
         notices.push_str(&format!("another replica of {model_id}; already loaded: {}\n", list.join(", ")));
@@ -604,20 +617,38 @@ fn wait_engine_ready(s: &Starting) -> Startup {
             PortOwner::Ours => alive && health_ok(s.port, &s.engine_key) && serves(s.port, &s.engine_key, &s.params.model_id),
             PortOwner::Nobody => false,
         };
-        let step = crate::startup_stall::poll_startup_step(
-            &mut tracker,
-            now_epoch_secs(),
-            alive,
-            log_file_len(&s.log_path),
-            ready,
-            hard_cap,
-        );
+        let progress = log_file_len(&s.log_path) + tree_cpu_ticks(&proc_ident::instance_pids(&s.identity));
+        let step = crate::startup_stall::poll_startup_step(&mut tracker, now_epoch_secs(), alive, progress, ready, hard_cap);
         match step {
             crate::startup_stall::StartupStep::Ready => return Startup::Ready,
-            crate::startup_stall::StartupStep::Failed(_) => return Startup::Failed,
+            crate::startup_stall::StartupStep::Failed(why) => {
+                let reason = match why {
+                    crate::startup_stall::StartupFail::ProcessGone => "the engine process exited".to_string(),
+                    crate::startup_stall::StartupFail::LogStalled => format!(
+                        "no log output and no CPU work for {} s; goethed stopped it",
+                        crate::startup_stall::LOG_STALL_SECS
+                    ),
+                    crate::startup_stall::StartupFail::HardCap => {
+                        format!("not ready after {hard_cap} s (GOETHE_HEALTH_POLL_TIMEOUT_SEC); goethed stopped it")
+                    }
+                };
+                append_goethed_log(&s.home, &format!("{}: startup failed: {reason}\n", s.instance_id));
+                return Startup::Failed;
+            }
             crate::startup_stall::StartupStep::Continue => thread::sleep(Duration::from_millis(500)),
         }
     }
+}
+
+fn tree_cpu_ticks(pids: &[i32]) -> u64 {
+    // CPU time of the engine's processes and their reaped children: kernel builds show up here while the log is quiet.
+    pids.iter()
+        .filter_map(|p| std::fs::read_to_string(format!("/proc/{p}/stat")).ok())
+        .map(|stat| {
+            let fields: Vec<&str> = stat.rsplit_once(')').map_or("", |(_, rest)| rest).split_whitespace().collect();
+            (11..=14).filter_map(|i| fields.get(i)?.parse::<u64>().ok()).sum::<u64>()
+        })
+        .sum()
 }
 
 fn learn_overhead(s: &Starting) {
@@ -1897,5 +1928,18 @@ mod tests {
         let auto: toml::Value = toml::from_str("kv_cache_dtype = \"auto\"").unwrap();
         assert_eq!(kv_bytes_per_token(&row(1, None), &fp8), 50);
         assert_eq!(kv_bytes_per_token(&row(1, None), &auto), 100);
+    }
+
+    #[test]
+    fn engine_cpu_time_counts_as_startup_progress() {
+        let me = std::process::id() as i32;
+        let before = tree_cpu_ticks(&[me]);
+        let mut x = 0u64;
+        for i in 0..30_000_000u64 {
+            x = x.wrapping_add(i * i);
+        }
+        assert!(x > 0);
+        assert!(tree_cpu_ticks(&[me]) >= before);
+        assert_eq!(tree_cpu_ticks(&[i32::MAX]), 0);
     }
 }

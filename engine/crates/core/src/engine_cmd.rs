@@ -94,6 +94,13 @@ pub fn new_engine_key() -> Result<String, String> {
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+fn engine_path(home: &Path) -> OsString {
+    // The py-env's bin first, so run-time kernel builds find its ninja (and python) on machines without them.
+    let mut dirs = vec![home.join("py-env/bin")];
+    dirs.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into())));
+    std::env::join_paths(dirs).unwrap_or_default()
+}
+
 fn kept_env() -> Vec<(OsString, OsString)> {
     std::env::vars_os()
         .filter(|(k, _)| {
@@ -133,11 +140,15 @@ fn arch_env(home: &Path, cc: &str) -> Vec<(String, String)> {
     };
     let cache = home.join("cache").join("jit").join(arch.tag());
     let dir = |name: &str| cache.join(name).to_string_lossy().into_owned();
-    vec![
+    let mut env = vec![
         ("TORCH_CUDA_ARCH_LIST".to_string(), arch.target.to_string()),
         ("TORCH_EXTENSIONS_DIR".to_string(), dir("torch_extensions")),
         ("TVM_FFI_CACHE_DIR".to_string(), dir("tvm-ffi")),
-    ]
+    ];
+    if arch.nvfp4 == crate::gpu_arch::Nvfp4Path::MarlinAll {
+        env.push(("SGLANG_DISABLE_SILU_FP4_QUANT_FUSION".to_string(), "1".to_string()));
+    }
+    env
 }
 
 fn memory_args(spec: &EngineSpec, extras: &[String]) -> Vec<String> {
@@ -231,6 +242,7 @@ pub fn command(spec: &EngineSpec) -> Command {
     let card_vars = card_env(spec);
     cmd.env_clear()
         .envs(kept_env())
+        .env("PATH", engine_path(spec.home))
         .envs(default_cuda_home(spec.home, &card_vars))
         .envs(arch_env(spec.home, spec.cc))
         .envs(compiler_env())
@@ -398,5 +410,19 @@ mod tests {
         assert_eq!(crate::chooser::engine_args(&m, 4096, 8), vec!["--max-mamba-cache-size".to_string(), "40".to_string()]);
         assert!(crate::memory_spec::installed(Path::new("/nonexistent"), &card).is_none());
         assert!(check_extra_args(&["--max-mamba-cache-size=4".to_string()]).is_err());
+    }
+
+    #[test]
+    fn engines_find_the_py_env_tools_first() {
+        let path = engine_path(Path::new("/h"));
+        let first = std::env::split_paths(&path).next().unwrap();
+        assert_eq!(first, Path::new("/h/py-env/bin"));
+    }
+
+    #[test]
+    fn marlin_only_gpus_skip_the_blackwell_fp4_activation_kernel() {
+        let has = |cc: &str| arch_env(Path::new("/h"), cc).iter().any(|(k, v)| k == "SGLANG_DISABLE_SILU_FP4_QUANT_FUSION" && v == "1");
+        assert!(has("8.0") && has("8.6") && has("8.9") && has("9.0"));
+        assert!(!has("10.0") && !has("12.0"));
     }
 }
