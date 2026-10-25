@@ -263,6 +263,8 @@ fn fetch_pkg_file(base: &str, rel: &str, dest: &Path) -> Result<(), String> {
     fs::write(dest, buf).map_err(|e| e.to_string())
 }
 
+const PROPAGATING: &str = "a new release may still be propagating through the package host's cache (up to 10 minutes): run goethe update again in a few minutes, nothing was changed";
+
 fn verify_sums_signature(home: &Path, tmp: &Path) -> Result<(), String> {
     let pub_pem = home.join("release_pub.pem");
     if !pub_pem.is_file() {
@@ -278,7 +280,7 @@ fn verify_sums_signature(home: &Path, tmp: &Path) -> Result<(), String> {
         .status()
         .map_err(|e| format!("openssl verify: {e}"))?;
     if !status.success() {
-        return Err("SHA256SUMS signature verification failed".to_string());
+        return Err(format!("SHA256SUMS signature verification failed; {PROPAGATING}"));
     }
     Ok(())
 }
@@ -300,7 +302,7 @@ fn fetch_verified(base: &str, sums: &Path, rel: &str, tmp: &Path) -> Result<Path
     let part = tmp.join(rel.replace('/', "__"));
     fetch_pkg_file(base, rel, &part)?;
     if sha256_file(&part)? != expected {
-        return Err(format!("checksum mismatch for {rel}"));
+        return Err(format!("checksum mismatch for {rel}; {PROPAGATING}"));
     }
     Ok(part)
 }

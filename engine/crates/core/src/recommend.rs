@@ -313,7 +313,7 @@ mod tests {
     }
 
     fn view(gpus: Vec<GpuState>) -> View {
-        let hw = HardwareState { profiled_at: "t".into(), driver: "t".into(), gpus, links: vec![], host: None, environment: None };
+        let hw = HardwareState { profiled_at: "t".into(), driver: "t".into(), gpus, links: vec![], unavailable: vec![], host: None, environment: None };
         let dir = tempfile::tempdir().unwrap();
         View::new(dir.path(), hw)
     }
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn capacity_counts_allowed_gpus_as_empty() {
-        let hw = HardwareState { profiled_at: "t".into(), driver: "t".into(), gpus: vec![gpu(2, 2, true)], links: vec![], host: None, environment: None };
+        let hw = HardwareState { profiled_at: "t".into(), driver: "t".into(), gpus: vec![gpu(2, 2, true)], links: vec![], unavailable: vec![], host: None, environment: None };
         let dir = tempfile::tempdir().unwrap();
         let busy = View::new(dir.path(), hw.clone());
         let whole = View::capacity(dir.path(), hw);

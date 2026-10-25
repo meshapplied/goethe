@@ -138,6 +138,12 @@ fn arch_env(home: &Path, cc: &str) -> Vec<(String, String)> {
     ]
 }
 
+fn compiler_env() -> Vec<(String, String)> {
+    // The host compiler for run-time kernel builds; CXX and CC from goethed's environment win.
+    let inherited = std::env::var("NVCC_APPEND_FLAGS").ok();
+    crate::host_compiler::engine_env(crate::host_compiler::find().as_ref(), inherited.as_deref())
+}
+
 fn card_env(spec: &EngineSpec) -> Vec<(String, String)> {
     // Card env table for every runtime, top-level TERNARY_* keys only for runtime ternary, card pythonpath always.
     let home = spec.home;
@@ -216,6 +222,7 @@ pub fn command(spec: &EngineSpec) -> Command {
         .envs(kept_env())
         .envs(default_cuda_home(spec.home, &card_vars))
         .envs(arch_env(spec.home, spec.cc))
+        .envs(compiler_env())
         .envs(card_vars)
         .env("CUDA_VISIBLE_DEVICES", gpus.join(","))
         .env("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
