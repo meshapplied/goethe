@@ -249,6 +249,7 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
                     max_conc: r.get::<_, i64>(4)?.max(1) as u64,
                     marlin_extra_gb: install::card_marlin_extra_gb(&card),
                     supported_sm: install::card_supported_sm(&card),
+                    linear_state_bytes: crate::model_facts::linear_state_bytes_in_dir(&home.join(r.get::<_, String>(11)?)),
                 },
             })
         })

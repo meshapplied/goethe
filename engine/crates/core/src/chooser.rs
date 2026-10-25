@@ -1,6 +1,8 @@
 // Tensor parallel size and GPU set selection for goethe load.
 
 use crate::calc::{missing_gb, shortfall, Need, BASE_OVERHEAD_GB};
+
+const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 use crate::engine_overhead::Learned;
 use crate::gpu_arch;
 use crate::hw::HardwareState;
@@ -18,6 +20,7 @@ pub struct ChooserInput {
     pub max_conc: u64,
     pub marlin_extra_gb: f64,
     pub supported_sm: Vec<String>,
+    pub linear_state_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,14 +64,26 @@ pub fn kv_shard(t: usize, num_kv_heads: u64, attention: &str) -> f64 {
     }
 }
 
+pub fn kv_tokens(ctx: u64, max_conc: u64) -> u64 {
+    // The KV pool holds one request at the full context, or every parallel request at a quarter of it.
+    ctx.max((max_conc.max(1) * ctx).div_ceil(4))
+}
+
+pub fn state_slots(max_conc: u64) -> u64 {
+    // Linear-attention state slots goethe asks SGLang for: two per parallel request (the second keeps prefix states).
+    (2 * max_conc).max(4)
+}
+
 pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
-    // Per GPU: sharded weights (plus the Marlin copy where cc keeps one), sharded KV for min(conc, 4) contexts, 1.8 GB.
+    // Per GPU: sharded weights (plus the Marlin copy where cc keeps one), the sharded KV pool, the state slots, 1.8 GB.
     let shard = kv_shard(tp, input.num_kv_heads, &input.attention);
-    let tokens = input.ctx as f64 * input.max_conc.min(4) as f64;
     let marlin = if gpu_arch::nvfp4_dual_copy(cc) { input.marlin_extra_gb } else { 0.0 };
+    let state_gb = input.linear_state_bytes as f64 / GIB;
+    let installed_state = 4.0 * state_gb;
     Need {
-        weights: (input.static_vram_gb + marlin) / tp as f64,
-        kv: tokens * input.kv_bytes_per_token as f64 * 1e-9 / shard,
+        weights: ((input.static_vram_gb - installed_state).max(0.0) + marlin) / tp as f64,
+        kv: kv_tokens(input.ctx, input.max_conc) as f64 * input.kv_bytes_per_token as f64 * 1e-9 / shard,
+        state: state_slots(input.max_conc) as f64 * state_gb / tp as f64,
         overhead: BASE_OVERHEAD_GB,
     }
 }
@@ -81,8 +96,8 @@ pub fn with_learned(base: Need, learned: Learned) -> Need {
     // Fold what a model taught us on a GPU type and tp into the budget parts: static extra and non-static overhead.
     Need {
         weights: base.weights + learned.static_gb,
-        kv: base.kv,
         overhead: base.overhead + learned.overhead_gb,
+        ..base
     }
 }
 
@@ -122,11 +137,28 @@ pub fn plan_with(
         let tp = pinned_tp.unwrap_or(pg.len());
         if tp != pg.len() {
             return Err(PlanError {
-                message: format!("--tp {tp} disagrees with {} GPUs on --gpus", pg.len()),
+                message: format!("--tp {tp} disagrees with {} GPUs on --gpu", pg.len()),
                 gpus: Vec::new(),
             });
         }
-        return fixed_plan(input, gpus, pg, learned);
+        if !valid_tp_values(input, MAX_TP).contains(&tp) {
+            let splits = valid_tp_values(input, gpus.len().max(1));
+            return Err(PlanError {
+                message: format!(
+                    "this model cannot be split over {tp} GPUs: its {} attention heads and {} KV heads allow {}; name that many GPUs with --gpu",
+                    input.num_attention_heads,
+                    input.num_kv_heads,
+                    or_list(&splits)
+                ),
+                gpus: Vec::new(),
+            });
+        }
+        return fixed_plan(input, gpus, pg, learned).map_err(|mut e| {
+            if let Some(hint) = split_hint(input, gpus, hw, tp, learned) {
+                e.message = format!("{}\n{hint}", e.message);
+            }
+            e
+        });
     }
     let eligible: Vec<GpuPlacementInput> =
         gpus.iter().filter(|g| gpu_arch::model_runs_on(&input.supported_sm, &g.cc)).cloned().collect();
@@ -139,6 +171,27 @@ pub fn plan_with(
             .ok_or_else(|| closest_miss(input, &eligible, hw, tp, learned));
     }
     auto_plan(input, &eligible, hw, learned)
+}
+
+const MAX_TP: usize = 64;
+
+fn or_list(v: &[usize]) -> String {
+    let s: Vec<String> = v.iter().map(|n| n.to_string()).collect();
+    match s.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+        _ => s.join(""),
+    }
+}
+
+fn split_hint(input: &ChooserInput, gpus: &[GpuPlacementInput], hw: Option<&HardwareState>, tp: usize, learned: LearnedAt) -> Option<String> {
+    // When the named GPUs are too few, the smallest larger split that fits, as a --gpu list to copy.
+    let eligible: Vec<GpuPlacementInput> =
+        gpus.iter().filter(|g| gpu_arch::model_runs_on(&input.supported_sm, &g.cc)).cloned().collect();
+    valid_tp_values(input, MAX_TP).into_iter().filter(|t| *t > tp).find_map(|t| {
+        let set = best_fit(input, &eligible, hw, t, learned)?;
+        let names: Vec<String> = set.gpus.iter().map(|g| format!("gpu{g}")).collect();
+        Some(format!("it fits split over {t} GPUs: --gpu {}", names.join(" ")))
+    })
 }
 
 fn no_arch_message(input: &ChooserInput, gpus: &[GpuPlacementInput]) -> String {
@@ -299,6 +352,7 @@ mod tests {
             max_conc: 4,
             marlin_extra_gb: 0.0,
             supported_sm: Vec::new(),
+            linear_state_bytes: 0,
         }
     }
 
@@ -443,8 +497,54 @@ mod tests {
     fn ctx_shrinks_when_tight() {
         let mut m = inp();
         m.ctx = 131072;
-        m.kv_bytes_per_token = 200_000;
+        m.kv_bytes_per_token = 600_000;
         let plan = pick_load_plan(&m, &[gpu(3, 95.0, false)], None, None, None).unwrap();
         assert!(plan.ctx < 131072);
+    }
+
+    #[test]
+    fn the_kv_pool_holds_one_full_context_or_every_request_at_a_quarter() {
+        assert_eq!(kv_tokens(131072, 1), 131072);
+        assert_eq!(kv_tokens(131072, 4), 131072);
+        assert_eq!(kv_tokens(131072, 8), 262144);
+        assert_eq!(kv_tokens(8192, 32), 65536);
+        assert_eq!((state_slots(1), state_slots(8)), (4, 16));
+    }
+
+    #[test]
+    fn hybrid_models_budget_their_state_slots_instead_of_four_requests_in_the_weights() {
+        let state: u64 = 48 * (48 * 128 * 128 * 4 + (2 * 16 * 128 + 48 * 128) * 3 * 2);
+        let gib = 1024.0_f64.powi(3);
+        let m = ChooserInput {
+            static_vram_gb: 21.0,
+            kv_bytes_per_token: 65536,
+            num_attention_heads: 24,
+            num_kv_heads: 4,
+            attention: "hybrid".to_string(),
+            ctx: 131072,
+            max_conc: 8,
+            linear_state_bytes: state,
+            ..inp()
+        };
+        let n = need(&m, 1, "9.0");
+        assert!((n.weights - (21.0 - 4.0 * state as f64 / gib)).abs() < 1e-9, "{n:?}");
+        assert!((n.kv - 262144.0 * 65536.0 * 1e-9).abs() < 1e-9, "17.2 GB, not 4 full contexts: {n:?}");
+        assert!((n.state - 16.0 * state as f64 / gib).abs() < 1e-9 && n.state > 2.2 && n.state < 2.4, "{n:?}");
+        let two = need(&m, 2, "9.0");
+        assert!((two.state - n.state / 2.0).abs() < 1e-9 && (two.kv - n.kv / 2.0).abs() < 1e-9);
+        assert_eq!(need(&inp(), 1, "9.0").state, 0.0);
+    }
+
+    #[test]
+    fn named_gpus_must_split_the_model_and_too_few_get_a_fitting_split() {
+        let m = ChooserInput { num_attention_heads: 24, num_kv_heads: 4, ..inp() };
+        let gpus = [gpu(0, 40.0, false), gpu(1, 40.0, false), gpu(2, 40.0, false), gpu(3, 40.0, false)];
+        let three = pick_load_plan(&m, &gpus, None, None, Some(&[0, 1, 2])).unwrap_err();
+        assert!(three.message.contains("cannot be split over 3 GPUs") && three.message.contains("1, 2 or 4"), "{}", three.message);
+        let two = pick_load_plan(&m, &gpus, None, None, Some(&[2, 3])).unwrap();
+        assert_eq!((two.tp, two.gpus), (2, vec![2, 3]));
+        let big = ChooserInput { static_vram_gb: 60.0, ..m };
+        let one = pick_load_plan(&big, &gpus, None, None, Some(&[3])).unwrap_err();
+        assert!(one.message.contains("missing") && one.message.contains("it fits split over 2 GPUs: --gpu gpu"), "{}", one.message);
     }
 }
