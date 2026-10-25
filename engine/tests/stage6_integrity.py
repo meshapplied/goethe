@@ -7,6 +7,7 @@ import os
 import platform
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 from lib.goethe_test import (
@@ -47,11 +48,28 @@ def _mini_cdn(cdn: Path, pub: Path) -> None:
         raise RuntimeError(f"subst_install_pubkey failed: {rr.stderr}")
 
 
+def _mid_release(tampered: Path, good: Path, url: str, home: Path) -> None:
+    """A stale file that the CDN replaces during the install is retried until it matches."""
+    boot = tampered / "pyenv" / "bootstrap.sh"
+    stale = boot.read_text()
+    timer = threading.Timer(2.0, lambda: shutil.copy2(good / "pyenv" / "bootstrap.sh", boot))
+    timer.start()
+    try:
+        out = _install(tampered / "install.sh", url, home, {"GOETHE_VERIFY_ONLY": "1", "GOETHE_FETCH_RETRIES": "10",
+                                                            "GOETHE_FETCH_RETRY_SECS": "1"})
+    finally:
+        timer.join()
+        boot.write_text(stale)
+    if not out.startswith("rc=0") or "retrying every 30 s" not in out or "verified CDN artifacts" not in out:
+        raise RuntimeError(f"mid-release retry: {out[-500:]}")
+
+
 def _install(install_sh: Path, pkg_url: str, home: Path, extra: dict[str, str] | None = None) -> str:
     """Run install.sh against pkg_url into home; return rc-prefixed combined output."""
     env = {
         "GOETHE_HOME": str(home / "g"), "GOETHE_PKG_URL": pkg_url, "GOETHE_NO_LINK": "1",
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home), **(extra or {}),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home),
+        "GOETHE_FETCH_RETRIES": "1", "GOETHE_FETCH_RETRY_SECS": "0", **(extra or {}),
     }
     rr = subprocess.run(["bash", str(install_sh)], env=env, capture_output=True, text=True, timeout=120,
                         stdin=subprocess.DEVNULL)
@@ -140,6 +158,7 @@ def main() -> None:
                     raise RuntimeError(f"{name}: expected {want!r}: {out[-500:]}")
             if marker.exists():
                 raise RuntimeError("bootstrap executed after checksum failure")
+            _mid_release(tampered, cdn, f"{base}/{tampered.name}", home / "mid-release")
     finally:
         if srv is not None:
             srv.stop()

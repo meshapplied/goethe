@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.3 (2026-10-25)
+
+- The installer handles far more machines without stopping. It installs missing `curl`, `zstd`, `openssl`, CA certificates, a C++ compiler and nginx with apt, dnf, yum or zypper (asking first unless root; `GOETHE_INSTALL_DEPS=1`/`0`). For the GPU it tells apart: no GPU, no driver, a driver installed but not loaded (it runs `modprobe`, and names Secure Boot when that blocks it), a driver older than 580, NVIDIA's proprietary module on a Blackwell GPU (it switches to the open module), a GPU that did not start (it explains the power cycle), some GPUs not starting, and GPUs older than compute capability 8.0. A driver installed from NVIDIA's `.run` file is removed before the packaged driver replaces it. GPU problems warn and the install continues; `GOETHE_REQUIRE_GPU=1` still stops. It checks disk space before downloading, says what it does when consent was given in advance, and survives an unset `HOME`.
+- Right after a release, the package host's cache can serve old and new files side by side for up to 10 minutes, which made installs stop with `checksum mismatch`. The installer now refreshes the signed checksums and retries every 30 s for up to 12 minutes; `goethe update` says to run it again in a few minutes and changes nothing.
+- Kernels built on a model's first load use the system C++ compiler, which Goethe now finds and passes to engines (`CXX`, `CC`, `CUDAHOSTCXX`). A gcc newer than the bundled nvcc 13.0 supports (above 15) gets `-allow-unsupported-compiler`. `goethe doctor` has a compiler check, and a model that fails because of the compiler, missing GPU kernels or an old driver says so in its failure report.
+- `goethe doctor` and `goethe start` recognise a GPU the driver did not start: the proprietary module on Blackwell, or a card that failed to initialise. `goethe start` explains such problems before the first step instead of failing on them. A GPU that does not answer no longer breaks GPU listing and placement for the others; it is skipped and shown in `goethe doctor`.
+- Ada GPUs (compute capability 8.9: RTX 4090, RTX 6000 Ada, L40S, L4) are supported, on the same path as Ampere.
+
 ## 0.1.2 (2026-10-25)
 
 - The installer no longer stops with `No: unbound variable` when `nvidia-smi` is installed but finds no usable GPU ("No devices were found", for example after the GPU crashed). Only output shaped like a driver version is used. Otherwise the version comes from the loaded kernel module (`/proc/driver/nvidia/version`), and with neither the machine is treated as having no driver.

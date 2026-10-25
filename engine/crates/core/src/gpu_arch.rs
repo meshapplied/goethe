@@ -35,6 +35,14 @@ pub const SUPPORTED: &[Arch] = &[
         covered_by: &[],
     },
     Arch {
+        major: 8,
+        minor: 9,
+        family: "Ada (RTX 4090, RTX 6000 Ada, L40S, L4)",
+        nvfp4: Nvfp4Path::MarlinAll,
+        target: "8.9",
+        covered_by: &["8.6"],
+    },
+    Arch {
         major: 9,
         minor: 0,
         family: "Hopper (H100, H200, GH200)",
@@ -147,7 +155,7 @@ pub fn supported_list() -> Vec<String> {
 }
 
 pub fn supported_text() -> String {
-    // "8.0, 8.6, 9.0, 10.0, 10.3, 12.0 or 12.1" for messages.
+    // "8.0, 8.6, 8.9, 9.0, 10.0, 10.3, 12.0 or 12.1" for messages.
     let all = supported_list();
     match all.split_last() {
         Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
@@ -188,9 +196,9 @@ mod tests {
 
     #[test]
     fn the_table_answers_every_question_from_one_place() {
-        assert_eq!(supported_list(), sm(&["8.0", "8.6", "9.0", "10.0", "10.3", "12.0", "12.1"]));
-        assert_eq!(supported_text(), "8.0, 8.6, 9.0, 10.0, 10.3, 12.0 or 12.1");
-        assert!(is_supported("9.0") && is_supported("8.0") && !is_supported("8.9") && !is_supported("7.5"));
+        assert_eq!(supported_list(), sm(&["8.0", "8.6", "8.9", "9.0", "10.0", "10.3", "12.0", "12.1"]));
+        assert_eq!(supported_text(), "8.0, 8.6, 8.9, 9.0, 10.0, 10.3, 12.0 or 12.1");
+        assert!(is_supported("9.0") && is_supported("8.9") && !is_supported("8.7") && !is_supported("7.5"));
         assert_eq!(lookup("10.3").map(|a| a.nvfp4), Some(Nvfp4Path::Native));
         assert_eq!(lookup("9.0").map(|a| a.nvfp4), Some(Nvfp4Path::MarlinAll));
         assert_eq!(parse_cc("12"), Some((12, 0)));
@@ -200,14 +208,14 @@ mod tests {
     #[test]
     fn doctor_lists_every_microarchitecture_with_its_family() {
         let text = microarchitectures_text();
-        assert!(text.starts_with("sm_80 (Ampere data center), sm_86 (Ampere), sm_90a (Hopper), sm_100a (Blackwell data center)"), "{text}");
+        assert!(text.starts_with("sm_80 (Ampere data center), sm_86 (Ampere), sm_89 (Ada), sm_90a (Hopper), sm_100a (Blackwell data center)"), "{text}");
         assert!(text.ends_with("sm_121a (Blackwell)"), "{text}");
     }
 
     #[test]
     fn arch_specific_targets_for_hopper_and_blackwell() {
         let tags: Vec<String> = SUPPORTED.iter().map(Arch::tag).collect();
-        assert_eq!(tags, sm(&["sm_80", "sm_86", "sm_90a", "sm_100a", "sm_103a", "sm_120a", "sm_121a"]));
+        assert_eq!(tags, sm(&["sm_80", "sm_86", "sm_89", "sm_90a", "sm_100a", "sm_103a", "sm_120a", "sm_121a"]));
     }
 
     #[test]
@@ -233,6 +241,6 @@ mod tests {
     #[test]
     fn an_empty_list_means_every_supported_gpu() {
         assert!(model_runs_on(&[], "9.0") && model_runs_on(&[], "12.1"));
-        assert!(!model_runs_on(&[], "8.9") && !model_runs_on(&sm(&["8.9"]), "8.9"), "unsupported GPUs never run");
+        assert!(!model_runs_on(&[], "7.5") && !model_runs_on(&sm(&["7.5"]), "7.5"), "unsupported GPUs never run");
     }
 }

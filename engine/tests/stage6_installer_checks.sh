@@ -30,7 +30,7 @@ make_shim_dir() {
   # A PATH directory with the basic tools install.sh needs plus the real curl, zstd and openssl.
   local dir="$1" t
   mkdir -p "${dir}"
-  for t in bash env uname sed awk tr sha256sum mv mkdir printf id head getconf ldd curl zstd openssl; do
+  for t in bash env uname sed awk tr sha256sum mv mkdir printf id head getconf ldd curl zstd openssl grep cut df; do
     ln -sf "$(tool_path "${t}")" "${dir}/${t}"
   done
   echo "${dir}"
@@ -51,7 +51,7 @@ run_install() {
   env -i HOME="${WORK}" GOETHE_HOME="${home}/goethe" GOETHE_PKG_URL="file:///nonexistent" GOETHE_NO_LINK=1 \
     GOETHE_REQUIRE_GPU="${GOETHE_REQUIRE_GPU:-}" GOETHE_NVIDIA_VERSION_FILE="${GOETHE_NVIDIA_VERSION_FILE:-/nonexistent}" \
     GOETHE_PCI_DIR="${GOETHE_PCI_DIR:-${WORK}/no-pci}" GOETHE_OS_RELEASE="${GOETHE_OS_RELEASE:-/nonexistent}" \
-    GOETHE_INSTALL_DRIVER="${GOETHE_INSTALL_DRIVER:-}" container="${container:-}" PATH="${shim_dir}${path_tail:+:${path_tail}}" \
+    GOETHE_INSTALL_DRIVER="${GOETHE_INSTALL_DRIVER:-}" GOETHE_INSTALL_DEPS="${GOETHE_INSTALL_DEPS:-}" container="${container:-}" PATH="${shim_dir}${path_tail:+:${path_tail}}" \
     bash "${script}" 2>"${home}/stderr.txt" >/dev/null
   local rc=$?
   set -e
@@ -116,26 +116,26 @@ expect_fail glibc "glibc 2.28 is below minimum 2.30" "${SHIM}" "/usr/bin:/bin"
 
 SHIM="$(make_shim_dir "${WORK}/shim-driver")"
 fake "${SHIM}" nvidia-smi "575.57.08"
-expect_fail driver "575.57.08 is below minimum 580" "${SHIM}" "/usr/bin:/bin"
+expect_fail driver "NVIDIA driver 575.57.08 is older than 580" "${SHIM}" "/usr/bin:/bin"
 
 SHIM="$(make_shim_dir "${WORK}/shim-nogpu")"
-GOETHE_REQUIRE_GPU=1 expect_fail require-gpu "no usable NVIDIA driver found" "${SHIM}" ""
+GOETHE_REQUIRE_GPU=1 expect_fail require-gpu "no NVIDIA GPU found on this machine.*(GOETHE_REQUIRE_GPU=1)" "${SHIM}" ""
 
 OUT="$(run_install "${SHIM}" "")"
-if ! grep -q "WARNING: no usable NVIDIA driver" <<<"${OUT}" || grep -q "below minimum" <<<"${OUT}"; then
-  echo "missing-driver warning case: ${OUT}"
+if ! grep -q "WARNING: no NVIDIA GPU found" <<<"${OUT}" || grep -q "older than" <<<"${OUT}"; then
+  echo "no-GPU warning case: ${OUT}"
   exit 1
 fi
 
 SHIM="$(make_shim_dir "${WORK}/shim-nodevices")"
 fake "${SHIM}" nvidia-smi "No devices were found"
 OUT="$(run_install "${SHIM}" "")"
-if grep -q "unbound variable" <<<"${OUT}" || ! grep -q "WARNING: no usable NVIDIA driver" <<<"${OUT}"; then
+if grep -q "unbound variable" <<<"${OUT}" || ! grep -q "WARNING: no NVIDIA GPU found" <<<"${OUT}"; then
   echo "nvidia-smi without devices must read as no driver: ${OUT}"
   exit 1
 fi
 printf 'NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  575.57.08  Release Build\n' >"${WORK}/nvrm"
-GOETHE_NVIDIA_VERSION_FILE="${WORK}/nvrm" expect_fail driver-module "575.57.08 is below minimum 580" "${SHIM}" ""
+GOETHE_NVIDIA_VERSION_FILE="${WORK}/nvrm" expect_fail driver-module "NVIDIA driver 575.57.08 is older than 580" "${SHIM}" ""
 
 SHIM="$(make_shim_dir "${WORK}/shim-trunc")"
 LINES="$(wc -l <"${INSTALL}")"
@@ -181,15 +181,21 @@ recorder() {
 }
 
 driver_case() {
-  # Run the installer on a machine with one NVIDIA GPU and no driver; $1 os-release text, then env assignments.
-  local release="$1" shim t
+  # Run the installer on a machine with NVIDIA GPUs (DEVICES, default one Ampere); $1 os-release text, then env assignments.
+  local release="$1" shim t d n=0
   shift
   shim="$(make_shim_dir "${WORK}/shim-drv-$RANDOM")"
   for t in sudo apt-get ubuntu-drivers dpkg dnf modprobe; do recorder "${shim}" "${t}"; done
   ln -sf "$(tool_path timeout)" "${shim}/timeout"
-  mkdir -p "${WORK}/pci/0000:01:00.0"
-  echo 0x10de >"${WORK}/pci/0000:01:00.0/vendor"
-  echo 0x030200 >"${WORK}/pci/0000:01:00.0/class"
+  for t in "${EXTRA_TOOLS[@]}"; do rm -f "${shim}/${t}" && cp "${WORK}/tools/${t}" "${shim}/${t}"; done
+  rm -rf "${WORK}/pci"
+  for d in ${DEVICES:-0x2204}; do
+    n=$((n + 1))
+    mkdir -p "${WORK}/pci/0000:0${n}:00.0"
+    echo 0x10de >"${WORK}/pci/0000:0${n}:00.0/vendor"
+    echo 0x030200 >"${WORK}/pci/0000:0${n}:00.0/class"
+    echo "${d}" >"${WORK}/pci/0000:0${n}:00.0/device"
+  done
   printf '%s\n' "${release}" >"${WORK}/os-release"
   : >"${WORK}/calls.log"
   (
@@ -201,17 +207,17 @@ driver_case() {
 UBUNTU=$'ID=ubuntu\nID_LIKE=debian\nVERSION_ID="24.04"'
 OUT="$(driver_case "${UBUNTU}" GOETHE_INSTALL_DRIVER=1)"
 if ! grep -q "sudo timeout 900 ubuntu-drivers install --gpgpu nvidia:580-server-open" "${WORK}/calls.log" \
-  || ! grep -q "sudo modprobe nvidia" "${WORK}/calls.log" || grep -q "WARNING: no usable" <<<"${OUT}"; then
+  || ! grep -q "sudo modprobe nvidia" "${WORK}/calls.log" || grep -q "Goethe installs anyway" <<<"${OUT}"; then
   echo "ubuntu driver install case: $(cat "${WORK}/calls.log") ${OUT}"
   exit 1
 fi
 OUT="$(driver_case "${UBUNTU}" GOETHE_INSTALL_DRIVER=0)"
-if [[ -s "${WORK}/calls.log" ]] || ! grep -q "skipping the driver install" <<<"${OUT}"; then
+if [[ -s "${WORK}/calls.log" ]] || ! grep -q "skipped (GOETHE_INSTALL_DRIVER=0)" <<<"${OUT}"; then
   echo "declined driver install case: $(cat "${WORK}/calls.log") ${OUT}"
   exit 1
 fi
 OUT="$(driver_case "${UBUNTU}" GOETHE_INSTALL_DRIVER=1 container=docker)"
-if [[ -s "${WORK}/calls.log" ]] || ! grep -q "this is a container, so install the NVIDIA driver" <<<"${OUT}"; then
+if [[ -s "${WORK}/calls.log" ]] || ! grep -q "this is a container, so fix the NVIDIA driver" <<<"${OUT}"; then
   echo "container driver case: $(cat "${WORK}/calls.log") ${OUT}"
   exit 1
 fi
@@ -227,5 +233,80 @@ if ! grep -q "dnf config-manager --add-repo https://developer.download.nvidia.co
   echo "rocky driver install case: $(cat "${WORK}/calls.log") ${OUT}"
   exit 1
 fi
+
+mkdir -p "${WORK}/tools"
+tool() {
+  # A fake tool under WORK/tools: $1 name, $2 shell body.
+  printf '#!/bin/sh\n%s\n' "$2" >"${WORK}/tools/$1"
+  chmod +x "${WORK}/tools/$1"
+}
+smi() {
+  # A fake nvidia-smi: $1 what -L lists, $2 the driver version line, $3 the index,name,compute_cap lines.
+  tool nvidia-smi "case \"\$*\" in
+  -L) printf '%b' '$1' ;;
+  *driver_version*) printf '%b' '$2' ;;
+  *compute_cap*) printf '%b' '$3' ;;
+esac"
+}
+expect_out() {
+  # $1 case name, $2 grep pattern that must be in OUT, $3 optional pattern that must not.
+  if ! grep -q -- "$2" <<<"${OUT}" || { [[ -n "${3:-}" ]] && grep -q -- "$3" <<<"${OUT}"; }; then
+    echo "$1: expected '$2'${3:+ and no '$3'}: $(cat "${WORK}/calls.log") ${OUT}"
+    exit 1
+  fi
+}
+EXTRA_TOOLS=()
+
+tool modinfo "exit 0"
+EXTRA_TOOLS=(modinfo)
+OUT="$(driver_case "${UBUNTU}" GOETHE_INSTALL_DRIVER=1)"
+expect_out module-not-loaded "kernel module is not loaded" "Goethe installs anyway"
+if ! grep -q "sudo modprobe nvidia" "${WORK}/calls.log" || grep -q ubuntu-drivers "${WORK}/calls.log"; then
+  echo "module-not-loaded must load the module, not reinstall: $(cat "${WORK}/calls.log")"
+  exit 1
+fi
+tool modprobe "echo \"modprobe \$*\" >>${WORK}/calls.log; echo \"modprobe: ERROR: could not insert 'nvidia': Key was rejected by service\" >&2; exit 1"
+EXTRA_TOOLS=(modinfo modprobe)
+OUT="$(driver_case "${UBUNTU}" GOETHE_INSTALL_DRIVER=1)"
+expect_out secure-boot "Secure Boot blocks the NVIDIA module"
+
+printf 'NVRM version: NVIDIA UNIX x86_64 Kernel Module  580.82.07  Release Build\n' >"${WORK}/nvrm-closed"
+printf 'NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  580.82.07  Release Build\n' >"${WORK}/nvrm-open"
+smi "" "No devices were found\n" ""
+EXTRA_TOOLS=(nvidia-smi)
+OUT="$(DEVICES=0x2b85 driver_case "${UBUNTU}" GOETHE_INSTALL_DRIVER=1 GOETHE_NVIDIA_VERSION_FILE="${WORK}/nvrm-closed")"
+expect_out closed-blackwell "proprietary kernel module, which cannot start Blackwell"
+if ! grep -q "ubuntu-drivers install --gpgpu nvidia:580-server-open" "${WORK}/calls.log"; then
+  echo "closed module on Blackwell must switch to the open driver: $(cat "${WORK}/calls.log")"
+  exit 1
+fi
+OUT="$(DEVICES=0x2b85 driver_case "${UBUNTU}" GOETHE_INSTALL_DRIVER=1 GOETHE_NVIDIA_VERSION_FILE="${WORK}/nvrm-open")"
+expect_out failed-init "loaded but the GPU did not start; the card failed to initialise" "proprietary"
+if [[ -s "${WORK}/calls.log" ]]; then
+  echo "a GPU that failed to initialise must not trigger a driver install: $(cat "${WORK}/calls.log")"
+  exit 1
+fi
+smi "GPU 0: NVIDIA GeForce RTX 5090 (UUID: GPU-x)\n" "580.82.07\n" "0, NVIDIA GeForce RTX 5090, 12.0\n"
+OUT="$(DEVICES="0x2b85 0x2b85" driver_case "${UBUNTU}")"
+expect_out partial "1 of 2 NVIDIA GPUs did not start and will be skipped"
+smi "GPU 0: Tesla T4 (UUID: GPU-x)\n" "580.82.07\n" "0, Tesla T4, 7.5\n"
+OUT="$(DEVICES=0x1eb8 driver_case "${UBUNTU}")"
+expect_out old-arch "no supported GPU: gpu0 Tesla T4 (SM 7.5)"
+smi "GPU 0: A (UUID: a)\nGPU 1: B (UUID: b)\n" "580.82.07\n" "0, Tesla T4, 7.5\n1, NVIDIA L40S, 8.9\n"
+OUT="$(DEVICES="0x1eb8 0x26b9" driver_case "${UBUNTU}")"
+expect_out mixed-arch "gpu0 Tesla T4 (SM 7.5) is older than Goethe supports" "no supported GPU"
+
+EXTRA_TOOLS=()
+OUT="$(driver_case "${UBUNTU}" GOETHE_INSTALL_DRIVER=0 GOETHE_INSTALL_DEPS=1)"
+if ! grep -q "apt-get install -y -qq build-essential" "${WORK}/calls.log"; then
+  echo "a missing compiler must be installed with consent: $(cat "${WORK}/calls.log") ${OUT}"
+  exit 1
+fi
+OUT="$(driver_case "${UBUNTU}" GOETHE_INSTALL_DRIVER=0)"
+expect_out no-compiler "rerun with GOETHE_INSTALL_DEPS=1"
+tool df "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/x 100 90 1048576 90%% /\\n'"
+EXTRA_TOOLS=(df)
+OUT="$(driver_case "${UBUNTU}" GOETHE_INSTALL_DRIVER=0)"
+expect_out low-disk "only 1 GB free at"
 
 echo "stage6_installer_checks ok"
