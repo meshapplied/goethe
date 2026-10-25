@@ -6,9 +6,9 @@
   <img alt="NVIDIA CUDA 12.8 or newer" src="https://img.shields.io/badge/NVIDIA%20CUDA-%E2%89%A5%2012.8-76B900?logo=nvidia&logoColor=white">
   <img alt="GPU architectures sm_86 to sm_120" src="https://img.shields.io/badge/arch-sm__86%20%E2%80%93%20sm__120-76B900">
   <img alt="Written in Rust" src="https://img.shields.io/badge/language-Rust-B7410E?logo=rust&logoColor=white">
-  <img alt="Linux x86_64 and aarch64" src="https://img.shields.io/badge/OS-Linux%20x86__64%20%2F%20aarch64-333333?logo=linux&logoColor=white">
+  <img alt="Linux x86_64 and aarch64" src="https://img.shields.io/badge/OS-Linux%20x86__64%20%2F%20aarch64-FCC624?logo=linux&logoColor=black">
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
-  <a href="https://github.com/meshapplied/goethe/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/meshapplied/goethe/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/meshapplied/goethe/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmeshapplied%2Fgoethe%2Fbadges%2Fci.json&logo=githubactions&logoColor=white"></a>
   <br>
   <a href="https://meshapplied.com/docs"><img alt="Documentation at meshapplied.com/docs" src="https://img.shields.io/badge/docs-meshapplied.com%2Fdocs-87D7FF?logo=readthedocs&logoColor=white"></a>
 </p>
