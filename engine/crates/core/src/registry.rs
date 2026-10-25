@@ -45,6 +45,8 @@ pub struct RegistryModel {
     pub attention: Option<String>,
     #[serde(default)]
     pub kv_cache_dtype: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<crate::memory_spec::MemorySpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_sglang_args: Vec<String>,
     #[serde(default)]
@@ -333,6 +335,17 @@ fn validate_entry(m: &RegistryModel, errors: &mut Vec<String>) {
     if m.supported_sm.is_empty() {
         errors.push(format!("{}: supported_sm required", m.id));
     }
+    if let Some(mem) = &m.memory {
+        if mem.kv_bytes_per_token == 0 {
+            errors.push(format!("{}: memory.kv_bytes_per_token must be positive", m.id));
+        }
+        if (mem.state_bytes_per_slot > 0) != (mem.state_slots_per_request > 0) {
+            errors.push(format!("{}: memory state needs both state_bytes_per_slot and state_slots_per_request", m.id));
+        }
+        if mem.swa_bytes_per_token > 0 && mem.swa_window == 0 {
+            errors.push(format!("{}: memory.swa_window required with swa_bytes_per_token", m.id));
+        }
+    }
     for sm in &m.supported_sm {
         if !sm.contains('.') {
             eprintln!("warning: {}: supported_sm entry {sm} should look like 8.6 or 12.0", m.id);
@@ -434,7 +447,7 @@ fn warn_unknown_fields(text: &str) {
         "version", "models", "id", "architecture", "static_vram_gb", "kv_bytes_per_token",
         "kv_elems_per_token", "min_total_vram_gb", "supported_sm", "default_ctx", "max_ctx",
         "default_max_conc", "default_tp", "num_attention_heads", "num_kv_heads", "attention",
-        "kv_cache_dtype", "extra_sglang_args", "runtime", "pack_id", "base_model_id", "env",
+        "kv_cache_dtype", "memory", "extra_sglang_args", "runtime", "pack_id", "base_model_id", "env",
         "pythonpath", "revision", "gated", "manual_download", "download_gb", "description", "family",
         "license", "released", "modalities",
     ];
@@ -638,6 +651,7 @@ fn merge_overlay(dst: &mut RegistryModel, src: &RegistryModel) -> Result<(), Str
 
 fn merge_measured(dst: &mut RegistryModel, src: &RegistryModel) -> Result<(), String> {
     dst.static_vram_gb = src.static_vram_gb;
+    dst.memory = src.memory.clone();
     dst.kv_elems_per_token = src.kv_elems_per_token;
     dst.max_ctx = src.max_ctx;
     dst.num_attention_heads = src.num_attention_heads;
@@ -678,7 +692,7 @@ pub fn infer_one_entry(
         return Err("repository has no model weight files".to_string());
     }
     let weight_bytes = hf::weight_bytes_from_siblings(repo_id, &sha, &pre.siblings)?;
-    let state_bytes = (facts.swa_kv_elems_per_request * 2 + facts.linear_state_bytes_per_request) * 4;
+    let memory = crate::memory_spec::from_config(&cfg, None)?;
     let download_gb = hf::download_bytes(&pre.siblings) as f64 / 1e9;
     let mut extra = Vec::new();
     if sglang_infer::wants_remote_code(&cfg) {
@@ -688,7 +702,7 @@ pub fn infer_one_entry(
     let entry = RegistryModel {
         id: repo_id.to_string(),
         architecture: facts.architecture,
-        static_vram_gb: (weight_bytes as f64 + state_bytes as f64) / model_facts::GIB,
+        static_vram_gb: weight_bytes as f64 / model_facts::GIB,
         kv_bytes_per_token: None,
         kv_elems_per_token: Some(facts.kv_elems_per_token),
         min_total_vram_gb: None,
@@ -701,6 +715,7 @@ pub fn infer_one_entry(
         num_kv_heads: Some(facts.num_kv_heads),
         attention: Some(facts.attention),
         kv_cache_dtype: None,
+        memory: Some(memory),
         extra_sglang_args: extra,
         runtime: Some(runtime.unwrap_or("sglang").to_string()),
         pack_id: None,
@@ -772,6 +787,7 @@ mod validate_tests {
             num_kv_heads: Some(2),
             attention: None,
             kv_cache_dtype: None,
+            memory: None,
             extra_sglang_args: vec![],
             runtime: Some("sglang".into()),
             pack_id: None,

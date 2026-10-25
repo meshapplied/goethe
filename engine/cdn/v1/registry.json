@@ -21,15 +21,15 @@
       "num_kv_heads": 4,
       "attention": "hybrid",
       "kv_cache_dtype": "fp8_e4m3",
-      "runtime": "sglang",
       "extra_sglang_args": [
         "--reasoning-parser",
         "qwen3",
         "--tool-call-parser",
         "qwen3_coder"
       ],
-      "description": "Qwen3.8 27B, compressed-tensors NVFP4/FP8 with FP8 KV scales. The Hub repo has no weight files yet: install a local copy with goethe install --model <dir> --name meshapplied/Qwen3.8-27B-NVFP4-NInfer.",
-      "manual_download": true
+      "runtime": "sglang",
+      "manual_download": true,
+      "description": "Qwen3.8 27B, compressed-tensors NVFP4/FP8 with FP8 KV scales. The Hub repo has no weight files yet: install a local copy with goethe install --model <dir> --name meshapplied/Qwen3.8-27B-NVFP4-NInfer."
     },
     {
       "id": "meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest",
@@ -180,8 +180,8 @@
       "pack_id": "meshapplied/Qwen3.8-Flash-Next-Ternary-Latest",
       "base_model_id": "Qwen/Qwen3.8-Flash-Next",
       "env": {
-        "TERNARY_PACK_DIR": "$GOETHE_HOME/models/meshapplied__Qwen3.8-Flash-Next-Ternary-Latest__pack",
         "TERNARY_MODEL_DIR": "$GOETHE_HOME/models/Qwen__Qwen3.8-Flash-Next",
+        "TERNARY_PACK_DIR": "$GOETHE_HOME/models/meshapplied__Qwen3.8-Flash-Next-Ternary-Latest__pack",
         "TERNARY_PROFILE": "flash_next"
       },
       "pythonpath": [
@@ -234,8 +234,8 @@
       "pack_id": "meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest",
       "base_model_id": "deepseek-ai/DeepSeek-V4.1-Flash",
       "env": {
-        "TERNARY_PACK_DIR": "$GOETHE_HOME/models/meshapplied__DeepSeek-V4.1-Flash-Ternary-Latest__pack",
         "TERNARY_MODEL_DIR": "$GOETHE_HOME/models/deepseek-ai__DeepSeek-V4.1-Flash",
+        "TERNARY_PACK_DIR": "$GOETHE_HOME/models/meshapplied__DeepSeek-V4.1-Flash-Ternary-Latest__pack",
         "TERNARY_PROFILE": "deepseek_v41"
       },
       "pythonpath": [
@@ -275,43 +275,6 @@
       "description": "NVFP4 quantization of Qwen3.8-Flash-Next with FP8 PLE",
       "family": "qwen",
       "released": "2026-09-05",
-      "modalities": [
-        "text",
-        "image",
-        "video"
-      ]
-    },
-    {
-      "id": "nvidia/Kimi-K3-NVFP4",
-      "architecture": "moe",
-      "static_vram_gb": 1501.027,
-      "kv_bytes_per_token": null,
-      "kv_elems_per_token": 13824,
-      "min_total_vram_gb": null,
-      "supported_sm": [
-        "8.6",
-        "12.0",
-        "12.1"
-      ],
-      "default_ctx": null,
-      "max_ctx": 1048576,
-      "default_max_conc": null,
-      "default_tp": null,
-      "num_attention_heads": 96,
-      "num_kv_heads": 1,
-      "attention": "hybrid",
-      "kv_cache_dtype": null,
-      "extra_sglang_args": [
-        "--quantization",
-        "modelopt_fp4",
-        "--trust-remote-code"
-      ],
-      "runtime": "sglang",
-      "revision": "b2428a0b83a8b712ff2e1a8448a103d4175341f1",
-      "download_gb": 1610.04,
-      "description": "NVFP4 Kimi-K3 2.8T MoE with Native 1M Context",
-      "family": "kimi",
-      "released": "2026-08-14",
       "modalities": [
         "text",
         "image",
@@ -387,14 +350,15 @@
       ]
     },
     {
-      "id": "nvidia/DeepSeek-V4-Pro-NVFP4",
+      "id": "LibertAIDAI/DeepSeek-V4.1-Flash-1017-NVFP4",
       "architecture": "moe",
-      "static_vram_gb": 850.384,
+      "static_vram_gb": 399.5247757434845,
       "kv_bytes_per_token": null,
-      "kv_elems_per_token": 62464,
+      "kv_elems_per_token": 40960,
       "min_total_vram_gb": null,
       "supported_sm": [
-        "8.6",
+        "10.0",
+        "10.3",
         "12.0",
         "12.1"
       ],
@@ -402,40 +366,10 @@
       "max_ctx": 1048576,
       "default_max_conc": null,
       "default_tp": null,
-      "num_attention_heads": 128,
-      "num_kv_heads": 1,
-      "attention": "gqa",
-      "kv_cache_dtype": null,
-      "extra_sglang_args": [
-        "--quantization",
-        "modelopt_fp4",
-        "--trust-remote-code"
-      ],
-      "runtime": "sglang",
-      "revision": "1449d1e641023406daf6b432361486c768aad740",
-      "download_gb": 913.128,
-      "description": "NVFP4 DeepSeek V4 Pro 1.6T parameter model",
-      "family": "deepseek",
-      "released": "2026-05-27",
-      "modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "LibertAIDAI/DeepSeek-V4.1-Flash-1017-NVFP4",
-      "architecture": "moe",
-      "static_vram_gb": 399.5247757434845,
-      "kv_elems_per_token": 40960,
-      "supported_sm": [
-        "10.0",
-        "10.3",
-        "12.0",
-        "12.1"
-      ],
-      "max_ctx": 1048576,
       "num_attention_heads": 64,
       "num_kv_heads": 1,
       "attention": "gqa",
+      "kv_cache_dtype": null,
       "runtime": "sglang",
       "revision": "5be99cd15675589fb6693d0a8651e413bcb9a396",
       "download_gb": 429.008926298
@@ -825,7 +759,7 @@
     {
       "id": "Qwen/Qwen3.8-Flash-Next",
       "architecture": "moe",
-      "static_vram_gb": 335.706,
+      "static_vram_gb": 335.27630650252104,
       "kv_bytes_per_token": null,
       "kv_elems_per_token": 12288,
       "min_total_vram_gb": null,
@@ -842,63 +776,36 @@
       "num_kv_heads": 2,
       "attention": "hybrid",
       "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 24576,
+        "kv_heads": 2,
+        "state_bytes_per_slot": 115458048,
+        "state_slots_per_request": 5
+      },
       "extra_sglang_args": [
         "--trust-remote-code"
       ],
       "runtime": "sglang",
       "revision": "de4b8e4d43b917e7706784d8bb445c9af86a3540",
-      "download_gb": 360.023,
-      "description": "Qwen3.8-Flash-Next Base BF16/FP8",
-      "family": "qwen",
+      "download_gb": 360.023351514,
+      "description": "Qwen3.8 Flash-Next, 180B MoE with Gated DeltaNet linear attention and one full-attention layer in four; BF16.",
+      "family": "Qwen",
       "modalities": [
         "text",
-        "image",
-        "video"
-      ]
-    },
-    {
-      "id": "moonshotai/Kimi-K3",
-      "architecture": "moe",
-      "static_vram_gb": 1455.409,
-      "kv_bytes_per_token": null,
-      "kv_elems_per_token": 13824,
-      "min_total_vram_gb": null,
-      "supported_sm": [
-        "8.6",
-        "12.0",
-        "12.1"
+        "image"
       ],
-      "default_ctx": null,
-      "max_ctx": 1048576,
-      "default_max_conc": null,
-      "default_tp": null,
-      "num_attention_heads": 96,
-      "num_kv_heads": 1,
-      "attention": "hybrid",
-      "kv_cache_dtype": null,
-      "extra_sglang_args": [
-        "--trust-remote-code"
-      ],
-      "runtime": "sglang",
-      "revision": "f831ab66814297da540d832a5235f8e904f29d06",
-      "download_gb": 1560.999,
-      "description": "Kimi-K3 2.8T MoE base model",
-      "family": "kimi",
-      "modalities": [
-        "text",
-        "image",
-        "video"
-      ]
+      "license": "other",
+      "released": "2026-08-24"
     },
     {
       "id": "zai-org/GLM-5.2",
       "architecture": "moe",
-      "static_vram_gb": 1403.193,
+      "static_vram_gb": 1403.1933503299952,
       "kv_bytes_per_token": null,
       "kv_elems_per_token": 54912,
       "min_total_vram_gb": null,
       "supported_sm": [
-        "8.6",
+        "9.0",
         "12.0",
         "12.1"
       ],
@@ -910,22 +817,30 @@
       "num_kv_heads": 1,
       "attention": "mla",
       "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 92628,
+        "kv_bytes_per_token_sm10": 47700,
+        "kv_bytes_per_token_sm12": 53940,
+        "kv_heads": 0
+      },
       "extra_sglang_args": [
         "--trust-remote-code"
       ],
       "runtime": "sglang",
       "revision": "cf457fa734ab149ffef225f80893eb38c6ff5cdc",
-      "download_gb": 1506.693,
-      "description": "GLM-5.2 753B MoE base model",
-      "family": "glm",
+      "download_gb": 1506.69303698,
+      "description": "GLM-5.2, 753B MoE with MLA and DeepSeek sparse attention; BF16. Hopper and Blackwell only.",
+      "family": "GLM",
       "modalities": [
         "text"
-      ]
+      ],
+      "license": "mit",
+      "released": "2026-06-16"
     },
     {
       "id": "MiniMaxAI/MiniMax-M3",
       "architecture": "moe",
-      "static_vram_gb": 795.514,
+      "static_vram_gb": 795.5137629136443,
       "kv_bytes_per_token": null,
       "kv_elems_per_token": 61440,
       "min_total_vram_gb": null,
@@ -942,6 +857,11 @@
       "num_kv_heads": 4,
       "attention": "gqa",
       "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 122880,
+        "kv_heads": 4,
+        "kv_replicated_bytes_per_token": 14592
+      },
       "extra_sglang_args": [
         "--trust-remote-code",
         "--reasoning-parser",
@@ -951,14 +871,15 @@
       ],
       "runtime": "sglang",
       "revision": "f0e1c1e04d40177e4673a22097036854f536e9c0",
-      "download_gb": 854.201,
-      "description": "MiniMax-M3 428B MoE base model",
-      "family": "minimax",
+      "download_gb": 854.200504173,
+      "description": "MiniMax-M3, 427B MoE with block-sparse attention and an index cache; BF16.",
+      "family": "MiniMax",
       "modalities": [
         "text",
-        "image",
-        "video"
-      ]
+        "image"
+      ],
+      "license": "other",
+      "released": "2026-06-02"
     },
     {
       "id": "microsoft/Phi-4-multimodal-instruct",
@@ -1057,14 +978,14 @@
       ]
     },
     {
-      "id": "deepseek-ai/DeepSeek-V4-Pro-0813",
+      "id": "XiaomiMiMo/MiMo-V2.6-Pro-RL",
       "architecture": "moe",
-      "static_vram_gb": 831.433,
+      "static_vram_gb": 527.1733774766326,
       "kv_bytes_per_token": null,
-      "kv_elems_per_token": 62464,
+      "kv_elems_per_token": 30720,
       "min_total_vram_gb": null,
       "supported_sm": [
-        "8.6",
+        "9.0",
         "12.0",
         "12.1"
       ],
@@ -1073,21 +994,509 @@
       "default_max_conc": null,
       "default_tp": null,
       "num_attention_heads": 128,
+      "num_kv_heads": 8,
+      "attention": "hybrid",
+      "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 51200,
+        "kv_heads": 8,
+        "swa_bytes_per_token": 307200,
+        "swa_heads": 8,
+        "swa_window": 128,
+        "chunked_prefill": 8192
+      },
+      "extra_sglang_args": [
+        "--trust-remote-code",
+        "--moe-runner-backend",
+        "flashinfer_mxfp4"
+      ],
+      "runtime": "sglang",
+      "revision": "b61f21852680ee02a29e946e18cf8697f4844061",
+      "download_gb": 573.492067396,
+      "family": "MiMo",
+      "license": "mit",
+      "released": "2026-09-21",
+      "modalities": [
+        "text"
+      ],
+      "description": "Xiaomi MiMo-V2.6 Pro (RL), 1.02T-parameter MoE with hybrid sliding-window attention; FP8 weights with MXFP4 experts. Its experts need the flashinfer_mxfp4 MoE runner, available on Hopper and Blackwell."
+    },
+    {
+      "id": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+      "architecture": "moe",
+      "static_vram_gb": 475.2508442029357,
+      "kv_bytes_per_token": null,
+      "kv_elems_per_token": 40960,
+      "min_total_vram_gb": null,
+      "supported_sm": [
+        "9.0",
+        "12.0",
+        "12.1"
+      ],
+      "default_ctx": null,
+      "max_ctx": 1048576,
+      "default_max_conc": null,
+      "default_tp": null,
+      "num_attention_heads": 64,
       "num_kv_heads": 1,
       "attention": "gqa",
       "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 1630,
+        "kv_heads": 0,
+        "request_bytes": 53919744,
+        "fixed_bytes": 388710400,
+        "chunked_prefill": 8192
+      },
+      "runtime": "sglang",
+      "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+      "download_gb": 510.311045295,
+      "family": "DeepSeek",
+      "license": "mit",
+      "released": "2026-10-17",
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "description": "DeepSeek-V4.1 Flash (1017), 763B MoE with compressed sparse attention and cross-layer KV sharing; FP8 weights with FP4 experts. Hopper and Blackwell only."
+    },
+    {
+      "id": "zai-org/GLM-5.3-Flash",
+      "architecture": "moe",
+      "static_vram_gb": 305.7880845591426,
+      "kv_bytes_per_token": null,
+      "kv_elems_per_token": 7040,
+      "min_total_vram_gb": null,
+      "supported_sm": [
+        "10.0",
+        "10.3"
+      ],
+      "default_ctx": null,
+      "max_ctx": 1048576,
+      "default_max_conc": null,
+      "default_tp": null,
+      "num_attention_heads": 64,
+      "num_kv_heads": 1,
+      "attention": "hybrid",
+      "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 12716,
+        "kv_bytes_per_token_sm10": 7084,
+        "kv_heads": 0,
+        "state_bytes_per_slot": 147619840,
+        "state_slots_per_request": 5
+      },
+      "runtime": "sglang",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "download_gb": 328.366173639,
+      "family": "GLM",
+      "license": "mit",
+      "released": "2026-08-25",
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "description": "GLM-5.3 Flash, 321B MoE mixing DeepSeek sparse attention with KDA linear attention; FP8. In this SGLang build only data-center Blackwell (B200, B300) runs its attention by default."
+    },
+    {
+      "id": "inclusionAI/Ling-3.1-flash",
+      "architecture": "moe",
+      "static_vram_gb": 534.375271060504,
+      "kv_bytes_per_token": null,
+      "kv_elems_per_token": 5184,
+      "min_total_vram_gb": null,
+      "supported_sm": [
+        "8.9",
+        "9.0",
+        "12.0",
+        "12.1"
+      ],
+      "default_ctx": null,
+      "max_ctx": 262144,
+      "default_max_conc": null,
+      "default_tp": null,
+      "num_attention_heads": 64,
+      "num_kv_heads": 1,
+      "attention": "hybrid",
+      "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 10368,
+        "kv_heads": 0,
+        "state_bytes_per_slot": 273530880,
+        "state_slots_per_request": 5
+      },
       "extra_sglang_args": [
         "--trust-remote-code"
       ],
       "runtime": "sglang",
-      "revision": "72e1d3230f6c080a530b0a1d46f8eb4602340597",
-      "download_gb": 892.762,
-      "description": "DeepSeek-V4-Pro 1.6T MoE Official FP8",
-      "family": "deepseek",
-      "released": "2026-08-13",
+      "revision": "e5623f6e4c34e9f2ca40bec867b9210db42ac76c",
+      "download_gb": 573.813968364,
+      "family": "Ling",
+      "license": "mit",
+      "released": "2026-10-13",
       "modalities": [
         "text"
-      ]
+      ],
+      "description": "Ling-3.1 flash, 572B MoE with one MLA layer in eight and KDA linear attention elsewhere; FP8 (Ada and newer)."
+    },
+    {
+      "id": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+      "architecture": "moe",
+      "static_vram_gb": 161.05594603717327,
+      "kv_bytes_per_token": null,
+      "kv_elems_per_token": 13824,
+      "min_total_vram_gb": null,
+      "supported_sm": [
+        "9.0",
+        "12.0",
+        "12.1"
+      ],
+      "default_ctx": null,
+      "max_ctx": 1048576,
+      "default_max_conc": null,
+      "default_tp": null,
+      "num_attention_heads": 64,
+      "num_kv_heads": 4,
+      "attention": "hybrid",
+      "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 23040,
+        "kv_heads": 4,
+        "swa_bytes_per_token": 199680,
+        "swa_heads": 8,
+        "swa_window": 128,
+        "chunked_prefill": 8192
+      },
+      "extra_sglang_args": [
+        "--trust-remote-code",
+        "--moe-runner-backend",
+        "flashinfer_mxfp4"
+      ],
+      "runtime": "sglang",
+      "revision": "dcd3fd83fb181622fbc606fbb1709901982a62c2",
+      "download_gb": 177.767644198,
+      "family": "MiMo",
+      "license": "mit",
+      "released": "2026-09-21",
+      "modalities": [
+        "text"
+      ],
+      "description": "Xiaomi MiMo-V2.6 Flash (RL), 311B MoE with hybrid sliding-window attention; FP8 weights with MXFP4 experts. Its experts need the flashinfer_mxfp4 MoE runner, available on Hopper and Blackwell."
+    },
+    {
+      "id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "architecture": "moe",
+      "static_vram_gb": 155.42519775778055,
+      "kv_bytes_per_token": null,
+      "kv_elems_per_token": 44032,
+      "min_total_vram_gb": null,
+      "supported_sm": [
+        "9.0",
+        "12.0",
+        "12.1"
+      ],
+      "default_ctx": null,
+      "max_ctx": 1048576,
+      "default_max_conc": null,
+      "default_tp": null,
+      "num_attention_heads": 64,
+      "num_kv_heads": 1,
+      "attention": "gqa",
+      "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 7750,
+        "kv_heads": 0,
+        "request_bytes": 10485760
+      },
+      "runtime": "sglang",
+      "revision": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+      "download_gb": 166.898661074,
+      "family": "DeepSeek",
+      "license": "mit",
+      "released": "2026-07-31",
+      "modalities": [
+        "text"
+      ],
+      "description": "DeepSeek-V4 Flash (0731), 304B MoE with compressed sparse attention; FP8 weights with FP4 experts. Hopper and Blackwell only."
+    },
+    {
+      "id": "Qwen/Qwen3.8-27B",
+      "architecture": "dense",
+      "static_vram_gb": 51.7470825240016,
+      "kv_bytes_per_token": null,
+      "kv_elems_per_token": 32768,
+      "min_total_vram_gb": null,
+      "supported_sm": [
+        "8.6",
+        "12.0",
+        "12.1"
+      ],
+      "default_ctx": null,
+      "max_ctx": 262144,
+      "default_max_conc": null,
+      "default_tp": null,
+      "num_attention_heads": 24,
+      "num_kv_heads": 4,
+      "attention": "hybrid",
+      "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 65536,
+        "kv_heads": 4,
+        "state_bytes_per_slot": 153944064,
+        "state_slots_per_request": 5
+      },
+      "runtime": "sglang",
+      "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "download_gb": 55.586114863,
+      "family": "Qwen",
+      "license": "apache-2.0",
+      "released": "2026-08-05",
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "description": "Qwen3.8 27B, dense model with Gated DeltaNet linear attention and one full-attention layer in four; BF16."
+    },
+    {
+      "id": "moonshotai/Kimi-K2.6",
+      "architecture": "moe",
+      "static_vram_gb": 554.3026963323355,
+      "kv_bytes_per_token": null,
+      "kv_elems_per_token": 35136,
+      "min_total_vram_gb": null,
+      "supported_sm": [
+        "8.6",
+        "12.0",
+        "12.1"
+      ],
+      "default_ctx": null,
+      "max_ctx": 262144,
+      "default_max_conc": null,
+      "default_tp": null,
+      "num_attention_heads": 64,
+      "num_kv_heads": 1,
+      "attention": "mla",
+      "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 70272,
+        "kv_heads": 0
+      },
+      "extra_sglang_args": [
+        "--trust-remote-code"
+      ],
+      "runtime": "sglang",
+      "revision": "7eb5002f6aadc958aed6a9177b7ed26bb94011bb",
+      "download_gb": 595.204999341,
+      "family": "Kimi",
+      "license": "other",
+      "released": "2026-04-14",
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "description": "Kimi K2.6, 1.03T MoE with MLA; INT4 experts (compressed-tensors). Reasoning and non-reasoning modes are chosen per request."
+    },
+    {
+      "id": "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+      "architecture": "moe",
+      "static_vram_gb": 231.81835321336985,
+      "kv_bytes_per_token": null,
+      "kv_elems_per_token": 4096,
+      "min_total_vram_gb": null,
+      "supported_sm": [
+        "8.9",
+        "9.0",
+        "12.0",
+        "12.1"
+      ],
+      "default_ctx": null,
+      "max_ctx": 1048576,
+      "default_max_conc": null,
+      "default_tp": null,
+      "num_attention_heads": 32,
+      "num_kv_heads": 2,
+      "attention": "hybrid",
+      "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 8192,
+        "kv_heads": 2,
+        "state_bytes_per_slot": 170229760,
+        "state_slots_per_request": 5
+      },
+      "extra_sglang_args": [
+        "--trust-remote-code"
+      ],
+      "runtime": "sglang",
+      "revision": "fb0ee0bc6b3f70342afd8d84cb80dbadbaa8a1fe",
+      "download_gb": 248.937282385,
+      "family": "Nemotron",
+      "license": "other",
+      "released": "2026-10-12",
+      "modalities": [
+        "text",
+        "image",
+        "audio"
+      ],
+      "description": "NVIDIA Nemotron 3.5 Super VL, 124B hybrid Mamba-2 / attention MoE (A12B); BF16. Its default MoE runner needs Ada or newer."
+    },
+    {
+      "id": "moonshotai/Kimi-K2.7-Code",
+      "architecture": "moe",
+      "static_vram_gb": 554.3026963323355,
+      "kv_bytes_per_token": null,
+      "kv_elems_per_token": 35136,
+      "min_total_vram_gb": null,
+      "supported_sm": [
+        "8.6",
+        "12.0",
+        "12.1"
+      ],
+      "default_ctx": null,
+      "max_ctx": 262144,
+      "default_max_conc": null,
+      "default_tp": null,
+      "num_attention_heads": 64,
+      "num_kv_heads": 1,
+      "attention": "mla",
+      "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 70272,
+        "kv_heads": 0
+      },
+      "extra_sglang_args": [
+        "--trust-remote-code"
+      ],
+      "runtime": "sglang",
+      "revision": "74797c9c62378b951a1f6fcf5c4631024e9b8bef",
+      "download_gb": 595.204984507,
+      "family": "Kimi",
+      "license": "other",
+      "released": "2026-06-11",
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "description": "Kimi K2.7 Code, 1.03T MoE with MLA tuned for coding; INT4 experts (compressed-tensors)."
+    },
+    {
+      "id": "inclusionAI/Ling-3.0-flash",
+      "architecture": "moe",
+      "static_vram_gb": 237.46965233422816,
+      "kv_bytes_per_token": null,
+      "kv_elems_per_token": 4032,
+      "min_total_vram_gb": null,
+      "supported_sm": [
+        "8.6",
+        "12.0",
+        "12.1"
+      ],
+      "default_ctx": null,
+      "max_ctx": 262144,
+      "default_max_conc": null,
+      "default_tp": null,
+      "num_attention_heads": 32,
+      "num_kv_heads": 1,
+      "attention": "hybrid",
+      "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 8064,
+        "kv_heads": 0,
+        "state_bytes_per_slot": 75980800,
+        "state_slots_per_request": 5
+      },
+      "extra_sglang_args": [
+        "--trust-remote-code"
+      ],
+      "runtime": "sglang",
+      "revision": "fcc60a52b34c69c6271d0ac8a8cb0815020b6a43",
+      "download_gb": 254.999502763,
+      "family": "Ling",
+      "license": "mit",
+      "released": "2026-08-02",
+      "modalities": [
+        "text"
+      ],
+      "description": "Ling-3.0 flash, 128B MoE with one MLA layer in six and KDA linear attention elsewhere; BF16."
+    },
+    {
+      "id": "meta-models/Muse-Glimmer-30B",
+      "architecture": "dense",
+      "static_vram_gb": 55.46345866471529,
+      "kv_bytes_per_token": null,
+      "kv_elems_per_token": 6656,
+      "min_total_vram_gb": null,
+      "supported_sm": [
+        "8.6",
+        "12.0",
+        "12.1"
+      ],
+      "default_ctx": null,
+      "max_ctx": 131072,
+      "default_max_conc": null,
+      "default_tp": null,
+      "num_attention_heads": 32,
+      "num_kv_heads": 2,
+      "attention": "hybrid",
+      "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 13312,
+        "kv_heads": 2,
+        "swa_bytes_per_token": 39936,
+        "swa_heads": 2,
+        "swa_window": 2048,
+        "chunked_prefill": 8192
+      },
+      "runtime": "sglang",
+      "revision": "cec94fcfd6512f2cfe708138c32533b346ea4f69",
+      "download_gb": 59.581830875,
+      "family": "Muse",
+      "license": "apache-2.0",
+      "released": "2026-08-09",
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "description": "Muse Glimmer 30B, dense model with sliding-window attention on three layers in four; BF16."
+    },
+    {
+      "id": "google/gemma-4-26B-A4B-it",
+      "architecture": "moe",
+      "static_vram_gb": 48.06742995604873,
+      "kv_bytes_per_token": null,
+      "kv_elems_per_token": 10240,
+      "min_total_vram_gb": null,
+      "supported_sm": [
+        "8.6",
+        "12.0",
+        "12.1"
+      ],
+      "default_ctx": null,
+      "max_ctx": 262144,
+      "default_max_conc": null,
+      "default_tp": null,
+      "num_attention_heads": 16,
+      "num_kv_heads": 2,
+      "attention": "hybrid",
+      "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 20480,
+        "kv_heads": 2,
+        "swa_bytes_per_token": 204800,
+        "swa_heads": 8,
+        "swa_window": 1024,
+        "chunked_prefill": 8192
+      },
+      "runtime": "sglang",
+      "revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+      "download_gb": 51.644340088,
+      "family": "Gemma",
+      "license": "apache-2.0",
+      "released": "2026-03-11",
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "description": "Gemma 4 26B-A4B instruct, MoE with sliding-window attention and wide global layers; BF16."
     }
   ]
 }

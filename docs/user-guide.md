@@ -235,7 +235,7 @@ The first load of a model on a new machine takes a few extra minutes while GPU k
 
 Choosing where and how:
 
-How much memory a load takes: the weights, a KV cache with room for one request at the full context (or every parallel request at a quarter of it, whichever is larger), for hybrid models such as Qwen3.5 and Qwen3-Next the linear-attention state of two slots per parallel request, and about 2 GB of working memory. `goethe load` prints these parts, and `goethe hw pick-gpus --model <model>` shows them without loading.
+How much memory a load takes: the weights, a KV cache with room for one request at the full context (or every parallel request at a quarter of it, whichever is larger), a sliding-window cache for models that use one (sized for the requests, not a fixed share), for hybrid models such as Qwen3.5 and Qwen3-Next the linear-attention state SGLang keeps per request, and about 2 GB of working memory. Goethe computes these the way SGLang allocates them, and after the first load of a model it corrects for the real weight size. `goethe load` prints these parts, and `goethe hw pick-gpus --model <model>` shows them without loading.
 
 ```bash
 goethe load --model Qwen/Qwen3-8B --gpu gpu1          # a specific GPU (goethe gpu lists them)

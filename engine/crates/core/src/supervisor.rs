@@ -126,6 +126,7 @@ struct Starting {
     cc: String,
     ctx: u64,
     max_conc: u64,
+    plan_free: f64,
     cancel: Arc<AtomicBool>,
     hold: coordinator::Hold,
 }
@@ -383,7 +384,8 @@ fn start_engine(
     let instance_id = format!("inst-{}", uuid_simple());
     let engine_key = engine_cmd::new_engine_key().map_err(err1)?;
     let budget = need.total();
-    let mem_frac = mem_fraction_from_free(&need, min_free).map_err(err1)?;
+    let context = crate::engine_overhead::read_context(con, &gpu_name, plan.tp as u64);
+    let mem_frac = mem_fraction_from_free(&need, min_free, context).map_err(err1)?;
     let log_path = req.home.join("logs").join(format!("{instance_id}.log"));
     let tp = plan.tp as u64;
     let spec = EngineSpec {
@@ -467,6 +469,7 @@ fn start_engine(
         cc: plan.cc.clone(),
         ctx: plan.ctx,
         max_conc: plan.max_conc,
+        plan_free: min_free,
     })
 }
 
@@ -631,6 +634,7 @@ fn learn_overhead(s: &Starting) {
         .max()
         .unwrap_or(0);
     let used = used_mb as f64 / 1024.0;
+    learn_weights(s);
     let Some(overhead) = calc::learned_overhead(used, &s.need, s.learned.overhead_gb) else {
         return;
     };
@@ -645,6 +649,32 @@ fn learn_overhead(s: &Starting) {
             s.instance_id,
             s.need.total()
         ),
+    );
+}
+
+fn learn_weights(s: &Starting) {
+    // Weights larger than estimated leave the KV pools short of their tokens: learn the difference for the next load.
+    let log = crate::engine_overhead::read_log_since(&s.log_path, s.log_offset);
+    if let (Some(pre), Ok(con)) = (crate::engine_overhead::parse_pre_load_gb(&log), db::open(&s.home)) {
+        let context = s.plan_free - pre;
+        if (0.05..8.0).contains(&context) {
+            let _ = crate::engine_overhead::store_context(&con, &s.gpu_name, s.tp, context);
+        }
+    }
+    let Some(loaded) = crate::engine_overhead::parse_weight_gb(&log) else {
+        return;
+    };
+    let extra = loaded - s.need.weights;
+    if extra <= 0.25 {
+        return;
+    }
+    if let Ok(con) = db::open(&s.home) {
+        let learned = s.learned.static_gb + extra;
+        let _ = crate::engine_overhead::store_learned(&con, &s.params.model_id, &s.gpu_name, s.tp, Kind::Static, learned);
+    }
+    append_goethed_log(
+        &s.home,
+        &format!("{}: weights take {loaded:.2} GB per GPU, {extra:.2} GB more than estimated; learned for the next load\n", s.instance_id),
     );
 }
 
@@ -758,7 +788,11 @@ fn respawn(s: &mut Starting, need: Need, move_port: bool) -> Result<(), String> 
         }
         s.port = port;
     }
-    let mem_frac = mem_fraction_from_free(&need, free)?;
+    let context = db::open(&s.home).map_or(crate::engine_overhead::DEFAULT_CONTEXT_GB, |c| {
+        crate::engine_overhead::read_context(&c, &s.gpu_name, s.tp)
+    });
+    let mem_frac = mem_fraction_from_free(&need, free, context)?;
+    s.plan_free = free;
     let spec = EngineSpec {
         home: &s.home,
         instance_id: &s.instance_id,
@@ -1164,7 +1198,7 @@ fn chooser_input(req: &LoadReq, ctx: u64, max_conc: u64) -> ChooserInput {
         max_conc,
         marlin_extra_gb: crate::install::card_marlin_extra_gb(&req.card),
         supported_sm: crate::install::card_supported_sm(&req.card),
-        linear_state_bytes: crate::model_facts::linear_state_bytes_in_dir(&req.model_path),
+        memory: crate::memory_spec::installed(&req.model_path, &req.card),
     }
 }
 
