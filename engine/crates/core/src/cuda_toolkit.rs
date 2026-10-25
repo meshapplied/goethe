@@ -53,10 +53,15 @@ pub fn prepare(home: &Path) -> Result<Option<PathBuf>, String> {
             }
         }
     }
-    if let Some(libcuda) = driver_library("libcuda.so.1") {
+    let compat = crate::cuda_compat::lib_dir(home).map(|d| d.join("libcuda.so.1"));
+    if let Some(libcuda) = compat.clone().or_else(|| driver_library("libcuda.so.1")) {
         let stubs = lib.join("stubs");
         std::fs::create_dir_all(&stubs).map_err(|e| format!("{}: {e}", stubs.display()))?;
-        link_if_missing(&libcuda, &stubs.join("libcuda.so"))?;
+        let link = stubs.join("libcuda.so");
+        if compat.is_some() && std::fs::read_link(&link).is_ok_and(|t| t != libcuda) {
+            std::fs::remove_file(&link).map_err(|e| format!("{}: {e}", link.display()))?;
+        }
+        link_if_missing(&libcuda, &link)?;
     }
     Ok(Some(root))
 }

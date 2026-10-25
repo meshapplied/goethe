@@ -115,8 +115,19 @@ fake "${SHIM}" getconf "glibc 2.28"
 expect_fail glibc "glibc 2.28 is below minimum 2.30" "${SHIM}" "/usr/bin:/bin"
 
 SHIM="$(make_shim_dir "${WORK}/shim-driver")"
-fake "${SHIM}" nvidia-smi "575.57.08"
-expect_fail driver "NVIDIA driver 575.57.08 is older than 580" "${SHIM}" "/usr/bin:/bin"
+fake "${SHIM}" nvidia-smi "530.30.02"
+expect_fail driver "NVIDIA driver 530.30.02 is older than 580" "${SHIM}" "/usr/bin:/bin"
+
+SHIM="$(make_shim_dir "${WORK}/shim-compat")"
+printf '#!/bin/sh\ncase "$*" in *name*) echo "NVIDIA A100-SXM4-80GB" ;; *) echo "570.172.08" ;; esac\n' >"${SHIM}/nvidia-smi"
+chmod +x "${SHIM}/nvidia-smi"
+OUT="$(GOETHE_REQUIRE_GPU=1 run_install "${SHIM}" "/usr/bin:/bin")"
+if ! grep -q "unsigned install.sh" <<<"${OUT}" || grep -q "older than 580" <<<"${OUT}"; then
+  echo "data-center GPU on driver 570 must use forward compatibility: ${OUT}"
+  exit 1
+fi
+printf '#!/bin/sh\ncase "$*" in *name*) echo "NVIDIA GeForce RTX 4090" ;; *) echo "570.172.08" ;; esac\n' >"${SHIM}/nvidia-smi"
+expect_fail compat-geforce "NVIDIA driver 570.172.08 is older than 580" "${SHIM}" "/usr/bin:/bin"
 
 SHIM="$(make_shim_dir "${WORK}/shim-nogpu")"
 GOETHE_REQUIRE_GPU=1 expect_fail require-gpu "no NVIDIA GPU found on this machine.*(GOETHE_REQUIRE_GPU=1)" "${SHIM}" ""
@@ -134,8 +145,8 @@ if grep -q "unbound variable" <<<"${OUT}" || ! grep -q "WARNING: no NVIDIA GPU f
   echo "nvidia-smi without devices must read as no driver: ${OUT}"
   exit 1
 fi
-printf 'NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  575.57.08  Release Build\n' >"${WORK}/nvrm"
-GOETHE_NVIDIA_VERSION_FILE="${WORK}/nvrm" expect_fail driver-module "NVIDIA driver 575.57.08 is older than 580" "${SHIM}" ""
+printf 'NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  530.30.02  Release Build\n' >"${WORK}/nvrm"
+GOETHE_NVIDIA_VERSION_FILE="${WORK}/nvrm" expect_fail driver-module "NVIDIA driver 530.30.02 is older than 580" "${SHIM}" ""
 
 SHIM="$(make_shim_dir "${WORK}/shim-trunc")"
 LINES="$(wc -l <"${INSTALL}")"

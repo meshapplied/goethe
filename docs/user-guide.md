@@ -60,7 +60,7 @@ curl -k https://127.0.0.1:8443/v1/chat/completions \
 ### Requirements
 
 - Linux on x86_64 or ARM64, with glibc 2.30 or newer: Ubuntu 20.04+, Debian 11+ and similar.
-- A [supported NVIDIA GPU](#hardware) with driver **580 or newer**. Check with `nvidia-smi`.
+- A [supported NVIDIA GPU](#hardware) with driver **580 or newer**. Check with `nvidia-smi`. Data-center GPUs (A100, H100, B200, L40S, A10 and similar) also run on drivers 535 to 579 through NVIDIA's CUDA 13 forward compatibility, which the installer sets up.
 - `curl`, `zstd`, `openssl` and a C++ compiler (`g++`). The installer installs any that are missing.
 - Disk space for your models, plus about 12 GB for Goethe itself.
 
@@ -72,6 +72,7 @@ Goethe brings its own CUDA compiler, so you never install the CUDA toolkit. Ever
 |---|---|
 | Missing `curl`, `zstd`, `openssl` or CA certificates | Installs them with apt, dnf, yum or zypper |
 | No C++ compiler (needed to build GPU kernels the first time a model loads) | Installs `build-essential` (Debian, Ubuntu) or `gcc-c++` (RHEL, Fedora, SUSE) |
+| A data-center GPU on driver 535 to 579 (for example a CUDA 12.8 host) | Downloads NVIDIA's CUDA 13 forward-compatibility libraries (`cuda-compat-13-0`, checksum pinned) into `$GOETHE_HOME/cuda-compat` and checks that CUDA starts through them; no driver change or reboot. If NVIDIA refuses the GPU, it falls back to the driver upgrade below |
 | A GPU without a driver, or a driver older than 580 | Installs the open NVIDIA driver 580+ (`ubuntu-drivers` on Ubuntu, NVIDIA's CUDA repository on Debian and the RHEL family), replacing a driver installed from NVIDIA's `.run` file, then loads it or asks for a reboot |
 | The driver is installed but not loaded | Loads it (`modprobe nvidia`); if Secure Boot blocks it, says how to enroll the key |
 | NVIDIA's proprietary kernel module with a Blackwell GPU (RTX 50, RTX PRO 6000, B200) | Switches to the open kernel module, which Blackwell needs |

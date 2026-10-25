@@ -31,6 +31,7 @@ pub mod security;
 pub mod shutdown;
 pub mod supervisor;
 pub mod runtime;
+pub mod cuda_compat;
 pub mod cuda_toolkit;
 pub mod doctor;
 pub mod domain;
