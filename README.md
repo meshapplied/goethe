@@ -1,6 +1,19 @@
-# Goethe
+<h1 align="center">
+  <img src="docs/assets/goethe-banner.svg" alt="Goethe" width="480">
+</h1>
 
-**Share the LLMs on your GPUs through one IP address, in three steps, and run them fast.**
+<p align="center">
+  <img alt="NVIDIA CUDA 12.8 or newer" src="https://img.shields.io/badge/NVIDIA%20CUDA-%E2%89%A5%2012.8-76B900?logo=nvidia&logoColor=white">
+  <img alt="GPU architectures sm_86 to sm_120" src="https://img.shields.io/badge/arch-sm__86%20%E2%80%93%20sm__120-76B900">
+  <img alt="Written in Rust" src="https://img.shields.io/badge/language-Rust-B7410E?logo=rust&logoColor=white">
+  <img alt="Linux x86_64 and aarch64" src="https://img.shields.io/badge/OS-Linux%20x86__64%20%2F%20aarch64-FCC624?logo=linux&logoColor=black">
+  <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
+  <a href="https://github.com/meshapplied/goethe/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmeshapplied%2Fgoethe%2Fbadges%2Fci.json&logo=githubactions&logoColor=white"></a>
+  <br>
+  <a href="https://meshapplied.com/docs"><img alt="Documentation at meshapplied.com/docs" src="https://img.shields.io/badge/docs-meshapplied.com%2Fdocs-87D7FF?logo=readthedocs&logoColor=white"></a>
+</p>
+
+<p align="center"><b>Share the LLMs on your GPUs through one IP address, in three steps, and run them fast.</b></p>
 
 Goethe turns a Linux machine with an NVIDIA GPU into your own API, compatible with OpenAI, Anthropic and LiteLLM clients. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
 
@@ -53,7 +66,7 @@ print(reply.choices[0].message.content)
   - Ada: GeForce RTX 4090, RTX 6000 Ada, L40S or L4;
   - or Ampere: A100, RTX A6000, GeForce RTX 3090, and similar.
   - GPUs of different kinds can share one machine; each model runs on GPUs of one kind.
-- NVIDIA driver 580 or newer. That is all: Goethe brings its own CUDA compiler, and the installer sets up the driver, a C++ compiler and the other tools it needs when they are missing (it asks first).
+- NVIDIA driver 580 or newer (data-center GPUs also run on 535 to 579 through NVIDIA's CUDA 13 forward compatibility). That is all: Goethe brings its own CUDA compiler, and the installer sets up the driver, a C++ compiler and the other tools it needs when they are missing (it asks first).
 - Enough GPU memory for your model. `goethe recommend` lists the models that fit your machine.
 
 Details on [supported hardware, model families and formats](docs/user-guide.md#what-goethe-supports) are in the user guide.

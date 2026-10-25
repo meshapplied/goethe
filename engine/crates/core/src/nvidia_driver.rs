@@ -20,6 +20,7 @@ pub struct Probe {
     pub libcuda: bool,
     pub libnvml: bool,
     pub container: bool,
+    pub cuda_compat: bool,
     pub distro: String,
 }
 
@@ -72,6 +73,7 @@ pub fn probe() -> Probe {
         libcuda: crate::cuda_toolkit::driver_library("libcuda.so.1").is_some(),
         libnvml: crate::cuda_toolkit::driver_library("libnvidia-ml.so.1").is_some(),
         container: crate::host::container_kind().is_some(),
+        cuda_compat: crate::cuda_compat::installed(&crate::paths::goethe_home()),
         distro: os_id(&os),
     }
 }
@@ -81,7 +83,7 @@ fn device_minor(information: &str) -> Option<u32> {
     information.lines().find_map(|l| l.strip_prefix("Device Minor:")).and_then(|v| v.trim().parse().ok())
 }
 
-fn module_version(text: &str) -> Option<String> {
+pub(crate) fn module_version(text: &str) -> Option<String> {
     // "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  580.82.07  Release Build ..." into "580.82.07".
     let line = text.lines().find(|l| l.starts_with("NVRM version"))?;
     line.split_whitespace().find(|w| w.split('.').count() >= 2 && w.split('.').all(|p| p.parse::<u32>().is_ok())).map(String::from)
@@ -124,9 +126,15 @@ pub fn diagnose(p: &Probe) -> Option<String> {
         ));
     };
     let major = version.split('.').next().and_then(|m| m.parse::<u32>().ok()).unwrap_or(0);
-    if major < DRIVER_MIN {
+    let compat = crate::cuda_compat::usable_with(major);
+    if major < DRIVER_MIN && !(compat && p.cuda_compat) {
+        let alternative = if compat {
+            "; data-center GPUs can keep this driver and use CUDA 13 forward compatibility, which the installer sets up"
+        } else {
+            ""
+        };
         return Some(format!(
-            "NVIDIA driver {version} is older than {DRIVER_MIN} (CUDA 13); {INSTALLER} or {}",
+            "NVIDIA driver {version} is older than {DRIVER_MIN} (CUDA 13); {INSTALLER} or {}{alternative}",
             install_command(&p.distro)
         ));
     }
@@ -203,6 +211,7 @@ mod tests {
             libcuda: true,
             libnvml: true,
             container: false,
+            cuda_compat: false,
             distro: "ubuntu debian".into(),
         }
     }
@@ -222,6 +231,10 @@ mod tests {
         assert!(diagnose(&vm).unwrap().contains("or sudo ubuntu-drivers install --gpgpu nvidia:580-server-open"));
         let old = Probe { module_version: Some("550.120".into()), ..ready() };
         assert!(diagnose(&old).unwrap().contains("older than 580"));
+        assert!(diagnose(&old).unwrap().contains("forward compatibility"));
+        assert_eq!(diagnose(&Probe { cuda_compat: true, ..old.clone() }), None);
+        let ancient = Probe { module_version: Some("525.147".into()), cuda_compat: true, ..ready() };
+        assert!(!diagnose(&ancient).unwrap().contains("forward compatibility"));
         let no_nodes = Probe { device_nodes: false, ..ready() };
         assert!(diagnose(&no_nodes).unwrap().contains("/dev/nvidia* is missing"));
         let no_libs = Probe { libcuda: false, ..ready() };

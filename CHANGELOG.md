@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `goethe load` and `goethe start` say `Loading into VRAM...` while a model loads, instead of talking about kernel builds.
+- CUDA 13 forward compatibility: data-center GPUs on NVIDIA drivers 535 to 579 (for example a CUDA 12.8 host on R570) no longer need a driver upgrade. The installer downloads NVIDIA's `cuda-compat-13-0` 580.196.07 libraries from NVIDIA (pinned checksum) into `$GOETHE_HOME/cuda-compat`, keeps them only if CUDA starts through them, and otherwise offers the driver upgrade as before. Engines and kernel builds load them first only while the driver is older than 580, so a later driver upgrade needs nothing. `goethe doctor` shows `<driver> with CUDA 13 forward compatibility`. GeForce and TITAN cards are not served by NVIDIA's forward compatibility and still need driver 580+.
+- The installer's banner is just the GOETHE wordmark (the "Own your inference" line is gone).
+- `goethe configure api` leaves a blank line after the access menu, then asks whether to restrict API access to specific IP addresses (default no). No allows every address that can reach the gateway (in VPN mode the whole VPN range); only yes asks for the addresses.
+
 ## 0.1.5 (2026-10-25)
 
 - Goethe sees the GPU inside GPU containers (RunPod, Vast, Docker, Kubernetes): NVML is loaded as `libnvidia-ml.so.1`, the only name the NVIDIA container toolkit mounts; before, `goethe doctor` reported no hardware and nothing could load. Found on a RunPod RTX 3090.

@@ -120,6 +120,8 @@ fn is_everyone(cidr: &str) -> bool {
     cidr.ends_with("/0")
 }
 
+const RESTRICT_QUESTION: &str = "Restrict API access to specific IP addresses?";
+
 fn current_text() -> Result<String, String> {
     // The bind, port and allowlist as they are before any change.
     let home = goethe_home();
@@ -146,7 +148,10 @@ fn choose_mode(vpns: &[VpnAddr]) -> Result<Mode, String> {
     let modes = [Mode::Local, Mode::Vpn, Mode::Public];
     let default = if vpns.is_empty() { 0 } else { 1 };
     match crate::term::select(&options, default) {
-        Ok(Some(i)) => return Ok(modes[i]),
+        Ok(Some(i)) => {
+            eprintln!();
+            return Ok(modes[i]);
+        }
         Ok(None) => return Err("cancelled; nothing changed".to_string()),
         Err(_) => {}
     }
@@ -156,6 +161,7 @@ fn choose_mode(vpns: &[VpnAddr]) -> Result<Mode, String> {
     loop {
         let a = ask(&format!("Choice [{}]:", default + 1), &(default + 1).to_string())?;
         if let Some(m) = a.parse::<usize>().ok().and_then(|n| modes.get(n.wrapping_sub(1))) {
+            eprintln!();
             return Ok(*m);
         }
         match Mode::parse(&a) {
@@ -233,9 +239,7 @@ fn configure_vpn(opts: &ApiOpts, vpns: &[VpnAddr]) -> Result<String, String> {
     let v = pick_vpn(opts, vpns)?;
     let ranges = if opts.allow.is_empty() {
         let default = v.range.clone();
-        let specific = interactive()
-            && !opts.yes
-            && confirm(&format!("Allow only specific addresses instead of the whole VPN range {default}?"), false, false)?;
+        let specific = interactive() && !opts.yes && confirm(RESTRICT_QUESTION, false, false)?;
         if specific {
             ask("Addresses or ranges to allow, comma separated (e.g. 100.64.0.7/32):", &default)?
         } else {
@@ -273,13 +277,20 @@ fn configure_public(opts: &ApiOpts) -> Result<String, String> {
         return Err("nothing changed (goethe configure api again to pick local or VPN)".to_string());
     }
     let mut ranges = opts.allow.clone();
-    if ranges.is_empty() && interactive() && !opts.yes && confirm("Allow specific client IP addresses now?", true, false)? {
-        let a = ask("Client IPs or ranges to allow, comma separated (e.g. 203.0.113.7/32):", "")?;
-        ranges = a.split(',').map(str::trim).filter(|r| !r.is_empty()).map(String::from).collect();
+    let mut everyone_chosen = false;
+    if ranges.is_empty() && interactive() && !opts.yes {
+        if confirm(RESTRICT_QUESTION, false, false)? {
+            let a = ask("Client IPs or ranges to allow, comma separated (e.g. 203.0.113.7/32):", "")?;
+            ranges = a.split(',').map(str::trim).filter(|r| !r.is_empty()).map(String::from).collect();
+        } else {
+            ranges = vec!["0.0.0.0/0".to_string()];
+            everyone_chosen = true;
+            println!("Every address that can reach this machine may connect; each request still needs an API key.");
+        }
     }
     for r in &ranges {
         security::canonical_cidr(r)?;
-        if is_everyone(r) {
+        if is_everyone(r) && !everyone_chosen {
             println!("{r} lets every address on the internet try your API keys.");
             if !interactive() || !confirm("Allow every address anyway?", false, false)? {
                 return Err(format!("refusing to allow {r}; name the client addresses instead"));

@@ -8,6 +8,13 @@ DEFAULT_PKG_URL="https://pkg.meshapplied.com"
 DRIVER_MIN=580
 GLIBC_MIN=2.30
 DRIVER_REBOOT=0
+COMPAT_DRIVER_MIN=535
+COMPAT_VERSION=580.196.07
+COMPAT_URL="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204"
+COMPAT_SHA256_x86_64=b0ee4fb1f439e919ca5c5fd7c5cff3e8b8afdbdb0b5ee38f7c09c047ea41a035
+COMPAT_SHA256_aarch64=aa3fdea008f678ba2dd865e371f4127d3cd8bf56aaa118b0a438853a50e73257
+CUDA_COMPAT=0
+CUDA_COMPAT_WHY=""
 
 default_home() {
   # /workspace/.goethe (RunPod, Vast), else /var/lib/goethe for root or when writable, else ~/.goethe.
@@ -433,6 +440,13 @@ check_nvidia_driver() {
     fi
   elif ((major < DRIVER_MIN)); then
     why="NVIDIA driver ${ver} is older than ${DRIVER_MIN} (CUDA 13)"
+    if ((major >= COMPAT_DRIVER_MIN)) && ! geforce_only; then
+      CUDA_COMPAT=1
+      CUDA_COMPAT_WHY="${why}"
+      check_gpu_arch
+      done_line "NVIDIA driver ${ver}: CUDA 13 runs through NVIDIA's forward-compatibility libraries, set up below"
+      return 0
+    fi
   elif ! in_container && command -v nvidia-smi >/dev/null 2>&1; then
     listed="$(started_gpus)"
     if ((listed == 0)) && ! open_module && blackwell_pci; then
@@ -458,6 +472,99 @@ check_nvidia_driver() {
     return 0
   fi
   no_gpu "${why}; Goethe installs anyway, and goethe doctor names the fix"
+}
+
+geforce_only() {
+  # True when every GPU nvidia-smi lists is a GeForce or TITAN, which NVIDIA's forward compatibility does not serve.
+  local names
+  names="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || true)"
+  [[ -n "${names}" ]] && ! grep -viqE 'geforce|titan' <<<"${names}"
+}
+
+unpack_compat() {
+  # Copy the compat libraries (regular files and links, no paths) from the .deb $1 into directory $2 with the py-env python.
+  "${GOETHE_HOME}/py-env/bin/python" -I - "$1" "$2" <<'PY'
+import io, os, sys, tarfile
+deb, dest = sys.argv[1], sys.argv[2]
+data = open(deb, "rb").read()
+assert data[:8] == b"!<arch>\n", "not a .deb archive"
+pos, payload = 8, None
+while pos + 60 <= len(data):
+    name, size = data[pos:pos + 16].decode().strip().rstrip("/"), int(data[pos + 48:pos + 58])
+    if name.startswith("data.tar"):
+        payload = data[pos + 60:pos + 60 + size]
+        break
+    pos += 60 + size + (size & 1)
+assert payload, "no data member in the .deb"
+prefix = "./usr/local/cuda-13.0/compat/"
+with tarfile.open(fileobj=io.BytesIO(payload)) as tar:
+    for m in tar.getmembers():
+        base = m.name[len(prefix):] if m.name.startswith(prefix) else ""
+        if not base or "/" in base or base.startswith("."):
+            continue
+        target = os.path.join(dest, base)
+        if m.issym() and "/" not in m.linkname:
+            os.symlink(m.linkname, target)
+        elif m.isfile():
+            with open(target, "wb") as f:
+                f.write(tar.extractfile(m).read())
+PY
+}
+
+compat_cuinit() {
+  # cuInit through GOETHE_HOME/cuda-compat: 0 when CUDA 13 works with this driver and GPU, else the CUDA error code.
+  LD_LIBRARY_PATH="${GOETHE_HOME}/cuda-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" "${GOETHE_HOME}/py-env/bin/python" -I -c \
+    "import ctypes; print(ctypes.CDLL('libcuda.so.1').cuInit(0))" 2>/dev/null || echo 999
+}
+
+install_cuda_compat() {
+  # Fetch and verify NVIDIA's cuda-compat-13-0 package, unpack it into GOETHE_HOME/cuda-compat, keep it only if cuInit works.
+  local dir="${GOETHE_HOME}/cuda-compat" pkg want tmp code
+  if [[ ! -e "${dir}/libcuda.so.${COMPAT_VERSION}" ]]; then
+    if [[ "${ARCH}" == aarch64 ]]; then
+      pkg="sbsa/cuda-compat-13-0_${COMPAT_VERSION}-1ubuntu1_arm64.deb"
+      want="${COMPAT_SHA256_aarch64}"
+    else
+      pkg="x86_64/cuda-compat-13-0_${COMPAT_VERSION}-1ubuntu1_amd64.deb"
+      want="${COMPAT_SHA256_x86_64}"
+    fi
+    tmp="$(mktemp -d "${GOETHE_HOME}/.cuda-compat.XXXXXX")"
+    local bar=(-sS)
+    if [[ "${PROGRESS:-0}" -eq 1 ]]; then
+      bar=(--progress-bar)
+      echo "  Downloading NVIDIA's CUDA 13 forward-compatibility libraries (about 60 MB)"
+    fi
+    if ! curl -fL "${bar[@]}" "${COMPAT_URL}/${pkg}" -o "${tmp}/compat.deb" ||
+      [[ "$(sha256sum "${tmp}/compat.deb" | awk '{print $1}')" != "${want}" ]]; then
+      rm -rf "${tmp}"
+      CUDA_COMPAT=0
+      echo "WARNING: could not download NVIDIA's forward-compatibility package (or its checksum did not match)" >&2
+      offer_driver_install "${CUDA_COMPAT_WHY}" install || no_gpu "${CUDA_COMPAT_WHY}; Goethe installs anyway, and goethe doctor names the fix"
+      return 0
+    fi
+    mkdir "${tmp}/lib"
+    if ! unpack_compat "${tmp}/compat.deb" "${tmp}/lib"; then
+      rm -rf "${tmp}"
+      echo "unpacking NVIDIA's forward-compatibility package failed" >&2
+      exit 1
+    fi
+    rm -rf "${dir}"
+    mv "${tmp}/lib" "${dir}"
+    rm -rf "${tmp}"
+  fi
+  code="$(compat_cuinit)"
+  if [[ "${code}" == 0 ]]; then
+    done_line "CUDA 13 forward compatibility ${COMPAT_VERSION}: the GPU starts with this driver"
+    return 0
+  fi
+  rm -rf "${dir}"
+  CUDA_COMPAT=0
+  case "${code}" in
+    804) echo "NVIDIA's forward compatibility does not serve this GPU (data-center GPUs only, error 804)" >&2 ;;
+    803) echo "NVIDIA's forward compatibility does not work with this driver (error 803)" >&2 ;;
+    *) echo "CUDA did not start through NVIDIA's forward-compatibility libraries (error ${code})" >&2 ;;
+  esac
+  offer_driver_install "${CUDA_COMPAT_WHY}" install || no_gpu "${CUDA_COMPAT_WHY}; Goethe installs anyway, and goethe doctor names the fix"
 }
 
 check_disk() {
@@ -951,52 +1058,27 @@ get_started() {
 }
 
 show_banner() {
-  # The Goethe banner in light blue on a fresh install: full, compact or one line, by terminal width.
+  # The GOETHE wordmark in light blue on a fresh install, or one line in narrow terminals.
   local cols
   [[ -t 1 && ! -x "${GOETHE_HOME:-$(default_home)}/bin/goethe" ]] || return 0
   cols="$(tput cols 2>/dev/null || true)"
   [[ "${cols}" =~ ^[0-9]+$ && "${cols}" -gt 0 ]] || cols="$(stty size </dev/tty 2>/dev/null | awk '{print $2}' || true)"
   [[ "${cols}" =~ ^[0-9]+$ ]] || cols=80
   [[ -z "${NO_COLOR:-}" ]] && printf '\033[1;38;5;117m'
-  if ((cols >= 143)); then
-    banner_full
-  elif ((cols >= 60)); then
-    banner_compact
-  else
-    echo "OWN YOUR INFERENCE -> GOETHE"
-  fi
-  [[ -z "${NO_COLOR:-}" ]] && printf '\033[0m'
-  echo
-}
-
-banner_compact() {
-  cat <<'BANNER'
+  if ((cols >= 52)); then
+    cat <<'BANNER'
  ██████╗  ██████╗ ███████╗████████╗██╗  ██╗███████╗
 ██╔════╝ ██╔═══██╗██╔════╝╚══██╔══╝██║  ██║██╔════╝
 ██║  ███╗██║   ██║█████╗     ██║   ███████║█████╗
 ██║   ██║██║   ██║██╔══╝     ██║   ██╔══██║██╔══╝
 ╚██████╔╝╚██████╔╝███████╗   ██║   ██║  ██║███████╗
  ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
-            O W N   Y O U R   I N F E R E N C E
 BANNER
-}
-
-banner_full() {
-  cat <<'BANNER'
- ██████╗ ██╗    ██╗███╗   ██╗    ██╗   ██╗ ██████╗ ██╗   ██╗██████╗     ██╗███╗   ██╗███████╗███████╗██████╗ ███████╗███╗   ██╗ ██████╗███████╗
-██╔═══██╗██║    ██║████╗  ██║    ╚██╗ ██╔╝██╔═══██╗██║   ██║██╔══██╗    ██║████╗  ██║██╔════╝██╔════╝██╔══██╗██╔════╝████╗  ██║██╔════╝██╔════╝
-██║   ██║██║ █╗ ██║██╔██╗ ██║     ╚████╔╝ ██║   ██║██║   ██║██████╔╝    ██║██╔██╗ ██║█████╗  █████╗  ██████╔╝█████╗  ██╔██╗ ██║██║     █████╗
-██║   ██║██║███╗██║██║╚██╗██║      ╚██╔╝  ██║   ██║██║   ██║██╔══██╗    ██║██║╚██╗██║██╔══╝  ██╔══╝  ██╔══██╗██╔══╝  ██║╚██╗██║██║     ██╔══╝
-╚██████╔╝╚███╔███╔╝██║ ╚████║       ██║   ╚██████╔╝╚██████╔╝██║  ██║    ██║██║ ╚████║██║     ███████╗██║  ██║███████╗██║ ╚████║╚██████╗███████╗
- ╚═════╝  ╚══╝╚══╝ ╚═╝  ╚═══╝       ╚═╝    ╚═════╝  ╚═════╝ ╚═╝  ╚═╝    ╚═╝╚═╝  ╚═══╝╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝ ╚═════╝╚══════╝
-
-     ██╗       ██████╗  ██████╗ ███████╗████████╗██╗  ██╗███████╗
-     ╚██╗     ██╔════╝ ██╔═══██╗██╔════╝╚══██╔══╝██║  ██║██╔════╝
-█████╗╚██╗    ██║  ███╗██║   ██║█████╗     ██║   ███████║█████╗
-╚════╝██╔╝    ██║   ██║██║   ██║██╔══╝     ██║   ██╔══██║██╔══╝
-     ██╔╝     ╚██████╔╝╚██████╔╝███████╗   ██║   ██║  ██║███████╗
-     ╚═╝       ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
-BANNER
+  else
+    echo "GOETHE"
+  fi
+  [[ -z "${NO_COLOR:-}" ]] && printf '\033[0m'
+  echo
 }
 
 main() {
@@ -1041,6 +1123,9 @@ main() {
   fi
   stage 3 "Setting up the Python environment"
   install_pyenv
+  if [[ "${CUDA_COMPAT}" -eq 1 ]]; then
+    install_cuda_compat
+  fi
   stage 4 "Installing goethe and goethed"
   install_ternary
   install_binaries
