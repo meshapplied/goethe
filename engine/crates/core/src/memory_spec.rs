@@ -8,6 +8,7 @@ const BF16: u64 = 2;
 const DSV4_PAGE: u64 = 256;
 const SWA_EVICTION_INTERVAL: u64 = 128;
 pub const CHUNKED_PREFILL: u64 = 8192;
+const LOAD_PEAK_LAYERS: f64 = 7.0;
 const EXTRA_BUFFER_ARCHS: &[&str] = &[
     "KimiLinearForCausalLM",
     "Qwen3_5ForConditionalGeneration",
@@ -65,6 +66,8 @@ pub struct MemorySpec {
     pub chunked_prefill: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub static_state_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub load_peak_bytes: u64,
 }
 
 impl MemorySpec {
@@ -117,6 +120,7 @@ pub fn from_config(cfg: &Value, kv_dtype: Option<&str>) -> Result<MemorySpec, St
     } else {
         mha(lm, cfg, plan)
     };
+    spec.load_peak_bytes = fp4_expert_load_peak(cfg, lm, model_type);
     let state = model_facts::linear_state_bytes(lm, plan);
     if state > 0 {
         spec.state_bytes_per_slot = state;
@@ -130,6 +134,18 @@ pub fn from_config(cfg: &Value, kv_dtype: Option<&str>) -> Result<MemorySpec, St
         }
     }
     Ok(spec)
+}
+
+fn fp4_expert_load_peak(cfg: &Value, lm: &Value, model_type: &str) -> u64 {
+    // Packed FP4 experts are reordered per layer after loading (original, per-expert copies, stack, allocator slack): 7 layers' worth, as measured on a B200.
+    let quant = cfg.get("quantization_config").or_else(|| lm.get("quantization_config"));
+    let mxfp4_store = quant.and_then(|q| q.get("store_dtype")).and_then(|v| v.as_str()) == Some("mxfp4");
+    if !(model_type.starts_with("deepseek_v4") || mxfp4_store) {
+        return 0;
+    }
+    let get = |k: &str| lm.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    let per_layer = (get("n_routed_experts") * 3 * get("hidden_size") * get("moe_intermediate_size")) as f64 * (0.5 + 1.0 / 32.0);
+    (LOAD_PEAK_LAYERS * per_layer) as u64
 }
 
 fn deepseek_v4(lm: &Value, layers: u64) -> Result<MemorySpec, String> {
@@ -322,6 +338,11 @@ mod tests {
         assert_eq!(t.kv_bytes_per_token, 1630);
         assert_eq!(t.request_bytes, 2304 * 23_360 + 3 * 8 * 4096);
         assert_eq!(t.fixed_bytes, (2 * 8192 + 256) * 23_360);
+        let moe = json!({"architectures": ["DeepseekV4ForCausalLM"], "model_type": "deepseek_v4", "num_hidden_layers": 43,
+            "num_attention_heads": 64, "head_dim": 512, "hidden_size": 4096, "moe_intermediate_size": 2048,
+            "n_routed_experts": 256, "compress_ratios": [0]});
+        let peak = from_config(&moe, None).unwrap().load_peak_bytes as f64 / 1024f64.powi(3);
+        assert!((peak - 7.0 * 3.1875).abs() < 1e-6, "{peak}");
     }
 
     #[test]

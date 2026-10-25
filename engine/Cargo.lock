@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "goethe"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "goethe-core",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "goethe-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "libc",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "goethed"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "goethe-core",
  "http-body-util",

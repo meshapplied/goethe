@@ -845,7 +845,7 @@ apply_binaries() {
     return
   fi
   if [[ -x "${GOETHE_HOME}/bin/goethe" ]]; then
-    old="$("${GOETHE_HOME}/bin/goethe" --version 2>/dev/null || echo "goethe unknown build")"
+    old="$("${GOETHE_HOME}/bin/goethe" --build-info 2>/dev/null || "${GOETHE_HOME}/bin/goethe" --version 2>/dev/null || echo "goethe unknown build")"
   fi
   if [[ -n "${old}" && " ${STAGED[*]} " == *" goethed "* ]] && goethed_answers; then
     if systemd_root && write_system_unit; then
@@ -877,7 +877,7 @@ apply_binaries() {
     STARTED=1
   fi
   if [[ -n "${old}" ]]; then
-    new="$("${GOETHE_HOME}/bin/goethe" --version)"
+    new="$("${GOETHE_HOME}/bin/goethe" --build-info 2>/dev/null || "${GOETHE_HOME}/bin/goethe" --version)"
     UPGRADE_NOTE="upgraded goethe ${old#goethe } -> ${new#goethe }${UPGRADE_NOTE:+; ${UPGRADE_NOTE}}"
   fi
 }

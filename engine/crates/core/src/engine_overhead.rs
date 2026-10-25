@@ -26,11 +26,25 @@ pub fn parse_shortfall_gb(log_text: &str) -> Option<f64> {
                 return Some(f * 0.05 + 1.0);
             }
         }
+        if let Some(gap) = torch_oom_gap_gb(line) {
+            return Some(gap.max(1.0) + 1.0);
+        }
         if line.contains("CUDA out of memory") || line.contains("state cache is too small to serve any requests") {
             return Some(4.0);
         }
     }
     None
+}
+
+fn torch_oom_gap_gb(line: &str) -> Option<f64> {
+    // "Tried to allocate 2.00 GiB. GPU 0 has a total capacity of 178.34 GiB of which 1.15 GiB is free": what was missing.
+    let number_after = |key: &str| -> Option<f64> {
+        let rest = line.split(key).nth(1)?;
+        rest.split_whitespace().next()?.trim_end_matches(['.', ',']).parse().ok()
+    };
+    let wanted = number_after("Tried to allocate ")?;
+    let free = number_after("of which ").unwrap_or(0.0);
+    Some(wanted - free)
 }
 
 pub fn parse_weight_gb(log_text: &str) -> Option<f64> {
@@ -182,6 +196,13 @@ mod tests {
         store_context(&con, "RTX", 1, 1.36).unwrap();
         assert_eq!(read_context(&con, "RTX", 1), 1.36);
         assert_eq!(read_context(&con, "RTX", 2), DEFAULT_CONTEXT_GB);
+    }
+
+    #[test]
+    fn a_torch_oom_names_what_was_missing() {
+        let line = "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 12.00 GiB. GPU 0 has a total capacity of 178.34 GiB of which 1.15 GiB is free.";
+        assert!((parse_shortfall_gb(line).unwrap() - (12.0 - 1.15 + 1.0)).abs() < 1e-9);
+        assert_eq!(parse_shortfall_gb("CUDA out of memory"), Some(4.0));
     }
 
     #[test]

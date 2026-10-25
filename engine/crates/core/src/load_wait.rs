@@ -115,6 +115,7 @@ const COMPILER_MARKERS: &[&str] = &[
     "cc1plus",
     "command 'c++' failed",
     "failed to preprocess host compiler properties",
+    "No such file or directory: 'ninja'",
 ];
 
 fn likely_cause(engine: &[String]) -> Option<String> {
@@ -125,6 +126,14 @@ fn likely_cause(engine: &[String]) -> Option<String> {
         return Some(match crate::host_compiler::verdict(crate::host_compiler::find().as_ref(), &distro) {
             crate::host_compiler::Verdict::Ok(label) => format!("a run-time kernel build failed with {label}; see the engine log lines below"),
             crate::host_compiler::Verdict::TooNew(why) | crate::host_compiler::Verdict::Unusable(why) => why,
+        });
+    }
+    if has(&["OutOfMemoryError", "CUDA out of memory"]) {
+        let loading = has(&["process_weights_after_loading", "load_weights", "Load weight begin"]) && !has(&["Load weight end"]);
+        return Some(if loading {
+            "the GPU ran out of memory while loading the weights; the model needs more memory than these GPUs have free during loading: split it across more GPUs with --gpu".into()
+        } else {
+            "the GPU ran out of memory; free memory on it, lower --ctx or --max-conc, or split the model across more GPUs with --gpu".into()
         });
     }
     if has(&["no kernel image is available"]) {

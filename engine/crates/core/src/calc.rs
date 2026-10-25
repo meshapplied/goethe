@@ -12,6 +12,7 @@ pub struct Need {
     pub window: f64,
     pub state: f64,
     pub overhead: f64,
+    pub load_peak: f64,
 }
 
 impl Need {
@@ -29,6 +30,7 @@ pub fn missing_gb(need: &Need, free_gb: f64) -> f64 {
     // GB a budget lacks: the whole budget leaves the safety margin and the static pool stays within 95% of free.
     (need.total() - (free_gb - SAFETY_MARGIN_GB))
         .max(need.pool() - MAX_MEM_FRACTION * free_gb)
+        .max(need.weights + need.load_peak + need.overhead - (free_gb - SAFETY_MARGIN_GB))
         .max(0.0)
 }
 
@@ -53,6 +55,14 @@ pub fn shortfall(need: &Need, gpu: u32, free_gb: f64) -> Option<String> {
     let (w, k, s, o, f) = (tenth(need.weights), tenth(need.kv) + tenth(need.window), tenth(need.state), tenth(need.overhead), tenth(free_gb));
     let n = w + k + s + o;
     let head = format!("needs {}; GPU {gpu} has {f:.1} GB free", describe(need));
+    let by_load = tenth(need.weights + need.load_peak + need.overhead) - (f - SAFETY_MARGIN_GB);
+    if need.load_peak > 0.0 && by_load >= n - (f - SAFETY_MARGIN_GB) && by_load > 0.0 {
+        return Some(format!(
+            "{head}; while loading, SGLang also holds {:.1} GB of reordered expert copies: missing {:.1} GB (split it across more GPUs with --gpu)",
+            tenth(need.load_peak),
+            by_load.max(0.1)
+        ));
+    }
     let by_margin = n - (f - SAFETY_MARGIN_GB);
     let cap = tenth(MAX_MEM_FRACTION * f);
     let by_cap = w + k + s - cap;
@@ -90,12 +100,20 @@ mod tests {
     use super::*;
 
     fn need(weights: f64, kv: f64, overhead: f64) -> Need {
-        Need { weights, kv, window: 0.0, state: 0.0, overhead }
+        Need { weights, kv, overhead, ..Need::default() }
+    }
+
+    #[test]
+    fn the_load_peak_must_fit_next_to_the_weights() {
+        let n = Need { weights: 155.4, kv: 0.3, state: 0.1, overhead: 1.8, load_peak: 9.6, ..Need::default() };
+        assert!(missing_gb(&n, 178.0) <= 0.0);
+        let why = shortfall(&n, 0, 160.0).unwrap();
+        assert!(why.contains("reordered expert copies") && why.contains("--gpu"), "{why}");
     }
 
     #[test]
     fn linear_attention_state_is_part_of_the_static_pool() {
-        let n = Need { weights: 20.0, kv: 17.2, window: 0.0, state: 2.5, overhead: 1.8 };
+        let n = Need { weights: 20.0, kv: 17.2, state: 2.5, overhead: 1.8, ..Need::default() };
         assert!((n.pool() - 39.7).abs() < 1e-9 && (n.total() - 41.5).abs() < 1e-9);
         assert_eq!(describe(&n), "41.5 GB per GPU (weights 20.0 + KV 17.2 + per-request state 2.5 + overhead 1.8)");
         let w = Need { window: 3.0, ..n };

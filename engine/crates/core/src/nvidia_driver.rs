@@ -23,9 +23,14 @@ pub struct Probe {
     pub distro: String,
 }
 
+pub fn init_nvml() -> Result<Nvml, nvml_wrapper::error::NvmlError> {
+    // libnvidia-ml.so.1 first: GPU containers mount only the versioned library, not the unversioned dev link.
+    Nvml::builder().lib_path(std::ffi::OsStr::new("libnvidia-ml.so.1")).init().or_else(|_| Nvml::init())
+}
+
 pub fn nvml() -> Result<Nvml, String> {
     // NVML, or an error that says why the driver is unusable and how to fix it.
-    Nvml::init().map_err(|e| match diagnose(&probe()) {
+    init_nvml().map_err(|e| match diagnose(&probe()) {
         Some(why) => format!("NVML init failed: {why}"),
         None => format!("NVML init failed: {e}"),
     })
@@ -176,7 +181,7 @@ fn bus_tail(bus_id: &str) -> &str {
 
 pub fn started_bus_ids() -> Vec<String> {
     // PCI bus ids of the GPUs NVML can open; empty when NVML itself does not start.
-    let Ok(nvml) = Nvml::init() else { return Vec::new() };
+    let Ok(nvml) = init_nvml() else { return Vec::new() };
     (0..nvml.device_count().unwrap_or(0))
         .filter_map(|i| nvml.device_by_index(i).ok()?.pci_info().ok().map(|p| p.bus_id.to_lowercase()))
         .collect()
