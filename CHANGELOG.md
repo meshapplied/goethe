@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `goethe uninstall` now deletes the models Goethe installed, with the same rules as `goethe remove`: downloads and managed copies are deleted, models registered from a folder elsewhere or the Hugging Face cache lose only Goethe's links, and a folder of your own files inside the models directory is kept and named. The plan lists the models and the space they free, also with `--yes`. `--keep-models` keeps them; the old `--purge-models` still works.
+
 ## 0.1.4 (2026-10-25)
 
 - The installer shows what it is doing: numbered steps (checking the machine, verifying the signed package, setting up the Python environment, installing goethe and goethed, setting up the gateway), a result line for each check (driver and GPUs, compiler, signature, version, nginx, TLS certificate), progress bars for downloads, and uv's live download and install progress for the Python environment. The banner now also shows in normal-width terminals, in a compact form, and as one line in narrow ones.

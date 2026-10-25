@@ -131,7 +131,7 @@ Where Goethe keeps its files (models, keys, logs), in order of preference:
 ```bash
 goethe update --check      # is there a new version?
 goethe update              # install it; loaded models keep serving
-goethe uninstall           # remove Goethe; add --purge-models to delete your models too
+goethe uninstall           # remove Goethe and the models it installed; add --keep-models to keep them
 ```
 
 ## First run: goethe start
@@ -667,7 +667,7 @@ Exit codes:
 | `goethe gpu --allow gpu<index>` | Allow a GPU again | |
 | `goethe doctor` | Check the setup, with a fix for each problem | `--json`<br>`--probe-public`: also test the public address |
 | `goethe update` | Install the latest Goethe | `--check`: only show what's available<br>`--yes`: don't ask<br>`--engine`: also update the inference engine<br>`--allow-downgrade` |
-| `goethe uninstall` | Remove Goethe | `--purge-models`: also delete models<br>`--yes` |
+| `goethe uninstall` | Remove Goethe and the models it installed; folders of your own files that you registered stay | `--keep-models`: keep the installed models<br>`--yes` |
 | `goethe --version` | Version and build | |
 
 ## Settings
