@@ -127,6 +127,16 @@ if ! grep -q "WARNING: no usable NVIDIA driver" <<<"${OUT}" || grep -q "below mi
   exit 1
 fi
 
+SHIM="$(make_shim_dir "${WORK}/shim-nodevices")"
+fake "${SHIM}" nvidia-smi "No devices were found"
+OUT="$(run_install "${SHIM}" "")"
+if grep -q "unbound variable" <<<"${OUT}" || ! grep -q "WARNING: no usable NVIDIA driver" <<<"${OUT}"; then
+  echo "nvidia-smi without devices must read as no driver: ${OUT}"
+  exit 1
+fi
+printf 'NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  575.57.08  Release Build\n' >"${WORK}/nvrm"
+GOETHE_NVIDIA_VERSION_FILE="${WORK}/nvrm" expect_fail driver-module "575.57.08 is below minimum 580" "${SHIM}" ""
+
 SHIM="$(make_shim_dir "${WORK}/shim-trunc")"
 LINES="$(wc -l <"${INSTALL}")"
 for keep in $((LINES / 3)) $((LINES / 2)) $((LINES - 1)); do
