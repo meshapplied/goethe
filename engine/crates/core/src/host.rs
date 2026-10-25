@@ -115,8 +115,22 @@ pub fn probe_host(home: &Path, cloud: &str) -> HostInfo {
 }
 
 pub fn probe_environment(public_port: u16) -> EnvironmentInfo {
-    let env: BTreeMap<String, String> = std::env::vars().collect();
-    detect_environment(&sysroot(), &env, public_port)
+    // This process's environment, completed from the container's main process: SSH sessions do not inherit RUNPOD_* and the like.
+    let root = sysroot();
+    let mut env: BTreeMap<String, String> = std::env::vars().collect();
+    for (k, v) in pid1_env(&root) {
+        env.entry(k).or_insert(v);
+    }
+    detect_environment(&root, &env, public_port)
+}
+
+fn pid1_env(root: &Path) -> Vec<(String, String)> {
+    let raw = std::fs::read(root.join("proc/1/environ")).unwrap_or_default();
+    String::from_utf8_lossy(&raw)
+        .split('\0')
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
 }
 
 pub fn mem_available_gb() -> Option<f64> {
@@ -516,6 +530,17 @@ mod tests {
 
     fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn the_container_main_process_environment_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("proc/1")).unwrap();
+        std::fs::write(dir.path().join("proc/1/environ"), b"RUNPOD_POD_ID=abc123\0container=docker\0PATH=/usr/bin\0").unwrap();
+        let env = pid1_env(dir.path());
+        assert!(env.contains(&("RUNPOD_POD_ID".to_string(), "abc123".to_string())));
+        assert_eq!(env.len(), 3);
+        assert!(pid1_env(Path::new("/nonexistent")).is_empty());
     }
 
     #[test]

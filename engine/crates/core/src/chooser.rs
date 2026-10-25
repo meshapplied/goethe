@@ -121,6 +121,7 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
             + ((conc + 1) * m.request_bytes + m.fixed_bytes) as f64)
             / GIB,
         overhead: BASE_OVERHEAD_GB + request_table,
+        load_peak: m.load_peak_bytes as f64 / tp as f64 / GIB,
     }
 }
 
