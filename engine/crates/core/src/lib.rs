@@ -6,6 +6,7 @@ pub mod chooser;
 pub mod config;
 pub mod db;
 pub mod hf;
+pub mod host_compiler;
 pub mod hw;
 pub mod inflight;
 pub mod install;

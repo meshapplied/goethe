@@ -15,6 +15,8 @@ pub struct HardwareState {
     pub driver: String,
     pub gpus: Vec<GpuState>,
     pub links: Vec<LinkState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<HostInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,20 +64,23 @@ pub struct LinkState {
 }
 
 pub fn profile(home: &Path) -> Result<HardwareState, String> {
-    // Probe every GPU and pair over NVML, then add the host and runtime environment.
+    // Probe every GPU and pair over NVML (a GPU that does not answer is listed as unavailable), then the host.
     ensure_layout(home).map_err(|e| format!("layout: {e}"))?;
     let nvml = crate::nvidia_driver::nvml()?;
     let driver = nvml.sys_driver_version().map_err(|e| format!("driver version: {e}"))?;
     let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
     let mut gpus = Vec::new();
+    let mut unavailable = Vec::new();
     for idx in 0..count {
-        let dev = nvml.device_by_index(idx).map_err(|e| format!("device {idx}: {e}"))?;
-        gpus.push(probe_gpu(idx, &dev)?);
+        match nvml.device_by_index(idx).map_err(|e| e.to_string()).and_then(|dev| probe_gpu(idx, &dev)) {
+            Ok(g) => gpus.push(g),
+            Err(e) => unavailable.push(format!("gpu{idx}: {e}")),
+        }
     }
     let mut links = Vec::new();
-    for i in 0..count {
-        for j in (i + 1)..count {
-            links.push(classify_link(&nvml, i, j)?);
+    for (n, a) in gpus.iter().enumerate() {
+        for b in &gpus[n + 1..] {
+            links.push(classify_link(&nvml, a.index, b.index)?);
         }
     }
     let environment = host::probe_environment(crate::nginx::public_port_u16(home));
@@ -93,6 +98,7 @@ pub fn profile(home: &Path) -> Result<HardwareState, String> {
         driver,
         gpus,
         links,
+        unavailable,
         host: Some(host_info),
         environment: Some(environment),
     })
@@ -246,8 +252,8 @@ pub fn list_gpus_for_placement(managed: &HashSet<i32>) -> Result<Vec<GpuPlacemen
     let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
     let mut out = Vec::new();
     for idx in 0..count {
-        let dev = nvml.device_by_index(idx).map_err(|e| format!("device {idx}: {e}"))?;
-        let (_, _, free, unified) = device_memory(&dev)?;
+        let Ok(dev) = nvml.device_by_index(idx) else { continue };
+        let Ok((_, _, free, unified)) = device_memory(&dev) else { continue };
         let free_vram_mb = if unified { free.saturating_sub(UNIFIED_OS_RESERVE_GB * 1024) } else { free };
         let foreign_compute = dev
             .running_compute_processes()
@@ -275,8 +281,8 @@ pub fn live_gpus() -> Result<Vec<LiveGpu>, String> {
     let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
     let mut out = Vec::new();
     for index in 0..count {
-        let dev = nvml.device_by_index(index).map_err(|e| format!("device {index}: {e}"))?;
-        let (_, _, free, unified) = device_memory(&dev)?;
+        let Ok(dev) = nvml.device_by_index(index) else { continue };
+        let Ok((_, _, free, unified)) = device_memory(&dev) else { continue };
         let mut pids: Vec<i32> = [dev.running_compute_processes(), dev.running_graphics_processes()]
             .into_iter()
             .flatten()

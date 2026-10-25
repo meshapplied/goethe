@@ -90,6 +90,9 @@ pub fn failure_report(home: &std::path::Path, instance_id: &str) -> String {
         out.push(format!("  goethed: {}", l.trim()));
     }
     let engine = tail_lines(&home.join("logs").join(format!("{instance_id}.log")), 512 * 1024);
+    if let Some(cause) = likely_cause(&engine) {
+        out.push(format!("  likely cause: {cause}"));
+    }
     let errors: Vec<&String> = engine.iter().filter(|l| ERROR_MARKERS.iter().any(|m| l.contains(m))).collect();
     let picked: Vec<&String> = if errors.is_empty() { engine.iter().rev().take(15).rev().collect() } else { errors.into_iter().rev().take(12).rev().collect() };
     if !picked.is_empty() {
@@ -100,9 +103,55 @@ pub fn failure_report(home: &std::path::Path, instance_id: &str) -> String {
     out.join("\n")
 }
 
+const COMPILER_MARKERS: &[&str] = &[
+    "unsupported GNU version",
+    "unsupported clang version",
+    "Failed to find C compiler",
+    "No such file or directory: 'c++'",
+    "No such file or directory: 'g++'",
+    "c++: not found",
+    "g++: not found",
+    "gcc: not found",
+    "cc1plus",
+    "command 'c++' failed",
+    "failed to preprocess host compiler properties",
+];
+
+fn likely_cause(engine: &[String]) -> Option<String> {
+    // A plain reason for the engine failures Goethe can name: no compiler, no kernels for this GPU, an old driver.
+    let has = |markers: &[&str]| engine.iter().any(|l| markers.iter().any(|m| l.contains(m)));
+    if has(COMPILER_MARKERS) {
+        let distro = crate::nvidia_driver::probe().distro;
+        return Some(match crate::host_compiler::verdict(crate::host_compiler::find().as_ref(), &distro) {
+            crate::host_compiler::Verdict::Ok(label) => format!("a run-time kernel build failed with {label}; see the engine log lines below"),
+            crate::host_compiler::Verdict::TooNew(why) | crate::host_compiler::Verdict::Unusable(why) => why,
+        });
+    }
+    if has(&["no kernel image is available"]) {
+        return Some("the engine has no kernels for this GPU's architecture; goethe doctor lists the supported ones".into());
+    }
+    if has(&["CUDA driver version is insufficient", "cudaErrorInsufficientDriver"]) {
+        let why = crate::nvidia_driver::diagnose(&crate::nvidia_driver::probe());
+        return Some(why.unwrap_or_else(|| format!("the NVIDIA driver is older than {} (CUDA 13)", crate::nvidia_driver::DRIVER_MIN)));
+    }
+    if has(&["ninja: build stopped", "Error building extension"]) {
+        return Some("a run-time kernel build failed; goethe doctor checks the compiler and CUDA toolkit".into());
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn known_engine_failures_get_a_plain_cause() {
+        let lines = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(likely_cause(&lines(&["RuntimeError: CUDA error: no kernel image is available for execution"])).unwrap().contains("architecture"));
+        assert!(likely_cause(&lines(&["Error building extension 'x'", "ninja: build stopped"])).unwrap().contains("kernel build failed"));
+        assert!(likely_cause(&lines(&["error -- unsupported GNU version! gcc versions later than 15"])).is_some());
+        assert_eq!(likely_cause(&lines(&["Traceback", "ValueError: bad config"])), None);
+    }
 
     #[test]
     fn failure_report_shows_daemon_reason_and_engine_errors() {

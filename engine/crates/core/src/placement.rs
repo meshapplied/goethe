@@ -236,6 +236,7 @@ mod tests {
                 link(1, 3, "NODE"),
                 link(2, 3, "NODE"),
             ],
+            unavailable: Vec::new(),
             host: None,
             environment: None,
         }
