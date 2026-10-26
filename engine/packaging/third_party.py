@@ -12,8 +12,8 @@ from pathlib import Path
 
 ENGINE = Path(__file__).resolve().parent.parent
 REPO = ENGINE.parent
-NOTICES = REPO / "THIRD_PARTY_NOTICES.md"
-LICENSES = REPO / "THIRD_PARTY_LICENSES.txt"
+NOTICES = REPO / "third_party" / "THIRD_PARTY_NOTICES.md"
+LICENSES = REPO / "third_party" / "THIRD_PARTY_LICENSES.txt"
 LOCK = ENGINE / "pyenv" / "requirements.lock"
 TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
 
@@ -179,7 +179,7 @@ def notices(py: list[tuple[str, str, str]], crates: list[tuple[str, str, str, Pa
     lines = [
         "# Third-party software",
         "",
-        "Goethe is licensed under the [Apache License 2.0](LICENSE). It is built on open-source and NVIDIA "
+        "Goethe is licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). It is built on open-source and NVIDIA "
         "software, "
         "each under its own license, listed below. The installer places this file and "
         "[THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) in `$GOETHE_HOME`.",

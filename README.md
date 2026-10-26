@@ -11,6 +11,7 @@
   <a href="https://github.com/meshapplied/goethe/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/meshapplied/goethe/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <br>
   <a href="https://meshapplied.com/docs"><img alt="Documentation at meshapplied.com/docs" src="https://img.shields.io/badge/docs-meshapplied.com%2Fdocs-87D7FF?logo=readthedocs&logoColor=white"></a>
+  <a href="https://discord.gg/fadnuFrm4"><img alt="Join us on Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
 </p>
 
 <p align="center"><b>Run and share your models on your own infra in 3 steps, and run them fast.</b></p>
@@ -112,4 +113,4 @@ Our models on [Hugging Face](https://huggingface.co/meshapplied) and at [meshapp
 
 Goethe is licensed under the [Apache License 2.0](LICENSE). The license of each model you serve still applies.
 
-Goethe is built on third-party software, among them SGLang, PyTorch, FlashInfer, Triton, Hugging Face Transformers, nginx and NVIDIA's CUDA libraries. [NOTICE](NOTICE) names them and their licenses; [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists every component.
+Goethe is built on third-party software, among them SGLang, PyTorch, FlashInfer, Triton, Hugging Face Transformers, nginx and NVIDIA's CUDA libraries. [NOTICE](NOTICE) names them and their licenses; [third_party/THIRD_PARTY_NOTICES.md](third_party/THIRD_PARTY_NOTICES.md) lists every component.
