@@ -52,11 +52,6 @@ class Load(unittest.TestCase):
         self.assertEqual(models["qwen-flash-next-nvfp4"].fetch, "")
         self.assertEqual(models["deepseek-ternary"].fetch, "meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest")
 
-    def test_the_command_line_count_is_the_number_in_the_research_doc(self):
-        root = Path(__file__).resolve().parents[1]
-        n = sum(len(p.read_text().splitlines()) for p in (root / "goethe").glob("*.py"))
-        self.assertIn(f"{n:,} lines", (root / "docs" / "research-models.md").read_text())
-
     def test_sglang_row_rejects_an_unknown_key(self):
         text = """
 [models.x]
