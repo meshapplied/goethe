@@ -13,7 +13,7 @@
   <a href="https://meshapplied.com/docs"><img alt="Documentation at meshapplied.com/docs" src="https://img.shields.io/badge/docs-meshapplied.com%2Fdocs-87D7FF?logo=readthedocs&logoColor=white"></a>
 </p>
 
-<p align="center"><b>Share the LLMs on your GPUs through one IP address, in three steps, and run them fast.</b></p>
+<p align="center"><b>Run and share your models on your own infra in 3 steps, and run them fast.</b></p>
 
 Goethe turns a Linux machine with an NVIDIA GPU into your own API, compatible with OpenAI, Anthropic and LiteLLM clients. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
 
