@@ -44,7 +44,7 @@ List keys, or revoke one:
                   goethe down stops goethed but keeps loaded models for the next goethe up; goethe unload stops a model for good."
 )]
 struct Cli {
-    #[arg(short = 'V', long = "version", help = "Print version, git commit and build date.")]
+    #[arg(short = 'V', long = "version", help = "Print the version, and how to upgrade when a newer one is out (--build-info adds commit and build date).")]
     version: bool,
     #[command(subcommand)]
     command: Commands,

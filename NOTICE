@@ -1,0 +1,68 @@
+Goethe
+Copyright 2026 Ternary Flash contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Goethe is built on and works with the third-party software below. Each component
+remains under its own license; nothing here changes those licenses.
+
+Shipped with Goethe
+-------------------
+
+SGLang (https://github.com/sgl-project/sglang)
+  Apache License 2.0. Goethe ships a modified build of SGLang. The modifications
+  are Goethe's; SGLang's copyright and license apply to the rest.
+
+PyTorch (https://github.com/pytorch/pytorch)
+  BSD 3-Clause License.
+
+FlashInfer (https://github.com/flashinfer-ai/flashinfer)
+  Apache License 2.0.
+
+Triton (https://github.com/triton-lang/triton)
+  MIT License.
+
+Hugging Face Transformers and Hugging Face Hub (https://github.com/huggingface)
+  Apache License 2.0.
+
+XGrammar (https://github.com/mlc-ai/xgrammar)
+  Apache License 2.0.
+
+uv (https://github.com/astral-sh/uv)
+  Apache License 2.0 or MIT License.
+
+CPython, from python-build-standalone (https://github.com/astral-sh/python-build-standalone)
+  Python Software Foundation License 2.0.
+
+SQLite (https://sqlite.org)
+  Public domain.
+
+NVIDIA software
+---------------
+
+NVIDIA CUDA libraries (CUDA runtime, nvcc, cuBLAS, cuDNN, NCCL, NVSHMEM and related
+packages) are proprietary NVIDIA software, used unmodified under the NVIDIA CUDA
+Toolkit End User License Agreement (https://docs.nvidia.com/cuda/eula/).
+
+On NVIDIA drivers 535 to 579, data-center GPUs use NVIDIA's CUDA forward
+compatibility libraries, which come from NVIDIA under NVIDIA's license and are not
+redistributed by Goethe.
+
+Used from the operating system
+------------------------------
+
+nginx (https://nginx.org)
+  BSD 2-Clause License. Installed from the distribution's packages, not shipped
+  by Goethe.
+
+Complete list
+-------------
+
+THIRD_PARTY_NOTICES.md lists every Python package and Rust crate in Goethe with its
+version and license, and THIRD_PARTY_LICENSES.txt holds the full license texts. Both
+are installed with Goethe.
+
+Models
+------
+
+Models served with Goethe are not part of Goethe. Each model's own license applies.
