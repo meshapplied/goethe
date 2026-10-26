@@ -834,7 +834,7 @@ resolve_nginx() {
 }
 
 install_notices() {
-  # Goethe's LICENSE and NOTICE (third-party software and its license texts), when this package carries them.
+  # Goethe's LICENSE and NOTICE (the third-party software it includes), when this package carries them.
   local f got=0
   rm -f "${GOETHE_HOME}/THIRD_PARTY_NOTICES.md" "${GOETHE_HOME}/THIRD_PARTY_LICENSES.txt"
   for f in LICENSE NOTICE; do
