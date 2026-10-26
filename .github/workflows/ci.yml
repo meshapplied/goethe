@@ -31,6 +31,31 @@ jobs:
       - run: pipx run ruff check goethe tests
       - run: shellcheck -S warning install.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
 
+  attribution:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No AI tool listed as co-author in new commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ -z "${BASE}" || "${BASE}" =~ ^0+$ ]] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "no earlier commit to compare with; nothing to check"
+            exit 0
+          fi
+          tools='claude|anthropic|cursor|copilot|codex|openai|chatgpt|gemini|devin|aider'
+          found="$(git log --format='@@ %h%n%B' "${BASE}..${HEAD}" | awk -v re="^co-authored-by:.*(${tools})|generated with \\[?(claude|cursor)" \
+            '/^@@ / {c = $2; next} tolower($0) ~ re {print c ": " $0}')"
+          if [[ -n "${found}" ]]; then
+            echo "These commits name an AI tool as co-author; remove the lines and push again:"
+            echo "${found}"
+            exit 1
+          fi
+          echo "no AI co-author lines in ${BASE:0:7}..${HEAD:0:7}"
+
   ninfer-patch:
     runs-on: ubuntu-24.04
     steps:
