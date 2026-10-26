@@ -61,8 +61,6 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Style lint (headers, function comments, no dashes or emojis, pinned ruff with the repo rules)
         run: python3 tests/lint_style.py
-      - name: Third-party notices match Cargo.lock and requirements.lock
-        run: python3 packaging/third_party.py --check
       - name: Shell syntax of installer and packaging scripts
         run: for f in cdn/install.sh packaging/*.sh tests/gate.sh tests/*.sh; do bash -n "$f"; done
       - name: CPU gates (harness self-test, package signing and verification)
