@@ -11,7 +11,7 @@ goethe <command> --help
 
 - Every value goes after its flag: `goethe unload --model <model>`, `goethe gpu --allow gpu0 gpu1`. A value typed without its flag prints the corrected command instead of running anything.
 - GPUs are named as `goethe gpu` lists them: `gpu0`, `gpu1`, and so on. Flags that take GPUs accept several: `--gpu gpu2 gpu3`.
-- Model ids are Hugging Face repo names such as `Qwen/Qwen3-8B`. Case doesn't matter, and the folder form `Qwen__Qwen3-8B` works too. A mistyped id gets a suggestion.
+- Model ids are Hugging Face repo names such as `zai-org/GLM-5.3-Flash`. Case doesn't matter, and the folder form `zai-org__GLM-5.3-Flash` works too. A mistyped id gets a suggestion.
 - Commands that list things accept `--json` for scripts.
 
 Exit codes:
@@ -163,9 +163,9 @@ Loads a model and waits until it answers. Goethe picks the GPUs and sizes the me
 | `-- <options>` | Extra engine options, after `--` |
 
 ```bash
-goethe load --model Qwen/Qwen3-8B --gpu gpu1
-goethe load --model deepseek-ai/DeepSeek-V4.1-Flash-1017 --gpu gpu0 gpu1 gpu2 gpu3 --ctx 65536
-goethe load --model Qwen/Qwen3-8B -- --chunked-prefill-size 4096
+goethe load --model zai-org/GLM-5.3-Flash --gpu gpu1
+goethe load --model zai-org/GLM-5.3-Flash --gpu gpu0 gpu1 gpu2 gpu3 --ctx 65536
+goethe load --model zai-org/GLM-5.3-Flash -- --chunked-prefill-size 4096
 ```
 
 ### `goethe unload`

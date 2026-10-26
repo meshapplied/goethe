@@ -1,430 +1,90 @@
 # Goethe user guide
 
-Goethe serves large language models from your own NVIDIA GPUs through one OpenAI-compatible address. You install a model, load it, and share it with your apps, your team or your other machines, all from the `goethe` command.
+Run and share your models on your own infrastructure in three steps, and run them fast.
+
+Goethe turns a Linux machine into your own API, compatible with OpenAI, Anthropic and LiteLLM clients. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
 
 ## Contents
 
 - [What you can use it for](#what-you-can-use-it-for)
-- [Quick start](#quick-start)
-- [Install](#install)
-- [First run: goethe start](#first-run-goethe-start)
+- [Quick install](#quick-install)
+- [API compatibility](#api-compatibility)
+- [CLI](#cli)
 - [Add models](#add-models)
-- [Load and run models](#load-and-run-models)
+- [Load and run](#load-and-run)
 - [Share the API](#share-the-api)
-- [Use the API](#use-the-api)
-- [Everyday commands](#everyday-commands)
-- [What Goethe supports](#what-goethe-supports)
-- [Command reference](#command-reference)
+- [Hardware requirements](#hardware-requirements)
+- [Software requirements](#software-requirements)
+- [Where it runs](#where-it-runs)
+- [Supported models](#supported-models)
 - [Settings](#settings)
 - [Troubleshooting](#troubleshooting)
 
 ## What you can use it for
 
-- **A private OpenAI-compatible API for your team.** Load a model on a GPU workstation and give each person or app its own OpenAI-compatible API key.
-- **Your home or office over a VPN.** Serve from a GPU box and use it from your laptop anywhere through Tailscale, WireGuard or ZeroTier.
-- **Local AI for your own apps.** Point code that uses the OpenAI SDK at your machine instead of a cloud service.
-- **Coding assistants and chat UIs.** Use Goethe as the backend for tools that accept an OpenAI-compatible endpoint, such as Open WebUI and many coding assistants.
-- **Comparing models.** Load several models at once and switch between them by name.
-- **Cloud GPUs.** Run it on RunPod, Vast.ai, Lambda or any other GPU server. Goethe prints the public address to use.
+- **Easy to serve.** Every model you load is served at the same URL; a request picks its model by name.
+- **Fast.** Use the custom kernel attachments to accelerate and optimise model capability.
+- **A private API for your team.** One key per person or app; nothing reaches the API until you allow it.
+- **Home or office over a VPN.** Serve from a GPU box and use it from your laptop through Tailscale, WireGuard or ZeroTier.
+- **Your own apps and tools.** Point OpenAI, Anthropic or LiteLLM clients, Open WebUI, coding assistants and similar tools at hardware you control.
+- **Many models, many GPUs.** Compare models by name on the same address, split large models across GPUs, or run on cloud GPUs when you need them.
 
-## Quick start
-
-```bash
-curl -fsSL https://meshapplied.com/install.sh | bash   # install
-goethe start                                           # start Goethe and set it up step by step
-```
-
-`goethe start` walks you through installing a model, serving it and sharing the API (see [First run](#first-run-goethe-start)). The same with plain commands:
-
-```bash
-goethe up                                              # 1. start Goethe
-goethe install --model Qwen/Qwen3-8B --load            # 2. add and load a model
-goethe configure api                                   # 3. choose who can reach it
-goethe key --create my-laptop                          #    make a key (goethe api lists it)
-goethe api                                             #    print the address, keys and loaded models
-```
-
-`goethe status` tells you at any time whether Goethe is running, with the API address and the names and ids of your keys. `goethe up` prints the same summary.
-
-Then send a request, replacing the address, port and key with your own:
-
-```bash
-curl -k https://127.0.0.1:8443/v1/chat/completions \
-  -H "Authorization: Bearer goethe_sk_..." \
-  -H "Content-Type: application/json" \
-  -d '{"model":"Qwen/Qwen3-8B","messages":[{"role":"user","content":"Hello!"}]}'
-```
-
-## Install
-
-### Requirements
-
-- Linux on x86_64 or ARM64 with glibc 2.30 or newer, such as Ubuntu 20.04+ or Debian 11+, on your own hardware, a cloud GPU virtual machine or a GPU container (see [Where it runs](#where-it-runs)).
-- A [supported NVIDIA GPU](#hardware) and driver: 580 or newer for every GPU, or 535 to 579 for data-center GPUs (see [CUDA compatibility](#cuda-compatibility)). Check with `nvidia-smi`.
-- Disk space for your models, plus about 12 GB for Goethe itself.
-
-Goethe brings its own CUDA runtime and compiler; you never install the CUDA toolkit. The installer checks the machine first and installs what is missing, such as a C++ compiler or the NVIDIA driver, after asking. Inside a container it never touches the driver, which belongs to the host. A GPU problem never stops the install: `goethe doctor` names the fix afterwards.
-
-`GOETHE_INSTALL_DEPS=1` and `GOETHE_INSTALL_DRIVER=1` answer yes in advance, `=0` answers no. `GOETHE_REQUIRE_GPU=1` makes a missing or broken GPU stop the install instead of warning.
-
-On a machine where Goethe is installed, `goethe doctor` names the cause and the fix for GPU and driver problems, `goethe start` explains them before the first step, and a model that fails to load because of one says so:
-
-| What `goethe doctor` finds | Fix it names |
-|---|---|
-| No NVIDIA GPU visible | Attach the GPU to the VM (PCI passthrough or vGPU), or start the container with `--gpus all` |
-| A GPU but no driver loaded | The driver package for your distribution, for example `sudo ubuntu-drivers install --gpgpu nvidia:580-server-open`, then a reboot |
-| A driver too old for this GPU | The same, to update it |
-| The proprietary module with a Blackwell GPU | The open module (`nvidia-driver-580-server-open`, `nvidia-open`) |
-| A GPU the driver did not start | A full power cycle, power cables, Above 4G decoding |
-| A driver but no `/dev/nvidia*` | Pass the devices into the container, or `sudo nvidia-modprobe -u -c=0` on the host |
-| A driver but no `libcuda.so.1` or `libnvidia-ml.so.1` | The NVIDIA Container Toolkit for containers, or the matching user-space driver (`libnvidia-compute-<version>`) |
-| No C++ compiler, or gcc older than 9 | `sudo apt install build-essential` or `sudo dnf install gcc-c++` |
-
-### Install Goethe
+## Quick install
 
 ```bash
 curl -fsSL https://meshapplied.com/install.sh | bash
-```
-
-No root is needed. The installer ends with the next step, `goethe start`.
-
-The installer does not start Goethe. `goethe start` (or `goethe up`) does that. When you run the installer again to upgrade a Goethe that is running, it swaps in the new version and keeps your models serving.
-
-Open a new terminal if the `goethe` command isn't found yet. To check your setup:
-
-```bash
-goethe doctor
-```
-
-Every line should say `OK` (green), `INFO` or `WARN` (yellow). Each `WARN` or `FAIL` line tells you how to fix it.
-
-Where Goethe keeps its files (models, keys, logs), in order of preference:
-- `/workspace/.goethe` on cloud machines with a persistent `/workspace` volume;
-- `/var/lib/goethe` when run as root;
-- `~/.goethe` otherwise.
-
-`goethe doctor` shows the folder in use on its `goethe_home` line.
-
-### Updating and removing Goethe
-
-```bash
-goethe update --check      # is there a new version?
-goethe update              # install it; loaded models keep serving
-goethe uninstall           # remove Goethe and the models it installed; add --keep-models to keep them
-```
-
-## First run: goethe start
-
-```bash
 goethe start
 ```
 
-`goethe start` starts Goethe, which from then on also starts at every boot, unless it was stopped with `goethe down` when the machine shut down. Then it offers two ways to go on.
-
-**Guided setup (recommended)** takes you through three steps, choosing with the arrow keys and Enter:
-
-1. **Install a model.** Pick one from the models that fit your GPUs, type any Hugging Face model id, or pick a gated or private model, for which you type a Hugging Face token. You can also run a model that is already on this machine: Goethe lists the ones it finds in its models folder and in the Hugging Face cache, or you name a folder.
-2. **Serve through an API.** Goethe loads the model on the GPUs that fit it and waits until it answers.
-3. **Configure API access.** Choose who can reach the API (this machine only, your VPN or a public address), then name the first API key. Goethe prints the base URL, the model name, the key and a `curl` command to try it.
-
-You can stop after step 1 and continue later with `goethe start` or `goethe load --model <model>`.
-
-**Advanced setup** lets you do each part on its own, in any order: choose which GPUs Goethe may use, install a model, run your own model, serve an installed model, configure API access and create API keys. Choose Finish when you are done.
-
-Without an interactive terminal, for example in a script, `goethe start` prints the same three steps as commands.
-
-## Add models
-
-### Find models that fit
+`goethe start` starts Goethe and walks you through three steps: install a model, serve it through the API, and configure who can reach it. You can stop after any step and continue later with `goethe start`. If you prefer plain commands:
 
 ```bash
-goethe recommend
+# 1. Start Goethe and load a model
+goethe up
+goethe install --model zai-org/GLM-5.3-Flash --load
+
+# 2. Share it
+goethe configure api                 # this machine only, your VPN (recommended), or a public address
+goethe key --create my-laptop        # one key per app or person
+goethe api                           # the address to give your apps
 ```
 
-This shows the VRAM of the GPUs Goethe may use, counted as if they were empty, then the catalog models they can run, grouped by the VRAM they take (up to 24 GB, 48 GB, 96 GB and so on), with their GPUs and download size. You aren't limited to this list: any [supported model](#model-families) on Hugging Face works.
+`goethe status` tells you whether Goethe is running, with the API address and your keys. Check the machine with `goethe doctor`: each `WARN` or `FAIL` line names its fix. See the [hardware](#hardware-requirements) and [software](#software-requirements) requirements before you install.
 
-### Install from Hugging Face
+## API compatibility
 
-```bash
-goethe install --model Qwen/Qwen3-8B
-goethe install --model nvidia/Llama-3.1-8B-Instruct-NVFP4 --load      # install and load in one step
-```
+The API is at `https://<address>:<port>/v1`. It speaks three schemas at once, so OpenAI, Anthropic and LiteLLM clients all work against the same address and key:
 
-The model id is the Hugging Face repo name.
-
-Useful options:
-- `--load`: load it right after installing.
-- `--ctx 32768`, `--max-conc 16`: default context length and number of parallel requests for this model.
-- `--trust-remote-code`: needed for models that ship their own Python code. Only use it with models you trust.
-- `--hf-token`: ask for your Hugging Face token, for [gated and private models](#gated-and-private-models).
-
-### Gated and private models
-
-A gated model (for example a Llama model that asks you to accept a license) or a private one needs your Hugging Face token:
-
-1. Accept the model's license on its page on huggingface.co, and create a read token at https://huggingface.co/settings/tokens.
-2. Install it, typing the token when asked (it is not shown on screen):
-   ```bash
-   goethe install --model <org>/<model> --hf-token
-   ```
-   In `goethe start`, choose "A private or gated model" instead.
-
-Goethe checks the token with Hugging Face and uses it for that download only. It never saves the token.
-
-### Models you downloaded yourself
-
-To add a model folder you placed on the machine yourself, move it into Goethe's `models` folder, for example `~/.goethe/models/`. If you name the folder `<org>__<model>`, the model gets the id `<org>/<model>`; any other folder name gives `local/<folder-name>`. Then run:
-
-```bash
-goethe scan
-```
-
-Goethe checks each new folder and asks `Model found: <name> ... Add to goethe? [y/N]`. If a model can't be served, it tells you why, for example an unsupported architecture or missing weight files.
-
-You can also register a folder anywhere on disk without moving it:
-
-```bash
-goethe install --model /data/models/my-finetune --name me/my-finetune
-```
-
-### See and remove models
-
-```bash
-goethe models                          # installed and catalog models, and whether each fits
-goethe remove --model Qwen/Qwen3-8B    # unloads it and deletes the files Goethe downloaded
-```
-
-`goethe models` lists installed models first, then catalog models in the same VRAM groups, then those that are too large for the allowed GPUs or need another GPU architecture. Both lists show what the machine can run, not what fits next to the models loaded now; `goethe load` checks the free memory. The FIT ON THIS MACHINE column says `fits: N.N GB per GPU`, or `does not fit` with the reason. DISK is the size on disk.
-
-For folders you registered in place, `remove` only unregisters the model and prints the command to delete the files yourself.
-
-## Load and run models
-
-```bash
-goethe load --model Qwen/Qwen3-8B
-```
-
-Goethe picks the GPUs, sizes the memory and waits until the model is ready. It ends with a line like:
-
-```
-RUNNING: Qwen/Qwen3-8B instance inst-... on GPU 0 port 30001 (45.2 s)
-```
-
-The first load of a model on a new machine takes a few extra minutes. Later loads are faster.
-
-`goethe load` shows how the GPU memory is used: the weights, the cache for the context and parallel requests, and working memory. `goethe hw pick-gpus --model <model>` shows the same without loading.
-
-Choosing where and how:
-
-```bash
-goethe load --model Qwen/Qwen3-8B --gpu gpu1          # a specific GPU (goethe gpu lists them)
-goethe load --model big/model --tp 2                  # split across 2 GPUs Goethe picks
-goethe load --model big/model --gpu gpu0 gpu1         # split across GPUs 0 and 1
-goethe load --model Qwen/Qwen3-8B --ctx 65536         # longer context
-goethe load --model Qwen/Qwen3-8B --max-conc 32       # more requests at the same time
-goethe load --model Qwen/Qwen3-8B --replica           # another copy, to serve more traffic
-goethe load --model Qwen/Qwen3-8B -- --chunked-prefill-size 4096   # extra SGLang options after --
-```
-
-To make settings the default for a model, so you don't have to type them each time:
-
-```bash
-goethe config --model Qwen/Qwen3-8B --ctx 65536 --max-conc 32
-```
-
-Model names are forgiving: `qwen/qwen3-8b` and the folder name `Qwen__Qwen3-8B` both mean `Qwen/Qwen3-8B`. If you mistype one, Goethe suggests the closest installed model.
-
-### Several models at once
-
-Load as many models as your GPUs can hold. They all share the same API address, and each request picks its model by name. `goethe ps` shows what is running:
-
-```bash
-goethe ps
-```
-
-```
-INSTANCE               MODEL            SLOT   STATUS   GPUS  PORT   VRAM_GB  RESTARTS  IN_FLIGHT  TOK_PER_S
-inst-18e1347e003bffe2  Qwen/Qwen3-8B    ...    RUNNING  0     30001  21.99    0         0          0.0
-```
-
-### Stopping a model
-
-```bash
-goethe unload --model Qwen/Qwen3-8B           # finishes requests in progress, then stops
-goethe unload --all                           # every model
-goethe unload --model Qwen/Qwen3-8B --force   # stop now, without waiting
-```
-
-### Sharing a GPU with other software
-
-If a GPU you pick is already used by other programs, Goethe lists them and asks before loading next to them:
-
-```
-GPU 0 has unmanaged process PID 3127 (python, user alice) using 10.3 GB VRAM
-Goethe never stops processes it did not start. To stop it yourself: kill 3127
-Load alongside these processes? [y/N]
-```
-
-Goethe never stops programs it didn't start. In scripts, add `--yes` to load anyway. To keep Goethe off a GPU completely:
-
-```bash
-goethe gpu --deny gpu0 gpu1   # never use gpu0 and gpu1
-goethe gpu --allow gpu0       # allow gpu0 again
-goethe gpu               # GPUs with memory use and allow/deny status
-```
-
-## Share the API
-
-### Choose who can connect
-
-```bash
-goethe configure api
-```
-
-Pick one of three options with the arrow keys and press Enter:
-- **Local only:** only programs on this machine.
-- **VPN (recommended):** devices on your Tailscale, WireGuard or ZeroTier network. Goethe detects the VPN and allows its addresses. Programs on this machine then also use the VPN address.
-- **Public network (not recommended):** any address that can reach this machine. Goethe shows a warning and your public IP, then asks which client addresses to allow. You also need to open the port in your firewall or router yourself.
-
-If no API key exists yet, Goethe offers to create one at the end, then prints the address of your API.
-
-In scripts:
-
-```bash
-goethe configure api --mode vpn --yes
-goethe configure api --mode public --allow 203.0.113.7 --yes
-```
-
-### API keys
-
-Every request needs a key; without a valid key the API answers `401`.
-
-```bash
-goethe key --create my-laptop                       # shows the key once: store it
-goethe key --create ci --rpm 600 --expires 30d
-goethe key --create chat-only --models Qwen/Qwen3-8B
-goethe key --create ops --expires 90d --rpm 300 --admin
-goethe key                                          # keys with limits and today's usage
-goethe key --revoke <key-id>                        # takes effect immediately
-```
-
-Options for `--create`:
-- `--expires 30d`: expires in 30 days; or a date, such as `--expires 2027-01-31`.
-- `--rpm N`: requests per minute; the default is 120, and `0` means unlimited.
-- `--models a,b`: the key can only use these models; other models look missing to it.
-- `--admin`: an admin key, which can read the health endpoints and use every model.
-- `--raw`: prints only the key, for scripts:
-
-```bash
-KEY=$(goethe key --create ci --raw)
-```
-
-`goethe key --help` shows these options too.
-
-### Allowed addresses
-
-On top of keys, only allowed client addresses can connect at all. `goethe configure api` sets this up for you. To change it by hand:
-
-```bash
-goethe allowlist
-goethe allowlist --add 192.168.1.0/24 --description "office LAN"
-goethe allowlist --add 203.0.113.7          # one address
-goethe allowlist --remove 192.168.1.0/24
-```
-
-### The address to share
-
-```bash
-goethe api
-```
-
-```
-API endpoint: https://100.90.97.111:8443/v1
-
-Models running
-MODEL                               STATUS   INSTANCES  GPUS
-nvidia/Llama-3.1-8B-Instruct-NVFP4  RUNNING  1          gpu0
-
-API keys
-NAME       API KEY                                    ADMIN  EXPIRES
-my-laptop  goethe_sk_0123456789abcdef0123456789abcdef  no     never
-
-Query the API:
-
-	→ curl -k https://100.90.97.111:8443/v1/chat/completions -H "Authorization: Bearer <your_bearer_token>" ...
-```
-
-`goethe api` lists each key in full; keys created before Goethe 0.1.1 show only their first characters.
-
-When there is no key yet, the allowlist is empty, Goethe is not running or no model is loaded, it says so instead and prints the command that fixes it.
-
-The API uses HTTPS with a certificate Goethe creates for itself. Clients either skip certificate verification (`curl -k`, or `verify=False` in Python) or trust Goethe's certificate, found at `<goethe folder>/nginx/certs/server.crt`.
-
-### Short model names
-
-```bash
-goethe alias --set chat --model Qwen/Qwen3-8B      # clients can now send "model": "chat"
-goethe alias
-goethe alias --remove chat
-```
-
-Change the model behind an alias at any time, and every client follows without changing its code.
-
-### Your own domain name
-
-To reach the API by a name such as `api.example.com` instead of its IP address, add a DNS A record that points the name at the address the API listens on. Goethe needs no setup for this. Run `goethe domain` to see the record with this machine's address filled in:
-
-```text
-api.example.com  A  100.70.155.114
-```
-
-The address can be public, or private such as a VPN or LAN address; a private one only resolves to clients on that network. Clients then use `https://api.example.com:8443/v1` with the same certificate settings as for the IP address. To check that the name works:
-
-```bash
-goethe domain --check api.example.com     # the name points at the API and the gateway answers there
-```
-
-## Use the API
-
-The API is at `https://<address>:<port>/v1`. It speaks three schemas at the same time, so OpenAI, Anthropic and LiteLLM clients all work against the same address and key:
-
-- **OpenAI:** the routes below.
-- **Anthropic:** `POST /v1/messages`. Errors on this route come back in Anthropic's format.
-- **LiteLLM proxy:** every route also works without `/v1` (for example `/chat/completions`), plus `/model/info`, `/model_group/info`, `/health/liveliness` and `/health/readiness`.
+- **OpenAI:** chat, completions, responses, embeddings, rerank and models.
+- **Anthropic:** `POST /v1/messages` and its token count. Errors on these routes use Anthropic's format.
+- **LiteLLM proxy:** every route also works without `/v1`, plus `/model/info`, `/model_group/info`, `/health/liveliness` and `/health/readiness`.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /v1/chat/completions` | Chat, with streaming, tools and reasoning output |
+| `POST /v1/chat/completions` | Chat, with streaming, tools and reasoning |
 | `POST /v1/completions` | Plain text completion |
 | `POST /v1/responses` | OpenAI Responses API |
 | `POST /v1/messages` | Anthropic Messages API, with streaming |
 | `POST /v1/messages/count_tokens` | Anthropic token count |
 | `POST /v1/embeddings` | Embeddings, for embedding models |
 | `POST /v1/rerank` | Reranking, for reranker models |
-| `GET /v1/models` | Models you can use with your key |
-| `GET /v1/models/{id}` | One model |
+| `GET /v1/models`, `GET /v1/models/{id}` | Models your key can use |
 | `GET /model/info`, `GET /model_group/info` | Models in LiteLLM's format |
-| `GET /health` | Is the API up (no key needed) |
+| `GET /health` | Up check, no key needed |
 
-Send the key in whichever header your client uses: `Authorization: Bearer <key>` (OpenAI), `x-api-key` (Anthropic), `x-litellm-api-key` (LiteLLM, with or without `Bearer`) or `api-key` (Azure-style).
+Send the key in whichever header your client uses: `Authorization: Bearer <key>` (OpenAI), `x-api-key` (Anthropic), `x-litellm-api-key` (LiteLLM) or `api-key` (Azure style).
+
+The API uses HTTPS with a certificate Goethe creates for itself. Clients either skip verification (`curl -k`, `verify=False`) or trust `<goethe folder>/nginx/certs/server.crt`.
 
 ### curl
 
 ```bash
 curl -k https://<address>:8443/v1/chat/completions \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"model":"Qwen/Qwen3-8B","messages":[{"role":"user","content":"Write a haiku."}],"max_tokens":128}'
+  -d '{"model":"zai-org/GLM-5.3-Flash","messages":[{"role":"user","content":"Hello!"}],"max_tokens":128}'
 ```
 
-If a long command breaks when you paste it, put the parts in variables first:
-
-```bash
-URL=https://<address>:8443/v1/chat/completions
-BODY='{"model":"Qwen/Qwen3-8B","messages":[{"role":"user","content":"Hi"}]}'
-curl -k "$URL" -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d "$BODY"
-```
-
-### Python (OpenAI SDK)
+### OpenAI SDK
 
 ```python
 import httpx
@@ -436,8 +96,8 @@ client = OpenAI(
     http_client=httpx.Client(verify=False),   # or verify="/path/to/server.crt"
 )
 stream = client.chat.completions.create(
-    model="Qwen/Qwen3-8B",
-    messages=[{"role": "user", "content": "Explain GPUs in one paragraph."}],
+    model="zai-org/GLM-5.3-Flash",
+    messages=[{"role": "user", "content": "Explain mixture-of-experts in one paragraph."}],
     stream=True,
 )
 for chunk in stream:
@@ -456,7 +116,7 @@ client = Anthropic(
     http_client=httpx.Client(verify=False),
 )
 reply = client.messages.create(
-    model="Qwen/Qwen3-8B",
+    model="zai-org/GLM-5.3-Flash",
     max_tokens=256,
     messages=[{"role": "user", "content": "Hello!"}],
 )
@@ -465,13 +125,11 @@ print(reply.content[0].text)
 
 ### LiteLLM
 
-Use Goethe as a LiteLLM proxy, with the `litellm_proxy/` prefix:
-
 ```python
 import litellm
 
 reply = litellm.completion(
-    model="litellm_proxy/Qwen/Qwen3-8B",
+    model="litellm_proxy/zai-org/GLM-5.3-Flash",
     api_base="https://<address>:8443",
     api_key="goethe_sk_...",
     messages=[{"role": "user", "content": "Hello!"}],
@@ -479,74 +137,252 @@ reply = litellm.completion(
 )
 ```
 
-Or add it to a LiteLLM proxy's `config.yaml` as an OpenAI-compatible backend (`model: openai/Qwen/Qwen3-8B`, `api_base: https://<address>:8443/v1`).
+Or add Goethe to a LiteLLM proxy's `config.yaml` as an OpenAI-compatible backend (`model: openai/zai-org/GLM-5.3-Flash`, `api_base: https://<address>:8443/v1`).
 
 ### Other tools
 
-In tools that accept a custom OpenAI endpoint, set:
-- the base URL to `https://<address>:<port>/v1`;
-- the API key to your Goethe key;
-- the model to a name from `goethe api`.
+Open WebUI, LangChain, LlamaIndex, coding assistants and any tool that takes a custom OpenAI or Anthropic endpoint work the same way: set the base URL to `https://<address>:<port>/v1` (Anthropic clients: without `/v1`), your Goethe key, and a model name from `goethe api`. If a tool can't skip certificate checks, add Goethe's certificate to the system's trusted certificates.
 
-If a tool can't skip certificate checks, add Goethe's certificate to the system's trusted certificates.
-
-### Limits to know
+### Limits
 
 - Each client address can send up to 20 requests per second.
 - Each key has its own per-minute limit, set with `--rpm`.
 - Request bodies can be up to 10 MB.
-- When you unload a model, requests in progress finish first, and new requests get `503` with a `Retry-After` header.
+- When a model unloads, requests in progress finish first; new requests get `503` with a `Retry-After` header.
 
-## Everyday commands
+## CLI
+
+Every value goes after its flag: `goethe unload --model <model>`, `goethe gpu --allow gpu0`. Listing commands accept `--json`. Exit codes: `0` success, `1` error, `2` wrong usage, `3` a confirmation was needed without a terminal (add `--yes`). The [command reference](cli.md) lists every command and option.
+
+### Everyday
 
 ```bash
-goethe up          # start Goethe; it also starts automatically at boot from now on
-goethe status      # running or not, the API address and your keys
-goethe down        # stop Goethe and its models; it won't start at boot until the next goethe up
+goethe up          # start; also starts at boot from now on
+goethe status      # running or not, API address and keys
+goethe down        # stop; won't start at boot until the next up
 goethe ps          # what is running
-goethe api         # the address, keys and loaded models
-goethe logs --model Qwen/Qwen3-8B -f      # follow a model's log
-goethe logs --daemon                      # Goethe's own log
-goethe doctor      # check the setup
-goethe hw profile  # your GPUs, CPU, memory, disk and cloud provider
+goethe api         # address, keys and loaded models
+goethe logs --model zai-org/GLM-5.3-Flash -f
+goethe logs --daemon
+goethe doctor
+goethe hw profile
 ```
 
-Models that were loaded when Goethe stopped come back by themselves when it starts again, including after a reboot. To start without that, run `goethe service restore --off`.
+Models that were loaded when Goethe stopped come back when it starts again, including after a reboot. `goethe service restore --off` turns that off.
 
-## What Goethe supports
+### Start and stop
 
-### Hardware
+| Command | What it does |
+|---|---|
+| `goethe start` | Start, and guided setup: model, serve, API access |
+| `goethe up` | Start Goethe and the API, and start at boot (`--no-boot` to skip) |
+| `goethe status` | Running state, address and keys |
+| `goethe down` | Stop Goethe and its models, and stop starting at boot |
+| `goethe service` | `enable`, `disable`, `status`, `restore --on`/`--off` |
 
-| GPU family | Examples | Compute capability |
+### Models
+
+| Command | What it does |
+|---|---|
+| `goethe recommend` | Catalog models that fit your GPUs |
+| `goethe install --model …` | Download from Hugging Face, or register a local folder |
+| `goethe scan` | Add folders you placed in the models directory |
+| `goethe models` | Installed and catalog models, and whether each fits |
+| `goethe config --model …` | Default context, concurrency and GPUs for a model |
+| `goethe remove --model …` | Unload and delete (or unregister a folder) |
+
+### Running
+
+| Command | What it does |
+|---|---|
+| `goethe load --model …` | Load and wait until ready (`--gpu`, `--tp`, `--ctx`, `--max-conc`, `--replica`) |
+| `goethe unload --model …` | Stop a model (`--all`, `--force`) |
+| `goethe ps` | Running instances, GPUs and speed |
+| `goethe logs` | `--model`, `--daemon`, `--gateway`, `-f`, `-n` |
+
+### Sharing
+
+| Command | What it does |
+|---|---|
+| `goethe configure api` | Local, VPN or public access |
+| `goethe api` | Address, authentication, models, keys and a curl example |
+| `goethe key` | `--create`, `--revoke`, `--rpm`, `--expires`, `--models`, `--admin` |
+| `goethe allowlist` | `--add` / `--remove` client addresses |
+| `goethe alias` | Short model names for clients (`--set`, `--remove`) |
+| `goethe gateway` | Where the API listens (`--bind 127.0.0.1`, `0.0.0.0` or an IP) |
+| `goethe domain` | DNS record for your own hostname (`--check <name>`) |
+
+### GPUs and system
+
+| Command | What it does |
+|---|---|
+| `goethe gpu` | Memory use and allow/deny (`--deny`, `--allow`) |
+| `goethe hw profile` | GPUs, CPU, memory, disk and cloud provider |
+| `goethe doctor` | Setup check with a fix for each problem |
+| `goethe update` | Install the latest Goethe (`--check` to only look) |
+| `goethe uninstall` | Remove Goethe and its models (`--keep-models` to keep them) |
+
+## Add models
+
+```bash
+goethe recommend                                        # catalog models that fit your GPUs
+goethe install --model zai-org/GLM-5.3-Flash            # download it
+goethe install --model zai-org/GLM-5.3-Flash --load     # download and load in one step
+```
+
+The model id is the Hugging Face repo name. Any [supported model](#supported-models) on Hugging Face works, not only the catalog. Useful flags: `--load`, `--ctx`, `--max-conc`, `--trust-remote-code` (only for models you trust) and `--hf-token`.
+
+**Gated or private models:** accept the license on the model's Hugging Face page, create a read token at huggingface.co/settings/tokens, then run `goethe install --model <org>/<model> --hf-token` and type the token when asked. It is used for that download only and never stored. In `goethe start`, choose "A private or gated model".
+
+**Models you already have:** move the folder into Goethe's `models` folder and run `goethe scan`; it checks each folder and asks before adding it. A folder named `<org>__<model>` gets the id `<org>/<model>`. To register a folder where it is:
+
+```bash
+goethe install --model /data/models/my-finetune --name me/my-finetune
+```
+
+**List and remove:**
+
+```bash
+goethe models                                   # installed and catalog models, and whether each fits
+goethe remove --model zai-org/GLM-5.3-Flash     # unload it and delete the files Goethe downloaded
+```
+
+For a folder you registered in place, `remove` only unregisters it.
+
+## Load and run
+
+```bash
+goethe load --model zai-org/GLM-5.3-Flash
+```
+
+Goethe picks the GPUs, sizes the memory and waits until the model answers:
+
+```
+RUNNING: zai-org/GLM-5.3-Flash instance inst-... on GPU 0 port 30001 (45.2 s)
+```
+
+The first load on a new machine takes a few extra minutes; later loads are faster. `goethe load` shows how the GPU memory is used, and `goethe hw pick-gpus --model <model>` shows the same without loading.
+
+```bash
+goethe load --model zai-org/GLM-5.3-Flash --gpu gpu1                    # a specific GPU
+goethe load --model zai-org/GLM-5.3-Flash --tp 2                        # split across 2 GPUs Goethe picks
+goethe load --model zai-org/GLM-5.3-Flash --gpu gpu0 gpu1               # split across GPUs 0 and 1
+goethe load --model zai-org/GLM-5.3-Flash --ctx 65536 --max-conc 32     # longer context, more parallel requests
+goethe load --model zai-org/GLM-5.3-Flash --replica                     # another copy, for more traffic
+goethe load --model zai-org/GLM-5.3-Flash -- --chunked-prefill-size 4096   # extra engine options after --
+goethe config --model zai-org/GLM-5.3-Flash --ctx 65536 --max-conc 32   # make settings the default
+```
+
+Model names are forgiving: `zai-org/glm-5.3-flash` and `zai-org__GLM-5.3-Flash` mean the same model, and a mistyped name gets a suggestion.
+
+Load as many models as your GPUs can hold. They share one API address, each request picks its model by name, and `goethe ps` shows what is running.
+
+```bash
+goethe unload --model zai-org/GLM-5.3-Flash           # finish requests in progress, then stop
+goethe unload --all                                   # every model
+goethe unload --model zai-org/GLM-5.3-Flash --force   # stop now
+```
+
+**Sharing a GPU with other software:** if a GPU is already used by other programs, Goethe lists them and asks before loading next to them. It never stops processes it did not start. Add `--yes` in scripts. To keep Goethe off a GPU, use `goethe gpu --deny gpu0`; `goethe gpu --allow gpu0` allows it again.
+
+## Share the API
+
+```bash
+goethe configure api
+```
+
+- **Local only:** programs on this machine.
+- **VPN (recommended):** devices on your Tailscale, WireGuard or ZeroTier network. Goethe detects the VPN and allows its addresses.
+- **Public network:** any address that can reach this machine. You open the port in your firewall yourself.
+
+It then asks whether to restrict access to specific IP addresses, and offers to create the first key. In scripts: `goethe configure api --mode vpn --yes`, or `--mode public --allow 203.0.113.7 --yes`.
+
+### Keys
+
+```bash
+goethe key --create my-laptop                                   # shows the key once
+goethe key --create ci --rpm 600 --expires 30d
+goethe key --create chat-only --models zai-org/GLM-5.3-Flash
+goethe key                                                      # keys, limits and today's usage
+goethe key --revoke <key-id>                                    # takes effect immediately
+KEY=$(goethe key --create ci --raw)                             # only the key, for scripts
+```
+
+Every request needs a valid key; without one the API answers `401`. A key can expire (`--expires 30d` or a date), have its own rate limit (`--rpm`, default 120 per minute, `0` for unlimited), be limited to some models (`--models`), or be an admin key that can read the health endpoints (`--admin`).
+
+### Allowed addresses
+
+On top of keys, only allowed client addresses can connect. `goethe configure api` sets this up; to change it by hand:
+
+```bash
+goethe allowlist
+goethe allowlist --add 192.168.1.0/24 --description "office LAN"
+goethe allowlist --add 203.0.113.7
+goethe allowlist --remove 192.168.1.0/24
+```
+
+### Address, aliases and your own domain
+
+```bash
+goethe api                                            # the address, models, keys and a curl command
+goethe alias --set chat --model zai-org/GLM-5.3-Flash  # clients can send "model": "chat"
+goethe domain                                         # the DNS record for your own hostname
+goethe domain --check api.example.com                 # check that the name points at the API
+```
+
+Change the model behind an alias at any time and every client follows. For a hostname such as `api.example.com`, add the DNS A record `goethe domain` shows; clients then use `https://api.example.com:8443/v1` with the same certificate settings as for the IP address.
+
+## Hardware requirements
+
+Goethe runs on NVIDIA GPUs from the Ampere generation onwards:
+
+| Architecture | Compute capability | GPUs |
 |---|---|---|
-| Blackwell (consumer and workstation) | GeForce RTX 5090, RTX PRO 6000 Blackwell | 12.0 |
-| Blackwell (DGX Spark) | GB10 | 12.1 |
-| Blackwell data center | B100, B200, GB200 | 10.0 |
-| Blackwell Ultra data center | B300, GB300 | 10.3 |
-| Hopper | H100, H200, GH200 | 9.0 |
-| Ada | GeForce RTX 4090, RTX 6000 Ada, L40S, L40, L4 | 8.9 |
-| Ampere | GeForce RTX 3090, RTX A6000, A40, A10 | 8.6 |
-| Ampere data center | A100, A30 | 8.0 |
+| Blackwell | 12.0, 12.1 | GeForce RTX 5090, RTX PRO 6000 Blackwell, DGX Spark (GB10) |
+| Blackwell data center | 10.0, 10.3 | B200, GB200, B300, GB300 |
+| Hopper | 9.0 | H100, H200, GH200 |
+| Ada | 8.9 | GeForce RTX 4090, RTX 6000 Ada, L40S, L40, L4 |
+| Ampere | 8.0, 8.6 | A100, A30, A40, A10, RTX A6000, GeForce RTX 3090 |
 
-GPUs older than Ampere (Volta, Turing and earlier) are not supported; Goethe names them and skips them.
+Older GPUs (Volta, Turing and earlier) are not supported; Goethe names them and skips them. A machine can mix generations; each model runs on GPUs of one generation. Large models can be split across GPUs with `--tp`, and mixture-of-experts models can also use `--ep`. 4-bit NVFP4 models run on every supported GPU.
 
-- **Several GPUs:** a model can be split across several GPUs in one machine (`--tp`), and mixture-of-experts models can also use expert parallelism (`--ep`).
-- **Mixed GPUs:** one machine can hold GPUs of different generations, for example two RTX PRO 6000 and an H100. Each model runs on GPUs of one generation; `goethe load --gpu` refuses a set that mixes them.
-- **4-bit models everywhere:** NVFP4 models run on every supported GPU, natively on Blackwell and with Goethe's own kernels on Hopper, Ada and Ampere.
-
-### CUDA compatibility
-
-Goethe ships its own CUDA 13 runtime and compiler, so the machine needs no CUDA toolkit, only the NVIDIA driver:
+Goethe ships its own CUDA 13 runtime, so the machine only needs the NVIDIA driver:
 
 | NVIDIA driver | CUDA it offers | Goethe runs on |
 |---|---|---|
 | 580 or newer | 13.0 and newer | Every supported GPU |
-| 535 to 579 | 12.2 to 12.9 | Data-center GPUs (A100, H100, H200, B200, L40S, L4 and similar), through NVIDIA's CUDA forward compatibility |
+| 535 to 579 | 12.2 to 12.9 | Data-center GPUs (A100, H100, H200, B200, L40S, L4 and similar), through CUDA forward compatibility |
 | Older than 535 | | Not supported; the installer offers to update the driver |
 
-GeForce and TITAN cards need driver 580 or newer. `goethe doctor` shows the driver and, on 535 to 579, `with CUDA 13 forward compatibility`.
+GeForce and TITAN cards need driver 580 or newer. Check the driver with `nvidia-smi`. Enough GPU memory for the model is the other requirement; `goethe recommend` lists what fits.
 
-### Where it runs
+## Software requirements
+
+- Linux on x86_64 or ARM64 with glibc 2.30 or newer, for example Ubuntu 20.04+ or Debian 11+.
+- Disk space for your models, plus about 12 GB for Goethe itself.
+- No CUDA toolkit: Goethe brings its own CUDA runtime and compiler.
+
+The installer checks the machine first and installs missing pieces, such as a C++ compiler or the NVIDIA driver, after asking. `GOETHE_INSTALL_DEPS=1` and `GOETHE_INSTALL_DRIVER=1` answer yes in advance, `=0` no. Inside a container it never touches the driver, which belongs to the host. A GPU problem never stops the install; `goethe doctor` names the fix afterwards:
+
+| What `goethe doctor` finds | Fix it names |
+|---|---|
+| No NVIDIA GPU visible | Attach the GPU to the VM (PCI passthrough or vGPU), or start the container with `--gpus all` |
+| A GPU but no driver loaded | The driver package for your distribution, then a reboot |
+| A driver too old for this GPU | The same, to update it |
+| The proprietary module with a Blackwell GPU | The open kernel module, which Blackwell needs |
+| A GPU the driver did not start | A full power cycle, power cables, Above 4G decoding in the BIOS |
+| A driver but no `/dev/nvidia*` | Pass the devices into the container, or `sudo nvidia-modprobe -u -c=0` on the host |
+| No C++ compiler | `sudo apt install build-essential` or `sudo dnf install gcc-c++` |
+
+After installing, open a new terminal if `goethe` is not found yet. Goethe keeps its files in `/workspace/.goethe` on cloud machines with a persistent volume, `/var/lib/goethe` as root, or `~/.goethe` otherwise.
+
+```bash
+goethe update --check      # is there a new version?
+goethe update              # install it; loaded models keep serving
+goethe uninstall           # remove Goethe and its models; add --keep-models to keep them
+```
+
+## Where it runs
 
 | Environment | Examples |
 |---|---|
@@ -554,158 +390,71 @@ GeForce and TITAN cards need driver 580 or newer. `goethe doctor` shows the driv
 | Cloud GPU virtual machines | AWS, Google Cloud, Azure, Oracle Cloud, Lambda, CoreWeave, Paperspace |
 | GPU containers | RunPod, Vast.ai, and Docker with the NVIDIA Container Toolkit |
 
-Goethe recognises the cloud provider or container it runs in, keeps its files on the persistent volume where there is one, and shows the address to use from outside. In a container, the GPU and its driver come from the host.
+Goethe recognises the cloud provider or container it runs in, keeps its files on the persistent volume when there is one, and shows the address to use from outside. In a container, the GPU and its driver come from the host.
 
-### Model families
+## Supported models
 
-Goethe serves models in the Hugging Face format (`config.json` plus `.safetensors` weights). It supports the architectures of its built-in SGLang, more than 200 in total, including:
+Goethe serves models in the Hugging Face format (`config.json` plus `.safetensors` weights), across more than 200 architectures:
 
 | Family | Examples |
 |---|---|
-| Llama | Llama 3, 3.1, 3.2, 3.3, Llama 4 |
-| Qwen | Qwen 2.5, Qwen 3, Qwen3-Next, Qwen 3.5 MoE, QwQ, Qwen-VL, Qwen3-VL |
-| DeepSeek | DeepSeek V2, V3, R1, V4 |
-| Mistral | Mistral, Ministral, Mixtral, Mistral Small, Pixtral |
-| Gemma | Gemma 2, Gemma 3, Gemma 4 |
-| Phi | Phi-3, Phi-4, Phi-4 multimodal |
-| GLM | GLM-4, GLM-4.5, GLM-4V |
-| Others | GPT-OSS, Kimi K2.5 and K3, MiniMax M, Nemotron-H, Granite, Command R, OLMo, InternLM, InternVL, MiMo, EXAONE, ERNIE, Baichuan, Yi, StarCoder |
-| Embeddings | BERT-style and LLM-based embedding models |
+| GLM | GLM-4, GLM-4.5, GLM-5.2, GLM-5.3 Flash |
+| Qwen | Qwen 2.5, Qwen 3, Qwen3-Next, Qwen 3.5, Qwen3-VL |
+| DeepSeek | DeepSeek V3, R1, V4 |
+| Llama | Llama 3.x, Llama 4 |
+| Mistral | Mistral, Mixtral, Mistral Small, Pixtral |
+| Gemma | Gemma 2, 3 and 4 |
+| Others | GPT-OSS, Kimi, MiniMax, Nemotron, Phi, Granite, Command R, OLMo, InternLM, InternVL, MiMo, EXAONE |
+| Embeddings | BERT-style and LLM-based embedding and reranker models |
 
-Dense, mixture-of-experts, hybrid (linear attention and Mamba) and vision-language models are all supported. `goethe scan` and `goethe install` tell you straight away if a model's architecture isn't supported.
+Dense, mixture-of-experts, hybrid (linear attention and Mamba) and vision-language models are supported. `goethe install` and `goethe scan` say straight away if an architecture is not.
 
-### Quantization formats
+| Format | Typical use |
+|---|---|
+| BF16 / FP16 | Original weights |
+| NVFP4 | 4-bit, about a quarter of BF16's size; every supported GPU |
+| FP8 | 8-bit; native on Hopper and Blackwell |
+| MXFP4 | GPT-OSS models |
+| AWQ, GPTQ | 4-bit community quantizations |
+| INT8 (W8A8) | 8-bit integer |
+| Mixed precision | NVFP4 and FP8 in one model |
 
-| Format | Typical use | GPUs |
-|---|---|---|
-| BF16 / FP16 | Original model weights | All supported GPUs |
-| **NVFP4** (NVIDIA ModelOpt, compressed-tensors) | 4-bit, about 4x smaller than BF16 | All supported GPUs, with Goethe's fast kernels |
-| FP8 (ModelOpt, compressed-tensors, block FP8) | 8-bit, about 2x smaller | Native on Blackwell; Ampere runs it more slowly |
-| MXFP4 | GPT-OSS models | Blackwell |
-| AWQ, GPTQ | 4-bit community quantizations | All supported GPUs |
-| INT8 (W8A8) | 8-bit integer | All supported GPUs |
-| Mixed precision (ModelOpt) | NVFP4 and FP8 in one model | Blackwell |
-
-You don't need to tell Goethe a model's format; it's detected from the model files. GGUF files and `.bin` (PyTorch pickle) weights are not supported; use the safetensors release of the model.
-
-## Command reference
-
-The [command reference](cli.md) describes every command and option in detail. In short:
-
-Most listing commands accept `--json` for scripts.
-
-Every value goes after a flag: `goethe unload --model <model>`, `goethe gpu --allow gpu0 gpu1`. Type a value without its flag and Goethe prints the corrected command instead of running anything.
-
-Exit codes:
-- `0`: success.
-- `1`: error.
-- `2`: wrong usage.
-- `3`: a confirmation was needed but there was no terminal to ask on; add `--yes`.
-
-### Start and stop
-
-| Command | What it does | Options |
-|---|---|---|
-| `goethe start` | Start Goethe and set it up step by step: install a model, serve it, configure API access | |
-| `goethe up` | Start Goethe and the API, and start them at boot; prints the same summary as `goethe status` | `--no-boot`: start now only |
-| `goethe status` | Whether Goethe is running, the API address, and your keys' names and ids | |
-| `goethe down` | Stop Goethe and its models, and stop starting at boot | `--keep-engines`: keep models serving while Goethe restarts |
-| `goethe service enable` | Start Goethe at boot | |
-| `goethe service disable` | Don't start Goethe at boot | |
-| `goethe service status` | Show whether Goethe starts at boot | |
-| `goethe service restore` | Bring loaded models back when Goethe starts | `--on`, `--off` |
-
-### Models
-
-| Command | What it does | Arguments and options |
-|---|---|---|
-| `goethe recommend` | Catalog models that fit your GPUs, with their size | `--json` |
-| `goethe install --model <model>` | Download a Hugging Face model, or register a local folder | `--model`: repo id or folder path<br>`--load`: load after installing<br>`--no-load`: only install<br>`--no-wait`: with `--load`, don't wait for it to be ready<br>`--ctx N`: default context length<br>`--max-conc N`: default parallel requests<br>`--tp N`: default number of GPUs (0 = automatic)<br>`--gpu gpu0 gpu1`: GPUs to load on<br>`--trust-remote-code`: allow model-provided code<br>`--yes`: with `--load`, share GPUs without asking<br>`--force`: download again<br>`--reset`: forget saved settings for this model<br>`--no-verify`: skip the download checksum check<br>`--name ID`: id for a local folder<br>`--copy`: copy a local folder instead of linking it<br>`--sglang-arg FLAG`: extra SGLang option to save with the model<br>`--hf-token`: ask for a Hugging Face token, used for this download only |
-| `goethe scan` | Add model folders you put into Goethe's `models` folder | `--dir FOLDER`: one folder (default: all)<br>`--yes`: add all supported models without asking<br>`--json` |
-| `goethe models` | Installed and catalog models, and whether each fits | `--installed`, `--available`, `--json` |
-| `goethe config --model <model>` | Change a model's default settings | `--ctx N`, `--max-conc N`, `--tp N`, `--gpu gpu0 gpu1`, `--sglang-arg FLAG`, `--clear-sglang-args` |
-| `goethe remove --model <model>` | Unload and delete a model (or unregister a folder) | `--yes`: don't ask<br>`--force`: don't wait for requests in progress |
-
-### Running
-
-| Command | What it does | Arguments and options |
-|---|---|---|
-| `goethe load --model <model>` | Load a model and wait until it's ready | `--gpu gpu0 gpu1`: which GPUs (several split the model)<br>`--tp N`: number of GPUs<br>`--ep N`: expert parallel size<br>`--ctx N`: context length<br>`--max-conc N`: parallel requests<br>`--replica`: start another copy<br>`--yes` / `--force`: share busy GPUs without asking<br>`--no-wait`: return right away<br>`--json`<br>`-- <SGLang options>`: extra engine options |
-| `goethe unload --model <model>` | Stop a model, letting requests in progress finish | `--all`: every model instead<br>`--force`: stop right away |
-| `goethe ps` | Running models with GPU, status and speed | `--json` |
-| `goethe logs --model <model>` | Show a model's log | `-f`: follow<br>`-n N`: number of lines (default 100)<br>`--daemon`: Goethe's own log<br>`--gateway`: the API gateway's log<br>`--prune`: clean up old logs |
-
-### Sharing
-
-| Command | What it does | Arguments and options |
-|---|---|---|
-| `goethe configure api` | Guided setup: local, VPN or public | `--mode local\|vpn\|public`<br>`--vpn-ip IP`: VPN address to use<br>`--allow CIDR`: client address to allow (repeatable)<br>`--yes`: no questions |
-| `goethe api` | API address, how to authenticate, models running, your keys in full and a curl example | `--json` |
-| `goethe key --create <name>` | Create an API key (goethe api lists it again) | `--rpm N`: requests per minute (default 120, 0 = unlimited)<br>`--expires 30d\|DATE`<br>`--models a,b`: limit to these models<br>`--admin`: access to admin health info<br>`--raw`: print only the key |
-| `goethe key` | Keys with limits and today's usage | `--json` |
-| `goethe key --revoke <id>` | Revoke a key | `<id>`: the KEY ID from `goethe key` |
-| `goethe allowlist --add <cidr>` | Allow a client address or network | `--description TEXT` |
-| `goethe allowlist --remove <cidr>` | Remove an allowed address | |
-| `goethe allowlist` | Allowed addresses | |
-| `goethe alias --set <alias> --model <model>` | Give a model a short name for clients | |
-| `goethe alias` | Aliases | |
-| `goethe alias --remove <alias>` | Remove an alias | |
-| `goethe gateway` | Where the API listens and how many addresses are allowed | `--json` |
-| `goethe gateway --bind <addr>` | Listen on `127.0.0.1`, `0.0.0.0` or one IP of this machine | |
-| `goethe domain` | How to reach the API by a domain name (a DNS A record) | |
-| `goethe domain --check <domain>` | Check that the name points at the API and the gateway answers | `<domain>` |
-
-### Hardware and system
-
-| Command | What it does | Arguments and options |
-|---|---|---|
-| `goethe hw profile` | GPUs, CPU, memory, disk, OS, container and cloud | `--json` |
-| `goethe hw pick-gpus` | Show which GPUs a load would use right now | `--tp N`, `--model ID` |
-| `goethe gpu` | GPUs with memory use and allow/deny status | `--json` |
-| `goethe gpu --deny gpu<index>` | Keep Goethe off a GPU | |
-| `goethe gpu --allow gpu<index>` | Allow a GPU again | |
-| `goethe doctor` | Check the setup, with a fix for each problem | `--json`<br>`--probe-public`: also test the public address |
-| `goethe update` | Install the latest Goethe | `--check`: only show what's available<br>`--yes`: don't ask<br>`--engine`: also update the inference engine<br>`--allow-downgrade` |
-| `goethe uninstall` | Remove Goethe and the models it installed; folders of your own files that you registered stay | `--keep-models`: keep the installed models<br>`--yes` |
-| `goethe --version` | Version, and the upgrade command when a newer one is out | `--build-info` instead: commit and build date |
+The format is detected from the model files. GGUF and `.bin` (PyTorch pickle) weights are not supported; use the safetensors release of the model.
 
 ## Settings
 
-Most people never need these. Set them in your shell, or in `goethe.env` inside Goethe's folder so that Goethe's background service picks them up.
+Optional. Set them in your shell, or in `goethe.env` inside Goethe's folder so the background service picks them up.
 
 | Variable | What it changes |
 |---|---|
 | `GOETHE_HOME` | Where Goethe keeps its files |
-| `GOETHE_PUBLIC_PORT` | API port; the default is 8443, and another port is used if it's taken |
+| `GOETHE_PUBLIC_PORT` | API port (default 8443; another is used if it's taken) |
 | `GOETHE_NO_AUTOSTART=1` | Never set up start at boot |
-| `GOETHE_PUBLIC_IP` | Your public IP, shown by `goethe configure api` in public mode |
-| `GOETHE_MAX_BODY_MB` | Largest request size, in MB (default 10) |
+| `GOETHE_PUBLIC_IP` | Public IP shown by `goethe configure api` in public mode |
+| `GOETHE_MAX_BODY_MB` | Largest request size in MB (default 10) |
 | `NO_COLOR=1` | Turn off colored output |
 
 ## Troubleshooting
 
-**`goethe: command not found` after installing.** Open a new terminal, or run `export PATH="$HOME/.local/bin:$PATH"`.
+**`goethe: command not found`.** Open a new terminal, or run `export PATH="$HOME/.local/bin:$PATH"`.
 
-**`goethed is not running`.** Run `goethe up`. `goethe status` shows whether it is running.
+**`goethed is not running`.** Run `goethe up`; `goethe status` shows whether it is running.
 
-**`model ... is not installed; did you mean ...?`** Use the id from `goethe models`.
+**Unknown model.** Use an id from `goethe models`.
 
-**A load fails.** Goethe prints the reason and the end of the model's log. For the full log, run `goethe logs --model <model> -n 200`. Common causes:
-- **`NVCC version must be at least 12.9`, or a CUDA compiler error:** Goethe gives each engine its own CUDA compiler unless `CUDA_HOME` or `CUDA_PATH` is set in goethed's environment or in the model card. Remove that setting so the bundled compiler is used, then run `rm -rf ~/.cache/sglang/.cache/flashinfer` and load again.
-- **Not enough GPU memory:** use a smaller context (`--ctx`), fewer parallel requests (`--max-conc`), more GPUs (`--tp 2`), or a quantized version of the model.
-- **The model needs its own code:** reinstall it with `--trust-remote-code`.
+**A load fails.** Goethe prints the reason and the end of the model's log; `goethe logs --model <model> -n 200` shows more. Common fixes: a smaller context (`--ctx`), fewer parallel requests (`--max-conc`), more GPUs (`--tp 2`), or a quantized version of the model; `--trust-remote-code` when the model needs its own code; `goethe doctor` for driver and GPU problems.
 
-**The first request is slow.** The first request after a load can take a while. Requests after that are fast.
+**The first request is slow.** The first request after a load can take a while; later requests are fast.
 
 **Requests fail:**
 
 | Answer | Meaning | Fix |
 |---|---|---|
 | No connection | Wrong address or port, `http` instead of `https`, or a firewall | Use the address from `goethe api` |
-| `403 Forbidden` | Your address isn't allowed | `goethe allowlist --add <your-ip>` |
-| `401` | Missing or wrong key | Send `Authorization: Bearer <key>` |
-| `404 Model Not Found` | Unknown model name, or your key isn't allowed that model | Use a name from `goethe api` |
+| `403` | Your address isn't allowed | `goethe allowlist --add <your-ip>` |
+| `401` | Missing or wrong key | Send the key, for example `Authorization: Bearer <key>` |
+| `404 Model Not Found` | Unknown model, or the key isn't allowed that model | Use a name from `goethe api` |
 | `429` | Too many requests | Slow down, or raise the key's `--rpm` |
-| `503` | The model isn't ready, or is being unloaded | Wait, or check `goethe ps` |
+| `503` | The model isn't ready, or is unloading | Wait, or check `goethe ps` |
 
-**Something else.** Run `goethe doctor` and follow the hints. `goethe logs --daemon` shows Goethe's own log.
+**Anything else.** Run `goethe doctor`, then `goethe logs --daemon`.
