@@ -58,9 +58,9 @@ nginx (https://nginx.org)
 Complete list
 -------------
 
-THIRD_PARTY_NOTICES.md lists every Python package and Rust crate in Goethe with its
-version and license, and THIRD_PARTY_LICENSES.txt holds the full license texts. Both
-are installed with Goethe.
+third_party/THIRD_PARTY_NOTICES.md lists every Python package and Rust crate in Goethe
+with its version and license, and third_party/THIRD_PARTY_LICENSES.txt holds the full
+license texts. Both are installed with Goethe.
 
 Models
 ------

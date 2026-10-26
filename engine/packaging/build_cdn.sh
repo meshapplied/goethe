@@ -160,7 +160,7 @@ for a in "${ARCH_LIST[@]}"; do
 done
 
 cp "${ROOT}/cdn/goethed.service" "${DIST}/goethed.service"
-cp "${ROOT}/../LICENSE" "${ROOT}/../THIRD_PARTY_NOTICES.md" "${ROOT}/../THIRD_PARTY_LICENSES.txt" "${DIST}/"
+cp "${ROOT}/../LICENSE" "${ROOT}/../third_party/THIRD_PARTY_NOTICES.md" "${ROOT}/../third_party/THIRD_PARTY_LICENSES.txt" "${DIST}/"
 cp "${ROOT}/cdn/v1/registry.json" "${DIST}/v1/registry.json"
 cp "${ROOT}/pyenv/requirements.lock" "${ROOT}/pyenv/requirements.aarch64.lock" "${ROOT}/pyenv/bootstrap.sh" \
   "${DIST}/pyenv/"
