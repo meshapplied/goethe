@@ -113,4 +113,4 @@ Our models on [Hugging Face](https://huggingface.co/meshapplied) and at [meshapp
 
 Goethe is licensed under the [Apache License 2.0](LICENSE). The license of each model you serve still applies.
 
-Goethe is built on third-party software, among them SGLang, PyTorch, FlashInfer, Triton, Hugging Face Transformers, nginx and NVIDIA's CUDA libraries. [NOTICE](NOTICE) names them and their licenses; [third_party/THIRD_PARTY_NOTICES.md](third_party/THIRD_PARTY_NOTICES.md) lists every component.
+Goethe is built on third-party software, among them SGLang, PyTorch, FlashInfer, Triton, Hugging Face Transformers, nginx and NVIDIA's CUDA libraries. [NOTICE](NOTICE) names them, lists every package Goethe includes with its license, and holds the full license texts.
