@@ -6,7 +6,7 @@
 - CUDA 13 forward compatibility: data-center GPUs on NVIDIA drivers 535 to 579 (for example a CUDA 12.8 host) run Goethe without a driver upgrade. `goethe doctor` shows `<driver> with CUDA 13 forward compatibility`. GeForce and TITAN cards still need driver 580 or newer.
 - The installer's banner is just the GOETHE wordmark (the "Own your inference" line is gone).
 - `goethe configure api` leaves a blank line after the access menu, then asks whether to restrict API access to specific IP addresses (default no). No allows every address that can reach the gateway (in VPN mode the whole VPN range); only yes asks for the addresses.
-- Docs: a `NOTICE` file names the third-party software Goethe is built on; `docs/cli.md` is the full `goethe` command reference; the README and user guide state where Goethe runs (own hardware, cloud GPU VMs, GPU containers) and which drivers and GPUs it needs. The README's CI badge is GitHub's own, and a Discord badge links to the community server. The full third-party notices and license texts moved to `third_party/`, so GitHub shows one License tab.
+- Docs: a `NOTICE` file names the third-party software Goethe is built on; `docs/cli.md` is the full `goethe` command reference; the README and user guide state where Goethe runs (own hardware, cloud GPU VMs, GPU containers) and which drivers and GPUs it needs. The README's CI badge is GitHub's own, and a Discord badge links to the community server. NOTICE now holds everything about third-party software, including the full package list and license texts, which replaces `THIRD_PARTY_NOTICES.md` and `THIRD_PARTY_LICENSES.txt`; installs get `NOTICE` in `$GOETHE_HOME` instead.
 
 ## 0.1.5 (2026-10-25)
 
