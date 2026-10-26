@@ -47,8 +47,13 @@ jobs:
             exit 0
           fi
           tools='claude|anthropic|cursor|copilot|codex|openai|chatgpt|gemini|devin|aider'
-          found="$(git log --format='@@ %h%n%B' "${BASE}..${HEAD}" | awk -v re="^co-authored-by:.*(${tools})|generated with \\[?(claude|cursor)" \
-            '/^@@ / {c = $2; next} tolower($0) ~ re {print c ": " $0}')"
+          found=""
+          for c in $(git rev-list "${BASE}..${HEAD}"); do
+            hit="$(git log -1 --format=%B "${c}" | grep -i -E "^co-authored-by:.*(${tools})|generated with .?(claude|cursor)" || true)"
+            if [[ -n "${hit}" ]]; then
+              found+="$(git rev-parse --short "${c}"): ${hit}"$'\n'
+            fi
+          done
           if [[ -n "${found}" ]]; then
             echo "These commits name an AI tool as co-author; remove the lines and push again:"
             echo "${found}"
