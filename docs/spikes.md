@@ -12,7 +12,7 @@ One lane, fp8 KV, DFlash2, 7 draft tokens, prefill chunk 1024.
 | 240000 | FATAL. Reservation wants 9469846528 bytes plus 1073741824 of headroom, 10160766976 available after weights |
 | 262144 | FATAL. Reservation wants 10201131264 bytes plus 1073741824 of headroom, 10160766976 available after weights |
 
-The FATAL line and the `capacity | KV` line are the strings `goethe-lab serve` matches. A CUDA out-of-memory line is `cudaMalloc failed: cudaErrorMemoryAllocation: out of memory`. That line is not the reservation FATAL. Fit treats it as a failed boot and lowers context.
+The FATAL line and the `capacity | KV` line are the strings the serve wrapper matches. A CUDA out-of-memory line is `cudaMalloc failed: cudaErrorMemoryAllocation: out of memory`. That line is not the reservation FATAL. Fit treats it as a failed boot and lowers context.
 
 ## Four lanes
 

@@ -1,0 +1,27 @@
+Goethe
+Copyright 2026 Goethe contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Goethe includes or uses the third-party software below, each under its own license.
+
+  SGLang (modified build)          Apache License 2.0
+  PyTorch                          BSD 3-Clause License
+  FlashInfer                       Apache License 2.0
+  Triton                           MIT License
+  Hugging Face Transformers        Apache License 2.0
+  Hugging Face Hub                 Apache License 2.0
+  XGrammar                         Apache License 2.0
+  uv                               Apache License 2.0 or MIT License
+  CPython                          Python Software Foundation License 2.0
+  SQLite                           Public domain
+  nginx                            BSD 2-Clause License
+  NVIDIA CUDA libraries            NVIDIA CUDA Toolkit End User License Agreement
+  pycountry                        GNU LGPL 2.1
+  easydict                         GNU LGPL 3.0
+  certifi, tqdm, orjson            Mozilla Public License 2.0
+
+Other Python packages and Rust crates included in Goethe are under permissive
+licenses (MIT, BSD, Apache 2.0, ISC and similar); each keeps its own license file.
+
+Models served with Goethe are not part of Goethe; each model's own license applies.
