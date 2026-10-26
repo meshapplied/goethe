@@ -8,7 +8,7 @@
   <img alt="Written in Rust" src="https://img.shields.io/badge/language-Rust-B7410E?logo=rust&logoColor=white">
   <img alt="Linux x86_64 and aarch64" src="https://img.shields.io/badge/OS-Linux%20x86__64%20%2F%20aarch64-FCC624?logo=linux&logoColor=black">
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
-  <a href="https://github.com/meshapplied/goethe/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmeshapplied%2Fgoethe%2Fbadges%2Fci.json&logo=githubactions&logoColor=white"></a>
+  <a href="https://github.com/meshapplied/goethe/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/meshapplied/goethe/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <br>
   <a href="https://meshapplied.com/docs"><img alt="Documentation at meshapplied.com/docs" src="https://img.shields.io/badge/docs-meshapplied.com%2Fdocs-87D7FF?logo=readthedocs&logoColor=white"></a>
 </p>
@@ -57,39 +57,59 @@ print(reply.choices[0].message.content)
 - **Many models, many GPUs.** Run several models side by side, split large models across GPUs, and keep other GPU software running next to Goethe.
 - **Always on.** Loaded models come back by themselves after a reboot or a crash.
 
-## What you need
+## Where it runs
 
-- Linux on x86_64 or ARM64.
-- An NVIDIA GPU:
-  - Blackwell: GeForce RTX 5090, RTX PRO 6000 Blackwell, DGX Spark (GB10), B200 or B300;
-  - Hopper: H100, H200 or GH200;
-  - Ada: GeForce RTX 4090, RTX 6000 Ada, L40S or L4;
-  - or Ampere: A100, RTX A6000, GeForce RTX 3090, and similar.
-  - GPUs of different kinds can share one machine; each model runs on GPUs of one kind.
-- NVIDIA driver 580 or newer (data-center GPUs also run on 535 to 579 through NVIDIA's CUDA 13 forward compatibility). That is all: Goethe brings its own CUDA compiler, and the installer sets up the driver, a C++ compiler and the other tools it needs when they are missing (it asks first).
-- Enough GPU memory for your model. `goethe recommend` lists the models that fit your machine.
+| Environment | Examples |
+|---|---|
+| Your own hardware | Workstations and servers with one or more NVIDIA GPUs, including DGX Spark |
+| Cloud GPU virtual machines | AWS, Google Cloud, Azure, Oracle Cloud, Lambda, CoreWeave, Paperspace |
+| GPU containers | RunPod, Vast.ai, and Docker with the NVIDIA Container Toolkit |
 
-Details on [supported hardware, model families and formats](docs/user-guide.md#what-goethe-supports) are in the user guide.
+Linux on x86_64 or ARM64 (glibc 2.30 or newer, for example Ubuntu 20.04+ or Debian 11+). Goethe recognises the cloud provider or container it runs in and shows the address to use from outside.
+
+## GPU and CUDA compatibility
+
+| Architecture | Compute capability | GPUs |
+|---|---|---|
+| Blackwell | 12.0, 12.1 | GeForce RTX 5090, RTX PRO 6000 Blackwell, DGX Spark (GB10) |
+| Blackwell data center | 10.0, 10.3 | B200, GB200, B300, GB300 |
+| Hopper | 9.0 | H100, H200, GH200 |
+| Ada | 8.9 | GeForce RTX 4090, RTX 6000 Ada, L40S, L40, L4 |
+| Ampere | 8.0, 8.6 | A100, A30, A40, A10, RTX A6000, GeForce RTX 3090 |
+
+Older GPUs (Volta, Turing) are not supported. A machine can mix GPU generations; each model runs on GPUs of one generation, and large models can be split across several GPUs.
+
+Goethe ships its own CUDA 13 runtime and compiler, so no CUDA toolkit is needed on the machine. What it needs is the NVIDIA driver:
+
+| NVIDIA driver | CUDA it offers | Goethe runs on |
+|---|---|---|
+| 580 or newer | 13.0 and newer | Every supported GPU |
+| 535 to 579 | 12.2 to 12.9 | Data-center GPUs (A100, H100, H200, B200, L40S, L4 and similar), through NVIDIA's CUDA forward compatibility |
+| Older than 535 | | Not supported; the installer offers to update the driver |
+
+GeForce and TITAN cards need driver 580 or newer. Enough GPU memory for the model is the only other requirement; `goethe recommend` lists the models that fit.
+
+Supported [model families and quantization formats](docs/user-guide.md#what-goethe-supports) are in the user guide.
 
 ## Documentation
 
-- **[User guide](docs/user-guide.md):** install, add models, share the API, every command with its options, and troubleshooting.
-- **[Engine README](engine/README.md):** building Goethe from source and publishing releases.
-- **[Research model packs](docs/research-models.md):** our published ternary and NVFP4 packs, the `goethe-lab` launcher and benchmark results.
+- **[User guide](docs/user-guide.md):** install, add models, share the API, and troubleshooting.
+- **[Command reference](docs/cli.md):** every `goethe` command and option.
+- **[Our models](docs/research-models.md):** the ternary and NVFP4 models we publish, and how fast they run.
+- **Full documentation:** [meshapplied.com/docs](https://meshapplied.com/docs).
 
 ## Repository layout
 
 | Path | What it is |
 |------|------------|
 | [`engine/`](engine/) | Goethe: the `goethe` command, the background service, the gateway and the installer |
-| [`nvfp4-kernels/`](nvfp4-kernels/), [`ternary-kernels/`](ternary-kernels/) | GPU kernels and model-pack tooling |
-| [`goethe/`](goethe/), [`examples/`](examples/) | `goethe-lab`, the launcher for our research model packs |
-| [`docs/`](docs/) | User guide and research notes |
+| [`nvfp4-kernels/`](nvfp4-kernels/), [`ternary-kernels/`](ternary-kernels/) | GPU kernels behind our NVFP4 and ternary models |
+| [`docs/`](docs/) | User guide, command reference and model notes |
 
 Our models are on [Hugging Face](https://huggingface.co/meshapplied) and at [meshapplied.com/models](https://meshapplied.com/models).
 
 ## License
 
-Apache-2.0 for this repository. The license of each model you serve still applies.
+Goethe is licensed under the [Apache License 2.0](LICENSE). The license of each model you serve still applies.
 
-Goethe is built on open-source software, notably [SGLang](https://github.com/sgl-project/sglang) (Apache-2.0, shipped in a modified build), PyTorch, FlashInfer, Triton, Hugging Face Transformers, uv and nginx, and installs NVIDIA's CUDA libraries under NVIDIA's license. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists every component and its license; the installer places it, with the full license texts, in `$GOETHE_HOME`.
+Goethe is built on third-party software, among them SGLang, PyTorch, FlashInfer, Triton, Hugging Face Transformers, nginx and NVIDIA's CUDA libraries. [NOTICE](NOTICE) names them and their licenses; [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists every component.

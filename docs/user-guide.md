@@ -21,7 +21,7 @@ Goethe serves large language models from your own NVIDIA GPUs through one OpenAI
 ## What you can use it for
 
 - **A private OpenAI-compatible API for your team.** Load a model on a GPU workstation and give each person or app its own OpenAI-compatible API key.
-- **Your home lab or office over a VPN.** Serve from a GPU box and use it from your laptop anywhere through Tailscale, WireGuard or ZeroTier.
+- **Your home or office over a VPN.** Serve from a GPU box and use it from your laptop anywhere through Tailscale, WireGuard or ZeroTier.
 - **Local AI for your own apps.** Point code that uses the OpenAI SDK at your machine instead of a cloud service.
 - **Coding assistants and chat UIs.** Use Goethe as the backend for tools that accept an OpenAI-compatible endpoint, such as Open WebUI and many coding assistants.
 - **Comparing models.** Load several models at once and switch between them by name.
@@ -59,44 +59,26 @@ curl -k https://127.0.0.1:8443/v1/chat/completions \
 
 ### Requirements
 
-- Linux on x86_64 or ARM64, with glibc 2.30 or newer: Ubuntu 20.04+, Debian 11+ and similar.
-- A [supported NVIDIA GPU](#hardware) with driver **580 or newer**. Check with `nvidia-smi`. Data-center GPUs (A100, H100, B200, L40S, A10 and similar) also run on drivers 535 to 579 through NVIDIA's CUDA 13 forward compatibility, which the installer sets up.
-- `curl`, `zstd`, `openssl` and a C++ compiler (`g++`). The installer installs any that are missing.
+- Linux on x86_64 or ARM64 with glibc 2.30 or newer, such as Ubuntu 20.04+ or Debian 11+, on your own hardware, a cloud GPU virtual machine or a GPU container (see [Where it runs](#where-it-runs)).
+- A [supported NVIDIA GPU](#hardware) and driver: 580 or newer for every GPU, or 535 to 579 for data-center GPUs (see [CUDA compatibility](#cuda-compatibility)). Check with `nvidia-smi`.
 - Disk space for your models, plus about 12 GB for Goethe itself.
 
-### What the installer takes care of
+Goethe brings its own CUDA runtime and compiler; you never install the CUDA toolkit. The installer checks the machine first and installs what is missing, such as a C++ compiler or the NVIDIA driver, after asking. Inside a container it never touches the driver, which belongs to the host. A GPU problem never stops the install: `goethe doctor` names the fix afterwards.
 
-Goethe brings its own CUDA compiler, so you never install the CUDA toolkit. Everything else the installer checks before it downloads anything. It fixes what it can and names the fix for the rest; a GPU problem never stops the install.
+`GOETHE_INSTALL_DEPS=1` and `GOETHE_INSTALL_DRIVER=1` answer yes in advance, `=0` answers no. `GOETHE_REQUIRE_GPU=1` makes a missing or broken GPU stop the install instead of warning.
 
-| What it finds | What it does |
-|---|---|
-| Missing `curl`, `zstd`, `openssl` or CA certificates | Installs them with apt, dnf, yum or zypper |
-| No C++ compiler (needed to build GPU kernels the first time a model loads) | Installs `build-essential` (Debian, Ubuntu) or `gcc-c++` (RHEL, Fedora, SUSE) |
-| A data-center GPU on driver 535 to 579 (for example a CUDA 12.8 host) | Downloads NVIDIA's CUDA 13 forward-compatibility libraries (`cuda-compat-13-0`, checksum pinned) into `$GOETHE_HOME/cuda-compat` and checks that CUDA starts through them; no driver change or reboot. If NVIDIA refuses the GPU, it falls back to the driver upgrade below |
-| A GPU without a driver, or a driver older than 580 | Installs the open NVIDIA driver 580+ (`ubuntu-drivers` on Ubuntu, NVIDIA's CUDA repository on Debian and the RHEL family), replacing a driver installed from NVIDIA's `.run` file, then loads it or asks for a reboot |
-| The driver is installed but not loaded | Loads it (`modprobe nvidia`); if Secure Boot blocks it, says how to enroll the key |
-| NVIDIA's proprietary kernel module with a Blackwell GPU (RTX 50, RTX PRO 6000, B200) | Switches to the open kernel module, which Blackwell needs |
-| A GPU that did not start (for example after the card crashed) | Explains: a full power cycle (on a VM, stop and start the instance), power cables, Above 4G decoding in the BIOS |
-| Some GPUs did not start, or are older than Goethe supports | Says which ones are skipped |
-| No NVIDIA GPU (a VM without passthrough, a container without `--gpus all`) | Says how to attach one; Goethe installs anyway |
-| Not enough disk space | Stops before downloading, with the numbers |
-| A new release still reaching the package host's cache | Waits and retries for up to 12 minutes |
-
-Before installing packages or a driver, the installer asks (as root it installs the small prerequisites and the compiler without asking). `GOETHE_INSTALL_DEPS=1` and `GOETHE_INSTALL_DRIVER=1` say yes in advance, `=0` says no. Inside a container it never installs a driver, because the driver belongs on the host. `GOETHE_REQUIRE_GPU=1` makes a missing or broken GPU stop the install instead of warning.
-
-On a machine where Goethe is already installed, `goethe doctor` names the cause and the fix for each of these, `goethe start` explains them before the first step, and a model that fails to load because of one of them says so:
+On a machine where Goethe is installed, `goethe doctor` names the cause and the fix for GPU and driver problems, `goethe start` explains them before the first step, and a model that fails to load because of one says so:
 
 | What `goethe doctor` finds | Fix it names |
 |---|---|
 | No NVIDIA GPU visible | Attach the GPU to the VM (PCI passthrough or vGPU), or start the container with `--gpus all` |
 | A GPU but no driver loaded | The driver package for your distribution, for example `sudo ubuntu-drivers install --gpgpu nvidia:580-server-open`, then a reboot |
-| A driver older than 580 | The same, to update it |
+| A driver too old for this GPU | The same, to update it |
 | The proprietary module with a Blackwell GPU | The open module (`nvidia-driver-580-server-open`, `nvidia-open`) |
 | A GPU the driver did not start | A full power cycle, power cables, Above 4G decoding |
 | A driver but no `/dev/nvidia*` | Pass the devices into the container, or `sudo nvidia-modprobe -u -c=0` on the host |
 | A driver but no `libcuda.so.1` or `libnvidia-ml.so.1` | The NVIDIA Container Toolkit for containers, or the matching user-space driver (`libnvidia-compute-<version>`) |
 | No C++ compiler, or gcc older than 9 | `sudo apt install build-essential` or `sudo dnf install gcc-c++` |
-| gcc newer than 15 | Nothing: Goethe tells nvcc to accept it, and names `gcc-15` in case a build still fails |
 
 ### Install Goethe
 
@@ -104,11 +86,7 @@ On a machine where Goethe is already installed, `goethe doctor` names the cause 
 curl -fsSL https://meshapplied.com/install.sh | bash
 ```
 
-No root is needed. The installer:
-- checks your system first;
-- downloads Goethe and verifies its signature;
-- sets up everything it needs in one folder;
-- ends with the next step, `goethe start`.
+No root is needed. The installer ends with the next step, `goethe start`.
 
 The installer does not start Goethe. `goethe start` (or `goethe up`) does that. When you run the installer again to upgrade a Goethe that is running, it swaps in the new version and keeps your models serving.
 
@@ -172,7 +150,7 @@ goethe install --model Qwen/Qwen3-8B
 goethe install --model nvidia/Llama-3.1-8B-Instruct-NVFP4 --load      # install and load in one step
 ```
 
-The model id is the Hugging Face repo name. Downloads are checked file by file, and an interrupted download resumes where it left off when you run the command again.
+The model id is the Hugging Face repo name.
 
 Useful options:
 - `--load`: load it right after installing.
@@ -232,11 +210,11 @@ Goethe picks the GPUs, sizes the memory and waits until the model is ready. It e
 RUNNING: Qwen/Qwen3-8B instance inst-... on GPU 0 port 30001 (45.2 s)
 ```
 
-The first load of a model on a new machine takes a few extra minutes while GPU kernels are built. Later loads are faster.
+The first load of a model on a new machine takes a few extra minutes. Later loads are faster.
+
+`goethe load` shows how the GPU memory is used: the weights, the cache for the context and parallel requests, and working memory. `goethe hw pick-gpus --model <model>` shows the same without loading.
 
 Choosing where and how:
-
-How much memory a load takes: the weights, a KV cache with room for one request at the full context (or every parallel request at a quarter of it, whichever is larger), a sliding-window cache for models that use one (sized for the requests, not a fixed share), for hybrid models such as Qwen3.5 and Qwen3-Next the linear-attention state SGLang keeps per request, and about 2 GB of working memory. Goethe computes these the way SGLang allocates them, and after the first load of a model it corrects for the real weight size. `goethe load` prints these parts, and `goethe hw pick-gpus --model <model>` shows them without loading.
 
 ```bash
 goethe load --model Qwen/Qwen3-8B --gpu gpu1          # a specific GPU (goethe gpu lists them)
@@ -539,26 +517,44 @@ Models that were loaded when Goethe stopped come back by themselves when it star
 
 ### Hardware
 
-| GPU family | Examples | Compute capability | Status |
-|---|---|---|---|
-| GPU family | Examples | Compute capability | NVFP4 path | Status |
-|---|---|---|---|---|
-| Blackwell (consumer and workstation) | GeForce RTX 5090, RTX PRO 6000 Blackwell | 12.0 | Native FP4 plus Marlin for small batches | Supported and tested |
-| Blackwell (DGX Spark) | GB10 | 12.1 | Native FP4 plus Marlin for small batches | Supported |
-| Blackwell data center | B100, B200, GB200 | 10.0 | Native FP4 | Supported |
-| Blackwell Ultra data center | B300, GB300 | 10.3 | Native FP4 | Supported |
-| Hopper | H100, H200, GH200 | 9.0 | Marlin (4-bit weights, 16-bit math) | Supported |
-| Ada | GeForce RTX 4090, RTX 6000 Ada, L40S, L4 | 8.9 | Marlin (4-bit weights, 16-bit math) | Supported |
-| Ampere | GeForce RTX 3090, RTX A6000, A40, A10 | 8.6 | Marlin (4-bit weights, 16-bit math) | Supported |
-| Ampere data center | A100, A30 | 8.0 | Marlin (4-bit weights, 16-bit math) | Supported |
-
-- **Several GPUs:** a model can be split across several GPUs in one machine (`--tp`), and mixture-of-experts models can also use expert parallelism (`--ep`).
-- **Mixed GPUs:** one machine can hold GPUs of different architectures, for example two RTX PRO 6000 and an H100. Each model loads on GPUs it runs on, and a model split across GPUs always uses GPUs of one architecture; `goethe load --gpu` refuses a set that mixes them. Kernels that SGLang builds on first use are compiled for each architecture separately (`sm_80`, `sm_86`, `sm_89`, `sm_90a`, `sm_100a`, `sm_103a`, `sm_120a`, `sm_121a`) and cached under `$GOETHE_HOME/cache/jit/<target>`. `goethe doctor` lists the architectures it finds.
-- **Catalog models:** a model validated on Ampere (8.6) also runs on A100 (8.0), Ada (8.9) and Hopper (9.0), which take the same NVFP4 path with more shared memory; a model validated on consumer Blackwell (12.x) also runs on data-center Blackwell (10.x).
-- **Operating system:** Linux on x86_64 or ARM64 with glibc 2.30 or newer, and NVIDIA driver 580 or newer. Goethe brings its own CUDA compiler.
-- **Where it runs:** bare metal, virtual machines and containers (Docker, Podman, Kubernetes, LXC). Cloud GPU providers are detected automatically: RunPod, Vast.ai, Lambda, AWS, Google Cloud, Azure, Oracle Cloud, CoreWeave and Paperspace.
+| GPU family | Examples | Compute capability |
+|---|---|---|
+| Blackwell (consumer and workstation) | GeForce RTX 5090, RTX PRO 6000 Blackwell | 12.0 |
+| Blackwell (DGX Spark) | GB10 | 12.1 |
+| Blackwell data center | B100, B200, GB200 | 10.0 |
+| Blackwell Ultra data center | B300, GB300 | 10.3 |
+| Hopper | H100, H200, GH200 | 9.0 |
+| Ada | GeForce RTX 4090, RTX 6000 Ada, L40S, L40, L4 | 8.9 |
+| Ampere | GeForce RTX 3090, RTX A6000, A40, A10 | 8.6 |
+| Ampere data center | A100, A30 | 8.0 |
 
 GPUs older than Ampere (Volta, Turing and earlier) are not supported; Goethe names them and skips them.
+
+- **Several GPUs:** a model can be split across several GPUs in one machine (`--tp`), and mixture-of-experts models can also use expert parallelism (`--ep`).
+- **Mixed GPUs:** one machine can hold GPUs of different generations, for example two RTX PRO 6000 and an H100. Each model runs on GPUs of one generation; `goethe load --gpu` refuses a set that mixes them.
+- **4-bit models everywhere:** NVFP4 models run on every supported GPU, natively on Blackwell and with Goethe's own kernels on Hopper, Ada and Ampere.
+
+### CUDA compatibility
+
+Goethe ships its own CUDA 13 runtime and compiler, so the machine needs no CUDA toolkit, only the NVIDIA driver:
+
+| NVIDIA driver | CUDA it offers | Goethe runs on |
+|---|---|---|
+| 580 or newer | 13.0 and newer | Every supported GPU |
+| 535 to 579 | 12.2 to 12.9 | Data-center GPUs (A100, H100, H200, B200, L40S, L4 and similar), through NVIDIA's CUDA forward compatibility |
+| Older than 535 | | Not supported; the installer offers to update the driver |
+
+GeForce and TITAN cards need driver 580 or newer. `goethe doctor` shows the driver and, on 535 to 579, `with CUDA 13 forward compatibility`.
+
+### Where it runs
+
+| Environment | Examples |
+|---|---|
+| Your own hardware | Workstations and servers with one or more NVIDIA GPUs, including DGX Spark |
+| Cloud GPU virtual machines | AWS, Google Cloud, Azure, Oracle Cloud, Lambda, CoreWeave, Paperspace |
+| GPU containers | RunPod, Vast.ai, and Docker with the NVIDIA Container Toolkit |
+
+Goethe recognises the cloud provider or container it runs in, keeps its files on the persistent volume where there is one, and shows the address to use from outside. In a container, the GPU and its driver come from the host.
 
 ### Model families
 
@@ -593,6 +589,8 @@ Dense, mixture-of-experts, hybrid (linear attention and Mamba) and vision-langua
 You don't need to tell Goethe a model's format; it's detected from the model files. GGUF files and `.bin` (PyTorch pickle) weights are not supported; use the safetensors release of the model.
 
 ## Command reference
+
+The [command reference](cli.md) describes every command and option in detail. In short:
 
 Most listing commands accept `--json` for scripts.
 
@@ -654,10 +652,8 @@ Exit codes:
 | `goethe alias --remove <alias>` | Remove an alias | |
 | `goethe gateway` | Where the API listens and how many addresses are allowed | `--json` |
 | `goethe gateway --bind <addr>` | Listen on `127.0.0.1`, `0.0.0.0` or one IP of this machine | |
-| `goethe domain` | How to serve the API under your own domain name (preview) | |
 | `goethe domain` | How to reach the API by a domain name (a DNS A record) | |
 | `goethe domain --check <domain>` | Check that the name points at the API and the gateway answers | `<domain>` |
-| `goethe domain --check <domain>` | Check that the domain points here and answers with a valid certificate | |
 
 ### Hardware and system
 
@@ -671,7 +667,7 @@ Exit codes:
 | `goethe doctor` | Check the setup, with a fix for each problem | `--json`<br>`--probe-public`: also test the public address |
 | `goethe update` | Install the latest Goethe | `--check`: only show what's available<br>`--yes`: don't ask<br>`--engine`: also update the inference engine<br>`--allow-downgrade` |
 | `goethe uninstall` | Remove Goethe and the models it installed; folders of your own files that you registered stay | `--keep-models`: keep the installed models<br>`--yes` |
-| `goethe --version` | Version and build | |
+| `goethe --version` | Version, and the upgrade command when a newer one is out | `--build-info` instead: commit and build date |
 
 ## Settings
 
@@ -699,7 +695,7 @@ Most people never need these. Set them in your shell, or in `goethe.env` inside 
 - **Not enough GPU memory:** use a smaller context (`--ctx`), fewer parallel requests (`--max-conc`), more GPUs (`--tp 2`), or a quantized version of the model.
 - **The model needs its own code:** reinstall it with `--trust-remote-code`.
 
-**The first request is slow.** The first request after a load can take a while, because GPU kernels are being prepared. Requests after that are fast.
+**The first request is slow.** The first request after a load can take a while. Requests after that are fast.
 
 **Requests fail:**
 

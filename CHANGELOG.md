@@ -3,9 +3,10 @@
 ## Unreleased
 
 - `goethe load` and `goethe start` say `Loading into VRAM...` while a model loads, instead of talking about kernel builds.
-- CUDA 13 forward compatibility: data-center GPUs on NVIDIA drivers 535 to 579 (for example a CUDA 12.8 host on R570) no longer need a driver upgrade. The installer downloads NVIDIA's `cuda-compat-13-0` 580.196.07 libraries from NVIDIA (pinned checksum) into `$GOETHE_HOME/cuda-compat`, keeps them only if CUDA starts through them, and otherwise offers the driver upgrade as before. Engines and kernel builds load them first only while the driver is older than 580, so a later driver upgrade needs nothing. `goethe doctor` shows `<driver> with CUDA 13 forward compatibility`. GeForce and TITAN cards are not served by NVIDIA's forward compatibility and still need driver 580+.
+- CUDA 13 forward compatibility: data-center GPUs on NVIDIA drivers 535 to 579 (for example a CUDA 12.8 host) run Goethe without a driver upgrade. `goethe doctor` shows `<driver> with CUDA 13 forward compatibility`. GeForce and TITAN cards still need driver 580 or newer.
 - The installer's banner is just the GOETHE wordmark (the "Own your inference" line is gone).
 - `goethe configure api` leaves a blank line after the access menu, then asks whether to restrict API access to specific IP addresses (default no). No allows every address that can reach the gateway (in VPN mode the whole VPN range); only yes asks for the addresses.
+- Docs: a `NOTICE` file names the third-party software Goethe is built on; `docs/cli.md` is the full `goethe` command reference; the README and user guide state where Goethe runs (own hardware, cloud GPU VMs, GPU containers) and which drivers and GPUs it needs. The README's CI badge is GitHub's own.
 
 ## 0.1.5 (2026-10-25)
 
@@ -65,13 +66,9 @@
 
 - `docs/HUB_CARDS.md` records the Hub card contract for the Ternary-Latest ids.
 
-- `goethe-lab serve <model>` starts that model. No name still starts Qwen3.8-27B on NInfer. The other three names run the SGLang command in `examples/`.
-
 - `nvfp4-kernels/image.sh` builds `goethe:pack` from a `pack.sh` tarball. The image does not compile NInfer.
 
 - Flash-Next NVFP4 weight-only (compressed-tensors): SGLang patch in `nvfp4-kernels/patches/` and serve example `examples/nvfp4-weight-only.toml`, with tests.
-
-- `goethe-lab serve` uses `$NVFP4_HOME/bin/ninfer-serve` when that file is executable, and does not build. `nvfp4-kernels/pack.sh` writes that layout with `libcudart.so.13` beside the binary.
 
 - OpenAI and Responses tool names may be 128 characters, the same limit the Anthropic adapter already had. A fit that cannot boot prints one line instead of a traceback.
 
@@ -81,13 +78,6 @@
 - DeepSeek-V4.1 Ternary performance: agentic **194** tok/s (conc=1 TP4) and cold prefill/long-ctx latency tables.
 - Flash-Next Ternary performance: agentic **168** tok/s (conc=1 TP1) and cold prefill/long-ctx latency tables.
 - Flash-Next NVFP4 performance: agentic **184** tok/s (conc=1) and cold prefill/long-ctx latency tables.
-- `goethe` command (`serve`, `list`, `doctor`), standard library only, with an installer. See `docs/cli.md`.
-- `goethe-lab connect` runs a coding agent against the server for one command.
-- `goethe-lab update --check` compares the installed engine, patch and model file to the pin.
-- `goethe-lab doctor` names missing engine libraries and the apt line.
-- `goethe-lab bench` replays the bundled agent traces and reports token-weighted decode tok/s, cache hit, time to first token, acceptance, tool-call validity and power.
-- `goethe-lab serve` treats a CUDA out-of-memory boot as a failed fit, and lowers context, instead of waiting out the probe.
-- The engine-link command was removed. `serve` starts the binary under `NVFP4_HOME`.
 - `nvfp4-kernels/`: patched NInfer tile for the down projection and a draft-shortlist patch for the model file, applied by `install.sh` and `fetch_model.sh` (about 5 % faster decode).
 - Passive lineup README; serve via [`examples/`](examples/) (ternary + Flash-Next NVFP4).
 - SGLang patch: skip ternary for DSpark/NEXTN draft stages and mismatched expert counts.
