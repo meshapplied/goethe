@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.6 (2026-10-27)
 
+- User guide restructured to match meshapplied.com/docs: what you can use it for, quick install, API compatibility (OpenAI, Anthropic and LiteLLM, with examples for each), CLI, models, sharing, and hardware, software, cloud and model compatibility. Examples use GLM-5.3 Flash.
 - `goethe load` and `goethe start` say `Loading into VRAM...` while a model loads, instead of talking about kernel builds.
 - CUDA 13 forward compatibility: data-center GPUs on NVIDIA drivers 535 to 579 (for example a CUDA 12.8 host) run Goethe without a driver upgrade. `goethe doctor` shows `<driver> with CUDA 13 forward compatibility`. GeForce and TITAN cards still need driver 580 or newer.
 - The installer's banner is just the GOETHE wordmark (the "Own your inference" line is gone).
