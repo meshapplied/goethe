@@ -16,6 +16,8 @@
 
 <p align="center"><b>Run and share your models on your own infra in 3 steps, and run them fast.</b></p>
 
+<p align="center">If Goethe is useful to you, a ⭐ on <a href="https://github.com/meshapplied/goethe">GitHub</a> helps others find it.</p>
+
 Goethe turns a Linux machine into your own API, compatible with OpenAI, Anthropic and LiteLLM clients. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
 
 ```bash
