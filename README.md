@@ -51,12 +51,12 @@ print(reply.choices[0].message.content)
 
 ## Why Goethe
 
-- **Three steps, one address.** Every model you load is served at the same URL; a request picks its model by name.
-- **Fast.** Models run on SGLang, with continuous batching, prefix caching and CUDA graphs. Goethe adds its own NVFP4 kernels for Blackwell, Hopper, Ada and Ampere GPUs, so 4-bit models use about a quarter of the memory of the full-precision version and stay quick.
-- **Private by default.** Nothing can reach the API until you allow it, you can rate-limit, expire, scope or revoke keys at any time.
-- **Fits your network.** Serve on your own infra only, over Tailscale, WireGuard or ZeroTier, or on a public IP. `goethe configure api` walks you through the choice.
+- **Easy to serve.** Every model you load is served at the same URL; a request picks its model by name.
+- **Fast.** Use the custom kernel attachments to accelerate and optimise model capability.
+- **Private by default.** Nothing reaches the API until you allow it. Rate-limit, expire, scope or revoke keys at any time.
+- **Fits your network.** This machine only, Tailscale / WireGuard / ZeroTier, or a public IP. `goethe configure api` walks you through the choice.
 - **Many models, many GPUs.** Run several models side by side, split large models across GPUs, and keep other GPU software running next to Goethe.
-- **Always on.** Loaded models come back by themselves after a reboot or a crash.
+- **Always on.** Loaded models come back after a reboot or a crash.
 
 ## Where it runs
 
@@ -90,13 +90,13 @@ Goethe ships its own CUDA 13 runtime and compiler, so no CUDA toolkit is needed 
 
 GeForce and TITAN cards need driver 580 or newer. Enough GPU memory for the model is the only other requirement; `goethe recommend` lists the models that fit.
 
-Supported [model families and quantization formats](docs/user-guide.md#what-goethe-supports) are in the user guide.
+Supported [model families and quantization formats](docs/user-guide.md#supported-models) are in the user guide.
 
 ## Documentation
 
 - **[User guide](docs/user-guide.md):** install, add models, share the API, and troubleshooting.
 - **[Command reference](docs/cli.md):** every `goethe` command and option.
-- **[Our models](docs/research-models.md):** the ternary and NVFP4 models we publish, and how fast they run.
+- **[Our models](docs/research-models.md):** the models we publish, and how fast they run.
 - **Full documentation:** [meshapplied.com/docs](https://meshapplied.com/docs).
 
 ## Repository layout
@@ -104,7 +104,7 @@ Supported [model families and quantization formats](docs/user-guide.md#what-goet
 | Path | What it is |
 |------|------------|
 | [`engine/`](engine/) | Goethe: the `goethe` command, the background service, the gateway and the installer |
-| [`nvfp4-kernels/`](nvfp4-kernels/), [`ternary-kernels/`](ternary-kernels/) | GPU kernels behind our NVFP4 and ternary models |
+| [`nvfp4-kernels/`](nvfp4-kernels/), [`ternary-kernels/`](ternary-kernels/) | GPU kernels behind our models |
 | [`docs/`](docs/) | User guide, command reference and model notes |
 
 Our models on [Hugging Face](https://huggingface.co/meshapplied) and at [meshapplied.com/models](https://meshapplied.com/models).
