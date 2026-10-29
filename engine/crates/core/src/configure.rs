@@ -252,12 +252,12 @@ fn configure_vpn(opts: &ApiOpts, vpns: &[VpnAddr]) -> Result<String, String> {
     for r in &ranges {
         security::canonical_cidr(r)?;
     }
-    println!("The gateway will listen only on {} ({} on {}) and allow {}.", v.ip, v.kind, v.name, ranges.join(", "));
-    println!("Programs on this machine then use {} too; 127.0.0.1 stops answering.", v.ip);
+    println!("The gateway will listen on {} ({} on {}) and on 127.0.0.1, and allow {}.", v.ip, v.kind, v.name, ranges.join(", "));
     if !confirm("Apply?", true, opts.yes)? {
         return Err("nothing changed".to_string());
     }
     bind(&v.ip.to_string())?;
+    allow("127.0.0.1/32", "this machine")?;
     for r in &ranges {
         allow(r, &format!("{} clients", v.kind))?;
     }

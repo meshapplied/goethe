@@ -337,10 +337,17 @@ fn render_gateway(home: &Path, bin: &Path) -> Result<String, String> {
         IpAddr::V6(a) => format!("[{a}]:{port}"),
     };
     let modern_http2 = nginx_version(bin).is_some_and(|v| v >= (1, 25, 1));
+    let http2 = if modern_http2 { "" } else { " http2" };
+    let loopback = if bind != IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) && !bind.is_unspecified() {
+        format!("    listen 127.0.0.1:{port} ssl{http2};")
+    } else {
+        String::new()
+    };
     const TMPL: &str = include_str!("../../../nginx/goethe_gateway.conf.tmpl");
     Ok(TMPL
         .replace("{{LISTEN}}", &listen)
-        .replace("{{HTTP2_LISTEN}}", if modern_http2 { "" } else { " http2" })
+        .replace("{{HTTP2_LISTEN}}", http2)
+        .replace("{{LOOPBACK}}", &loopback)
         .replace("{{HTTP2_ON}}", if modern_http2 { "    http2 on;" } else { "" })
         .replace("{{CERT}}", &quote(&dir.join("certs/server.crt")))
         .replace("{{KEY}}", &quote(&dir.join("certs/server.key")))
@@ -954,10 +961,24 @@ mod tests {
         let conf = fs::read_to_string(home.join("nginx/goethe_gateway.conf")).unwrap();
         assert!(conf.contains(&format!("listen 127.0.0.2:{port}")), "{conf}");
         assert!(TcpStream::connect(("127.0.0.2", port)).is_ok());
-        assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_ok());
+        assert!(conf.contains(&format!("listen 127.0.0.1:{port}")), "{conf}");
         assert_eq!(format_gateway_line(home), Some(format!("gateway: https://127.0.0.2:{port}")));
         stop(home);
         assert_eq!(verified_master(home), None);
+    }
+
+    #[test]
+    fn a_vpn_address_keeps_a_loopback_listen() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        fs::create_dir_all(home.join("nginx")).unwrap();
+        fs::write(home.join("nginx/mux_port"), "30000\n").unwrap();
+        fs::write(home.join("nginx/public_port"), "8443\n").unwrap();
+        store_public_bind(home, "100.116.114.80").unwrap();
+        let conf = render_gateway(home, Path::new("/bin/false")).unwrap();
+        assert!(conf.contains("listen 100.116.114.80:8443"), "{conf}");
+        assert!(conf.contains("listen 127.0.0.1:8443"), "{conf}");
     }
 
     #[test]

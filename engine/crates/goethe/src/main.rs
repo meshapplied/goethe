@@ -1367,6 +1367,7 @@ fn do_api(json: bool) -> Result<(), String> {
     }
     use goethe_core::term::{commands, paint, Color, Table};
     println!("API endpoint: {api}");
+    println!("SSL_CERT_FILE={}", cert_path());
     println!("Accepts: OpenAI, Anthropic (/v1/messages) and LiteLLM (routes with or without /v1, x-litellm-api-key)");
     for e in goethe_core::host::probe_environment(nginx::public_port_u16(&home)).public_endpoints {
         println!("Public endpoint: {e}");
@@ -1391,10 +1392,15 @@ fn do_api(json: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn cert_path() -> String {
+    goethe_home().join("nginx/certs/server.crt").display().to_string()
+}
+
 fn curl_example(api: &str) -> String {
     format!(
-        "curl -k {api}/chat/completions -H \"Authorization: Bearer <your_bearer_token>\" -H \"Content-Type: application/json\" \
-         -d '{{\"model\": \"<model_name>\", \"messages\": [{{\"role\": \"user\", \"content\": \"Hello!\"}}]}}'"
+        "curl --cacert {} {api}/chat/completions -H \"Authorization: Bearer <your_bearer_token>\" -H \"Content-Type: application/json\" \
+         -d '{{\"model\": \"<model_name>\", \"messages\": [{{\"role\": \"user\", \"content\": \"Hello!\"}}]}}'",
+        cert_path()
     )
 }
 

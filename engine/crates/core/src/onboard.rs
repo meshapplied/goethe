@@ -162,7 +162,7 @@ fn install_from_catalog() -> Result<Option<String>, String> {
     let hw = crate::placement::load_hw(&home).ok_or("no hardware profile; run goethe hw profile")?;
     let view = crate::recommend::View::capacity(&home, hw);
     let reg = crate::registry::fetch(&crate::registry::registry_url())?;
-    let mut fits = crate::recommend::recommend(&view, &reg).recommended;
+    let mut fits = crate::recommend::recommend(&home, &view, &reg).recommended;
     fits.sort_by(|a, b| (a.vram_per_gpu_gb * a.tp as f64).total_cmp(&(b.vram_per_gpu_gb * b.tp as f64)));
     let width = fits.iter().map(|f| f.model_id.len()).max().unwrap_or(0);
     let mut rows: Vec<String> = fits

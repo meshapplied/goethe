@@ -497,7 +497,7 @@ fn spawn_engine(spec: &EngineSpec, log_path: &Path) -> Result<(Identity, u64), S
         .open(log_path)
         .map_err(|e| e.to_string())?;
     let offset = log.metadata().map(|m| m.len()).unwrap_or(0);
-    let mut cmd = engine_cmd::command(spec);
+    let mut cmd = engine_cmd::command(spec)?;
     cmd.stdin(Stdio::null())
         .stdout(log.try_clone().map_err(|e| e.to_string())?)
         .stderr(log);

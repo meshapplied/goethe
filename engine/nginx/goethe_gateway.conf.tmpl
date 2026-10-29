@@ -10,6 +10,7 @@ upstream goethe_mux {
 
 server {
     listen {{LISTEN}} ssl{{HTTP2_LISTEN}};
+{{LOOPBACK}}
 {{HTTP2_ON}}
     server_tokens off;
     ssl_certificate {{CERT}};
