@@ -40,8 +40,7 @@ pub struct EngineSpec<'a> {
 }
 
 pub fn check_extra_args(args: &[String]) -> Result<(), String> {
-    // Refuse extra args that would override a Goethe flag, including --flag=value and argparse prefixes.
-    // ponytail: refuse tokenizer workers above 1; a mode-0600 socket is the upgrade if a catalog model needs it.
+    // Refuse Goethe owned flags, and tokenizer workers above 1 because that mode cannot take an API key.
     if multi_tokenizer(args) {
         return Err("extra SGLang arg --tokenizer-worker-num greater than 1 is not allowed: that mode cannot take an API key, so Goethe will not listen on TCP".into());
     }

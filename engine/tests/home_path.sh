@@ -2,7 +2,6 @@
 # GOETHE_HOME written into a systemd unit must be one absolute path.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck disable=SC1090
 eval "$(awk '/^goethe_home_ok\(\)/,/^}/' "${root}/cdn/install.sh")"
 
 tmp="$(mktemp -d)"
