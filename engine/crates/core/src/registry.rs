@@ -147,8 +147,7 @@ pub fn bundled() -> Result<Registry, String> {
 }
 
 pub fn fetch(url: &str) -> Result<Registry, String> {
-    // file:// or http(s) with a cache. A body is parsed only after the release key verifies it.
-    // The default URL with no signature falls back to the catalog built into this binary.
+    // file:// or http(s). Parse a body only after the release key verifies it. The default URL with no signature uses the built in catalog.
     if let Some(rest) = url.strip_prefix("file://") {
         let path = Path::new(rest);
         let text = fs_read(path)?;
@@ -259,7 +258,6 @@ fn fetch_http_uncached(home: &Path, url: &str) -> Result<Registry, String> {
         Ok(c.body)
     };
     let sig_bytes = |body_url: &str| -> Option<Vec<u8>> {
-        // OpenSSL signatures are binary. into_string() would drop a valid sig.
         let resp = crate::net::agent()
             .get(&format!("{body_url}.sig"))
             .timeout(std::time::Duration::from_secs(10))
