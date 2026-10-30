@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Speculative-decoding models on hybrid (linear-attention) architectures load with default settings: memory planning counts the per-draft-token state SGLang keeps for every running request, and follows `--mamba-ssm-dtype`. Qwen3.8-Flash-Next NVFP4 failed to load on a 96 GB GPU before; its catalog entry now uses bf16 state.
+- Goethe learns a model's real weight size from the main model plus its drafter (before, only the last loaded part counted), also when a start fails, and retries at a reduced context or concurrency instead of giving up. Loads on GPUs named with `--gpu` also shrink context and concurrency to fit instead of refusing.
+- The static-pool limit is checked against free memory minus the CUDA context, as SGLang applies it, so the KV cache gets the tokens the plan promised.
+- `goethe unload` waits up to 30 s for the GPU memory to be released, so an immediate `goethe load` no longer sees the old engine as a foreign process.
+- A warm-up request runs before a model is reported RUNNING, so the first client request does not wait for first-use kernel builds.
+- The gateway allows 100 requests per second (burst 200) and 512 open connections per client address, configurable with `GOETHE_GATEWAY_RATE_PER_IP` and `GOETHE_GATEWAY_CONN_PER_IP`; before, more than 32 concurrent streams from one machine got 429.
+- `docs/registry.md`: what a registry entry must pass; `engine/tests/load/mixed_load.py`: mixed prompt-length load test.
+
 ## 0.1.6 (2026-10-27)
 
 - User guide restructured to match meshapplied.com/docs: what you can use it for, quick install, API compatibility (OpenAI, Anthropic and LiteLLM, with examples for each), CLI, models, sharing, and hardware, software, cloud and model compatibility. Examples use GLM-5.3 Flash.

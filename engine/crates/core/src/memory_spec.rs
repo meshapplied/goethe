@@ -68,6 +68,8 @@ pub struct MemorySpec {
     pub static_state_bytes: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub load_peak_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub spec_state_bytes_per_request: u64,
 }
 
 impl MemorySpec {
@@ -92,15 +94,56 @@ impl MemorySpec {
     }
 }
 
-pub fn installed(dir: &std::path::Path, card: &toml::Value) -> Option<MemorySpec> {
-    // An installed model's spec for its card's KV dtype; the stored weight figure includes four requests of the old state estimate.
+pub fn installed(dir: &std::path::Path, card: &toml::Value, load_extra: &[String]) -> Option<MemorySpec> {
+    // An installed model's spec for its card's KV dtype and the engine flags it runs with (card plus this load's extras).
     let cfg = model_facts::read_config(dir).ok()?;
     let kv_dtype = card.get("kv_cache_dtype").and_then(|v| v.as_str()).filter(|d| !d.eq_ignore_ascii_case("auto"));
     let mut spec = from_config(&cfg, kv_dtype).ok()?;
     let facts = model_facts::facts_from_config(&cfg, 0.0, None, "installed").ok()?;
     let elem = crate::install::kv_element_bytes(kv_dtype.unwrap_or("auto"), &cfg);
     spec.static_state_bytes = (facts.swa_kv_elems_per_request * elem + facts.linear_state_bytes_per_request) * 4;
+    let mut args = crate::engine_cmd::card_extra_args(card);
+    args.extend_from_slice(load_extra);
+    apply_engine_args(&mut spec, Some(&cfg), &args);
     Some(spec)
+}
+
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    // The last value given for flag, as `--flag value` or `--flag=value`.
+    let mut found = None;
+    for (i, a) in args.iter().enumerate() {
+        if a == flag {
+            found = args.get(i + 1).map(String::as_str);
+        } else if let Some(v) = a.strip_prefix(flag).and_then(|r| r.strip_prefix('=')) {
+            found = Some(v);
+        }
+    }
+    found
+}
+
+pub fn apply_engine_args(spec: &mut MemorySpec, cfg: Option<&Value>, args: &[String]) {
+    // Engine-allocated linear state: --mamba-ssm-dtype sets its dtype, speculative decoding adds one per draft token.
+    if spec.state_bytes_per_slot == 0 {
+        return;
+    }
+    let lm = cfg.and_then(|c| model_facts::resolve_language_config(c).ok().map(|lm| (c, lm)));
+    if let (Some(d), Some((cfg, lm))) = (flag_value(args, "--mamba-ssm-dtype"), lm) {
+        let bytes = if d.contains("16") { 2 } else { 4 };
+        let layers = read_u64(lm, cfg, &["num_hidden_layers", "n_layer"]).unwrap_or(0);
+        let state = model_facts::linear_state_bytes_as(lm, model_facts::layer_plan(lm, layers), Some(bytes));
+        if state > 0 {
+            spec.state_bytes_per_slot = state;
+        }
+    }
+    let algo = flag_value(args, "--speculative-algorithm").unwrap_or("");
+    if algo.is_empty() || algo.eq_ignore_ascii_case("none") {
+        return;
+    }
+    let draft_tokens = flag_value(args, "--speculative-num-draft-tokens")
+        .and_then(|v| v.parse::<u64>().ok())
+        .or_else(|| flag_value(args, "--speculative-num-steps").and_then(|v| v.parse::<u64>().ok()).map(|s| s + 1))
+        .unwrap_or(4);
+    spec.spec_state_bytes_per_request = draft_tokens * spec.state_bytes_per_slot;
 }
 
 pub fn from_config(cfg: &Value, kv_dtype: Option<&str>) -> Result<MemorySpec, String> {
@@ -372,5 +415,31 @@ mod tests {
             "sparse_disable_index_value": flags}}});
         let x = from_config(&minimax, None).unwrap();
         assert_eq!(x.kv_bytes_per_token + x.kv_replicated_bytes_per_token, 137_472);
+    }
+
+    #[test]
+    fn engine_flags_set_state_dtype_and_speculative_state() {
+        let types: Vec<&str> = (0..48).map(|i| if i % 4 == 3 { "full_attention" } else { "linear_attention" }).collect();
+        let cfg = json!({"architectures": ["Qwen4ExpForConditionalGeneration"], "text_config": {"num_hidden_layers": 48,
+            "layer_types": types, "num_attention_heads": 24, "num_key_value_heads": 2, "head_dim": 256,
+            "linear_num_value_heads": 48, "linear_num_key_heads": 16, "linear_key_head_dim": 128,
+            "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4, "mamba_ssm_dtype": "float32"}});
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut plain = from_config(&cfg, None).unwrap();
+        apply_engine_args(&mut plain, Some(&cfg), &[]);
+        assert_eq!((plain.state_bytes_per_slot, plain.spec_state_bytes_per_request), (115_458_048, 0));
+        let mut bf16 = from_config(&cfg, None).unwrap();
+        apply_engine_args(&mut bf16, Some(&cfg), &args(&["--mamba-ssm-dtype", "bfloat16"]));
+        assert_eq!(bf16.state_bytes_per_slot, 58_834_944);
+        let mut spec = from_config(&cfg, None).unwrap();
+        let flags = args(&["--mamba-ssm-dtype=bfloat16", "--speculative-algorithm", "NEXTN", "--speculative-num-steps", "3"]);
+        apply_engine_args(&mut spec, Some(&cfg), &flags);
+        assert_eq!(spec.spec_state_bytes_per_request, 4 * 58_834_944);
+        let mut drafts = from_config(&cfg, None).unwrap();
+        apply_engine_args(&mut drafts, None, &args(&["--speculative-algorithm", "EAGLE", "--speculative-num-draft-tokens", "6"]));
+        assert_eq!(drafts.spec_state_bytes_per_request, 6 * 115_458_048);
+        let mut dense = MemorySpec { kv_bytes_per_token: 1, ..MemorySpec::default() };
+        apply_engine_args(&mut dense, None, &args(&["--speculative-algorithm", "NEXTN"]));
+        assert_eq!(dense.spec_state_bytes_per_request, 0);
     }
 }

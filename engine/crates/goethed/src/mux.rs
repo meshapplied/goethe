@@ -69,6 +69,7 @@ pub fn spawn_mux() -> Result<tokio::task::JoinHandle<()>, String> {
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let listener = TcpListener::from_std(listener).map_err(|e| e.to_string())?;
     let max_body = nginx::persist_max_body_mb(&home) as usize * 1024 * 1024;
+    nginx::persist_gateway_limits(&home);
     let mux = MUX.get_or_init(|| Mux {
         cache: GatewayCache::open(&home),
         client: upstream_client(),

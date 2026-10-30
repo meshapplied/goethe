@@ -220,7 +220,11 @@ fn attention_kv(
 }
 
 pub fn linear_state_bytes(lm: &Value, plan: LayerPlan) -> u64 {
-    // Per-request recurrent state of linear-attention (GDN) or Mamba2 layers.
+    linear_state_bytes_as(lm, plan, None)
+}
+
+pub fn linear_state_bytes_as(lm: &Value, plan: LayerPlan, ssm_dtype_bytes: Option<u64>) -> u64 {
+    // Per-request recurrent state of linear-attention (GDN) or Mamba2 layers; ssm_dtype_bytes overrides the config's dtype.
     if plan.linear == 0 {
         return 0;
     }
@@ -232,26 +236,26 @@ pub fn linear_state_bytes(lm: &Value, plan: LayerPlan) -> u64 {
     ) {
         let kh = get("linear_num_key_heads").unwrap_or(vh);
         let kernel = get("linear_conv_kernel_dim").unwrap_or(4).max(1);
-        let ssm_bytes = match lm.get("mamba_ssm_dtype").and_then(|v| v.as_str()) {
+        let ssm_bytes = ssm_dtype_bytes.unwrap_or(match lm.get("mamba_ssm_dtype").and_then(|v| v.as_str()) {
             Some(d) if d.contains("16") => 2,
             _ => 4,
-        };
+        });
         let per_layer = vh * kd * vd * ssm_bytes + (2 * kh * kd + vh * vd) * (kernel - 1) * 2;
         return per_layer * plan.linear;
     }
     let kda = |k: &str| lm.pointer(&format!("/linear_attn_config/{k}")).and_then(|v| v.as_u64());
     if let (Some(k), None) = (get("short_conv_kernel_size"), lm.get("linear_attn_config")) {
         let (h, d) = (get("num_attention_heads").unwrap_or(0), get("head_dim").unwrap_or(0));
-        return (h * d * d * 4 + 3 * h * d * (k.max(1) - 1) * 2) * plan.linear;
+        return (h * d * d * ssm_dtype_bytes.unwrap_or(4) + 3 * h * d * (k.max(1) - 1) * 2) * plan.linear;
     }
     if let (Some(h), Some(d)) = (kda("num_heads"), kda("head_dim")) {
         let kernel = kda("short_conv_kernel_size").unwrap_or(4).max(1);
-        return (h * d * d * 4 + 3 * h * d * (kernel - 1) * 2) * plan.linear;
+        return (h * d * d * ssm_dtype_bytes.unwrap_or(4) + 3 * h * d * (kernel - 1) * 2) * plan.linear;
     }
     if let (Some(h), Some(hd), Some(state)) = (get("mamba_num_heads"), get("mamba_head_dim"), get("ssm_state_size")) {
         let groups = get("n_groups").unwrap_or(1);
         let kernel = get("conv_kernel").unwrap_or(4).max(1);
-        let per_layer = h * hd * state * 4 + (h * hd + 2 * groups * state) * (kernel - 1) * 2;
+        let per_layer = h * hd * state * ssm_dtype_bytes.unwrap_or(4) + (h * hd + 2 * groups * state) * (kernel - 1) * 2;
         return per_layer * plan.linear;
     }
     0

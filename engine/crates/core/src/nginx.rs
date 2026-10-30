@@ -154,6 +154,30 @@ pub fn max_body_mb(home: &Path) -> u64 {
     persisted_port(home, "max_body_mb").map(u64::from).unwrap_or(DEFAULT_MAX_BODY_MB)
 }
 
+const DEFAULT_RATE_PER_IP: u64 = 100;
+const DEFAULT_CONN_PER_IP: u64 = 512;
+
+pub fn gateway_limit(home: &Path, name: &str, default: u64) -> u64 {
+    persisted_port(home, name).map(u64::from).unwrap_or(default)
+}
+
+pub fn persist_gateway_limits(home: &Path) {
+    // Daemon side: GOETHE_GATEWAY_RATE_PER_IP (requests/s, burst twice that) and GOETHE_GATEWAY_CONN_PER_IP for nginx.
+    for (var, name, default) in [
+        ("GOETHE_GATEWAY_RATE_PER_IP", "rate_per_ip", DEFAULT_RATE_PER_IP),
+        ("GOETHE_GATEWAY_CONN_PER_IP", "conn_per_ip", DEFAULT_CONN_PER_IP),
+    ] {
+        let value = std::env::var(var)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| (1..=65535).contains(v))
+            .unwrap_or(default);
+        if let Err(e) = write_private(&nginx_prefix(home).join(name), format!("{value}\n").as_bytes()) {
+            eprintln!("goethe gateway: {e}");
+        }
+    }
+}
+
 pub fn persist_max_body_mb(home: &Path) -> u64 {
     // Daemon side: GOETHE_MAX_BODY_MB (1-1024, default 10) becomes the body limit shared by nginx and the mux.
     let mb = std::env::var("GOETHE_MAX_BODY_MB")
@@ -353,6 +377,9 @@ fn render_gateway(home: &Path, bin: &Path) -> Result<String, String> {
         .replace("{{KEY}}", &quote(&dir.join("certs/server.key")))
         .replace("{{ALLOWLIST}}", &quote(&dir.join("allowlist.conf")))
         .replace("{{MAX_BODY_MB}}", &max_body_mb(home).to_string())
+        .replace("{{RATE_PER_IP}}", &gateway_limit(home, "rate_per_ip", DEFAULT_RATE_PER_IP).to_string())
+        .replace("{{BURST_PER_IP}}", &(2 * gateway_limit(home, "rate_per_ip", DEFAULT_RATE_PER_IP)).to_string())
+        .replace("{{CONN_PER_IP}}", &gateway_limit(home, "conn_per_ip", DEFAULT_CONN_PER_IP).to_string())
         .replace("{{MUX_PORT}}", &mux_port.to_string()))
 }
 

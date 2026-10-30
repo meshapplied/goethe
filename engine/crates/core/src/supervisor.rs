@@ -35,8 +35,9 @@ static WATCHDOG_TICK_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_ATTEMPT: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
 
 const LIVE: &str = "('STARTING', 'RUNNING', 'RESTARTING', 'DRAINING', 'STOPPING')";
-const GPU_RELEASE_WAIT: Duration = Duration::from_secs(2);
+const GPU_RELEASE_WAIT: Duration = Duration::from_secs(30);
 const HTTP_PROBE_SECS: u64 = 25;
+const WARM_UP_SECS: u64 = 900;
 const USER_GATE_WAIT: Duration = Duration::from_secs(590);
 
 pub type LoadErr = (i32, String, Value);
@@ -126,6 +127,7 @@ struct Starting {
     cc: String,
     ctx: u64,
     max_conc: u64,
+    input: ChooserInput,
     plan_free: f64,
     cancel: Arc<AtomicBool>,
     hold: coordinator::Hold,
@@ -482,6 +484,7 @@ fn start_engine(
         cc: plan.cc.clone(),
         ctx: plan.ctx,
         max_conc: plan.max_conc,
+        input: chooser_input(req, plan.ctx, plan.max_conc),
         plan_free: min_free,
     })
 }
@@ -548,6 +551,7 @@ fn startup(s: &mut Starting) {
     loop {
         match wait_engine_ready(s) {
             Startup::Ready => {
+                warm_up(s);
                 if mark_running(s) {
                     learn_overhead(s);
                 }
@@ -579,23 +583,28 @@ fn startup(s: &mut Starting) {
             return cancel_engine(s);
         }
         let log = crate::engine_overhead::read_log_since(&s.log_path, s.log_offset);
-        if let Some(extra) = crate::engine_overhead::parse_shortfall_gb(&log) {
+        let weights_gap = crate::engine_overhead::parse_weight_gb(&log)
+            .map(|w| w - s.need.weights)
+            .filter(|gap| *gap > 0.25);
+        if let Some(extra) = weights_gap.or_else(|| crate::engine_overhead::parse_shortfall_gb(&log)) {
             s.learned.static_gb += extra;
             if let Ok(con) = db::open(&s.home) {
                 let (model, learned) = (&s.params.model_id, s.learned.static_gb);
                 let _ = crate::engine_overhead::store_learned(&con, model, &s.gpu_name, s.tp, Kind::Static, learned);
             }
             if mem_retries < 2 {
-                let bigger = Need { weights: s.need.weights + extra, ..s.need };
-                match respawn(s, bigger, false) {
-                    Ok(()) => {
+                match refit(s) {
+                    Ok(reduced) => {
                         mem_retries += 1;
-                        let notice = format!("engine needed {extra:.1} GB more than estimated, retried");
+                        let notice = format!("engine needed {extra:.1} GB more than estimated, retried{reduced}");
                         load_slot::push_instance_notice(&s.instance_id, &notice);
                         continue;
                     }
                     Err(_) if load_slot::is_cancelled(&s.cancel) => return cancel_engine(s),
-                    Err(notice) => load_slot::push_instance_notice(&s.instance_id, &notice),
+                    Err(notice) => {
+                        append_goethed_log(&s.home, &format!("{}: retry not started: {notice}\n", s.instance_id));
+                        load_slot::push_instance_notice(&s.instance_id, &notice);
+                    }
                 }
             }
         }
@@ -782,6 +791,66 @@ fn stop_one(home: &Path, id: &Identity) -> bool {
     gone
 }
 
+fn wait_vram_back(gpus: &[u32], want_gb: f64) {
+    // A failed engine's VRAM returns some seconds after its processes exit; wait up to a minute for the pre-load level.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        let Ok(snap) = foreign::snapshot() else { return };
+        let free = gpus.iter().map(|g| snap.iter().find(|x| x.index == *g).map_or(0.0, |x| x.free_mb as f64 / 1024.0));
+        if free.fold(f64::INFINITY, f64::min) >= want_gb {
+            return;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn refit(s: &mut Starting) -> Result<String, String> {
+    // Respawn with the learned weights at the planned size, else context halved to 8192, then one request fewer.
+    let stopped = proc_ident::terminate(std::slice::from_ref(&s.identity));
+    foreign::wait_released(&s.gpus, &stopped.pids, GPU_RELEASE_WAIT);
+    wait_vram_back(&s.gpus, s.plan_free - 1.0);
+    let (ctx0, conc0) = (s.ctx, s.max_conc);
+    let mut trial = ChooserInput { ctx: s.ctx, max_conc: s.max_conc, ..s.input.clone() };
+    loop {
+        let need = chooser::with_learned(chooser::need(&trial, s.tp as usize, &s.cc), s.learned);
+        (s.ctx, s.max_conc) = (trial.ctx, trial.max_conc);
+        match respawn(s, need, false) {
+            Ok(()) => {
+                s.need = need;
+                if let Ok(con) = db::open(&s.home) {
+                    let _ = con.execute(
+                        "UPDATE loaded_instances SET ctx_len = ?2, max_conc = ?3 WHERE instance_id = ?1",
+                        rusqlite::params![s.instance_id, s.ctx as i64, s.max_conc as i64],
+                    );
+                }
+                let mut reduced = Vec::new();
+                if s.ctx < ctx0 {
+                    reduced.push(format!("context {}", s.ctx));
+                }
+                if s.max_conc < conc0 {
+                    reduced.push(format!("{} parallel requests", s.max_conc));
+                }
+                return Ok(if reduced.is_empty() { String::new() } else { format!(" at {}", reduced.join(", ")) });
+            }
+            Err(e) if e.contains("missing") && !load_slot::is_cancelled(&s.cancel) => {
+                if trial.ctx > 8192 {
+                    trial.ctx /= 2;
+                } else if trial.max_conc > 1 {
+                    trial.max_conc -= 1;
+                    trial.ctx = ctx0;
+                } else {
+                    (s.ctx, s.max_conc) = (ctx0, conc0);
+                    return Err(e);
+                }
+            }
+            Err(e) => {
+                (s.ctx, s.max_conc) = (ctx0, conc0);
+                return Err(e);
+            }
+        }
+    }
+}
+
 fn respawn(s: &mut Starting, need: Need, move_port: bool) -> Result<(), String> {
     // Stop the current engine (verified) and start it again under the same instance id, with a new budget or port.
     let stopped = proc_ident::terminate(std::slice::from_ref(&s.identity));
@@ -903,7 +972,7 @@ fn stop_processes(home: &Path, list: &[Inst]) -> HashSet<String> {
         .into_iter()
         .collect();
     if !foreign::wait_released(&gpus, &stopped.pids, GPU_RELEASE_WAIT) {
-        append_goethed_log(home, &format!("teardown: pids {:?} still listed on GPUs {gpus:?} after 2s\n", stopped.pids));
+        append_goethed_log(home, &format!("teardown: pids {:?} still listed on GPUs {gpus:?} after {}s\n", stopped.pids, GPU_RELEASE_WAIT.as_secs()));
     }
     for i in list {
         if stopped.survivors.contains(&i.instance_id) {
@@ -1229,7 +1298,7 @@ fn chooser_input(req: &LoadReq, ctx: u64, max_conc: u64) -> ChooserInput {
         max_conc,
         marlin_extra_gb: crate::install::card_marlin_extra_gb(&req.card),
         supported_sm: crate::install::card_supported_sm(&req.card),
-        memory: crate::memory_spec::installed(&req.model_path, &req.card),
+        memory: crate::memory_spec::installed(&req.model_path, &req.card, &req.params.extra_sglang_args),
     }
 }
 
@@ -1336,6 +1405,29 @@ fn get(port: u16, path: &str, key: &str, timeout_secs: u64) -> Option<ureq::Resp
         req = req.set("Authorization", &format!("Bearer {key}"));
     }
     req.call().ok().filter(|r| r.status() == 200)
+}
+
+fn warm_up(s: &Starting) {
+    // One real-length completion before RUNNING, so the first client request does not pay for first-use kernel builds.
+    let words = (s.ctx / 3).clamp(256, 3000) as usize;
+    let prompt = "the engine compiles its kernels for this prompt length now ".repeat(words / 10);
+    let body = serde_json::json!({"model": s.params.model_id, "prompt": prompt, "max_tokens": 8, "temperature": 0});
+    load_slot::push_instance_notice(&s.instance_id, "warming up kernels with one request");
+    let started = Instant::now();
+    let agent = ureq::AgentBuilder::new()
+        .timeout_read(Duration::from_secs(WARM_UP_SECS))
+        .timeout_connect(Duration::from_secs(2))
+        .build();
+    let res = agent
+        .post(&format!("http://127.0.0.1:{}/v1/completions", s.port))
+        .set("Authorization", &format!("Bearer {}", s.engine_key))
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string());
+    let outcome = match res {
+        Ok(_) => format!("warm-up request took {:.0} s", started.elapsed().as_secs_f64()),
+        Err(e) => format!("warm-up request skipped ({e})"),
+    };
+    append_goethed_log(&s.home, &format!("{}: {outcome}\n", s.instance_id));
 }
 
 fn serves(port: u16, key: &str, model_id: &str) -> bool {

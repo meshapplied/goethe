@@ -432,6 +432,8 @@ Optional. Set them in your shell, or in `goethe.env` inside Goethe's folder so t
 | `GOETHE_NO_AUTOSTART=1` | Never set up start at boot |
 | `GOETHE_PUBLIC_IP` | Public IP shown by `goethe configure api` in public mode |
 | `GOETHE_MAX_BODY_MB` | Largest request size in MB (default 10) |
+| `GOETHE_GATEWAY_RATE_PER_IP` | Requests per second one client address may send (default 100, bursts up to twice that) |
+| `GOETHE_GATEWAY_CONN_PER_IP` | Open API connections one client address may hold (default 512) |
 | `NO_COLOR=1` | Turn off colored output |
 
 ## Troubleshooting
