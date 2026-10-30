@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.7 (2026-10-30)
 
+- Fixes from running 0.1.6 on an RTX 5090: the local NInfer model file is accepted, and `goethe load` no longer starts SGLang for it; the registry JSON is checked against its signature; `goethe recommend` and `goethe models` agree on what fits; VPN mode keeps localhost access; the keyless TCP mode is gone; a `GOETHE_HOME` value can no longer end up in the service unit's ExecStartPost; the load wait mentions kernel builds; the README names a model `goethe recommend` lists.
 - Speculative-decoding models on hybrid (linear-attention) architectures load with default settings: memory planning counts the per-draft-token state SGLang keeps for every running request, and follows `--mamba-ssm-dtype`. Qwen3.8-Flash-Next NVFP4 failed to load on a 96 GB GPU before; its catalog entry now uses bf16 state.
 - Goethe learns a model's real weight size from the main model plus its drafter (before, only the last loaded part counted), also when a start fails, and retries at a reduced context or concurrency instead of giving up. Loads on GPUs named with `--gpu` also shrink context and concurrency to fit instead of refusing.
 - The static-pool limit is checked against free memory minus the CUDA context, as SGLang applies it, so the KV cache gets the tokens the plan promised.
