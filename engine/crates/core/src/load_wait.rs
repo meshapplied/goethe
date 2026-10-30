@@ -16,9 +16,20 @@ pub fn wait_after_load_stdout(stdout: &str, no_wait: bool) -> Result<(), String>
     wait_for_instance(&instance_id, DEFAULT_LOAD_WAIT)
 }
 
+pub fn wait_banner(log: &str) -> &'static str {
+    // The engine log already names a kernel build; say that instead of a weight load.
+    if log.contains("ninja") || log.contains("Error building extension") {
+        "Building kernels, first load on this GPU..."
+    } else {
+        "Loading into VRAM..."
+    }
+}
+
 pub fn wait_for_instance(instance_id: &str, timeout: Duration) -> Result<(), String> {
     // Poll ps until the instance is RUNNING, printing its notices; a final status or a vanished row ends the wait.
-    eprintln!("Loading into VRAM...");
+    let log_path = crate::paths::goethe_home().join("logs").join(format!("{instance_id}.log"));
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    eprintln!("{}", wait_banner(&log));
     let deadline = Instant::now() + timeout;
     let mut printed_notices = 0usize;
     while Instant::now() < deadline {
@@ -177,5 +188,11 @@ mod tests {
         assert!(r.ends_with("goethe logs --model inst-x -n 200"));
         let none = failure_report(td.path(), "inst-missing");
         assert!(none.starts_with("the engine failed to start (instance inst-missing)"));
+    }
+
+    #[test]
+    fn a_kernel_build_log_changes_the_wait_line() {
+        assert_eq!(wait_banner("ninja: build stopped\n"), "Building kernels, first load on this GPU...");
+        assert_eq!(wait_banner(""), "Loading into VRAM...");
     }
 }

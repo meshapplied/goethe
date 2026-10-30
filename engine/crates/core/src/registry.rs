@@ -6,7 +6,7 @@ use crate::paths::goethe_home;
 use crate::sglang_infer;
 use crate::sglang_validate;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Registry {
@@ -147,16 +147,70 @@ pub fn bundled() -> Result<Registry, String> {
 }
 
 pub fn fetch(url: &str) -> Result<Registry, String> {
-    // file:// or http(s) with a cache; the default URL falls back to the catalog built into this binary.
+    // file:// or http(s) with a cache. A body is parsed only after the release key verifies it.
+    // The default URL with no signature falls back to the catalog built into this binary.
     if let Some(rest) = url.strip_prefix("file://") {
         let path = Path::new(rest);
         let text = fs_read(path)?;
-        return parse_registry(&text);
+        let sig = std::fs::read(format!("{}.sig", path.display())).ok();
+        return finish_registry(url, text, sig.as_deref());
     }
     if url.starts_with("http://") || url.starts_with("https://") {
         return fetch_http_cached(url).or_else(|e| if url == DEFAULT_REGISTRY_URL { bundled() } else { Err(e) });
     }
     Err(format!("unsupported registry URL scheme: {url}"))
+}
+
+fn finish_registry(url: &str, body: String, sig: Option<&[u8]>) -> Result<Registry, String> {
+    match sig {
+        Some(sig) => {
+            verify_registry(body.as_bytes(), sig)?;
+            parse_registry(&body)
+        }
+        None if url == DEFAULT_REGISTRY_URL => bundled(),
+        None => Err("registry signature missing".into()),
+    }
+}
+
+fn registry_pubkey() -> Result<PathBuf, String> {
+    if let Some(p) = std::env::var_os("GOETHE_RELEASE_PUB") {
+        return Ok(PathBuf::from(p));
+    }
+    let installed = goethe_home().join("release_pub.pem");
+    if installed.is_file() {
+        return Ok(installed);
+    }
+    let tmp = std::env::temp_dir().join("goethe-release_pub.pem");
+    if !tmp.is_file() {
+        std::fs::write(&tmp, include_str!("../../../packaging/release_pub.pem")).map_err(|e| e.to_string())?;
+    }
+    Ok(tmp)
+}
+
+fn verify_registry(body: &[u8], sig: &[u8]) -> Result<(), String> {
+    // Same openssl check as the package SHA256SUMS. A bad signature never becomes engine flags.
+    let dir = std::env::temp_dir().join(format!("goethe-reg-{}-{}", std::process::id(), body.len()));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let data = dir.join("body");
+    let sigp = dir.join("body.sig");
+    std::fs::write(&data, body).map_err(|e| e.to_string())?;
+    std::fs::write(&sigp, sig).map_err(|e| e.to_string())?;
+    let status = std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-verify"])
+        .arg(registry_pubkey()?)
+        .arg("-signature")
+        .arg(&sigp)
+        .arg(&data)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("openssl verify: {e}"))?;
+    let _ = std::fs::remove_dir_all(&dir);
+    if status.success() {
+        Ok(())
+    } else {
+        Err("registry signature verification failed".into())
+    }
 }
 
 const MISS_TTL_SECS: u64 = 300;
@@ -199,35 +253,42 @@ fn fetch_http_uncached(home: &Path, url: &str) -> Result<Registry, String> {
             }
         }
     }
-    let cached = || -> Result<Registry, String> {
+    let cached_body = || -> Result<String, String> {
         let text = std::fs::read_to_string(&cache_path).map_err(|e| e.to_string())?;
         let c: RegistryCache = serde_json::from_str(&text).map_err(|e| format!("registry cache: {e}"))?;
-        parse_registry(&c.body)
+        Ok(c.body)
+    };
+    let sig_bytes = |body_url: &str| -> Option<Vec<u8>> {
+        // OpenSSL signatures are binary. into_string() would drop a valid sig.
+        let resp = crate::net::agent()
+            .get(&format!("{body_url}.sig"))
+            .timeout(std::time::Duration::from_secs(10))
+            .call()
+            .ok()?;
+        if resp.status() != 200 {
+            return None;
+        }
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut resp.into_reader(), &mut buf).ok()?;
+        Some(buf)
     };
     match req.call() {
-        Ok(resp) if resp.status() == 304 => cached(),
+        Ok(resp) if resp.status() == 304 => finish_registry(url, cached_body()?, sig_bytes(url).as_deref()),
         Ok(resp) => {
             let etag = resp.header("etag").map(String::from);
             let body = resp.into_string().map_err(|e| format!("registry body: {e}"))?;
-            if let Ok(reg) = parse_registry(&body) {
-                let cache = RegistryCache {
-                    etag,
-                    body: body.clone(),
-                };
-                let _ = std::fs::write(
-                    &cache_path,
-                    serde_json::to_string(&cache).unwrap_or_default(),
-                );
-                return Ok(reg);
-            }
-            parse_registry(&body)
+            let sig = sig_bytes(url);
+            let reg = finish_registry(url, body.clone(), sig.as_deref())?;
+            let cache = RegistryCache { etag, body };
+            let _ = std::fs::write(&cache_path, serde_json::to_string(&cache).unwrap_or_default());
+            Ok(reg)
         }
         Err(e) if offline => {
             if !cache_path.is_file() {
                 return Err(format!("registry unreachable ({e}) and no registry.cache.json"));
             }
-            eprintln!("warning: registry fetch failed ({e}); using cached registry");
-            cached()
+            eprintln!("warning: registry fetch failed ({e}); using the signed catalog");
+            finish_registry(url, cached_body().unwrap_or_default(), None)
         }
         Err(e) => Err(format!("registry unreachable at {url}: {e}")),
     }
@@ -806,5 +867,59 @@ mod validate_tests {
         };
         assert_eq!(m.effective_kv_elems(), Some(512));
         assert_eq!(m.effective_max_ctx(), Some(4096));
+    }
+
+    #[test]
+    fn unsigned_and_wrong_key_registries_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = dir.path().join("registry.json");
+        std::fs::write(&reg, r#"{"version":1,"models":[]}"#).unwrap();
+        let url = format!("file://{}", reg.display());
+        assert!(fetch(&url).unwrap_err().contains("signature"), "unsigned file");
+
+        let key = dir.path().join("key.pem");
+        let pubk = dir.path().join("pub.pem");
+        let key2 = dir.path().join("key2.pem");
+        let wrong = dir.path().join("wrong.pem");
+        let run = |args: &[std::ffi::OsString]| {
+            assert!(std::process::Command::new("openssl").args(args).status().unwrap().success());
+        };
+        run(&["genpkey".into(), "-algorithm".into(), "RSA".into(), "-pkeyopt".into(), "rsa_keygen_bits:2048".into(), "-out".into(), key.clone().into()]);
+        run(&["pkey".into(), "-in".into(), key.clone().into(), "-pubout".into(), "-out".into(), pubk.clone().into()]);
+        run(&["genpkey".into(), "-algorithm".into(), "RSA".into(), "-pkeyopt".into(), "rsa_keygen_bits:2048".into(), "-out".into(), key2.clone().into()]);
+        run(&["pkey".into(), "-in".into(), key2.into(), "-pubout".into(), "-out".into(), wrong.clone().into()]);
+        let sig = std::path::PathBuf::from(format!("{}.sig", reg.display()));
+        run(&["dgst".into(), "-sha256".into(), "-sign".into(), key.into(), "-out".into(), sig.clone().into(), reg.into()]);
+
+        let prev = std::env::var_os("GOETHE_RELEASE_PUB");
+        std::env::set_var("GOETHE_RELEASE_PUB", &wrong);
+        assert!(fetch(&url).is_err(), "wrong key");
+        std::env::set_var("GOETHE_RELEASE_PUB", &pubk);
+        assert!(fetch(&url).is_ok(), "matching key");
+        match prev {
+            Some(v) => std::env::set_var("GOETHE_RELEASE_PUB", v),
+            None => std::env::remove_var("GOETHE_RELEASE_PUB"),
+        }
+    }
+
+    #[test]
+    fn the_default_url_without_a_signature_uses_the_bundled_catalog() {
+        let reg = finish_registry(DEFAULT_REGISTRY_URL, "{}".into(), None).unwrap();
+        assert!(reg.models.iter().any(|m| m.id == "nvidia/Llama-3.1-8B-Instruct-NVFP4"));
+    }
+
+    #[test]
+    fn readme_install_ids_are_catalog_ids() {
+        let readme = include_str!("../../../../README.md");
+        let reg = bundled().unwrap();
+        let mut found = false;
+        for line in readme.lines() {
+            if let Some(rest) = line.split("goethe install --model ").nth(1) {
+                let id = rest.split_whitespace().next().unwrap();
+                found = true;
+                assert!(reg.models.iter().any(|m| m.id == id), "{id}");
+            }
+        }
+        assert!(found);
     }
 }
