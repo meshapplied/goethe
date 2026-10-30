@@ -24,6 +24,8 @@ pub struct RecommendedModel {
     pub ctx: u64,
     pub max_conc: u64,
     pub vram_per_gpu_gb: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -191,7 +193,7 @@ pub fn run(json_out: bool) -> Result<(), String> {
     let hw = crate::placement::load_hw(&home).ok_or("hardware_state.json missing; run goethe hw profile first")?;
     let reg = fetch(&registry_url())?;
     let view = View::capacity(&home, hw);
-    let out = recommend(&view, &reg);
+    let out = recommend(&home, &view, &reg);
     if json_out {
         println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
         return Ok(());
@@ -207,8 +209,12 @@ pub fn run(json_out: bool) -> Result<(), String> {
         .map(|item| {
             let total = item.vram_per_gpu_gb * item.tp as f64;
             let download = reg.models.iter().find(|m| m.id == item.model_id).and_then(|m| m.download_gb);
+            let name = match &item.note {
+                Some(n) => format!("{} ({n})", item.model_id),
+                None => item.model_id.clone(),
+            };
             (total, vec![
-                item.model_id.clone(),
+                name,
                 format!("{total:.1} GB"),
                 format_gpu_list(&item.gpus),
                 download.map_or_else(|| "-".to_string(), |g| format!("{g:.1} GB")),
@@ -219,7 +225,26 @@ pub fn run(json_out: bool) -> Result<(), String> {
     Ok(())
 }
 
-pub fn recommend(view: &View, reg: &Registry) -> RecommendOutput {
+pub fn preview(home: &Path, model: &RegistryModel) -> Result<Option<String>, String> {
+    // The same plan recommend would print. None when this machine has no hardware profile yet.
+    let Some(hw) = crate::placement::load_hw(home) else {
+        return Ok(None);
+    };
+    let view = View::capacity(home, hw);
+    let input = registry_input(model);
+    let pinned = model.default_tp.filter(|t| *t > 0).map(|t| t as usize);
+    match view.fit(&model.id, &input, pinned) {
+        Ok(f) => Ok(Some(format!(
+            "fit: ctx {} on GPU {} ({:.1} GB per GPU)",
+            f.ctx,
+            format_gpu_list(&f.gpus),
+            f.need.total()
+        ))),
+        Err(e) => Err(format!("does not fit the allowed GPUs: {e}")),
+    }
+}
+
+pub fn recommend(home: &Path, view: &View, reg: &Registry) -> RecommendOutput {
     // Fitting downloadable entries are recommended and the rest say why not; entries goethe cannot download are left out.
     let total_gb: f64 = view.hw.gpus.iter().map(|g| g.vram_total_mb as f64 / 1024.0).sum();
     let sm_set: Vec<String> = view.hw.gpus.iter().map(|g| g.compute_capability.clone()).collect();
@@ -233,14 +258,20 @@ pub fn recommend(view: &View, reg: &Registry) -> RecommendOutput {
         let input = registry_input(model);
         let pinned = model.default_tp.filter(|t| *t > 0).map(|t| t as usize);
         match view.fit(&model.id, &input, pinned) {
-            Ok(f) => out.recommended.push(RecommendedModel {
-                model_id: model.id.clone(),
-                tp: f.tp as u64,
-                gpus: f.gpus,
-                ctx: f.ctx,
-                max_conc: f.max_conc,
-                vram_per_gpu_gb: f.need.total(),
-            }),
+            Ok(f) => {
+                let note = (model.effective_runtime() == "ternary")
+                    .then(|| crate::runtime::require_ternary_runtime(home).err())
+                    .flatten();
+                out.recommended.push(RecommendedModel {
+                    model_id: model.id.clone(),
+                    tp: f.tp as u64,
+                    gpus: f.gpus,
+                    ctx: f.ctx,
+                    max_conc: f.max_conc,
+                    vram_per_gpu_gb: f.need.total(),
+                    note,
+                })
+            }
             Err(why) => out.excluded.push(excluded(format!("does not fit the allowed GPUs: {why}"))),
         }
     }
@@ -348,7 +379,7 @@ mod tests {
                 entry("meshapplied/huge", serde_json::json!({"static_vram_gb": 900.0})),
             ],
         };
-        let out = recommend(&v, &reg);
+        let out = recommend(std::path::Path::new("/none"), &v, &reg);
         let ids: Vec<&str> = out.recommended.iter().map(|r| r.model_id.as_str()).collect();
         assert_eq!(ids, vec!["meshapplied/open"]);
         assert!(out.excluded.iter().all(|e| !e.model_id.ends_with("manual") && !e.model_id.ends_with("gated")));
@@ -382,5 +413,54 @@ mod tests {
         for word in order {
             at += text[at..].find(word).unwrap_or_else(|| panic!("{word} out of order in {text}"));
         }
+    }
+
+    #[test]
+    fn ternary_row_names_the_private_pack_when_it_fits() {
+        let home = tempfile::tempdir().unwrap();
+        let hw = HardwareState {
+            profiled_at: "t".into(),
+            driver: "t".into(),
+            gpus: (0..4).map(|i| gpu(i, 96, false)).collect(),
+            links: vec![],
+            unavailable: vec![],
+            host: None,
+            environment: None,
+        };
+        let view = View::capacity(home.path(), hw);
+        let reg = crate::registry::bundled().unwrap();
+        let note = |home: &Path| {
+            recommend(home, &view, &reg)
+                .recommended
+                .into_iter()
+                .find(|m| m.model_id == "meshapplied/Qwen3.8-Flash-Next-Ternary-Latest")
+                .and_then(|m| m.note)
+        };
+        assert!(note(home.path()).unwrap().contains("GOETHE_PKG_TOKEN"));
+        std::fs::create_dir_all(home.path().join("goethe/ternary-kernels")).unwrap();
+        assert!(note(home.path()).is_none());
+    }
+
+    #[test]
+    fn preview_matches_the_5090_llama_row_and_refuses_what_does_not_fit() {
+        let home = tempfile::tempdir().unwrap();
+        let hw = serde_json::json!({
+            "profiled_at": "t", "driver": "580",
+            "gpus": [{
+                "index": 0, "uuid": "GPU-0", "name": "RTX 5090", "compute_capability": "12.0",
+                "vram_total_mb": 32607, "vram_used_mb": 0, "vram_free_mb": 32000,
+                "pcie_gen": 5, "pcie_width": 16, "pcie_gen_max": 5, "pcie_width_max": 16,
+                "running_processes": []
+            }],
+            "links": []
+        });
+        std::fs::write(home.path().join("hardware_state.json"), hw.to_string()).unwrap();
+        let reg = crate::registry::bundled().unwrap();
+        let llama = reg.models.iter().find(|m| m.id == "nvidia/Llama-3.1-8B-Instruct-NVFP4").unwrap();
+        let line = preview(home.path(), llama).unwrap().unwrap();
+        assert!(line.contains("ctx 65536"), "{line}");
+        assert!(line.contains("23.4 GB"), "{line}");
+        let big = reg.models.iter().find(|m| m.id == "Qwen/Qwen3.8-27B").unwrap();
+        assert!(preview(home.path(), big).is_err());
     }
 }

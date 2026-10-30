@@ -903,9 +903,18 @@ systemd_root() {
   [[ "$(id -u)" -eq 0 && "$(ps -p 1 -o comm= 2>/dev/null || true)" == "systemd" ]]
 }
 
+goethe_home_ok() {
+  # One absolute path. A backslash or newline would become another systemd directive through sed.
+  [[ "${1}" =~ ^/([A-Za-z0-9._-]+/?)+$ ]]
+}
+
 write_system_unit() {
   # Write and load this home's goethed system unit; fails without writing when another home owns the unit.
   local other
+  if ! goethe_home_ok "${GOETHE_HOME}"; then
+    echo "error: GOETHE_HOME must be one absolute path without spaces or punctuation" >&2
+    return 1
+  fi
   other="$(system_unit_home)"
   if [[ -n "${other}" && "${other}" != "${GOETHE_HOME}" ]]; then
     return 1

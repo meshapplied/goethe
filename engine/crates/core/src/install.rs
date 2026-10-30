@@ -147,6 +147,29 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         .ok()
         .and_then(|r| find_model(&r, &opts.model_id).cloned());
     let card_dir = model_dir(home, &opts.model_id);
+    if opts.model_id == crate::engine_cmd::NINFER_ID {
+        let file = crate::engine_cmd::find_ninfer(&card_dir)?;
+        fs::create_dir_all(&card_dir).map_err(|e| e.to_string())?;
+        let dest = card_dir.join(crate::engine_cmd::NINFER_FILE);
+        if fs::canonicalize(&dest).ok().as_deref() != Some(file.as_path()) {
+            if dest.symlink_metadata().is_ok() {
+                fs::remove_file(&dest).map_err(|e| e.to_string())?;
+            }
+            std::os::unix::fs::symlink(&file, &dest).map_err(|e| format!("link {}: {e}", dest.display()))?;
+        }
+        let mut entry = entry;
+        if let Some(e) = entry.as_mut() {
+            e.runtime = Some("ninfer".into());
+        }
+        return Ok(Target {
+            model_id: opts.model_id.clone(),
+            card_dir,
+            entry,
+            managed: false,
+            source_dir: file.parent().map(|p| p.to_path_buf()),
+            ternary: None,
+        });
+    }
     if entry.as_ref().is_some_and(|e| e.manual_download.unwrap_or(false)) {
         return Err(format!(
             "the weights of {} are not on Hugging Face, so goethe cannot download them. Put the model folder \
@@ -154,6 +177,11 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             opts.model_id,
             card_dir.display()
         ));
+    }
+    if let Some(e) = entry.as_ref() {
+        if let Some(line) = crate::recommend::preview(home, e)? {
+            println!("{line}");
+        }
     }
     let dl = DownloadOpts {
         revision: entry.as_ref().and_then(|e| e.revision.clone()),
@@ -437,9 +465,80 @@ pub fn plan_in_place(home: &Path, model_id: &str, dir: &Path, entry: Option<Regi
     plan(home, &opts, &t)
 }
 
+fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> {
+    // The pinned artifact is the model. The card says runtime ninfer so load does not start SGLang.
+    let dir = &t.card_dir;
+    let path = crate::engine_cmd::ninfer_in(dir).ok_or_else(crate::engine_cmd::ninfer_reject)?;
+    if fs::metadata(&path).map_err(|e| e.to_string())?.len() != crate::engine_cmd::NINFER_BYTES {
+        return Err(crate::engine_cmd::ninfer_reject());
+    }
+    let entry = t.entry.as_ref();
+    let facts = model_facts::ModelFacts {
+        architecture: entry.map(|e| e.architecture.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "dense".into()),
+        static_vram_gb: entry.map(|e| e.static_vram_gb).filter(|v| *v > 0.0).unwrap_or(23.566),
+        kv_elems_per_token: entry.and_then(|e| e.effective_kv_elems()).unwrap_or(32_768),
+        max_ctx: entry.and_then(|e| e.effective_max_ctx()).unwrap_or(262_144),
+        num_attention_heads: entry.and_then(|e| e.num_attention_heads).unwrap_or(24),
+        num_kv_heads: entry.and_then(|e| e.num_kv_heads).unwrap_or(4),
+        attention: entry.and_then(|e| e.attention.clone()).unwrap_or_else(|| "hybrid".into()),
+        swa_kv_elems_per_request: 0,
+        linear_state_bytes_per_request: 0,
+    };
+    let ctx = opts.ctx.unwrap_or(100_000).min(facts.max_ctx);
+    let max_conc = opts.max_conc.unwrap_or(4);
+    let card = GoetheCard {
+        model_id: t.model_id.clone(),
+        context_length: ctx,
+        max_running_requests: max_conc,
+        tp_size: opts.tp.unwrap_or(1),
+        ep_size: 1,
+        kv_cache_dtype: "fp8_e4m3".into(),
+        preferred_gpus: opts.gpus.clone().unwrap_or_default(),
+        extra_sglang_args: Vec::new(),
+        runtime: Some("ninfer".into()),
+        pack_id: None,
+        base_model_id: None,
+        env: None,
+        pythonpath: None,
+        marlin_extra_gb: None,
+        host_offload_gb: None,
+        source_dir: t.source_dir.as_ref().map(|p| p.display().to_string()),
+        supported_sm: entry.map(|e| e.supported_sm.clone()).filter(|sm| !sm.is_empty()),
+    };
+    let rel = dir
+        .strip_prefix(home)
+        .map(|r| r.display().to_string())
+        .map_err(|_| format!("{} is not under {}", dir.display(), home.display()))?;
+    Ok(Planned {
+        model_id: t.model_id.clone(),
+        dir: dir.clone(),
+        rel,
+        table: card_table(&card, None)?,
+        vram: VramEstimate {
+            weights_gb: facts.static_vram_gb,
+            state_gb: 0.0,
+            host_offload_gb: 0.0,
+            kv_bytes_per_token: facts.kv_elems_per_token,
+        },
+        facts,
+        kv_dtype: "fp8_e4m3".into(),
+        ctx,
+        max_conc,
+        tp: card.tp_size,
+        extra: Vec::new(),
+        notes: Vec::new(),
+        managed: t.managed,
+        source_dir: t.source_dir.clone(),
+        quant: Some("nvfp4".into()),
+    })
+}
+
 fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> {
     // Compute the card (merged with an existing one unless --reset), facts and VRAM; write nothing.
     let dir = &t.card_dir;
+    if crate::engine_cmd::ninfer_in(dir).is_some() {
+        return plan_ninfer(home, opts, t);
+    }
     let cfg = model_facts::read_config(dir)?;
     let facts = model_facts::facts_from_install_dir(dir, t.entry.as_ref().map(|e| e.architecture.as_str()))?;
     let existing = if opts.reset { None } else { read_card_table(dir) };

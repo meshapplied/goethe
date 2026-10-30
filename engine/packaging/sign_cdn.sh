@@ -15,6 +15,9 @@ printf '%s\n' "${VER}" >"${DIST}/VERSION"
   done
 ) >"${DIST}/SHA256SUMS"
 openssl dgst -sha256 -sign "${KEY}" -out "${DIST}/SHA256SUMS.sig" "${DIST}/SHA256SUMS"
+if [[ -f "${DIST}/v1/registry.json" ]]; then
+  openssl dgst -sha256 -sign "${KEY}" -out "${DIST}/v1/registry.json.sig" "${DIST}/v1/registry.json"
+fi
 EMBEDDED="$(mktemp)"
 trap 'rm -f "${EMBEDDED}"' EXIT
 awk '/-----BEGIN PUBLIC KEY-----/,/-----END PUBLIC KEY-----/' "${DIST}/install.sh" \

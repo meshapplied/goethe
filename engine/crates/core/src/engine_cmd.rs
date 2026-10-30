@@ -41,6 +41,10 @@ pub struct EngineSpec<'a> {
 
 pub fn check_extra_args(args: &[String]) -> Result<(), String> {
     // Refuse extra args that would override a Goethe flag, including --flag=value and argparse prefixes.
+    // ponytail: refuse tokenizer workers above 1; a mode-0600 socket is the upgrade if a catalog model needs it.
+    if multi_tokenizer(args) {
+        return Err("extra SGLang arg --tokenizer-worker-num greater than 1 is not allowed: that mode cannot take an API key, so Goethe will not listen on TCP".into());
+    }
     for arg in args {
         let name = arg.split('=').next().unwrap_or("");
         if !name.starts_with("--") || name.len() < 3 {
@@ -197,7 +201,146 @@ fn card_env(spec: &EngineSpec) -> Vec<(String, String)> {
     out
 }
 
-pub fn command(spec: &EngineSpec) -> Command {
+pub const NINFER_ID: &str = "meshapplied/Qwen3.8-27B-NVFP4-NInfer";
+pub const NINFER_FILE: &str = "qwen3_8_27b_nvfp4.ninfer";
+pub const NINFER_BYTES: u64 = 23_719_715_844;
+pub const NINFER_SHA256: &str = "74d2c57145e6ff11d1d2faa79594477f9bc903a611af1fb20218189fbbb77d82";
+pub const NINFER_PATCHED_SHA256: &str = "afcaac9cd6b684e4a2f0316100b3a9e5f888e6b3d8b84b6f76ee4fed29ef34ed";
+
+pub fn ninfer_reject() -> String {
+    format!(
+        "{NINFER_FILE} must be {NINFER_BYTES} bytes and sha256 {NINFER_SHA256} or {NINFER_PATCHED_SHA256}; run nvfp4-kernels/fetch_model.sh"
+    )
+}
+
+pub fn accept_ninfer(len: u64, digest: &str) -> Result<(), String> {
+    // Size and one of the two pinned digests. The caller supplies the digest so tests never hash 23 GB.
+    if len == NINFER_BYTES && (digest == NINFER_SHA256 || digest == NINFER_PATCHED_SHA256) {
+        Ok(())
+    } else {
+        Err(ninfer_reject())
+    }
+}
+
+pub fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", h.finalize()))
+}
+
+pub fn ninfer_in(dir: &Path) -> Option<PathBuf> {
+    let p = dir.join(NINFER_FILE);
+    p.is_file().then_some(p)
+}
+
+pub fn check_ninfer_with(path: &Path, mut hash: impl FnMut(&Path) -> Result<String, String>) -> Result<(), String> {
+    let len = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?.len();
+    if len != NINFER_BYTES {
+        return accept_ninfer(len, "");
+    }
+    accept_ninfer(len, &hash(path)?)
+}
+
+pub fn verify_ninfer_file(path: &Path) -> Result<(), String> {
+    check_ninfer_with(path, sha256_file)
+}
+
+pub fn find_ninfer(card_dir: &Path) -> Result<PathBuf, String> {
+    // The model dir, $MODEL, or the path serve.sh uses. No copy and no Hugging Face.
+    let mut cands = vec![card_dir.join(NINFER_FILE)];
+    if let Some(p) = std::env::var_os("MODEL") {
+        cands.push(PathBuf::from(p));
+    }
+    if let Some(h) = std::env::var_os("NVFP4_HOME") {
+        cands.push(PathBuf::from(h).join("models").join(NINFER_FILE));
+    }
+    if let Some(h) = std::env::var_os("HOME") {
+        cands.push(PathBuf::from(h).join(".cache/goethe/nvfp4/models").join(NINFER_FILE));
+    }
+    for p in cands {
+        if p.is_file() {
+            verify_ninfer_file(&p)?;
+            return Ok(p);
+        }
+    }
+    Err(format!("{NINFER_ID}: {}", ninfer_reject()))
+}
+
+fn ninfer_bin() -> Result<PathBuf, String> {
+    if let Some(p) = std::env::var_os("NINFER_SERVE") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    if let Some(h) = std::env::var_os("HOME") {
+        let p = PathBuf::from(h).join(".cache/goethe/nvfp4/ninfer/build/apps/ninfer-serve");
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    Err("ninfer-serve not found; set NINFER_SERVE or run nvfp4-kernels/install.sh".into())
+}
+
+fn ninfer_command(spec: &EngineSpec) -> Result<Command, String> {
+    // ponytail: one argv, the default profile from nvfp4-kernels/serve.sh. Card ctx and concurrency still apply.
+    let bin = ninfer_bin()?;
+    let model = spec.model_path.join(NINFER_FILE);
+    if !model.is_file() {
+        return Err(format!("{}: {}", model.display(), ninfer_reject()));
+    }
+    let mut cmd = Command::new(bin);
+    cmd.arg(&model)
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(spec.port.to_string())
+        .arg("--api-key")
+        .arg(spec.engine_key)
+        .arg("--model-id")
+        .arg(spec.served_name)
+        .arg("--max-context")
+        .arg(spec.ctx.to_string())
+        .arg("--kv-capacity")
+        .arg("auto")
+        .arg("--max-concurrency")
+        .arg(spec.max_conc.to_string())
+        .arg("--kv-dtype")
+        .arg("fp8")
+        .arg("--spec")
+        .arg("dflash2")
+        .arg("--draft-tokens")
+        .arg("7")
+        .arg("--lm-head-draft")
+        .arg("--prefill-chunk")
+        .arg("1024");
+    let gpus: Vec<String> = spec.gpus.iter().map(|g| g.to_string()).collect();
+    cmd.env_clear()
+        .envs(kept_env())
+        .env("CUDA_VISIBLE_DEVICES", gpus.join(","))
+        .env("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+        .env(INSTANCE_ENV, spec.instance_id);
+    Ok(cmd)
+}
+
+pub fn command(spec: &EngineSpec) -> Result<Command, String> {
+    if spec.card.get("runtime").and_then(|v| v.as_str()) == Some("ninfer") {
+        return ninfer_command(spec);
+    }
+    Ok(sglang_command(spec))
+}
+
+fn sglang_command(spec: &EngineSpec) -> Command {
     // Goethe flags, then checked card and load extras, in a cleared env; probe paths stay out of the access log.
     let mut cmd = Command::new(resolve_python(spec.home));
     cmd.arg("-m")
@@ -222,9 +365,7 @@ pub fn command(spec: &EngineSpec) -> Command {
         .args(QUIET_PATHS);
     let extras: Vec<String> = card_extra_args(spec.card).into_iter().chain(spec.load_extra.iter().cloned()).collect();
     cmd.args(memory_args(spec, &extras));
-    if !multi_tokenizer(&extras) {
-        cmd.arg("--api-key").arg(spec.engine_key);
-    }
+    cmd.arg("--api-key").arg(spec.engine_key);
     if let Some(dtype) = spec
         .card
         .get("kv_cache_dtype")
@@ -283,7 +424,7 @@ mod tests {
             cc: "9.0",
             load_extra: &[],
         };
-        command(&spec)
+        command(&spec).unwrap()
     }
 
     fn args(cmd: &Command) -> Vec<String> {
@@ -379,13 +520,73 @@ mod tests {
     }
 
     #[test]
-    fn multi_tokenizer_engines_run_without_api_key() {
-        let multi = args(&spec_cmd("extra_sglang_args = [\"--tokenizer-worker-num\", \"4\"]", 1));
-        assert!(!multi.iter().any(|a| a == "--api-key"));
-        let eq = args(&spec_cmd("extra_sglang_args = [\"--tokenizer-worker-num=2\"]", 1));
-        assert!(!eq.iter().any(|a| a == "--api-key"));
+    fn ninfer_accepts_only_the_two_pinned_digests() {
+        assert!(accept_ninfer(NINFER_BYTES, NINFER_SHA256).is_ok());
+        assert!(accept_ninfer(NINFER_BYTES, NINFER_PATCHED_SHA256).is_ok());
+        assert!(accept_ninfer(NINFER_BYTES, "nope").unwrap_err().contains(NINFER_FILE));
+        assert!(accept_ninfer(1, NINFER_SHA256).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(NINFER_FILE);
+        std::fs::File::create(&path).unwrap().set_len(NINFER_BYTES).unwrap();
+        let mut hashed = false;
+        check_ninfer_with(&path, |_| {
+            hashed = true;
+            Ok(NINFER_PATCHED_SHA256.into())
+        })
+        .unwrap();
+        assert!(hashed);
+        let err = check_ninfer_with(&path, |_| Ok("deadbeef".into())).unwrap_err();
+        assert!(err.contains(NINFER_SHA256) && !err.contains("safetensors"), "{err}");
+    }
+
+    #[test]
+    fn ninfer_runtime_spawns_ninfer_serve_with_an_api_key() {
+        let bin = tempfile::tempdir().unwrap();
+        let exe = bin.path().join("ninfer-serve");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        let model = tempfile::tempdir().unwrap();
+        std::fs::write(model.path().join(NINFER_FILE), b"x").unwrap();
+        let card: toml::Value = toml::from_str("runtime = \"ninfer\"").unwrap();
+        let spec = EngineSpec {
+            home: Path::new("/h"),
+            instance_id: "inst-x",
+            served_name: NINFER_ID,
+            engine_key: "k".repeat(32).leak(),
+            model_path: model.path(),
+            card: &card,
+            port: 30001,
+            ctx: 100_000,
+            max_conc: 4,
+            tp: 1,
+            mem_frac: 0.5,
+            gpus: &[0],
+            cc: "12.0",
+            load_extra: &[],
+        };
+        let prev = std::env::var_os("NINFER_SERVE");
+        std::env::set_var("NINFER_SERVE", &exe);
+        let cmd = command(&spec).unwrap();
+        match prev {
+            Some(v) => std::env::set_var("NINFER_SERVE", v),
+            None => std::env::remove_var("NINFER_SERVE"),
+        }
+        let a = args(&cmd);
+        assert!(cmd.get_program().to_string_lossy().contains("ninfer-serve"), "{a:?}");
+        assert!(!a.iter().any(|x| x == "sglang.launch_server"), "{a:?}");
+        assert!(a.iter().any(|x| x == "--api-key"), "{a:?}");
+        assert!(a.iter().any(|x| x == "--host"), "{a:?}");
+        let host = a.iter().position(|x| x == "--host").unwrap();
+        assert_eq!(a[host + 1], "127.0.0.1");
+    }
+
+    #[test]
+    fn multi_tokenizer_above_one_is_refused() {
+        let err = check_extra_args(&strs(&["--tokenizer-worker-num", "4"])).unwrap_err();
+        assert!(err.contains("not allowed"), "{err}");
+        assert!(check_extra_args(&strs(&["--tokenizer-worker-num=2"])).is_err());
         let single = args(&spec_cmd("extra_sglang_args = [\"--tokenizer-worker-num\", \"1\"]", 1));
         assert!(single.iter().any(|a| a == "--api-key"));
+        assert!(single.windows(2).any(|w| w[0] == "--host" && w[1] == "127.0.0.1"));
     }
 
     #[test]

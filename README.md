@@ -30,7 +30,7 @@ goethe start
 ```bash
 # 1. Start Goethe and load a model
 goethe up
-goethe install --model Qwen/Qwen3-8B --load
+goethe install --model nvidia/Llama-3.1-8B-Instruct-NVFP4 --load
 
 # 2. Share it
 goethe configure api                 # this machine only, your VPN (recommended), or a public address
@@ -45,7 +45,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="https://<your-goethe-address>:8443/v1", api_key="goethe_sk_...")
 reply = client.chat.completions.create(
-    model="Qwen/Qwen3-8B",
+    model="nvidia/Llama-3.1-8B-Instruct-NVFP4",
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(reply.choices[0].message.content)
