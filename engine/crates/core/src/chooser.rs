@@ -117,7 +117,8 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
         weights: ((input.static_vram_gb - m.static_state_bytes as f64 / GIB).max(0.0) + marlin) / tp as f64,
         kv: tokens * (m.kv_bytes_for(cc) as f64 / split(m.kv_heads) + m.kv_replicated_bytes_per_token as f64) / GIB,
         window: swa_tokens * m.swa_bytes_per_token as f64 / split(m.swa_heads) / GIB,
-        state: (slots as f64 * m.state_bytes_per_slot as f64 / tp as f64
+        state: ((slots as f64 * m.state_bytes_per_slot as f64 + ((conc + 1) * m.spec_state_bytes_per_request) as f64)
+            / tp as f64
             + ((conc + 1) * m.request_bytes + m.fixed_bytes) as f64)
             / GIB,
         overhead: BASE_OVERHEAD_GB + request_table,
@@ -190,12 +191,19 @@ pub fn plan_with(
                 gpus: Vec::new(),
             });
         }
-        return fixed_plan(input, gpus, pg, learned).map_err(|mut e| {
-            if let Some(hint) = split_hint(input, gpus, hw, tp, learned) {
-                e.message = format!("{}\n{hint}", e.message);
+        let mut err = match fixed_plan(input, gpus, pg, learned) {
+            Ok(p) => return Ok(p),
+            Err(e) => e,
+        };
+        if !err.gpus.is_empty() {
+            if let Some(p) = shrink_until(input, |trial| fixed_plan(trial, gpus, pg, learned).ok()) {
+                return Ok(p);
             }
-            e
-        });
+        }
+        if let Some(hint) = split_hint(input, gpus, hw, tp, learned) {
+            err.message = format!("{}\n{hint}", err.message);
+        }
+        return Err(err);
     }
     let eligible: Vec<GpuPlacementInput> =
         gpus.iter().filter(|g| gpu_arch::model_runs_on(&input.supported_sm, &g.cc)).cloned().collect();
@@ -253,6 +261,26 @@ fn plan(input: &ChooserInput, tp: usize, set: SetRank) -> LoadPlan {
         cc: set.cc,
         ctx: input.ctx,
         max_conc: input.max_conc,
+    }
+}
+
+fn shrink_until(input: &ChooserInput, mut fits: impl FnMut(&ChooserInput) -> Option<LoadPlan>) -> Option<LoadPlan> {
+    // Context halved down to 8192, then one request fewer at full context, until a memory shortfall goes away.
+    let mut trial = input.clone();
+    trial.ctx = input.ctx.min(input.max_ctx);
+    trial.max_conc = input.max_conc.max(1);
+    loop {
+        if trial.ctx > 8192 {
+            trial.ctx /= 2;
+        } else if trial.max_conc > 1 {
+            trial.max_conc -= 1;
+            trial.ctx = input.ctx.min(input.max_ctx);
+        } else {
+            return None;
+        }
+        if let Some(p) = fits(&trial) {
+            return Some(p);
+        }
     }
 }
 
@@ -515,6 +543,15 @@ mod tests {
         huge.static_vram_gb = 200.0;
         let err = pick_load_plan(&huge, &[gpu(3, 90.0, false)], None, None, Some(&[3])).unwrap_err();
         assert!(err.message.contains("missing") && err.gpus == vec![3], "{}", err.message);
+    }
+
+    #[test]
+    fn pinned_set_shrinks_context_then_concurrency_to_fit() {
+        let m = ChooserInput { ctx: 131072, kv_bytes_per_token: 65536, ..inp() };
+        let p = pick_load_plan(&m, &[gpu(3, 30.0, false)], None, None, Some(&[3])).unwrap();
+        assert_eq!((p.gpus, p.ctx, p.max_conc), (vec![3], 65536, 4));
+        let full = pick_load_plan(&m, &[gpu(3, 40.0, false)], None, None, Some(&[3])).unwrap();
+        assert_eq!((full.ctx, full.max_conc), (131072, 4));
     }
 
     #[test]

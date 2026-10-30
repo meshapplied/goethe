@@ -1,5 +1,5 @@
 # goethe gateway nginx template
-limit_req_zone $binary_remote_addr zone=goethe_ip:10m rate=20r/s;
+limit_req_zone $binary_remote_addr zone=goethe_ip:10m rate={{RATE_PER_IP}}r/s;
 limit_conn_zone $binary_remote_addr zone=goethe_conn:10m;
 
 upstream goethe_mux {
@@ -31,7 +31,7 @@ server {
     include {{ALLOWLIST}};
     deny all;
 
-    limit_req zone=goethe_ip burst=40 nodelay;
+    limit_req zone=goethe_ip burst={{BURST_PER_IP}} nodelay;
     limit_req_status 429;
     limit_conn_status 429;
 
@@ -65,7 +65,7 @@ server {
     }
 
     location / {
-        limit_conn goethe_conn 32;
+        limit_conn goethe_conn {{CONN_PER_IP}};
         proxy_pass http://goethe_mux;
     }
 

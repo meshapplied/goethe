@@ -156,7 +156,7 @@ fn arch_env(home: &Path, cc: &str) -> Vec<(String, String)> {
 
 fn memory_args(spec: &EngineSpec, extras: &[String]) -> Vec<String> {
     // The window ratio, state slots and chunk size the budget assumed; a chunk size the user set wins.
-    let Some(m) = crate::memory_spec::installed(spec.model_path, spec.card) else { return Vec::new() };
+    let Some(m) = crate::memory_spec::installed(spec.model_path, spec.card, spec.load_extra) else { return Vec::new() };
     let args = crate::chooser::engine_args(&m, spec.ctx, spec.max_conc);
     let user_chunk = extras.iter().any(|a| a.starts_with("--chunked-prefill-size"));
     args.chunks(2).filter(|p| !(user_chunk && p[0] == "--chunked-prefill-size")).flatten().cloned().collect()
@@ -607,9 +607,9 @@ mod tests {
             "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4}"#;
         std::fs::write(dir.path().join("config.json"), cfg).unwrap();
         let card: toml::Value = toml::from_str("").unwrap();
-        let m = crate::memory_spec::installed(dir.path(), &card).unwrap();
+        let m = crate::memory_spec::installed(dir.path(), &card, &[]).unwrap();
         assert_eq!(crate::chooser::engine_args(&m, 4096, 8), vec!["--max-mamba-cache-size".to_string(), "40".to_string()]);
-        assert!(crate::memory_spec::installed(Path::new("/nonexistent"), &card).is_none());
+        assert!(crate::memory_spec::installed(Path::new("/nonexistent"), &card, &[]).is_none());
         assert!(check_extra_args(&["--max-mamba-cache-size=4".to_string()]).is_err());
     }
 

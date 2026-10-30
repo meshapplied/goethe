@@ -48,13 +48,16 @@ fn torch_oom_gap_gb(line: &str) -> Option<f64> {
 }
 
 pub fn parse_weight_gb(log_text: &str) -> Option<f64> {
-    // Per-GPU weight memory SGLang reports once loading ends ("Load weight end. ... mem usage=48.87 GB").
-    log_text
-        .lines()
-        .filter(|l| l.contains("Load weight end"))
-        .filter_map(|l| l.split("mem usage=").nth(1))
-        .filter_map(|rest| rest.split_whitespace().next()?.parse::<f64>().ok())
-        .next_back()
+    // Per-GPU weights SGLang loaded ("Load weight end ... mem usage=48.87 GB"): target plus drafter, summed per TP rank.
+    let mut per_rank: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+    for line in log_text.lines().filter(|l| l.contains("Load weight end")) {
+        let Some(gb) = line.split("mem usage=").nth(1).and_then(|r| r.split_whitespace().next()?.parse::<f64>().ok()) else {
+            continue;
+        };
+        let rank = line.split_whitespace().find(|w| w.starts_with("TP") && w.len() > 2).unwrap_or("").to_string();
+        per_rank.entry(rank).and_modify(|v| *v += gb).or_insert(gb);
+    }
+    per_rank.into_values().reduce(f64::max)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -210,6 +213,12 @@ mod tests {
         let log = "[t] Load weight begin. avail mem=74.86 GB\n[t] Load weight end. elapsed=2.94 s, type=Gemma4, avail mem=25.99 GB, mem usage=48.87 GB.\n";
         assert_eq!(parse_weight_gb(log), Some(48.87));
         assert_eq!(parse_weight_gb("[t] Memory pool end. avail mem=10.21 GB"), None);
+        let spec = "[t] Load weight end. type=Qwen4ExpForConditionalGeneration, mem usage=81.35 GB.\n\
+                    [t] Load weight end. type=Qwen4ExpForCausalLMMTP, mem usage=0.49 GB.\n";
+        assert!((parse_weight_gb(spec).unwrap() - 81.84).abs() < 1e-9, "target plus drafter");
+        let tp = "[t TP0] Load weight end. mem usage=40.10 GB.\n[t TP1] Load weight end. mem usage=40.20 GB.\n\
+                  [t TP0] Load weight end. mem usage=0.30 GB.\n[t TP1] Load weight end. mem usage=0.30 GB.\n";
+        assert!((parse_weight_gb(tp).unwrap() - 40.50).abs() < 1e-9, "per GPU, not summed across ranks");
     }
 
     #[test]

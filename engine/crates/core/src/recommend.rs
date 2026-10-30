@@ -312,7 +312,10 @@ pub fn registry_input(m: &RegistryModel) -> ChooserInput {
         max_conc: m.default_max_conc.unwrap_or(8),
         marlin_extra_gb: 0.0,
         supported_sm: m.supported_sm.clone(),
-        memory: m.memory.clone(),
+        memory: m.memory.clone().map(|mut spec| {
+            crate::memory_spec::apply_engine_args(&mut spec, None, &m.extra_sglang_args);
+            spec
+        }),
     }
 }
 

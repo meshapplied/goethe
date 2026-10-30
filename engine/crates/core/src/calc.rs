@@ -2,6 +2,7 @@
 
 const SAFETY_MARGIN_GB: f64 = 1.5;
 const MAX_MEM_FRACTION: f64 = 0.95;
+const CUDA_CONTEXT_GB: f64 = crate::engine_overhead::DEFAULT_CONTEXT_GB;
 pub const BASE_OVERHEAD_GB: f64 = 1.8;
 const LEARN_SLACK_GB: f64 = 0.25;
 
@@ -27,9 +28,9 @@ impl Need {
 }
 
 pub fn missing_gb(need: &Need, free_gb: f64) -> f64 {
-    // GB a budget lacks: the whole budget leaves the safety margin and the static pool stays within 95% of free.
+    // GB a budget lacks: the whole budget leaves the safety margin, the static pool stays within 95% of free minus context.
     (need.total() - (free_gb - SAFETY_MARGIN_GB))
-        .max(need.pool() - MAX_MEM_FRACTION * free_gb)
+        .max(need.pool() - MAX_MEM_FRACTION * (free_gb - CUDA_CONTEXT_GB))
         .max(need.weights + need.load_peak + need.overhead - (free_gb - SAFETY_MARGIN_GB))
         .max(0.0)
 }
@@ -64,11 +65,11 @@ pub fn shortfall(need: &Need, gpu: u32, free_gb: f64) -> Option<String> {
         ));
     }
     let by_margin = n - (f - SAFETY_MARGIN_GB);
-    let cap = tenth(MAX_MEM_FRACTION * f);
+    let cap = tenth(MAX_MEM_FRACTION * (f - CUDA_CONTEXT_GB));
     let by_cap = w + k + s - cap;
     if by_cap > by_margin {
         return Some(format!(
-            "{head}, and its static pool ({}, {:.1} GB) may use at most 95% of it ({cap:.1} GB): missing {:.1} GB",
+            "{head}, and its static pool ({}, {:.1} GB) may use at most 95% of it after the CUDA context ({cap:.1} GB): missing {:.1} GB",
             if s > 0.0 { "weights, KV and state" } else { "weights + KV" },
             w + k + s,
             by_cap.max(0.1)
@@ -154,7 +155,7 @@ mod tests {
         );
         let capped = shortfall(&need(70.0, 9.5, 1.8), 2, 75.6).unwrap();
         assert!(
-            capped.ends_with("its static pool (weights + KV, 79.5 GB) may use at most 95% of it (71.8 GB): missing 7.7 GB"),
+            capped.ends_with("its static pool (weights + KV, 79.5 GB) may use at most 95% of it after the CUDA context (70.5 GB): missing 9.0 GB"),
             "{capped}"
         );
         assert_eq!(shortfall(&need(10.0, 1.0, 1.8), 2, 75.6), None);
@@ -164,6 +165,6 @@ mod tests {
     fn missing_uses_margin_and_static_cap() {
         assert_eq!(missing_gb(&need(8.0, 0.2, 1.8), 20.0), 0.0);
         assert!((missing_gb(&need(15.0, 2.2, 1.8), 20.0) - 0.5).abs() < 1e-9);
-        assert!((missing_gb(&need(88.0, 5.0, 1.8), 96.0) - (93.0 - 0.95 * 96.0)).abs() < 1e-9);
+        assert!((missing_gb(&need(88.0, 5.0, 1.8), 96.0) - (93.0 - 0.95 * (96.0 - CUDA_CONTEXT_GB))).abs() < 1e-9);
     }
 }
