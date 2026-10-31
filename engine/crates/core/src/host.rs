@@ -491,6 +491,18 @@ pub fn public_access_hint(bind: &str) -> String {
     }
 }
 
+pub fn ask_yes_no(question: &str) -> Result<bool, String> {
+    // A y/N question on a terminal; no terminal answers no.
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        return Ok(false);
+    }
+    eprint!("{question} [y/N] ");
+    std::io::stderr().flush().ok();
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf).map_err(|e| e.to_string())?;
+    Ok(matches!(buf.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
 pub fn confirm(question: &str, yes: bool) -> Result<(), String> {
     // Proceed on --yes or a y answer on a terminal; without a terminal exit 3 (confirmation required).
     if yes {

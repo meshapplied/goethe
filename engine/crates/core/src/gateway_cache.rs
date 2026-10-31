@@ -1,8 +1,9 @@
-// In-memory gateway view of state.db (keys, routes, aliases, models), reloaded when PRAGMA data_version moves.
+// In-memory gateway view of state.db (keys, routes, aliases, models, trace settings), reloaded when PRAGMA data_version moves.
 
 use crate::db;
 use crate::key_usage;
 use crate::security::{token_hash, ResolvedKey};
+use crate::trace::{self, TraceConfig};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,9 +29,14 @@ pub struct Snapshot {
     routes: HashMap<String, Vec<Route>>,
     aliases: HashMap<String, String>,
     models: HashMap<String, i64>,
+    trace: Arc<TraceConfig>,
 }
 
 impl Snapshot {
+    pub fn trace(&self) -> &TraceConfig {
+        &self.trace
+    }
+
     pub fn has_key(&self, key: &ResolvedKey) -> bool {
         self.keys.contains_key(&key.token_hash)
     }
@@ -252,6 +258,7 @@ fn load_snapshot(con: &Connection) -> rusqlite::Result<Snapshot> {
         let (model_id, created) = row?;
         snap.models.insert(model_id, created);
     }
+    snap.trace = Arc::new(trace::load_config(&tx));
     Ok(snap)
 }
 

@@ -36,6 +36,11 @@ pub fn run(opts: UninstallOpts) -> Result<(), String> {
             plan.extend(m.keep.iter().map(|(p, why)| format!("keep {} ({why})", p.display())));
         }
     }
+    let traces = home.join("traces");
+    let keep_traces = traces.join("manifest.json").is_file();
+    if keep_traces {
+        plan.push(format!("keep {} (training traces; delete the folder yourself if you do not want them)", traces.display()));
+    }
     plan.push(format!("delete everything else in {}", home.display()));
     plan.push("remove installer symlinks that point into GOETHE_HOME".to_string());
     if opts.yes {
@@ -54,8 +59,11 @@ pub fn run(opts: UninstallOpts) -> Result<(), String> {
         }
         None => Vec::new(),
     };
-    remove_home_contents(&home, models.is_none(), &kept)?;
+    remove_home_contents(&home, models.is_none(), keep_traces, &kept)?;
     println!("uninstalled goethe from {}", home.display());
+    if keep_traces {
+        println!("kept {} (training traces)", traces.display());
+    }
     for p in &kept {
         println!("kept {} (your files)", p.display());
     }
@@ -95,12 +103,15 @@ fn remove_installer_symlinks(home: &Path) {
     }
 }
 
-fn remove_home_contents(home: &Path, keep_models: bool, kept: &[PathBuf]) -> Result<(), String> {
-    // Everything in the home; models/ stays with --keep-models, and keeps the folders of your own files otherwise.
+fn remove_home_contents(home: &Path, keep_models: bool, keep_traces: bool, kept: &[PathBuf]) -> Result<(), String> {
+    // Everything in the home but a trace corpus; models/ stays with --keep-models, and keeps the folders of your own files otherwise.
     for entry in fs::read_dir(home).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
         let is_dir = entry.file_type().map_err(|e| e.to_string())?.is_dir();
+        if keep_traces && entry.file_name() == "traces" {
+            continue;
+        }
         if entry.file_name() == "models" {
             if keep_models {
                 continue;
@@ -167,14 +178,18 @@ mod tests {
         fs::write(elsewhere.join("config.json"), "{}").unwrap();
         std::os::unix::fs::symlink(&elsewhere, models.join("org__linked")).unwrap();
         fs::create_dir_all(h.join("logs")).unwrap();
-        remove_home_contents(&h, false, &[models.join("org__mine")]).unwrap();
+        remove_home_contents(&h, false, false, &[models.join("org__mine")]).unwrap();
         assert!(models.join("org__mine/w.safetensors").exists(), "your own files stay");
         assert!(!models.join("org__a").exists() && !models.join(".partial").exists() && !h.join("logs").exists());
         assert!(!models.join("org__linked").exists() && elsewhere.join("config.json").exists(), "links go, their targets stay");
         fs::create_dir_all(h.join("logs")).unwrap();
-        remove_home_contents(&h, true, &[]).unwrap();
+        remove_home_contents(&h, true, false, &[]).unwrap();
         assert!(models.join("org__mine").exists() && !h.join("logs").exists(), "--keep-models keeps models/");
-        remove_home_contents(&h, false, &[]).unwrap();
-        assert!(!models.exists());
+        fs::create_dir_all(h.join("traces")).unwrap();
+        fs::write(h.join("traces/manifest.json"), "{}").unwrap();
+        remove_home_contents(&h, false, true, &[]).unwrap();
+        assert!(!models.exists() && h.join("traces/manifest.json").exists(), "a trace corpus stays");
+        remove_home_contents(&h, false, false, &[]).unwrap();
+        assert!(!h.join("traces").exists());
     }
 }

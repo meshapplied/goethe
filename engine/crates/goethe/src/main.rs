@@ -15,6 +15,7 @@ use goethe_core::recommend;
 use goethe_core::rpc;
 use goethe_core::security;
 use goethe_core::shutdown;
+use goethe_core::trace;
 use serde_json::{json, Value};
 
 const KEY_HELP: &str = "Create a key (goethe api lists it again later):
@@ -34,6 +35,26 @@ List keys, or revoke one:
 
 \t→ goethe key
 \t→ goethe key --revoke <key-id>";
+
+const TRACE_HELP: &str = "Record every generation request and reply, grouped into sessions, as a corpus for training later:
+
+\t→ goethe trace on
+
+Only some API keys (by name or id), or every key but one:
+
+\t→ goethe trace on --key my-app
+\t→ goethe trace off --key ci
+
+Another folder, or a size limit (default 20 GB) at which recording turns itself off:
+
+\t→ goethe trace on --dir /data/traces --max-gb 200
+\t→ goethe trace --max-gb 100
+
+Stop recording:
+
+\t→ goethe trace off
+
+goethe trace alone shows what is recorded and how much space it takes. The folder format is in docs/traces.md.";
 
 #[derive(Parser)]
 #[command(
@@ -141,6 +162,10 @@ enum Commands {
         yes: bool,
         #[arg(long, help = "When unloading first, skip draining in-flight requests.")]
         force: bool,
+        #[arg(long, conflicts_with = "keep_traces", help = "Also delete the traces recorded with the model, without asking.")]
+        delete_traces: bool,
+        #[arg(long, help = "Keep the traces recorded with the model, without asking (the default with --yes).")]
+        keep_traces: bool,
     },
     #[command(about = "Change default load settings stored on the model card.")]
     Config {
@@ -333,6 +358,19 @@ enum Commands {
         model: Option<String>,
         #[arg(long, num_args = 1.., value_name = "ALIAS", help = "Remove these aliases.")]
         remove: Vec<String>,
+    },
+    #[command(about = "Record requests and replies as training traces: turn it on or off, per API key, and see the size.", after_help = TRACE_HELP)]
+    Trace {
+        #[arg(value_parser = ["on", "off", "status"], help = "on, off, or status (the default).")]
+        action: Option<String>,
+        #[arg(long, num_args = 1.., value_name = "KEY", help = "Only these API keys (name or id); without it, on and off apply to every key.")]
+        key: Vec<String>,
+        #[arg(long, value_name = "PATH", help = "Folder for the traces (default ~/.goethe/traces).")]
+        dir: Option<String>,
+        #[arg(long = "max-gb", value_name = "GB", help = "Size limit: recording turns off when the folder reaches it (default 20).")]
+        max_gb: Option<f64>,
+        #[arg(long, help = "Emit JSON.")]
+        json: bool,
     },
 }
 
@@ -656,7 +694,12 @@ fn main() {
             model_id,
             yes,
             force,
-        } => each(model_id, |id| models::run_remove(&installed_id(&id, false), yes, force)),
+            delete_traces,
+            keep_traces,
+        } => {
+            let traces = (delete_traces || keep_traces).then_some(delete_traces);
+            each(model_id, |id| models::run_remove(&installed_id(&id, false), yes, force, traces))
+        }
         Commands::Config {
             model_id,
             ctx,
@@ -824,6 +867,7 @@ fn main() {
             each(remove, |a| alias::remove(&a).map(|()| println!("Removed alias {a}")))
         }
         Commands::Alias { .. } => alias::list().map(|rows| print!("{}", alias_text(&rows))),
+        Commands::Trace { action, key, dir, max_gb, json } => do_trace(action.as_deref(), &key, dir.as_deref(), max_gb, json),
     };
     match result {
         Ok(()) => {}
@@ -999,6 +1043,85 @@ fn alias_text(rows: &[(String, String)]) -> String {
         table.row(vec![a.clone(), m.clone()]);
     }
     table.render()
+}
+
+fn do_trace(action: Option<&str>, keys: &[String], dir: Option<&str>, max_gb: Option<f64>, json: bool) -> Result<(), String> {
+    let home = goethe_home();
+    ensure_layout(&home).map_err(|e| format!("layout: {e}"))?;
+    match action {
+        Some(a @ ("on" | "off")) => {
+            trace::set(&home, Some(a == "on"), keys, dir, max_gb)?;
+            if a == "on" && !json {
+                eprintln!("Traces hold whole prompts and replies, including anything secret clients send; only your user can read the folder.");
+            }
+        }
+        _ if !keys.is_empty() => usage("--key goes with on or off"),
+        _ if dir.is_some() || max_gb.is_some() => trace::set(&home, None, keys, dir, max_gb)?,
+        _ => {}
+    }
+    let st = trace::status(&home)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&st).unwrap_or_default());
+    } else {
+        print!("{}", trace_text(&st));
+    }
+    Ok(())
+}
+
+fn trace_text(st: &Value) -> String {
+    let names = |v: &Value| -> String {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .map(|k| match k["name"].as_str().filter(|n| !n.is_empty()) {
+                Some(n) => format!("{n} ({})", k["id"].as_str().unwrap_or("")),
+                None => k["id"].as_str().unwrap_or("").to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let recording = if let Some(why) = st["stopped"].as_str() {
+        format!("off, turned off automatically: {why}")
+    } else if !st["recording"].as_bool().unwrap_or(false) {
+        "off".to_string()
+    } else if st["all_keys"].as_bool().unwrap_or(false) {
+        match names(&st["except"]) {
+            e if e.is_empty() => "on, every API key".to_string(),
+            e => format!("on, every API key except {e}"),
+        }
+    } else {
+        format!("on, only {}", names(&st["keys"]))
+    };
+    let mut rows = vec![("Recording", recording), ("Folder", st["dir"].as_str().unwrap_or("").to_string())];
+    let free = st["free_bytes"].as_u64().map(|b| format!(", {} free on the disk", trace::human_bytes(b))).unwrap_or_default();
+    rows.push(("Size", format!("{} of a {} GB limit{free}", trace::human_bytes(st["bytes"].as_u64().unwrap_or(0)), st["max_gb"])));
+    let count = |v: &Value, word: &str| match v.as_u64().unwrap_or(0) {
+        1 => format!("1 {word}"),
+        n => format!("{n} {word}s"),
+    };
+    rows.push((
+        "Sessions",
+        format!("{}, {}, {}", count(&st["sessions"], "session"), count(&st["turns"], "turn"), count(&st["models"], "model version")),
+    ));
+    if let Some(t) = st["last_turn_at"].as_str() {
+        rows.push(("Last turn", t.to_string()));
+    }
+    if let Some(p) = st["paused"].as_str().filter(|_| st["recording"].as_bool().unwrap_or(false)) {
+        rows.push(("Paused", format!("{p}; recording resumes when space is freed")));
+    }
+    let d = &st["dropped"];
+    let dropped: u64 = ["queue_full", "paused", "errors"].iter().filter_map(|k| d[*k].as_u64()).sum();
+    if dropped > 0 {
+        rows.push(("Dropped", format!("{dropped} (queue full {}, while paused {}, write errors {})", d["queue_full"], d["paused"], d["errors"])));
+    }
+    let mut out: String = rows.iter().map(|(k, v)| format!("{k:<11} {v}\n")).collect();
+    if st["stopped"].is_string() {
+        let more = format!("goethe trace on --max-gb {}", (st["max_gb"].as_f64().unwrap_or(trace::DEFAULT_MAX_GB) * 2.0).ceil());
+        out.push_str(&goethe_core::term::commands("Raise the limit and turn it back on, or delete traces first:", &[&more]));
+    } else if !st["recording"].as_bool().unwrap_or(false) {
+        out.push_str(&goethe_core::term::commands("Turn it on with:", &["goethe trace on"]));
+    }
+    out
 }
 
 fn rpc_daemon_err(e: String) -> String {

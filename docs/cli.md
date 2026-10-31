@@ -28,7 +28,7 @@ Exit codes:
 - [Start and stop](#start-and-stop): `start`, `up`, `status`, `down`, `service`
 - [Models](#models): `recommend`, `install`, `scan`, `models`, `config`, `remove`
 - [Running models](#running-models): `load`, `unload`, `ps`, `logs`
-- [API access](#api-access): `configure api`, `api`, `key`, `allowlist`, `alias`, `gateway`, `domain`
+- [API access](#api-access): `configure api`, `api`, `key`, `allowlist`, `alias`, `trace`, `gateway`, `domain`
 - [GPUs and system](#gpus-and-system): `gpu`, `hw`, `doctor`, `update`, `uninstall`, `--version`
 
 ## Start and stop
@@ -135,12 +135,14 @@ Changes the default settings a model loads with.
 
 ### `goethe remove --model <id>...`
 
-Unloads a model and deletes the files Goethe downloaded. For a folder you registered in place, it only unregisters it.
+Unloads a model and deletes the files Goethe downloaded. For a folder you registered in place, it only unregisters it. If [traces](traces.md) were recorded with the model, it asks whether to delete them too; the default is to keep them.
 
 | Option | Description |
 |---|---|
-| `--yes` | Don't ask; unload it first if it's loaded |
+| `--yes` | Don't ask; unload it first if it's loaded; keep its traces |
 | `--force` | Don't wait for requests in progress |
+| `--delete-traces` | Also delete the model's traces, without asking |
+| `--keep-traces` | Keep the model's traces, without asking |
 
 ## Running models
 
@@ -258,6 +260,23 @@ Short model names for clients. Changing what an alias points to moves every clie
 | `--set <alias>` | The alias clients send as the model |
 | `--model <id>` | The installed model it points to |
 | `--remove <alias>...` | Remove aliases |
+
+### `goethe trace [on | off]`
+
+Records every generation request and reply, grouped into sessions, as a corpus for training later. Without `on` or `off` it shows what is recorded, the folder, its size and the free disk. Changes apply to the next request. The format is in [traces.md](traces.md).
+
+| Option | Description |
+|---|---|
+| `--key <name or id>...` | Only these keys. With `on` and recording off: record just them. With `off` and every key on: leave them out |
+| `--dir <path>` | Folder for the traces (default `~/.goethe/traces`) |
+| `--max-gb <N>` | Size limit: recording turns off when the folder reaches it (default 20). Works without `on` or `off` |
+| `--json` | JSON output |
+
+```bash
+goethe trace on
+goethe trace on --key my-app
+goethe trace off
+```
 
 ### `goethe gateway`
 
