@@ -40,10 +40,13 @@ const TRACE_HELP: &str = "Record every generation request and reply, grouped int
 
 \t→ goethe trace on
 
-Only some API keys (by name or id), or every key but one:
+Only some API keys (by name or id), every key but one, or back to every key:
 
 \t→ goethe trace on --key my-app
 \t→ goethe trace off --key ci
+\t→ goethe trace on --all-keys
+
+goethe trace off stops recording and keeps the keys chosen; goethe trace on resumes with them.
 
 Another folder, or a size limit (default 20 GB) at which recording turns itself off:
 
@@ -363,8 +366,10 @@ enum Commands {
     Trace {
         #[arg(value_parser = ["on", "off", "status"], help = "on, off, or status (the default).")]
         action: Option<String>,
-        #[arg(long, num_args = 1.., value_name = "KEY", help = "Only these API keys (name or id); without it, on and off apply to every key.")]
+        #[arg(long, num_args = 1.., value_name = "KEY", help = "Add these API keys (name or id) with on, or leave them out with off.")]
         key: Vec<String>,
+        #[arg(long = "all-keys", conflicts_with = "key", help = "With on: record every API key, clearing the chosen keys and exceptions.")]
+        all_keys: bool,
         #[arg(long, value_name = "PATH", help = "Folder for the traces (default ~/.goethe/traces).")]
         dir: Option<String>,
         #[arg(long = "max-gb", value_name = "GB", help = "Size limit: recording turns off when the folder reaches it (default 20).")]
@@ -867,7 +872,14 @@ fn main() {
             each(remove, |a| alias::remove(&a).map(|()| println!("Removed alias {a}")))
         }
         Commands::Alias { .. } => alias::list().map(|rows| print!("{}", alias_text(&rows))),
-        Commands::Trace { action, key, dir, max_gb, json } => do_trace(action.as_deref(), &key, dir.as_deref(), max_gb, json),
+        Commands::Trace {
+            action,
+            key,
+            all_keys,
+            dir,
+            max_gb,
+            json,
+        } => do_trace(action.as_deref(), &key, all_keys, dir.as_deref(), max_gb, json),
     };
     match result {
         Ok(()) => {}
@@ -1045,18 +1057,19 @@ fn alias_text(rows: &[(String, String)]) -> String {
     table.render()
 }
 
-fn do_trace(action: Option<&str>, keys: &[String], dir: Option<&str>, max_gb: Option<f64>, json: bool) -> Result<(), String> {
+fn do_trace(action: Option<&str>, keys: &[String], all_keys: bool, dir: Option<&str>, max_gb: Option<f64>, json: bool) -> Result<(), String> {
     let home = goethe_home();
     ensure_layout(&home).map_err(|e| format!("layout: {e}"))?;
     match action {
+        Some("off") if all_keys => usage("--all-keys goes with on"),
         Some(a @ ("on" | "off")) => {
-            trace::set(&home, Some(a == "on"), keys, dir, max_gb)?;
+            trace::set(&home, Some(a == "on"), keys, all_keys, dir, max_gb)?;
             if a == "on" && !json {
                 eprintln!("Traces hold whole prompts and replies, including anything secret clients send; only your user can read the folder.");
             }
         }
-        _ if !keys.is_empty() => usage("--key goes with on or off"),
-        _ if dir.is_some() || max_gb.is_some() => trace::set(&home, None, keys, dir, max_gb)?,
+        _ if !keys.is_empty() || all_keys => usage("--key and --all-keys go with on or off"),
+        _ if dir.is_some() || max_gb.is_some() => trace::set(&home, None, keys, false, dir, max_gb)?,
         _ => {}
     }
     let st = trace::status(&home)?;
@@ -1080,17 +1093,23 @@ fn trace_text(st: &Value) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let recording = if let Some(why) = st["stopped"].as_str() {
-        format!("off, turned off automatically: {why}")
-    } else if !st["recording"].as_bool().unwrap_or(false) {
-        "off".to_string()
-    } else if st["all_keys"].as_bool().unwrap_or(false) {
+    let scope = if st["all_keys"].as_bool().unwrap_or(false) {
         match names(&st["except"]) {
-            e if e.is_empty() => "on, every API key".to_string(),
-            e => format!("on, every API key except {e}"),
+            e if e.is_empty() => "every API key".to_string(),
+            e => format!("every API key except {e}"),
         }
     } else {
-        format!("on, only {}", names(&st["keys"]))
+        match names(&st["keys"]) {
+            k if k.is_empty() => String::new(),
+            k => format!("only {k}"),
+        }
+    };
+    let recording = if st["recording"].as_bool().unwrap_or(false) {
+        format!("on, {scope}")
+    } else {
+        let why = st["stopped"].as_str().map(|w| format!(", turned off automatically: {w}")).unwrap_or_default();
+        let resumes = if scope.is_empty() { String::new() } else { format!("; on resumes {scope}") };
+        format!("off{why}{resumes}")
     };
     let mut rows = vec![("Recording", recording), ("Folder", st["dir"].as_str().unwrap_or("").to_string())];
     let free = st["free_bytes"].as_u64().map(|b| format!(", {} free on the disk", trace::human_bytes(b))).unwrap_or_default();

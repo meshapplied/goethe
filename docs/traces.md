@@ -3,10 +3,11 @@
 Goethe can record every generation request and its reply as a corpus for training later. Recording is off until you turn it on. Nothing is scored or filtered while it records: deciding which turns go into a training run is a later, separate step (a labeler) that reads this folder.
 
 ```bash
-goethe trace on                      # every API key
-goethe trace on --key my-app         # only this key (name or id); repeat for more
+goethe trace on                      # every API key the first time; afterwards the keys chosen before
+goethe trace on --key my-app         # add this key (name or id); repeat for more
 goethe trace off --key ci            # every key but this one, when all keys are on
-goethe trace off                     # stop recording
+goethe trace on --all-keys           # back to every key
+goethe trace off                     # stop recording; the chosen keys are kept for the next on
 goethe trace                         # what is recorded, folder, size, free disk
 goethe trace on --dir /data/traces --max-gb 200
 goethe trace --max-gb 100            # change the size limit only
@@ -14,7 +15,7 @@ goethe trace --max-gb 100            # change the size limit only
 
 Changes apply to the next request; no restart or reload. Recorded routes: `/v1/chat/completions`, `/v1/messages` (Anthropic), `/v1/completions` and `/v1/responses`. Embeddings, rerank and token counts are not recorded.
 
-Traces hold whole prompts and replies, including anything secret that clients send. The folder is `0700` and every file `0600`. Request headers and client keys are never stored, only the key id. When the folder reaches the size limit (`--max-gb`, default 20 GB), recording turns off, as if you had run `goethe trace off`. `goethe trace` says why and when, and `history.jsonl` logs it with the scope that was on. `goethe trace on` refuses while the folder is over the limit: raise it in the same command (`goethe trace on --max-gb 200`) or delete traces first. When the disk has less than 10 GB free, recording pauses instead, and resumes by itself once space is freed. A full write queue drops traces instead of slowing replies. Every drop is counted in the manifest. `goethe uninstall` keeps a trace folder that lives in the Goethe home. `goethe remove --model` asks whether to delete that model's traces too (default no; `--delete-traces` or `--keep-traces` answers without asking). Deleting a model's `v1/<model>` folder by hand works too: goethed drops its lines from `sessions.jsonl`, `models.json` and the manifest on its next write.
+Traces hold whole prompts and replies, including anything secret that clients send. The folder is `0700` and every file `0600`. Request headers and client keys are never stored, only the key id. When the folder reaches the size limit (`--max-gb`, default 20 GB), recording turns off, as if you had run `goethe trace off`; the chosen keys are kept. `goethe trace` says why and when, and `history.jsonl` logs it with the scope that was on. `goethe trace on` refuses while the folder is over the limit: raise it in the same command (`goethe trace on --max-gb 200`) or delete traces first. When the disk has less than 10 GB free, recording pauses instead, and resumes by itself once space is freed. A full write queue drops traces instead of slowing replies. Every drop is counted in the manifest. `goethe uninstall` keeps a trace folder that lives in the Goethe home. `goethe remove --model` asks whether to delete that model's traces too (default no; `--delete-traces` or `--keep-traces` answers without asking). Deleting a model's `v1/<model>` folder by hand works too: goethed drops its lines from `sessions.jsonl`, `models.json` and the manifest on its next write.
 
 ## Folder
 

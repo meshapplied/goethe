@@ -263,11 +263,12 @@ Short model names for clients. Changing what an alias points to moves every clie
 
 ### `goethe trace [on | off]`
 
-Records every generation request and reply, grouped into sessions, as a corpus for training later. Without `on` or `off` it shows what is recorded, the folder, its size and the free disk. Changes apply to the next request. The format is in [traces.md](traces.md).
+Records every generation request and reply, grouped into sessions, as a corpus for training later. `off` stops recording and keeps the chosen keys; `on` resumes with them (every key the first time). Without `on` or `off` it shows what is recorded, the folder, its size and the free disk. Changes apply to the next request. The format is in [traces.md](traces.md).
 
 | Option | Description |
 |---|---|
-| `--key <name or id>...` | Only these keys. With `on` and recording off: record just them. With `off` and every key on: leave them out |
+| `--key <name or id>...` | With `on`: add these keys to the ones recorded. With `off`: leave them out |
+| `--all-keys` | With `on`: record every key, clearing the chosen keys and exceptions |
 | `--dir <path>` | Folder for the traces (default `~/.goethe/traces`) |
 | `--max-gb <N>` | Size limit: recording turns off when the folder reaches it (default 20). Works without `on` or `off` |
 | `--json` | JSON output |
