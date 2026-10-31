@@ -44,6 +44,8 @@ const MODEL_FILES: &[&str] = &[
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TraceConfig {
     #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
     pub all_keys: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<String>,
@@ -59,8 +61,10 @@ pub struct TraceConfig {
 
 impl TraceConfig {
     pub fn records(&self, key_id: &str) -> bool {
-        // All keys minus the exceptions, or only the listed keys.
-        if self.all_keys {
+        // While enabled: all keys minus the exceptions, or only the listed keys.
+        if !self.enabled {
+            false
+        } else if self.all_keys {
             !self.except.iter().any(|k| k == key_id)
         } else {
             self.keys.iter().any(|k| k == key_id)
@@ -68,6 +72,10 @@ impl TraceConfig {
     }
 
     pub fn on(&self) -> bool {
+        self.enabled && self.scoped()
+    }
+
+    pub fn scoped(&self) -> bool {
         self.all_keys || !self.keys.is_empty()
     }
 
@@ -79,12 +87,14 @@ impl TraceConfig {
         self.max_gb.unwrap_or(DEFAULT_MAX_GB)
     }
 
-    pub fn turn_on(&mut self, keys: &[String]) {
-        // No keys: every key, clearing per-key lists; with keys: add them (or drop them from the exceptions).
-        if keys.is_empty() {
+    pub fn turn_on(&mut self, keys: &[String], all_keys: bool) {
+        // No keys: resume the saved scope (every key when none is saved); with keys: add them (or drop them from the exceptions); all_keys: every key.
+        self.enabled = true;
+        if all_keys || (keys.is_empty() && !self.scoped()) {
             self.all_keys = true;
             self.keys.clear();
             self.except.clear();
+        } else if keys.is_empty() {
         } else if self.all_keys {
             self.except.retain(|k| !keys.contains(k));
         } else {
@@ -97,10 +107,9 @@ impl TraceConfig {
     }
 
     pub fn turn_off(&mut self, keys: &[String]) {
+        // No keys: stop recording and keep the scope for the next on; with keys: take them out of the scope.
         if keys.is_empty() {
-            self.all_keys = false;
-            self.keys.clear();
-            self.except.clear();
+            self.enabled = false;
         } else if self.all_keys {
             for k in keys {
                 if !self.except.contains(k) {
@@ -170,7 +179,7 @@ fn make_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
 }
 
-pub fn set(home: &Path, on: Option<bool>, keys: &[String], dir: Option<&str>, max_gb: Option<f64>) -> Result<(), String> {
+pub fn set(home: &Path, on: Option<bool>, keys: &[String], all_keys: bool, dir: Option<&str>, max_gb: Option<f64>) -> Result<(), String> {
     // Change what is recorded, the folder or the size limit; the daemon picks it up on its next request, no reload needed.
     let con = db::open(home).map_err(|e| e.to_string())?;
     let ids = resolve_keys(&con, keys)?;
@@ -187,7 +196,7 @@ pub fn set(home: &Path, on: Option<bool>, keys: &[String], dir: Option<&str>, ma
         cfg.max_gb = Some(gb);
     }
     match on {
-        Some(true) => cfg.turn_on(&ids),
+        Some(true) => cfg.turn_on(&ids, all_keys),
         Some(false) => cfg.turn_off(&ids),
         None => {}
     }
@@ -572,7 +581,7 @@ impl Writer {
         }
         let before = cfg.clone();
         let at = now_rfc3339();
-        cfg.turn_off(&[]);
+        cfg.enabled = false;
         cfg.stopped = Some(format!("the {max_gb} GB limit was reached at {at}"));
         if let Err(e) = save_config(con, &cfg) {
             eprintln!("goethe trace: turning off at the size limit: {e}");
@@ -1024,16 +1033,24 @@ mod tests {
     fn scope_follows_on_and_off_per_key() {
         let mut cfg = TraceConfig::default();
         assert!(!cfg.on() && !cfg.records("k1"));
-        cfg.turn_on(&["k1".into()]);
+        cfg.turn_on(&["k1".into()], false);
         assert!(cfg.records("k1") && !cfg.records("k2"));
-        cfg.turn_on(&[]);
+        cfg.turn_off(&[]);
+        assert!(!cfg.on() && !cfg.records("k1") && cfg.keys == ["k1"]);
+        cfg.turn_on(&[], false);
+        assert!(cfg.records("k1") && !cfg.records("k2"));
+        cfg.turn_on(&[], true);
         assert!(cfg.records("k1") && cfg.records("k2"));
         cfg.turn_off(&["k2".into()]);
         assert!(cfg.records("k1") && !cfg.records("k2"));
-        cfg.turn_on(&["k2".into()]);
-        assert!(cfg.records("k2") && cfg.except.is_empty());
         cfg.turn_off(&[]);
-        assert!(!cfg.on() && !cfg.records("k1"));
+        cfg.turn_on(&[], false);
+        assert!(cfg.records("k1") && !cfg.records("k2"));
+        cfg.turn_on(&["k2".into()], false);
+        assert!(cfg.records("k2") && cfg.except.is_empty());
+        let mut fresh = TraceConfig::default();
+        fresh.turn_on(&[], false);
+        assert!(fresh.records("anything"));
     }
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -1199,7 +1216,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("traces");
         let home = tmp.path();
-        set(home, Some(true), &[], Some(dir.to_str().unwrap()), Some(1.5e-6)).unwrap();
+        db::open(home)
+            .unwrap()
+            .execute("INSERT INTO api_keys (key_id, name, token_hash, raw_prefix) VALUES ('k1', 'app', 'h', 'p')", [])
+            .unwrap();
+        set(home, Some(true), &["app".into()], false, Some(dir.to_str().unwrap()), Some(1.5e-6)).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
         let mut w = Writer::new(home, Arc::new(AtomicU64::new(0)));
         for _ in 0..20 {
@@ -1211,14 +1232,14 @@ mod tests {
         assert!(w.totals.turns >= 1 && w.totals.paused_dropped >= 1);
         assert_eq!(w.totals.turns + w.totals.paused_dropped, 20);
         let cfg = load_config(&db::open(home).unwrap());
-        assert!(!cfg.on() && cfg.stopped.as_deref().is_some_and(|s| s.contains("limit was reached")));
+        assert!(!cfg.on() && cfg.keys == ["k1"] && cfg.stopped.as_deref().is_some_and(|s| s.contains("limit was reached")));
         let history = std::fs::read_to_string(dir.join("history.jsonl")).unwrap();
         assert!(history.lines().last().unwrap().contains("\"reason\":\"size limit\""));
-        assert!(set(home, Some(true), &[], None, None).unwrap_err().contains("over its"));
-        set(home, None, &[], None, Some(1.0)).unwrap();
+        assert!(set(home, Some(true), &[], false, None, None).unwrap_err().contains("over its"));
+        set(home, None, &[], false, None, Some(1.0)).unwrap();
         assert!(!load_config(&db::open(home).unwrap()).on());
-        set(home, Some(true), &[], None, None).unwrap();
+        set(home, Some(true), &[], false, None, None).unwrap();
         let cfg = load_config(&db::open(home).unwrap());
-        assert!(cfg.on() && cfg.stopped.is_none());
+        assert!(cfg.on() && cfg.stopped.is_none() && cfg.records("k1") && !cfg.records("k2"));
     }
 }

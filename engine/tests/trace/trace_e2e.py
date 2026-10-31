@@ -262,7 +262,7 @@ def main() -> int:
             workers.append(threading.Thread(target=run, args=(n,)))
             workers[-1].start()
         time.sleep(3)
-        goethe("trace", "on")
+        goethe("trace", "on", "--all-keys")
         gw.chat(key_b, [{"role": "user", "content": "key b while every key is on"}])
         for w in workers:
             w.join()
@@ -279,9 +279,16 @@ def main() -> int:
         time.sleep(3)
         after = status()
         check(not after["recording"], "trace off stops recording", failures)
+
+        def kept(s: dict) -> bool:
+            """Every key but trace-b: the scope set before off."""
+            return s["all_keys"] and [k["id"] for k in s["except"]] == [ids["trace-b"]]
+
+        check(kept(after), "trace off keeps the key scope", failures)
         check(after["turns"] == before, f"no turns recorded after off ({before} -> {after['turns']})", failures)
         limit = (after["bytes"] + 4000) / 1e9
-        goethe("trace", "on", "--key", "trace-a", "--max-gb", f"{limit:.9f}")
+        goethe("trace", "on", "--max-gb", f"{limit:.9f}")
+        check(status()["recording"] and kept(status()), "trace on resumes the saved scope", failures)
         for i in range(20):
             gw.chat(key_a, [{"role": "user", "content": f"filling up to the size limit {i}"}])
             time.sleep(0.5)
@@ -293,8 +300,8 @@ def main() -> int:
         stopped = capped["stopped"] or ""
         check(not capped["recording"] and "limit was reached" in stopped and capped["turns"] > before,
               f"the size limit turns recording off ({stopped}, {capped['turns'] - before} turns first)", failures)
-        check(last.get("reason") == "size limit" and last["was"]["keys"] == [ids["trace-a"]],
-              "history.jsonl logs the automatic off with the scope it had", failures)
+        check(last.get("reason") == "size limit" and last["was"]["except"] == [ids["trace-b"]] and kept(capped),
+              "the automatic off keeps the scope and history.jsonl logs it", failures)
         refused = subprocess.run(["goethe", "trace", "on"], capture_output=True, text=True)
         check(refused.returncode != 0 and "over its" in refused.stderr, "turning on over the limit is refused",
               failures)
