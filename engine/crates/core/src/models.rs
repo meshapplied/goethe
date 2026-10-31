@@ -8,6 +8,7 @@ use crate::paths::{contained_in_models, goethe_home, shell_quote, validate_model
 use crate::recommend::{registry_input, View};
 use crate::registry::{fetch, registry_url, Registry};
 use crate::rpc;
+use crate::trace;
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::json;
@@ -321,7 +322,7 @@ struct RemovalPlan {
     source: Option<String>,
 }
 
-pub fn run_remove(model_id: &str, yes: bool, force: bool) -> Result<(), String> {
+pub fn run_remove(model_id: &str, yes: bool, force: bool, delete_traces: Option<bool>) -> Result<(), String> {
     // Unload when needed, drop the model's rows in one transaction, then delete only what goethe owns.
     validate_model_id(model_id)?;
     let home = goethe_home();
@@ -364,6 +365,19 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool) -> Result<(), String> 
         steps.push(format!("unregister the model; your files in {src} stay on disk"));
     }
     host::confirm(&format!("goethe remove --model {model_id} will:\n  {}\nProceed?", steps.join("\n  ")), yes)?;
+    let traces = trace::model_traces(&home, model_id)?;
+    let drop_traces = match (&traces, delete_traces) {
+        (None, _) => false,
+        (Some(_), Some(d)) => d,
+        (Some(t), None) => {
+            !yes && host::ask_yes_no(&format!(
+                "Also delete the {} trace session(s) ({}) recorded with {model_id} in {}? They cannot be recovered.",
+                t.sessions,
+                trace::human_bytes(t.bytes),
+                t.folder.display()
+            ))?
+        }
+    };
     if instances > 0 {
         unload(model_id, force)?;
     }
@@ -386,6 +400,18 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool) -> Result<(), String> 
             shell_quote(src)
         ),
         None => println!("removed {model_id}"),
+    }
+    if drop_traces {
+        if let Some(t) = trace::delete_model_traces(&home, model_id)? {
+            println!("deleted {} trace session(s) ({}) in {}", t.sessions, trace::human_bytes(t.bytes), t.folder.display());
+        }
+    } else if let Some(t) = &traces {
+        println!(
+            "kept {} trace session(s) ({}) recorded with {model_id}. To delete them run:\n  rm -rf {}",
+            t.sessions,
+            trace::human_bytes(t.bytes),
+            shell_quote(&t.folder.to_string_lossy())
+        );
     }
     Ok(())
 }

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `goethe trace on|off [--key ...]` records every chat, Anthropic Messages, completions and Responses request with its reply, for all models and instances, into `~/.goethe/traces` (or `--dir`), as a corpus for training later. Turns are grouped into sessions: follow-ups store only their new messages, and regenerations are kept as alternative replies. Each turn names the exact model version that produced it, and streamed replies are stored in their non-streaming shape. A manifest, a session index and a recording history describe the folder. `goethe trace` shows the size. Recording turns itself off at a size limit (`--max-gb`, default 20 GB), pauses while the disk is low, and never slows a reply. The format is in `docs/traces.md`; `goethe uninstall` keeps the corpus, and `goethe remove --model` asks whether to delete that model's traces (`--delete-traces`, `--keep-traces`).
+
 ## 0.1.7 (2026-10-30)
 
 - Fixes from running 0.1.6 on an RTX 5090: the local NInfer model file is accepted, and `goethe load` no longer starts SGLang for it; the registry JSON is checked against its signature; `goethe recommend` and `goethe models` agree on what fits; VPN mode keeps localhost access; the keyless TCP mode is gone; a `GOETHE_HOME` value can no longer end up in the service unit's ExecStartPost; the load wait mentions kernel builds; the README names a model `goethe recommend` lists.

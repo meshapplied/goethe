@@ -1,4 +1,4 @@
-// API multiplexer on 127.0.0.1 (persisted mux port): OpenAI, Anthropic and LiteLLM routes, key auth, metering and upstream auth.
+// API multiplexer on 127.0.0.1 (persisted mux port): OpenAI, Anthropic and LiteLLM routes, key auth, metering, tracing and upstream auth.
 
 use goethe_core::db;
 use goethe_core::gateway_cache::{GatewayCache, Route, Snapshot};
@@ -9,6 +9,8 @@ use goethe_core::nginx;
 use goethe_core::paths::goethe_home;
 use goethe_core::placement;
 use goethe_core::security::{self, ResolvedKey};
+use goethe_core::trace::{self, Capture, Recorder};
+use goethe_core::trace_assemble::Api as TraceApi;
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::body::{Body, Bytes, Frame, Incoming, SizeHint};
 use hyper::header::{HeaderMap, HeaderName, HeaderValue, ALLOW, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
@@ -28,7 +30,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::net::TcpListener;
 
 type MuxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -43,6 +45,7 @@ const READY_TTL: Duration = Duration::from_secs(1);
 const JSON_USAGE_CAP: usize = 8 << 20;
 const SSE_LINE_CAP: usize = 1 << 20;
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
+const X_SESSION_ID: HeaderName = HeaderName::from_static("x-session-id");
 
 struct Mux {
     cache: GatewayCache,
@@ -50,6 +53,7 @@ struct Mux {
     max_body: usize,
     rpm: Mutex<HashMap<String, Instant>>,
     ready: Mutex<HashMap<String, (Instant, bool)>>,
+    trace: Recorder,
 }
 
 static MUX: OnceLock<Mux> = OnceLock::new();
@@ -76,6 +80,7 @@ pub fn spawn_mux() -> Result<tokio::task::JoinHandle<()>, String> {
         max_body,
         rpm: Mutex::new(HashMap::new()),
         ready: Mutex::new(HashMap::new()),
+        trace: Recorder::start(&home),
     });
     let _ = mux.cache.exact();
     Ok(tokio::spawn(serve(mux, listener)))
@@ -378,6 +383,8 @@ async fn route_post(
 ) -> Response<MuxBody> {
     // Parse the body once, resolve the model, take the in-flight guard before the drain check, then proxy.
     let started = Instant::now();
+    let wall = SystemTime::now();
+    let hint = session_hint(req.headers());
     let declared = req
         .headers()
         .get(CONTENT_LENGTH)
@@ -427,7 +434,39 @@ async fn route_post(
     let ids: Vec<&str> = live.iter().map(|r| r.instance_id.as_str()).collect();
     let route = live[guard.pick(&ids).unwrap_or(0)].clone();
     let stream = matches!(head.stream, Some(Value::Bool(true)));
-    proxy(m, path, &route, body, rid, stream, guard, finish).await
+    let tap = snap.trace().records(&key.key_id).then(|| api_tail(path)).filter(|t| TraceApi::from_path(t).is_some()).map(|t| {
+        let cfg = snap.trace();
+        Box::new(Capture {
+            dir: cfg.dir(&goethe_home()),
+            max_gb: cfg.max_gb(),
+            path: t.to_string(),
+            request_id: rid.to_string(),
+            key_id: key.key_id.clone(),
+            instance_id: route.instance_id.clone(),
+            model: model.clone(),
+            session_hint: hint,
+            request: body.to_vec(),
+            started_at: wall,
+            duration_s: 0.0,
+            ttft_s: None,
+            status: 0,
+            sse: false,
+            complete: false,
+            response: Vec::new(),
+            truncated: false,
+        })
+    });
+    proxy(m, path, &route, body, rid, stream, guard, finish, tap).await
+}
+
+fn session_hint(headers: &HeaderMap) -> Option<String> {
+    // Optional client session id for the trace recorder: 1-128 visible ASCII, like X-Request-Id.
+    headers
+        .get(X_SESSION_ID)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_graphic()))
+        .map(str::to_string)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -440,8 +479,9 @@ async fn proxy(
     stream: bool,
     guard: inflight::InflightGuard,
     finish: Finish,
+    tap: Option<Box<Capture>>,
 ) -> Response<MuxBody> {
-    // Forward with the engine's own key (never the client's) and meter the reply as it streams back.
+    // Forward with the engine's own key (never the client's) and meter (and maybe trace) the reply as it streams back.
     let mut builder = Request::builder()
         .method(Method::POST)
         .uri(format!("http://127.0.0.1:{}{path}", route.port))
@@ -482,6 +522,8 @@ async fn proxy(
         done: Some((finish, guard, code)),
         sse,
         cut: false,
+        ended: false,
+        tap,
         cut_event: if is_anthropic(path) { ANTHROPIC_CUT_EVENT } else { STREAM_CUT_EVENT },
     };
     Response::from_parts(parts, body.boxed())
@@ -493,6 +535,8 @@ struct MeteredBody {
     done: Option<(Finish, inflight::InflightGuard, u16)>,
     sse: bool,
     cut: bool,
+    ended: bool,
+    tap: Option<Box<Capture>>,
     cut_event: &'static [u8],
 }
 
@@ -506,6 +550,14 @@ impl MeteredBody {
             let (prompt, completion) = self.meter.totals();
             finish.record(code, prompt, completion, self.meter.ttft());
             drop(guard);
+            if let Some(mut c) = self.tap.take() {
+                c.duration_s = finish.started.elapsed().as_secs_f64();
+                c.ttft_s = self.meter.ttft();
+                c.status = code;
+                c.sse = self.sse;
+                c.complete = self.ended && !self.cut;
+                finish.m.trace.submit(*c);
+            }
         }
     }
 }
@@ -525,14 +577,31 @@ impl Body for MeteredBody {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
                     this.meter.feed(data);
+                    if let Some(c) = this.tap.as_mut() {
+                        if c.response.len() + data.len() > trace::RESPONSE_CAP {
+                            c.truncated = true;
+                        } else {
+                            c.response.extend_from_slice(data);
+                        }
+                    }
+                }
+                if this.inner.is_end_stream() {
+                    this.ended = true;
                 }
             }
             Poll::Ready(Some(Err(_))) if this.sse => {
-                this.finish();
                 this.cut = true;
+                this.finish();
                 return Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(this.cut_event)))));
             }
-            Poll::Ready(None) | Poll::Ready(Some(Err(_))) => this.finish(),
+            Poll::Ready(None) => {
+                this.ended = true;
+                this.finish();
+            }
+            Poll::Ready(Some(Err(_))) => {
+                this.cut = true;
+                this.finish();
+            }
             Poll::Pending => {}
         }
         polled
