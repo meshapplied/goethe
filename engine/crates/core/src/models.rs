@@ -99,7 +99,8 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 verdict,
             });
         }
-        if let Some(view) = view.as_ref().filter(|v| !installed.iter().any(|i| i.id == crate::engine_cmd::NINFER_ID)) {
+        let missing = !installed.iter().any(|i| i.id == crate::engine_cmd::NINFER_ID);
+        if let Some(view) = view.as_ref().filter(|_| missing) {
             if let Some(row) = crate::recommend::ninfer_row(view) {
                 rows.push(ModelRow {
                     id: row.model_id,
