@@ -99,6 +99,18 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 verdict,
             });
         }
+        if let Some(view) = view.as_ref().filter(|v| !installed.iter().any(|i| i.id == crate::engine_cmd::NINFER_ID)) {
+            if let Some(row) = crate::recommend::ninfer_row(view) {
+                rows.push(ModelRow {
+                    id: row.model_id,
+                    status: "available".to_string(),
+                    gb: row.vram_per_gpu_gb * row.tp as f64,
+                    fit: Verdict::Fits { per_gpu: row.vram_per_gpu_gb, total: row.vram_per_gpu_gb * row.tp as f64 }.label(),
+                    custom: None,
+                    verdict: Verdict::Fits { per_gpu: row.vram_per_gpu_gb, total: row.vram_per_gpu_gb * row.tp as f64 },
+                });
+            }
+        }
     }
     if json {
         println!("{}", serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?);

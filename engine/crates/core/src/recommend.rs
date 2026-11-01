@@ -308,7 +308,7 @@ pub fn ninfer_profile() -> RegistryModel {
     .expect("ninfer profile")
 }
 
-fn ninfer_row(view: &View) -> Option<RecommendedModel> {
+pub fn ninfer_row(view: &View) -> Option<RecommendedModel> {
     // Only sm 12.0 and 12.1. model_runs_on would also offer this row to data-center Blackwell.
     let blackwell = view.hw.gpus.iter().any(|g| {
         let cc = g.compute_capability.as_str();
