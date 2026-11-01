@@ -9,13 +9,12 @@
       "kv_elems_per_token": 32768,
       "min_total_vram_gb": null,
       "supported_sm": [
-        "8.6",
         "12.0",
         "12.1"
       ],
-      "default_ctx": null,
-      "max_ctx": 262144,
-      "default_max_conc": null,
+      "default_ctx": 100000,
+      "max_ctx": 100000,
+      "default_max_conc": 4,
       "default_tp": null,
       "num_attention_heads": 24,
       "num_kv_heads": 4,
@@ -29,7 +28,7 @@
       ],
       "runtime": "sglang",
       "manual_download": true,
-      "description": "Qwen3.8 27B, compressed-tensors NVFP4/FP8 with FP8 KV scales. The Hub repo has no weight files yet: install a local copy with goethe install --model <dir> --name meshapplied/Qwen3.8-27B-NVFP4-NInfer."
+      "description": "Qwen3.8 27B NVFP4 served by NInfer. goethe install downloads neroued/Qwen3.8-27B-nvfp4-NInfer file qwen3_8_27b_nvfp4.ninfer."
     },
     {
       "id": "meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest",

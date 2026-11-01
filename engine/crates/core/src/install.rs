@@ -148,7 +148,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         .and_then(|r| find_model(&r, &opts.model_id).cloned());
     let card_dir = model_dir(home, &opts.model_id);
     if opts.model_id == crate::engine_cmd::NINFER_ID {
-        let file = crate::engine_cmd::find_ninfer(&card_dir)?;
+        let file = crate::engine_cmd::acquire_ninfer(&card_dir)?;
         fs::create_dir_all(&card_dir).map_err(|e| e.to_string())?;
         let dest = card_dir.join(crate::engine_cmd::NINFER_FILE);
         if fs::canonicalize(&dest).ok().as_deref() != Some(file.as_path()) {
@@ -157,14 +157,16 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             }
             std::os::unix::fs::symlink(&file, &dest).map_err(|e| format!("link {}: {e}", dest.display()))?;
         }
-        let mut entry = entry;
-        if let Some(e) = entry.as_mut() {
-            e.runtime = Some("ninfer".into());
+        let mut profile = crate::recommend::ninfer_profile();
+        if let Some(e) = entry {
+            profile.description = e.description;
+            profile.license = e.license;
+            profile.family = e.family;
         }
         return Ok(Target {
             model_id: opts.model_id.clone(),
             card_dir,
-            entry,
+            entry: Some(profile),
             managed: false,
             source_dir: file.parent().map(|p| p.to_path_buf()),
             ternary: None,

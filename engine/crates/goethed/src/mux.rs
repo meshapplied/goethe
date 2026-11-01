@@ -434,6 +434,7 @@ async fn route_post(
     let ids: Vec<&str> = live.iter().map(|r| r.instance_id.as_str()).collect();
     let route = live[guard.pick(&ids).unwrap_or(0)].clone();
     let stream = matches!(head.stream, Some(Value::Bool(true)));
+    let body = prepare_body(path, body);
     let tap = snap.trace().records(&key.key_id).then(|| api_tail(path)).filter(|t| TraceApi::from_path(t).is_some()).map(|t| {
         let cfg = snap.trace();
         Box::new(Capture {
@@ -467,6 +468,28 @@ fn session_hint(headers: &HeaderMap) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_graphic()))
         .map(str::to_string)
+}
+
+fn prepare_body(path: &str, body: Bytes) -> Bytes {
+    // Anthropic rejects thinking budgets under 1024. Raise only that field; every other body is unchanged.
+    if !is_anthropic(path) {
+        return body;
+    }
+    let Ok(mut v) = serde_json::from_slice::<Value>(&body) else {
+        return body;
+    };
+    let Some(budget) = v.get("thinking").and_then(|t| t.get("budget_tokens")).and_then(|n| n.as_u64()) else {
+        return body;
+    };
+    if budget >= 1024 {
+        return body;
+    }
+    if let Some(t) = v.get_mut("thinking") {
+        if let Some(obj) = t.as_object_mut() {
+            obj.insert("budget_tokens".to_string(), json!(1024));
+        }
+    }
+    Bytes::from(serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1244,5 +1267,69 @@ mod tests {
         let minted = request_id(&h);
         assert!(minted.starts_with("req-") && minted.len() == 28, "{minted}");
         assert_ne!(request_id(&HeaderMap::new()), minted);
+    }
+
+    #[test]
+    fn anthropic_budget_below_1024_is_raised_and_tools_stay() {
+        let raw = concat!(
+            r#"{"model":"m","thinking":{"type":"enabled","budget_tokens":128},"#,
+            r#""tools":[{"name":"ping"}],"tool_choice":{"type":"tool","name":"ping"}}"#
+        )
+        .as_bytes();
+        let out = prepare_body("/v1/messages", Bytes::from_static(raw));
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["thinking"]["budget_tokens"], 1024);
+        assert_eq!(v["tools"][0]["name"], "ping");
+        assert_eq!(v["tool_choice"]["name"], "ping");
+        let high = br#"{"thinking":{"budget_tokens":1024},"tools":[{"name":"ping"}]}"#;
+        assert_eq!(prepare_body("/v1/messages", Bytes::from_static(high)).as_ref(), &high[..]);
+        let openai = br#"{"tools":[{"type":"function","function":{"name":"ping"}}]}"#;
+        assert_eq!(prepare_body("/v1/chat/completions", Bytes::from_static(openai)).as_ref(), &openai[..]);
+    }
+
+    #[tokio::test]
+    async fn proxied_openai_body_keeps_tools() {
+        let dir = std::env::temp_dir().join(format!("goethe-mux-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let seen_task = seen.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let io = TokioIo::new(stream);
+            let svc = service_fn(move |req: Request<Incoming>| {
+                let seen_task = seen_task.clone();
+                async move {
+                    let bytes = req.into_body().collect().await.unwrap().to_bytes();
+                    let mut slot = seen_task.lock().unwrap();
+                    slot.clear();
+                    slot.extend_from_slice(&bytes);
+                    let reply = b"{\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}";
+                    Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(reply))))
+                }
+            });
+            let _ = http1::Builder::new().serve_connection(io, svc).await;
+        });
+        tokio::task::yield_now().await;
+        let mux = Box::leak(Box::new(Mux {
+            cache: GatewayCache::open(&dir),
+            client: upstream_client(),
+            max_body: 8 << 20,
+            rpm: Mutex::new(HashMap::new()),
+            ready: Mutex::new(HashMap::new()),
+            trace: Recorder::start(&dir),
+        }));
+        let route = Route { instance_id: "i".into(), port, engine_key: None, draining: false };
+        let raw = br#"{"model":"m","tools":[{"type":"function","function":{"name":"ping"}}]}"#;
+        let body = prepare_body("/v1/chat/completions", Bytes::from_static(raw));
+        assert_eq!(body.as_ref(), &raw[..]);
+        let guard = inflight::track("m");
+        let finish = Finish { m: mux, label: "m".into(), key_id: "k".into(), started: Instant::now() };
+        let resp = proxy(mux, "/v1/chat/completions", &route, body, "req-1", false, guard, finish, None).await;
+        let _ = resp.into_body().collect().await.unwrap();
+        let recorded = seen.lock().unwrap().clone();
+        let v: Value = serde_json::from_slice(&recorded).unwrap();
+        assert_eq!(v["tools"][0]["function"]["name"], "ping");
     }
 }

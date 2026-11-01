@@ -199,6 +199,10 @@ pub fn run(json_out: bool) -> Result<(), String> {
         return Ok(());
     }
     println!("{}\n", view.free_text());
+    if let Some(item) = out.recommended.iter().find(|m| m.model_id == crate::engine_cmd::NINFER_ID) {
+        println!("{}  ctx {}  concurrency {}", item.model_id, item.ctx, item.max_conc);
+        println!();
+    }
     if out.recommended.is_empty() {
         print!("{}", crate::term::commands("No catalog model fits these GPUs. See why with:", &["goethe models"]));
         return Ok(());
@@ -275,7 +279,56 @@ pub fn recommend(home: &Path, view: &View, reg: &Registry) -> RecommendOutput {
             Err(why) => out.excluded.push(excluded(format!("does not fit the allowed GPUs: {why}"))),
         }
     }
+    if !out.recommended.iter().any(|m| m.model_id == crate::engine_cmd::NINFER_ID) {
+        if let Some(row) = ninfer_row(view) {
+            out.recommended.insert(0, row);
+        }
+    }
     out
+}
+
+pub fn ninfer_profile() -> RegistryModel {
+    serde_json::from_value(serde_json::json!({
+        "id": crate::engine_cmd::NINFER_ID,
+        "static_vram_gb": 23.566,
+        "kv_elems_per_token": 32768,
+        "supported_sm": ["12.0", "12.1"],
+        "default_ctx": crate::engine_cmd::NINFER_CTX,
+        "max_ctx": crate::engine_cmd::NINFER_CTX,
+        "default_max_conc": crate::engine_cmd::NINFER_MAX_CONC,
+        "default_tp": 1,
+        "num_attention_heads": 24,
+        "num_kv_heads": 4,
+        "attention": "hybrid",
+        "kv_cache_dtype": "fp8_e4m3",
+        "runtime": "ninfer",
+        "manual_download": true,
+        "download_gb": 23.7
+    }))
+    .expect("ninfer profile")
+}
+
+fn ninfer_row(view: &View) -> Option<RecommendedModel> {
+    // Only sm 12.0 and 12.1. model_runs_on would also offer this row to data-center Blackwell.
+    let blackwell = view.hw.gpus.iter().any(|g| {
+        let cc = g.compute_capability.as_str();
+        cc == "12.0" || cc == "12.1"
+    });
+    if !blackwell {
+        return None;
+    }
+    let model = ninfer_profile();
+    let input = registry_input(&model);
+    let f = view.fit(&model.id, &input, Some(1)).ok()?;
+    Some(RecommendedModel {
+        model_id: model.id,
+        tp: f.tp as u64,
+        gpus: f.gpus,
+        ctx: f.ctx,
+        max_conc: f.max_conc,
+        vram_per_gpu_gb: f.need.total(),
+        note: None,
+    })
 }
 
 fn exclusion_reason(model: &RegistryModel, sm_set: &[String], total_gb: f64) -> Option<String> {
@@ -384,7 +437,7 @@ mod tests {
         };
         let out = recommend(std::path::Path::new("/none"), &v, &reg);
         let ids: Vec<&str> = out.recommended.iter().map(|r| r.model_id.as_str()).collect();
-        assert_eq!(ids, vec!["meshapplied/open"]);
+        assert_eq!(ids, vec![crate::engine_cmd::NINFER_ID, "meshapplied/open"]);
         assert!(out.excluded.iter().all(|e| !e.model_id.ends_with("manual") && !e.model_id.ends_with("gated")));
         assert!(out.excluded.iter().any(|e| e.model_id == "meshapplied/huge" && e.reason.contains("missing")));
     }
@@ -465,5 +518,25 @@ mod tests {
         assert!(line.contains("23.4 GB"), "{line}");
         let big = reg.models.iter().find(|m| m.id == "Qwen/Qwen3.8-27B").unwrap();
         assert!(preview(home.path(), big).is_err());
+    }
+
+    fn single_gpu(cc: &str) -> View {
+        let mut g = gpu(0, 31, false);
+        g.vram_total_mb = 32607;
+        g.vram_free_mb = 32000;
+        g.vram_used_mb = 607;
+        g.compute_capability = cc.into();
+        view(vec![g])
+    }
+
+    #[test]
+    fn a_5090_lists_the_ninfer_profile_first_and_ampere_does_not() {
+        let home = tempfile::tempdir().unwrap();
+        let reg = crate::registry::bundled().unwrap();
+        let first = &recommend(home.path(), &single_gpu("12.0"), &reg).recommended[0];
+        assert_eq!(first.model_id, crate::engine_cmd::NINFER_ID);
+        assert_eq!((first.ctx, first.max_conc), (100_000, 4));
+        let out = recommend(home.path(), &single_gpu("8.6"), &reg);
+        assert!(out.recommended.iter().all(|m| m.model_id != crate::engine_cmd::NINFER_ID));
     }
 }
