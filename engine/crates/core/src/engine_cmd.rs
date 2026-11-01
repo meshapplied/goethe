@@ -375,12 +375,12 @@ fn write_patch_kit() -> Result<PathBuf, String> {
     let root = ninfer_cache_file()?.parent().and_then(|p| p.parent()).ok_or("no nvfp4 cache")?.join("patchkit");
     let patches = root.join("patches");
     std::fs::create_dir_all(&patches).map_err(|e| format!("{}: {e}", patches.display()))?;
-    std::fs::write(root.join("NINFER_PIN"), include_str!("../../../../nvfp4-kernels/NINFER_PIN")).map_err(|e| e.to_string())?;
+    std::fs::write(root.join("NINFER_PIN"), include_str!("../../../packaging/nvfp4-patch/NINFER_PIN")).map_err(|e| e.to_string())?;
     let script = patches.join("apply_head.py");
-    std::fs::write(&script, include_str!("../../../../nvfp4-kernels/patches/apply_head.py")).map_err(|e| e.to_string())?;
-    std::fs::write(patches.join("head_swap.json"), include_str!("../../../../nvfp4-kernels/patches/head_swap.json"))
+    std::fs::write(&script, include_str!("../../../packaging/nvfp4-patch/patches/apply_head.py.txt")).map_err(|e| e.to_string())?;
+    std::fs::write(patches.join("head_swap.json"), include_str!("../../../packaging/nvfp4-patch/patches/head_swap.json"))
         .map_err(|e| e.to_string())?;
-    std::fs::write(patches.join("head_rows.dat"), include_bytes!("../../../../nvfp4-kernels/patches/head_rows.dat"))
+    std::fs::write(patches.join("head_rows.dat"), include_bytes!("../../../packaging/nvfp4-patch/patches/head_rows.dat"))
         .map_err(|e| e.to_string())?;
     Ok(script)
 }
