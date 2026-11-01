@@ -13,7 +13,7 @@ goethe install --model meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest --load
 | [`meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest`](https://huggingface.co/meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest) | Qwen3.8 Flash-Next with NVFP4 experts and a built-in speculative drafter | One 96 GB Blackwell GPU |
 | [`meshapplied/Qwen3.8-Flash-Next-Ternary-Latest`](https://huggingface.co/meshapplied/Qwen3.8-Flash-Next-Ternary-Latest) | Qwen3.8 Flash-Next with ternary experts | Two 96 GB Blackwell GPUs |
 | [`meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest`](https://huggingface.co/meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest) | DeepSeek-V4.1-Flash with ternary experts | Four 96 GB Blackwell GPUs |
-| [`meshapplied/Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer) | Qwen3.8-27B in NVFP4 | 32 GB or larger GPUs; the weights are not on the Hub yet |
+| [`meshapplied/Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer) | Qwen3.8-27B in NVFP4 | 32 GB Blackwell. Weights: [`neroued/Qwen3.8-27B-nvfp4-NInfer`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) file `qwen3_8_27b_nvfp4.ninfer` |
 
 `goethe recommend` shows which of them fit your GPUs. Each model's card on Hugging Face has its full results.
 

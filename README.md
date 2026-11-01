@@ -38,6 +38,8 @@ goethe key --create my-laptop        # one key per app or person
 goethe api                           # the address to give your apps
 ```
 
+On a 32 GB Blackwell GPU, `goethe recommend` lists `meshapplied/Qwen3.8-27B-NVFP4-NInfer` first.
+
 Anything that speaks the OpenAI, Anthropic or LiteLLM API can use it right away, all at the same address: the OpenAI and Anthropic SDKs, LiteLLM, LangChain, LlamaIndex, Open WebUI, coding assistants, or plain `curl`.
 
 ```python

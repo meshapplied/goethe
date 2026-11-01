@@ -1183,6 +1183,15 @@ pub fn handle_ps() -> Result<Value, (i32, String)> {
         if let Some(mid) = v.get("model_id").and_then(|x| x.as_str()).map(str::to_string) {
             v["tokens_per_s_1m"] = json!(crate::metrics::model_tokens_per_s_1m(&mid));
         }
+        if let Some(id) = v.get("instance_id").and_then(|x| x.as_str()) {
+            let path = home.join("logs").join(format!("{id}.requests.jsonl"));
+            if let Some(done) = crate::engine_cmd::last_request_done(&path) {
+                v["prefix_cache_hit_tokens"] = json!(done.prefix_cache_hit_tokens);
+                v["prompt_tokens"] = json!(done.prompt_tokens);
+                v["computed_prefill_tokens"] = json!(done.computed_prefill_tokens);
+                v["tool_call_count"] = json!(done.tool_call_count);
+            }
+        }
         if v["status"] == "RESTARTING" {
             let at = v["slot_key"].as_str().and_then(|sk| next_attempts().get(sk).copied());
             v["next_attempt_at"] = json!(at);

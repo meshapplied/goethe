@@ -1296,7 +1296,7 @@ fn print_ps_table(rows: &[Value]) {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
     let mut table = goethe_core::term::Table::new(&[
-        "INSTANCE", "MODEL", "SLOT", "STATUS", "GPUS", "PORT", "VRAM_GB", "RESTARTS", "IN_FLIGHT", "TOK_PER_S",
+        "INSTANCE", "MODEL", "SLOT", "STATUS", "GPUS", "PORT", "VRAM_GB", "RESTARTS", "IN_FLIGHT", "TOK_PER_S", "PREFIX",
     ]);
     for row in rows {
         let inst = row.get("instance_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -1315,6 +1315,13 @@ fn print_ps_table(rows: &[Value]) {
             .get("tokens_per_s_1m")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
+        let prefix = match (
+            row.get("prefix_cache_hit_tokens").and_then(|v| v.as_u64()),
+            row.get("prompt_tokens").and_then(|v| v.as_u64()),
+        ) {
+            (Some(hit), Some(prompt)) if prompt > 0 => format!("{:.0}%", 100.0 * hit as f64 / prompt as f64),
+            _ => "-".to_string(),
+        };
         table.row(vec![
             inst.to_string(),
             model.to_string(),
@@ -1326,6 +1333,7 @@ fn print_ps_table(rows: &[Value]) {
             restarts.to_string(),
             inflight.to_string(),
             format!("{tps:.1}"),
+            prefix,
         ]);
     }
     table.print();
