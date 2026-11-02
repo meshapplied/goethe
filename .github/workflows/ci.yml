@@ -104,6 +104,7 @@ jobs:
   package-smoke:
     runs-on: ubuntu-24.04
     needs: engine
+    if: ${{ github.event_name != 'workflow_call' }}
     steps:
       - uses: actions/checkout@v4
       - name: Patched SGLang source at the pinned commit
