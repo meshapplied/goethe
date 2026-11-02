@@ -6,6 +6,9 @@
 
 ## 0.1.7 (2026-10-30)
 
+- An RTX 5090 install gets the model that was measured on it: `goethe recommend` lists `meshapplied/Qwen3.8-27B-NVFP4-NInfer` first on a 32 GB Blackwell GPU at ctx 100000 and concurrency 4, `goethe models` lists it too, and `goethe install` curls the pinned `neroued/Qwen3.8-27B-nvfp4-NInfer` file, checks size and sha256, and patches the draft shortlist so tool calls are drafted. Before, the entry was marked as a manual download and recommend hid it.
+- Anthropic `thinking.budget_tokens` below 1024 is raised to 1024 at the gateway instead of being rejected; other fields are forwarded untouched.
+- `goethe ps` shows a `PREFIX` column from the engine's request log: the share of the last request's prompt that came from the prefix cache. NInfer is started with `--request-log-jsonl` for this.
 - Fixes from running 0.1.6 on an RTX 5090: the local NInfer model file is accepted, and `goethe load` no longer starts SGLang for it; the registry JSON is checked against its signature; `goethe recommend` and `goethe models` agree on what fits; VPN mode keeps localhost access; the keyless TCP mode is gone; a `GOETHE_HOME` value can no longer end up in the service unit's ExecStartPost; the load wait mentions kernel builds; the README names a model `goethe recommend` lists.
 - Speculative-decoding models on hybrid (linear-attention) architectures load with default settings: memory planning counts the per-draft-token state SGLang keeps for every running request, and follows `--mamba-ssm-dtype`. Qwen3.8-Flash-Next NVFP4 failed to load on a 96 GB GPU before; its catalog entry now uses bf16 state.
 - Goethe learns a model's real weight size from the main model plus its drafter (before, only the last loaded part counted), also when a start fails, and retries at a reduced context or concurrency instead of giving up. Loads on GPUs named with `--gpu` also shrink context and concurrency to fit instead of refusing.
