@@ -28,6 +28,9 @@ permissions:
 jobs:
   guard:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       ci_green: ${{ steps.ci.outputs.green }}
@@ -47,9 +50,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=success&event=push&per_page=1" \
-              --jq '.total_count' | grep -qx 1; then
-            echo "green"
+          set -o pipefail
+          runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=success&event=push&per_page=1" --jq '.total_count')" || {
+            echo "::warning::could not ask for CI runs; the release runs CI itself"
+            echo "green=0" >>"$GITHUB_OUTPUT"
+            exit 0
+          }
+          if [[ "${runs}" == "1" ]]; then
+            echo "push CI already passed on $GITHUB_SHA"
             echo "green=1" >>"$GITHUB_OUTPUT"
           else
             echo "no successful push CI run for $GITHUB_SHA; the release runs CI itself"
@@ -135,8 +143,9 @@ jobs:
       - name: Verify the aarch64 binaries
         run: |
           cd engine/dist/cdn/bin/linux-aarch64
-          file goethe goethed | grep -q aarch64
-          ./uv --version
+          file goethe | grep -q "ARM aarch64"
+          file goethed | grep -q "ARM aarch64"
+          file uv | grep -q "ARM aarch64"
       - uses: actions/upload-artifact@v4
         with:
           name: bin-aarch64
@@ -157,9 +166,15 @@ jobs:
           path: cdn/bin/linux-aarch64
       - name: Combine both architectures into one package
         run: |
-          test -x cdn/bin/linux-aarch64/goethe && test -x cdn/bin/linux-aarch64/uv
-          file cdn/bin/linux-aarch64/goethe | grep -q aarch64
-          file cdn/bin/linux-x86_64/goethe | grep -q x86-64
+          test -x cdn/bin/linux-aarch64/goethe && test -x cdn/bin/linux-aarch64/goethed && test -x cdn/bin/linux-aarch64/uv
+          test -x cdn/bin/linux-x86_64/goethe && test -x cdn/bin/linux-x86_64/goethed
+          for b in goethe goethed uv; do
+            file "cdn/bin/linux-aarch64/$b" | grep -q "ARM aarch64" || { echo "aarch64 $b is not aarch64"; exit 1; }
+          done
+          for b in goethe goethed; do
+            file "cdn/bin/linux-x86_64/$b" | grep -q "x86-64" || { echo "x86_64 $b is not x86-64"; exit 1; }
+          done
+          cdn/bin/linux-x86_64/goethe --version
           sed -i 's/^arches=.*/arches=x86_64,aarch64/' cdn/BUILDINFO
           grep -q "arches=x86_64,aarch64" cdn/BUILDINFO
           grep -q "release=1" cdn/BUILDINFO
