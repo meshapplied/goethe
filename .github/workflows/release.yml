@@ -28,8 +28,12 @@ permissions:
 jobs:
   guard:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      ci_green: ${{ steps.ci.outputs.green }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,6 +44,24 @@ jobs:
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "::error::$GITHUB_SHA is not on main; releases are built from main only"
             exit 1
+          fi
+      - id: ci
+        name: CI already passed on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=success&event=push&per_page=1" --jq '.total_count')" || {
+            echo "::warning::could not ask for CI runs; the release runs CI itself"
+            echo "green=0" >>"$GITHUB_OUTPUT"
+            exit 0
+          }
+          if [[ "${runs}" == "1" ]]; then
+            echo "push CI already passed on $GITHUB_SHA"
+            echo "green=1" >>"$GITHUB_OUTPUT"
+          else
+            echo "no successful push CI run for $GITHUB_SHA; the release runs CI itself"
+            echo "green=0" >>"$GITHUB_OUTPUT"
           fi
       - id: version
         name: Version from Cargo.toml (and the tag, when there is one)
@@ -53,10 +75,12 @@ jobs:
 
   ci:
     needs: guard
+    if: ${{ needs.guard.outputs.ci_green != '1' }}
     uses: ./.github/workflows/ci.yml
 
   build:
     needs: [guard, ci]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -68,7 +92,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.13.1"
-      - name: Signed release build (x86_64 and aarch64)
+      - name: "Signed release build (x86_64: wheel, pyenv, binaries)"
         env:
           SGLANG_FORK_SRC: ${{ github.workspace }}/sglang-fork
           GOETHE_RELEASE_PUB_FPR: ${{ vars.GOETHE_RELEASE_PUB_FPR }}
@@ -78,8 +102,8 @@ jobs:
           umask 077
           printf '%s\n' "$SIGN_KEY_PEM" >"$key"
           trap 'shred -u "$key" 2>/dev/null || rm -f "$key"' EXIT
-          GOETHE_SIGN_KEY="$key" engine/packaging/build_cdn.sh --release
-      - name: Verify what will ship
+          GOETHE_SIGN_KEY="$key" engine/packaging/build_cdn.sh --release --arch x86_64
+      - name: Verify what will ship (x86_64)
         run: |
           cd engine/dist/cdn
           grep -q "release=1" BUILDINFO
@@ -92,21 +116,103 @@ jobs:
           [[ "$fpr" == "${{ vars.GOETHE_RELEASE_PUB_FPR }}" ]]
           bash -n install.sh
           bin/linux-x86_64/goethe --version
-          file bin/linux-aarch64/goethe | grep -q aarch64
+          bin/linux-x86_64/goethe --help >/dev/null
+          file bin/linux-x86_64/goethe | grep -q "x86-64"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cdn-x86_64
+          path: engine/dist/cdn
+          retention-days: 30
+
+  build-aarch64:
+    needs: [guard, ci]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Portable aarch64 binaries and uv
+        run: |
+          mkdir -p engine/dist/cdn/bin/linux-aarch64
+          curl -fsSL -o /tmp/uv.tar.gz \
+            "https://github.com/astral-sh/uv/releases/download/0.13.1/uv-aarch64-unknown-linux-gnu.tar.gz"
+          echo "9041c73c99fdc5892cf128140beb354eca9231d502068cc36e6cb53a8e59ad14  /tmp/uv.tar.gz" | sha256sum -c --quiet
+          tar -xzf /tmp/uv.tar.gz -C engine/dist/cdn/bin/linux-aarch64 --strip-components=1 "uv-aarch64-unknown-linux-gnu/uv"
+          chmod +x engine/dist/cdn/bin/linux-aarch64/uv
+          GOETHE_ARCH=aarch64 engine/packaging/build_bin.sh
+          cp engine/target-portable/aarch64-unknown-linux-gnu/release/goethe \
+            engine/target-portable/aarch64-unknown-linux-gnu/release/goethed engine/dist/cdn/bin/linux-aarch64/
+      - name: Verify the aarch64 binaries
+        run: |
+          cd engine/dist/cdn/bin/linux-aarch64
+          file goethe | grep -q "ARM aarch64"
+          file goethed | grep -q "ARM aarch64"
+          file uv | grep -q "ARM aarch64"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-aarch64
+          path: engine/dist/cdn/bin/linux-aarch64
+          retention-days: 30
+
+  merge:
+    needs: [guard, build, build-aarch64]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cdn-x86_64
+          path: cdn
+      - uses: actions/download-artifact@v4
+        with:
+          name: bin-aarch64
+          path: cdn/bin/linux-aarch64
+      - name: Combine both architectures into one package
+        run: |
+          test -x cdn/bin/linux-aarch64/goethe && test -x cdn/bin/linux-aarch64/goethed && test -x cdn/bin/linux-aarch64/uv
+          test -x cdn/bin/linux-x86_64/goethe && test -x cdn/bin/linux-x86_64/goethed
+          for b in goethe goethed uv; do
+            file "cdn/bin/linux-aarch64/$b" | grep -q "ARM aarch64" || { echo "aarch64 $b is not aarch64"; exit 1; }
+          done
+          for b in goethe goethed; do
+            file "cdn/bin/linux-x86_64/$b" | grep -q "x86-64" || { echo "x86_64 $b is not x86-64"; exit 1; }
+          done
+          cdn/bin/linux-x86_64/goethe --version
+          sed -i 's/^arches=.*/arches=x86_64,aarch64/' cdn/BUILDINFO
+          grep -q "arches=x86_64,aarch64" cdn/BUILDINFO
+          grep -q "release=1" cdn/BUILDINFO
+          rm -f cdn/SHA256SUMS cdn/SHA256SUMS.sig cdn/v1/registry.json.sig
+          cd cdn
+          find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
+            sha256sum "$f" | awk -v p="$f" '{print $1 "  " p}'
+          done >SHA256SUMS
+      - name: Sign the combined sums
+        env:
+          SIGN_KEY_PEM: ${{ secrets.GOETHE_SIGN_KEY }}
+        run: |
+          key="$RUNNER_TEMP/release.key"
+          umask 077
+          printf '%s\n' "$SIGN_KEY_PEM" >"$key"
+          trap 'shred -u "$key" 2>/dev/null || rm -f "$key"' EXIT
+          openssl dgst -sha256 -sign "$key" -out cdn/SHA256SUMS.sig cdn/SHA256SUMS
+          openssl dgst -sha256 -sign "$key" -out cdn/v1/registry.json.sig cdn/v1/registry.json
+          awk "/-----BEGIN PUBLIC KEY-----/,/-----END PUBLIC KEY-----/" cdn/install.sh \
+            | sed "s/^GOETHE_RELEASE_PUB_PEM='//; s/'\$//" >"$RUNNER_TEMP/embedded.pem"
+          openssl dgst -sha256 -verify "$RUNNER_TEMP/embedded.pem" -signature cdn/SHA256SUMS.sig cdn/SHA256SUMS
+          openssl dgst -sha256 -verify "$RUNNER_TEMP/embedded.pem" -signature cdn/v1/registry.json.sig cdn/v1/registry.json
+          (cd cdn && sha256sum -c --quiet SHA256SUMS)
       - name: Archive
-        run: tar -C engine/dist -cf - cdn | zstd -19 -T0 -o "goethe-cdn-${{ needs.guard.outputs.version }}.tar.zst"
+        run: tar -C "$GITHUB_WORKSPACE" -cf - cdn | zstd -19 -T0 -o "goethe-cdn-${{ needs.guard.outputs.version }}.tar.zst"
       - uses: actions/upload-artifact@v4
         with:
           name: goethe-cdn
           path: |
             goethe-cdn-*.tar.zst
-            engine/dist/cdn/install.sh
-            engine/dist/cdn/SHA256SUMS
-            engine/dist/cdn/SHA256SUMS.sig
+            cdn/install.sh
+            cdn/SHA256SUMS
+            cdn/SHA256SUMS.sig
           retention-days: 30
 
   install-smoke:
-    needs: build
+    needs: merge
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -127,7 +233,7 @@ jobs:
           '
 
   publish:
-    needs: [guard, build, install-smoke]
+    needs: [guard, merge, install-smoke]
     runs-on: ubuntu-24.04
     environment: release
     steps:
@@ -144,10 +250,10 @@ jobs:
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Goethe $VERSION" --generate-notes
           fi
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
-            goethe-cdn-*.tar.zst engine/dist/cdn/install.sh engine/dist/cdn/SHA256SUMS engine/dist/cdn/SHA256SUMS.sig
+            goethe-cdn-*.tar.zst cdn/install.sh cdn/SHA256SUMS cdn/SHA256SUMS.sig
 
   pages:
-    needs: [guard, publish]
+    needs: [guard, merge, publish]
     runs-on: ubuntu-24.04
     environment:
       name: github-pages
