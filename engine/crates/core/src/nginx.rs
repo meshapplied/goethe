@@ -396,7 +396,11 @@ fn write_configs(home: &Path, bin: &Path) -> Result<(), String> {
     if !keys.is_file() {
         write_private(&keys, b"")?;
     }
-    ensure_tls(home)?;
+    let san = san_extension(&tls_names());
+    let san_file = dir.join("certs/sans.txt");
+    let stale = fs::read_to_string(&san_file).map(|s| s.trim() != san).unwrap_or(true);
+    ensure_tls(home, &san, stale)?;
+    write_private(&san_file, san.as_bytes())?;
     let gateway = dir.join("goethe_gateway.conf");
     write_private(&gateway, render_gateway(home, bin)?.as_bytes())?;
     let main_conf = format!(
@@ -422,19 +426,44 @@ pub fn write_gateway_configs(home: &Path) -> Result<(), String> {
     write_configs(home, &active_bin(home))
 }
 
-fn ensure_tls(home: &Path) -> Result<(), String> {
-    // Self-signed certificate on first use; the private key is always 0600 in a 0700 directory.
+fn tls_names() -> Vec<String> {
+    // Loopback, this host's name, and anything in GOETHE_TLS_NAMES. A pod's public IP changes every start, so a name is what a client pins.
+    let mut names: Vec<String> = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
+    if let Ok(h) = fs::read_to_string("/etc/hostname") {
+        let h = h.trim();
+        if !h.is_empty() && h != "localhost" {
+            names.push(h.to_string());
+        }
+    }
+    names.extend(std::env::var("GOETHE_TLS_NAMES").unwrap_or_default().split(',').map(|n| n.trim().to_string()));
+    names.retain(|n| !n.is_empty());
+    names.dedup();
+    names
+}
+
+fn san_extension(names: &[String]) -> String {
+    let entries: Vec<String> = names
+        .iter()
+        .map(|n| if n.parse::<IpAddr>().is_ok() { format!("IP:{n}") } else { format!("DNS:{n}") })
+        .collect();
+    format!("subjectAltName={}", entries.join(","))
+}
+
+fn ensure_tls(home: &Path, san: &str, stale: bool) -> Result<(), String> {
+    // Self-signed certificate on first use, or again when the names changed; the key is always 0600 in a 0700 directory.
     let cert_dir = nginx_prefix(home).join("certs");
     private_dir(&cert_dir, false)?;
     let crt = cert_dir.join("server.crt");
     let key = cert_dir.join("server.key");
-    if !(crt.is_file() && key.is_file()) {
+    if stale || !(crt.is_file() && key.is_file()) {
         let status = Command::new("openssl")
             .args(["req", "-x509", "-newkey", "rsa:2048", "-keyout"])
             .arg(&key)
             .arg("-out")
             .arg(&crt)
             .args(["-days", "365", "-nodes", "-subj", "/CN=goethe-local"])
+            .arg("-addext")
+            .arg(san)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -1020,5 +1049,17 @@ mod tests {
         assert!(!cmdline_has_prefix(std::process::id() as i32, &home.join("nginx")));
         let (state, pgrp, start) = proc_stat(std::process::id() as i32).unwrap();
         assert!(state != 'Z' && pgrp > 0 && start > 0);
+    }
+
+    #[test]
+    fn the_certificate_names_loopback_and_accepts_extra_hosts() {
+        let san = san_extension(&["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string(), "box".to_string()]);
+        assert_eq!(san, "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1,DNS:box");
+        let names = tls_names();
+        assert!(names.contains(&"localhost".to_string()) && names.contains(&"127.0.0.1".to_string()));
+        assert!(names.iter().all(|n| !n.trim().is_empty()));
+        std::env::set_var("GOETHE_TLS_NAMES", "pod-8443.proxy.runpod.net, ,");
+        assert!(tls_names().contains(&"pod-8443.proxy.runpod.net".to_string()), "blank entries dropped");
+        std::env::remove_var("GOETHE_TLS_NAMES");
     }
 }
