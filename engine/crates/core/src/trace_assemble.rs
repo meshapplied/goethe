@@ -314,12 +314,20 @@ fn responses(events: &[Value]) -> Value {
                     items.insert(i, item.clone());
                 }
             }
-            "response.output_text.delta" => {
-                let item = items.entry(i).or_insert_with(|| json!({"type": "message", "role": "assistant", "content": []}));
+            kind @ ("response.output_text.delta" | "response.reasoning_text.delta") => {
+                let (item_type, part_type) = if kind == "response.output_text.delta" {
+                    (json!({"type": "message", "role": "assistant", "content": []}), "output_text")
+                } else {
+                    (json!({"type": "reasoning", "content": []}), "reasoning_text")
+                };
+                let item = items.entry(i).or_insert(item_type);
                 let at = e.get("content_index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                if let Value::Object(m) = &mut *item {
+                    m.entry("content").or_insert_with(|| json!([]));
+                }
                 if let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) {
                     while parts.len() <= at {
-                        parts.push(json!({"type": "output_text", "text": ""}));
+                        parts.push(json!({"type": part_type, "text": ""}));
                     }
                     if let Some(Value::Object(part)) = parts.get_mut(at) {
                         append(part, "text", delta);
@@ -503,6 +511,8 @@ mod tests {
     fn cut_responses_stream_keeps_the_partial_reply() {
         let raw = sse(&[
             json!({"type": "response.created", "response": {"id": "r1", "status": "in_progress", "output": []}}),
+            json!({"type": "response.output_item.added", "output_index": 2, "item": {"type": "reasoning"}}),
+            json!({"type": "response.reasoning_text.delta", "output_index": 2, "content_index": 0, "delta": "hmm"}),
             json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "message", "role": "assistant", "content": []}}),
             json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "Hel"}),
             json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "lo"}),
@@ -514,6 +524,7 @@ mod tests {
         assert_eq!(body["status"], "incomplete");
         assert_eq!(body["output"][0]["content"][0]["text"], "Hello");
         assert_eq!(body["output"][1]["arguments"], "{\"a");
+        assert_eq!(body["output"][2]["content"][0]["text"], "hmm");
         let done = sse(&[json!({"type": "response.created", "response": {"id": "r2", "output": []}}),
                          json!({"type": "response.completed", "response": {"id": "r2", "status": "completed", "output": [{"type": "message"}]}})]);
         assert_eq!(assemble(Api::Responses, true, &done)["status"], "completed");

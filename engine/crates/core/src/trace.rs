@@ -1392,6 +1392,32 @@ mod tests {
     }
 
     #[test]
+    fn a_partial_write_is_cut_back() {
+        // A real short write needs a file size limit, which applies to the whole process, so a child runs it.
+        if let Some(path) = std::env::var_os("TRACE_TEST_LIMITED_FILE") {
+            let path = PathBuf::from(path);
+            let limit = libc::rlimit { rlim_cur: 4096, rlim_max: 4096 };
+            unsafe {
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+            }
+            append_private(&path, &[1; 3000]).unwrap();
+            assert!(append_private(&path, &[2; 3000]).is_err());
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), 3000);
+            append_private(&path, &[3; 500]).unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), 3500);
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "trace::tests::a_partial_write_is_cut_back", "--nocapture"])
+            .env("TRACE_TEST_LIMITED_FILE", tmp.path().join("file"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    }
+
+    #[test]
     fn same_messages_to_another_model_start_their_own_session() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("traces");

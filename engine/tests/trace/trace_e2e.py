@@ -199,6 +199,36 @@ def check(cond: bool, what: str, failures: list) -> None:
         failures.append(what)
 
 
+def responses_conversation(gw: Gateway, key: str) -> bool:
+    """Responses API: a stateless tool loop, a stream, previous_response_id and a cut stream. False if not served."""
+    tool = {"type": "function", "name": "add", "description": "add two numbers", "parameters": {
+        "type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"]}}
+    base = {"model": gw.model, "max_output_tokens": 300}
+    items = [{"role": "user", "content": "Responses check: use add for 2 and 3, then state the result."}]
+    forced = {"type": "function", "name": "add"}
+    code, first = gw.post("/v1/responses", key, {**base, "input": items, "tools": [tool], "tool_choice": forced})
+    if code == 404:
+        return False
+    items = items + first["output"]
+    for o in first["output"]:
+        if o.get("type") == "function_call":
+            items.append({"type": "function_call_output", "call_id": o["call_id"], "output": "5"})
+    gw.post("/v1/responses", key, {**base, "input": items, "tools": [tool]})
+    gw.post("/v1/responses", key, {**base, "input": "Responses stream check: name one color.", "stream": True})
+    _, a = gw.post("/v1/responses", key, {**base, "input": "Responses state check: remember the word lime."})
+    gw.post("/v1/responses", key, {**base, "input": "Which word?", "previous_response_id": a["id"]})
+    req = urllib.request.Request(gw.url + "/v1/responses", method="POST", data=json.dumps(
+        {**base, "input": "Responses cut check: write a long poem about rivers.", "max_output_tokens": 800,
+         "stream": True}).encode(), headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, context=CTX, timeout=600) as r:
+        seen = 0
+        for raw in r:
+            seen += b"_text.delta" in raw and raw.startswith(b"data:")
+            if seen > 12:
+                break
+    return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="https://100.70.155.114:8080")
@@ -245,7 +275,8 @@ def main() -> int:
             expect.append((f"anthropic-{i}", sent))
         code, _ = gw.post("/v1/completions", key_a, {"model": gw.model, "prompt": "The capital of France is",
                                                        "max_tokens": 8})
-        check(code == 200, "completions call works", failures)
+        check(code in (200, 404), f"completions call answers ({code}; 404 when the engine has no such route)", failures)
+        responses_served = responses_conversation(gw, key_a)
         gw.post("/v1/embeddings", key_a, {"model": gw.model, "input": "not traced"})
         gw.disconnect_mid_stream(key_a, [{"role": "user", "content": "Write a 1500 word essay about rivers."}])
         time.sleep(2)
@@ -323,7 +354,7 @@ def main() -> int:
     b_turns = [t for t in by_key.get(ids["trace-b"], [])]
     check(len(b_turns) == 1 and "every key is on" in json.dumps(b_turns[0]["messages"]),
           "key b recorded only while every key was on", failures)
-    check(not any(t["api"] not in ("chat.completions", "messages", "completions") for t in turns.values()),
+    check(not any(t["api"] not in ("chat.completions", "messages", "completions", "responses") for t in turns.values()),
           "embeddings are not traced", failures)
     check(all("after off" not in json.dumps(t.get("messages")) for t in turns.values()), "nothing after off", failures)
 
@@ -370,13 +401,45 @@ def main() -> int:
     cut = [t for t in a_turns if "1500 word essay" in json.dumps(t.get("messages"))]
     check(len(cut) == 1 and cut[0]["response"]["complete"] is False and cut[0]["reply_hash"] is None,
           "a client disconnect is recorded as incomplete", failures)
-    complete = [t for t in a_turns if t not in cut]
+    resp = [t for t in a_turns if t["api"] == "responses"]
+    if responses_served:
+        def said(text: str) -> list[dict]:
+            return [t for t in resp if text in json.dumps(t.get("messages"))]
+
+        loop = sorted(said("use add for 2 and 3") + [t for t in resp if "function_call_output" in
+                                                     json.dumps(t.get("messages"))], key=lambda t: t["started_at"])
+        check(len(loop) == 2 and loop[1]["parent"] == {"turn_id": loop[0]["turn_id"], "with_reply": True}
+              and len(loop[1]["messages"]) == 1 and loop[1]["session_id"] == loop[0]["session_id"],
+              "Responses tool loop links and stores only new items", failures)
+        rebuilt = trace_reader.history(turns, loop[1]) if len(loop) == 2 else []
+        check("function_call" in {i.get("type") for i in rebuilt}, "Responses history rebuilds with its tool call",
+              failures)
+        follow = [t for t in resp if t.get("previous_response_id")]
+        check(len(follow) == 1 and follow[0]["parent"] and follow[0]["parent"]["with_reply"]
+              and "remember the word lime" in json.dumps(trace_reader.history(turns, follow[0])),
+              "previous_response_id links to its turn", failures)
+        stream = said("name one color")
+        check(len(stream) == 1 and stream[0]["response"]["stream"] and stream[0]["reply_hash"]
+              and stream[0]["response"]["body"].get("status") == "completed", "Responses stream is rebuilt", failures)
+        rcut = said("long poem about rivers")
+        check(len(rcut) == 1 and rcut[0]["response"]["complete"] is False and rcut[0]["reply_hash"] is None
+              and rcut[0]["response"]["body"].get("status") == "incomplete"
+              and "text" in json.dumps(rcut[0]["response"]["body"].get("output")),
+              "a cut Responses stream keeps its partial reply", failures)
+        cut = cut + rcut
+    else:
+        print("skip Responses checks: this engine has no /v1/responses")
+    missing_route = [t for t in a_turns if t["api"] == "completions" and t["response"]["status"] == 404]
+    missing_route += [t for t in a_turns if t.get("previous_response_id") and t["response"]["status"] == 400]
+    complete = [t for t in a_turns if t not in cut and t not in missing_route]
     check(all(t["response"]["complete"] and t["response"]["status"] == 200 for t in complete),
           "every other turn is complete with status 200", failures)
     models = json.loads((folder / "models.json").read_text())
     fps = {t["model_fingerprint"] for t in turns.values()}
-    check(len(fps) == 1 and fps <= set(models) and models[next(iter(fps))]["files"].get("config.json"),
-          "model fingerprint recorded with file hashes in models.json", failures)
+    entry = models[next(iter(fps))] if len(fps) == 1 and fps <= set(models) else {}
+    check(bool(entry.get("runtime") and entry.get("goethe_version")
+               and (entry["files"].get("config.json") or (entry["weights"] or {}).get("samples"))),
+          "model fingerprint recorded with hashes, runtime and version in models.json", failures)
     sessions = [json.loads(line) for line in (folder / "sessions.jsonl").read_text().splitlines()]
     check({s["session_id"] for s in sessions} == {t["session_id"] for t in turns.values()},
           "sessions.jsonl lists every session", failures)

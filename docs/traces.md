@@ -28,7 +28,7 @@ traces/
   v1/<model>/<YYYY-MM-DD>/<start>_<session_id>.jsonl.gz
 ```
 
-A session file holds one JSON object per turn, one per line. Each turn is appended as its own gzip member, so `zcat`, Python's `gzip` and any multi-member gzip reader read the whole file. A crash mid-write can leave a torn last member: keep the turns read before it. The session files are the record; the manifest totals are a summary that can lag after a crash. `v1` is the schema version. A future format goes next to it, not over it.
+A session file holds one JSON object per turn, one per line. Each turn is appended as its own gzip member, so `zcat`, Python's `gzip` and any multi-member gzip reader read the whole file. A crash mid-write can leave a torn last member: keep the turns read before it. The session files are the record. The manifest totals, and so the turn count in `goethe trace`, are a summary: after a crash they can stay a few seconds of turns short. `v1` is the schema version. A future format goes next to it, not over it.
 
 ## Sessions
 
@@ -68,7 +68,7 @@ Only complete replies with status 200 get a `reply_hash`, so only they can be co
 
 ## Rebuilding a turn
 
-The full message list of a turn is: the parent's full list, then the parent's reply if `with_reply` is true, then this turn's `messages`. Its length before the new messages equals `messages_from`. The parent's reply is the model's own output (with its reasoning and tool-call ids), not the client's resent copy; the two match in role, text and tool calls. Request parameters follow `params_from_parent` up to the first turn that has `params`. For `completions`, `params` holds the whole request and there is no parent. For `responses`, the parent's reply is its `output` items; `messages_from` does not count reasoning items, which clients often drop, and `previous_response_id` links to the turn that produced that id. An id Goethe no longer knows (older than 24 hours, or from before a restart) starts a new session, and the turn keeps the id so the history can still be followed.
+The full message list of a turn is: the parent's full list, then the parent's reply if `with_reply` is true, then this turn's `messages`. Its length before the new messages equals `messages_from`. The parent's reply is the model's own output (with its reasoning and tool-call ids), not the client's resent copy; the two match in role, text and tool calls. Request parameters follow `params_from_parent` up to the first turn that has `params`. For `completions`, `params` holds the whole request and there is no parent. For `responses`, the parent's reply is its `output` items; `messages_from` does not count reasoning items, which clients often drop, and `previous_response_id` links to the turn that produced that id. SGLang rejects `previous_response_id` unless it runs with `--enable-response-store`; the rejected request is recorded with its status. An id Goethe no longer knows (older than 24 hours, or from before a restart) starts a new session, and the turn keeps the id so the history can still be followed.
 
 `engine/tests/trace/trace_reader.py` is a reference reader: it loads a folder, rebuilds any turn's history and params, and groups alternative replies.
 
