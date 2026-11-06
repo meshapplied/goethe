@@ -220,6 +220,7 @@ async fn main() {
         mux.abort();
         drain_mux(&home).await;
     }
+    goethe_core::trace::flush(Duration::from_secs(5));
     shutdown::shutdown_daemon(&home, &sock, keep);
     std::process::exit(exit_code);
 }
