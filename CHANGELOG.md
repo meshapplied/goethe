@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.1.8 (2026-11-06)
 
 - `goethe trace on|off [--key ... | --all-keys]` records every chat, Anthropic Messages, completions and Responses request with its reply, for all models and instances, into `~/.goethe/traces` (or `--dir`), as a corpus for training later. Turns are grouped into sessions: follow-ups store only their new messages, and regenerations are kept as alternative replies. Each turn names the exact model version that produced it, and streamed replies are stored in their non-streaming shape. A manifest, a session index and a recording history describe the folder. `off` keeps the chosen keys for the next `on`. `goethe trace` shows the size. Recording turns itself off at a size limit (`--max-gb`, default 20 GB), pauses while the disk is low, and never slows a reply. The format is in `docs/traces.md`; `goethe uninstall` keeps the corpus, and `goethe remove --model` asks whether to delete that model's traces (`--delete-traces`, `--keep-traces`).
 - Traces work with any model and client: Responses requests link into sessions and store only new items, including `previous_response_id`; streams keep every field the engine sends, and a cut Responses stream keeps its partial reply. Model fingerprints cover the Goethe version, the runtime, more tokenizer files and single-file checkpoints such as NInfer's. Drop counters survive a restart, goethed writes queued turns before stopping, and a partial write can no longer hide later turns.
+- The gateway certificate now has subject alternative names (`localhost`, `127.0.0.1`, `::1`, the hostname and `GOETHE_TLS_NAMES`), so the `curl --cacert` command from `goethe api` verifies. It is regenerated only when those names change.
+- `engine/packaging/Dockerfile` builds a container image with the signed installer.
 
 ## 0.1.7 (2026-10-30)
 
