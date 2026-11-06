@@ -118,10 +118,13 @@ jobs:
           bin/linux-x86_64/goethe --version
           bin/linux-x86_64/goethe --help >/dev/null
           file bin/linux-x86_64/goethe | grep -q "x86-64"
+      # Artifacts do not keep file modes, so the executables travel inside a tar.
+      - name: Pack for the merge job
+        run: tar -C engine/dist -cf cdn-x86_64.tar cdn
       - uses: actions/upload-artifact@v4
         with:
           name: cdn-x86_64
-          path: engine/dist/cdn
+          path: cdn-x86_64.tar
           retention-days: 30
 
   build-aarch64:
@@ -147,10 +150,12 @@ jobs:
           file goethe | grep -q "ARM aarch64"
           file goethed | grep -q "ARM aarch64"
           file uv | grep -q "ARM aarch64"
+      - name: Pack for the merge job
+        run: tar -C engine/dist/cdn/bin -cf bin-aarch64.tar linux-aarch64
       - uses: actions/upload-artifact@v4
         with:
           name: bin-aarch64
-          path: engine/dist/cdn/bin/linux-aarch64
+          path: bin-aarch64.tar
           retention-days: 30
 
   merge:
@@ -161,15 +166,18 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: cdn-x86_64
-          path: cdn
       - uses: actions/download-artifact@v4
         with:
           name: bin-aarch64
-          path: cdn/bin/linux-aarch64
+      - name: Unpack both architectures
+        run: |
+          tar -xf cdn-x86_64.tar
+          tar -C cdn/bin -xf bin-aarch64.tar
       - name: Combine both architectures into one package
         run: |
-          test -x cdn/bin/linux-aarch64/goethe && test -x cdn/bin/linux-aarch64/goethed && test -x cdn/bin/linux-aarch64/uv
-          test -x cdn/bin/linux-x86_64/goethe && test -x cdn/bin/linux-x86_64/goethed
+          for f in cdn/bin/linux-{aarch64,x86_64}/{goethe,goethed,uv} cdn/pyenv/bootstrap.sh; do
+            test -x "$f" || { echo "$f is not executable"; exit 1; }
+          done
           for b in goethe goethed uv; do
             file "cdn/bin/linux-aarch64/$b" | grep -q "ARM aarch64" || { echo "aarch64 $b is not aarch64"; exit 1; }
           done
