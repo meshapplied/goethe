@@ -33,7 +33,7 @@ impl Api {
     }
 
     pub fn has_messages(self) -> bool {
-        matches!(self, Api::Chat | Api::Messages)
+        matches!(self, Api::Chat | Api::Messages | Api::Responses)
     }
 }
 
@@ -77,6 +77,20 @@ fn copy_head(out: &mut Map<String, Value>, e: &Value, keys: &[&str]) {
     }
 }
 
+fn merge_logprobs(choice: &mut Map<String, Value>, v: &Value) {
+    // Each stream event carries the log probabilities of its own tokens; the non-streaming shape has one list.
+    let Some(new) = v.get("content").and_then(Value::as_array) else {
+        choice.insert("logprobs".into(), v.clone());
+        return;
+    };
+    match choice.get_mut("logprobs").and_then(|l| l.get_mut("content")).and_then(Value::as_array_mut) {
+        Some(all) => all.extend(new.iter().cloned()),
+        None => {
+            choice.insert("logprobs".into(), v.clone());
+        }
+    }
+}
+
 fn chat(events: &[Value]) -> Value {
     // Deltas per choice index: text fields concatenate, tool calls merge by their own index.
     let mut out = Map::new();
@@ -102,18 +116,27 @@ fn chat(events: &[Value]) -> Value {
                 if let Some(r) = d.get("role").and_then(Value::as_str) {
                     msg.insert("role".into(), json!(r));
                 }
-                for field in ["content", "reasoning_content"] {
-                    if let Some(s) = d.get(field).and_then(Value::as_str) {
-                        append(msg, field, s);
+                for (field, v) in d.as_object().into_iter().flatten() {
+                    match v {
+                        _ if field == "role" || field == "tool_calls" => {}
+                        Value::String(s) => append(msg, field, s),
+                        Value::Null => {}
+                        other => {
+                            msg.insert(field.clone(), other.clone());
+                        }
                     }
                 }
                 for tc in d.get("tool_calls").and_then(Value::as_array).into_iter().flatten() {
                     merge_tool_call(msg, tc);
                 }
             }
-            for k in ["finish_reason", "matched_stop"] {
-                if let Some(v) = c.get(k).filter(|v| !v.is_null()) {
-                    ch.insert(k.into(), v.clone());
+            for (k, v) in c.as_object().into_iter().flatten() {
+                match (k.as_str(), v) {
+                    ("index" | "delta", _) | (_, Value::Null) => {}
+                    ("logprobs", _) => merge_logprobs(ch, v),
+                    _ => {
+                        ch.insert(k.clone(), v.clone());
+                    }
                 }
             }
         }
@@ -273,13 +296,99 @@ fn messages(events: &[Value]) -> Value {
 }
 
 fn responses(events: &[Value]) -> Value {
-    // The Responses API ends with an event carrying the whole response object.
-    events
-        .iter()
-        .rev()
-        .find_map(|e| e.get("response").filter(|r| r.is_object()))
-        .cloned()
-        .unwrap_or_else(|| json!({}))
+    // The Responses API ends with an event carrying the whole response object; a cut stream is rebuilt from its deltas.
+    let last = events.iter().rev().find(|e| e.get("response").is_some_and(Value::is_object));
+    let in_progress = |e: &&Value| matches!(e.get("type").and_then(Value::as_str), Some("response.created" | "response.in_progress"));
+    if let Some(r) = last.filter(|e| !in_progress(e)).and_then(|e| e.get("response")) {
+        return r.clone();
+    }
+    let mut items: BTreeMap<u64, Value> = BTreeMap::new();
+    for e in events {
+        let Some(i) = e.get("output_index").and_then(Value::as_u64) else {
+            continue;
+        };
+        let delta = e.get("delta").and_then(Value::as_str).unwrap_or("");
+        match e.get("type").and_then(Value::as_str).unwrap_or("") {
+            "response.output_item.added" | "response.output_item.done" => {
+                if let Some(item) = e.get("item") {
+                    items.insert(i, item.clone());
+                }
+            }
+            kind @ ("response.output_text.delta" | "response.reasoning_text.delta") => {
+                let (item_type, part_type) = if kind == "response.output_text.delta" {
+                    (json!({"type": "message", "role": "assistant", "content": []}), "output_text")
+                } else {
+                    (json!({"type": "reasoning", "content": []}), "reasoning_text")
+                };
+                let item = items.entry(i).or_insert(item_type);
+                let at = e.get("content_index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                if let Value::Object(m) = &mut *item {
+                    m.entry("content").or_insert_with(|| json!([]));
+                }
+                if let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) {
+                    while parts.len() <= at {
+                        parts.push(json!({"type": part_type, "text": ""}));
+                    }
+                    if let Some(Value::Object(part)) = parts.get_mut(at) {
+                        append(part, "text", delta);
+                    }
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                if let Some(Value::Object(item)) = items.get_mut(&i) {
+                    append(item, "arguments", delta);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = last.and_then(|e| e.get("response")).cloned().unwrap_or_else(|| json!({}));
+    if let Value::Object(m) = &mut out {
+        m.insert("status".into(), json!("incomplete"));
+        m.insert("output".into(), Value::Array(items.into_values().collect()));
+    }
+    out
+}
+
+pub fn request_items(api: Api, params: &mut Map<String, Value>) -> Vec<Value> {
+    // Take the history out of the request: messages, or Responses input with a plain string as one user message.
+    let field = if api == Api::Responses { "input" } else { "messages" };
+    match params.remove(field) {
+        Some(Value::Array(a)) => a,
+        Some(Value::String(s)) if api == Api::Responses => vec![json!({"type": "message", "role": "user", "content": s})],
+        _ => Vec::new(),
+    }
+}
+
+pub fn item_canonical(api: Api, item: &Value) -> Option<String> {
+    // One history element in canonical form. Responses reasoning items are skipped, as clients often drop them.
+    if api != Api::Responses {
+        return Some(canonical(item));
+    }
+    Some(match item.get("type").and_then(Value::as_str).unwrap_or("message") {
+        "reasoning" => return None,
+        "message" => canonical(item),
+        "function_call" => canonical(&json!({"role": "assistant", "tool_calls": [{"function": {
+            "name": item.get("name"), "arguments": item.get("arguments")}}]})),
+        "function_call_output" => canonical(&json!({"role": "tool", "content": item.get("output")})),
+        _ => {
+            let mut other = item.clone();
+            if let Value::Object(m) = &mut other {
+                m.remove("id");
+                m.remove("status");
+            }
+            sorted(&other).to_string()
+        }
+    })
+}
+
+pub fn reply_canonical(api: Api, body: &Value) -> Vec<String> {
+    // What a client appends to its history after this reply, element by element.
+    if api == Api::Responses {
+        let output = body.get("output").and_then(Value::as_array);
+        return output.into_iter().flatten().filter_map(|i| item_canonical(api, i)).collect();
+    }
+    reply_message(api, body).iter().map(canonical).collect()
 }
 
 pub fn reply_message(api: Api, body: &Value) -> Option<Value> {
@@ -381,6 +490,44 @@ mod tests {
         assert_eq!(msg["reasoning_content"], "think more");
         assert_eq!(msg["tool_calls"][0], json!({"id": "call_1", "type": "function", "function": {"name": "read", "arguments": "{\"path\": \"a\"}"}}));
         assert_eq!(body["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    #[test]
+    fn chat_stream_keeps_fields_of_any_model_or_engine() {
+        let raw = sse(&[
+            json!({"id": "c", "choices": [{"index": 0, "delta": {"role": "assistant", "reasoning": "a"}, "logprobs": {"content": [{"token": "x"}]}}]}),
+            json!({"id": "c", "choices": [{"index": 0, "delta": {"reasoning": "b", "content": null, "citations": [1]}, "logprobs": {"content": [{"token": "y"}]}, "stop_reason": 7}]}),
+        ]);
+        let body = assemble(Api::Chat, true, &raw);
+        let c = &body["choices"][0];
+        assert_eq!(c["message"]["reasoning"], "ab");
+        assert_eq!(c["message"]["citations"], json!([1]));
+        assert_eq!(c["message"]["content"], Value::Null);
+        assert_eq!(c["logprobs"]["content"], json!([{"token": "x"}, {"token": "y"}]));
+        assert_eq!(c["stop_reason"], 7);
+    }
+
+    #[test]
+    fn cut_responses_stream_keeps_the_partial_reply() {
+        let raw = sse(&[
+            json!({"type": "response.created", "response": {"id": "r1", "status": "in_progress", "output": []}}),
+            json!({"type": "response.output_item.added", "output_index": 2, "item": {"type": "reasoning"}}),
+            json!({"type": "response.reasoning_text.delta", "output_index": 2, "content_index": 0, "delta": "hmm"}),
+            json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "message", "role": "assistant", "content": []}}),
+            json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "Hel"}),
+            json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "lo"}),
+            json!({"type": "response.output_item.added", "output_index": 1, "item": {"type": "function_call", "name": "ls", "arguments": ""}}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 1, "delta": "{\"a"}),
+        ]);
+        let body = assemble(Api::Responses, true, &raw);
+        assert_eq!(body["id"], "r1");
+        assert_eq!(body["status"], "incomplete");
+        assert_eq!(body["output"][0]["content"][0]["text"], "Hello");
+        assert_eq!(body["output"][1]["arguments"], "{\"a");
+        assert_eq!(body["output"][2]["content"][0]["text"], "hmm");
+        let done = sse(&[json!({"type": "response.created", "response": {"id": "r2", "output": []}}),
+                         json!({"type": "response.completed", "response": {"id": "r2", "status": "completed", "output": [{"type": "message"}]}})]);
+        assert_eq!(assemble(Api::Responses, true, &done)["status"], "completed");
     }
 
     #[test]

@@ -28,3 +28,6 @@ docs/dev/
 
 # Modal PoC, kept local
 modal/
+
+# In-context learning prototype and eval, kept local
+engine/tests/icl/

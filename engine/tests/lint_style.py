@@ -10,7 +10,9 @@ import tokenize
 from pathlib import Path
 
 ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent)
-SKIP_DIRS = {"target", "target-portable", "dist", "build", "__pycache__", ".git", "node_modules", "experimental"}
+SKIP_DIRS = {
+    "target", "target-portable", "dist", "build", "__pycache__", ".git", "node_modules", "experimental", ".work",
+}
 SRC = {".py", ".rs", ".cu", ".cuh", ".cpp", ".h", ".sh", ".toml", ".conf", ".sql", ".tmpl", ".service"}
 BAD_CHARS = re.compile(
     "[\u2010-\u2015\u2212]|[\U0001F000-\U0001FFFF]|[\u2600-\u27BF]|[\u2B00-\u2BFF]"

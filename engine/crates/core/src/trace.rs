@@ -16,7 +16,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 pub const SCHEMA: u32 = 1;
@@ -35,6 +35,13 @@ const MODEL_FILES: &[&str] = &[
     "generation_config.json",
     "tokenizer_config.json",
     "tokenizer.json",
+    "tokenizer.model",
+    "tiktoken.model",
+    "vocab.json",
+    "merges.txt",
+    "added_tokens.json",
+    "special_tokens_map.json",
+    "preprocessor_config.json",
     "chat_template.jinja",
     "chat_template.json",
     "model.safetensors.index.json",
@@ -325,8 +332,14 @@ pub fn now_rfc3339() -> String {
 }
 
 fn append_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    // A partial write (disk full) is cut back, so a torn gzip member cannot hide the turns appended after it.
     let mut f = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
-    f.write_all(data)
+    let before = f.metadata()?.len();
+    let written = f.write_all(data);
+    if written.is_err() {
+        let _ = f.set_len(before);
+    }
+    written
 }
 
 fn write_private_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
@@ -379,8 +392,26 @@ pub struct Capture {
     pub truncated: bool,
 }
 
+enum Job {
+    Capture(Box<Capture>),
+    Flush(SyncSender<()>),
+}
+
+static WRITERS: Mutex<Vec<SyncSender<Job>>> = Mutex::new(Vec::new());
+
+pub fn flush(timeout: Duration) {
+    // Called on daemon shutdown: every queued turn is written and the manifest is current before the process exits.
+    let writers = WRITERS.lock().map(|w| w.clone()).unwrap_or_default();
+    for w in writers {
+        let (ack, done) = mpsc::sync_channel(1);
+        if w.send(Job::Flush(ack)).is_ok() {
+            let _ = done.recv_timeout(timeout);
+        }
+    }
+}
+
 pub struct Recorder {
-    tx: SyncSender<Capture>,
+    tx: SyncSender<Job>,
     dropped: Arc<AtomicU64>,
 }
 
@@ -392,17 +423,24 @@ impl Recorder {
         let mut writer = Writer::new(home, Arc::clone(&dropped));
         let _ = std::thread::Builder::new().name("goethe-trace".into()).spawn(move || loop {
             match rx.recv_timeout(MANIFEST_EVERY) {
-                Ok(c) => writer.handle(c),
+                Ok(Job::Capture(c)) => writer.handle(*c),
+                Ok(Job::Flush(ack)) => {
+                    writer.write_manifest();
+                    let _ = ack.send(());
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
             writer.tick();
         });
+        if let Ok(mut w) = WRITERS.lock() {
+            w.push(tx.clone());
+        }
         Recorder { tx, dropped }
     }
 
     pub fn submit(&self, c: Capture) {
-        if let Err(TrySendError::Full(_)) = self.tx.try_send(c) {
+        if let Err(TrySendError::Full(_)) = self.tx.try_send(Job::Capture(Box::new(c))) {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -414,6 +452,7 @@ struct Link {
     session_id: String,
     with_reply: bool,
     params: Hash,
+    history: usize,
 }
 
 struct Session {
@@ -444,8 +483,10 @@ struct Writer {
     order: VecDeque<(Hash, Instant)>,
     sessions: HashMap<String, Session>,
     hinted: HashMap<String, String>,
+    responses: HashMap<String, Hash>,
     fingerprints: HashMap<String, String>,
     models: Map<String, Value>,
+    queue_full_base: u64,
     totals: Totals,
     paused: Option<String>,
     dirty: bool,
@@ -464,8 +505,10 @@ impl Writer {
             order: VecDeque::new(),
             sessions: HashMap::new(),
             hinted: HashMap::new(),
+            responses: HashMap::new(),
             fingerprints: HashMap::new(),
             models: Map::new(),
+            queue_full_base: 0,
             totals: Totals::default(),
             paused: None,
             dirty: false,
@@ -482,6 +525,7 @@ impl Writer {
         self.order.clear();
         self.sessions.clear();
         self.hinted.clear();
+        self.responses.clear();
         self.fingerprints.clear();
         self.paused = None;
         self.last_space = None;
@@ -496,6 +540,9 @@ impl Writer {
         let text = |k: &str| manifest.get(k).and_then(Value::as_str).map(str::to_string);
         let (bytes, sessions) = folder_totals(dir);
         let by_model = turns_by_model(&manifest);
+        let drops = |k: &str| manifest.get("dropped").and_then(|d| d.get(k)).and_then(Value::as_u64).unwrap_or(0);
+        self.queue_full_base = drops("queue_full");
+        self.dropped.store(0, Ordering::Relaxed);
         self.totals = Totals {
             turns: by_model.values().sum(),
             by_model,
@@ -504,6 +551,8 @@ impl Writer {
             created: text("created").or_else(|| Some(now_rfc3339())),
             first_turn_at: text("first_turn_at"),
             last_turn_at: text("last_turn_at"),
+            paused_dropped: drops("paused"),
+            errors: drops("errors"),
             ..Totals::default()
         };
         self.models = std::fs::read(dir.join("models.json"))
@@ -600,28 +649,41 @@ impl Writer {
             Ok(Value::Object(m)) => m,
             _ => return Err("request body is not a JSON object".into()),
         };
-        let messages: Vec<Value> = if api.has_messages() {
-            match params.remove("messages") {
-                Some(Value::Array(a)) => a,
-                _ => Vec::new(),
-            }
-        } else {
-            Vec::new()
-        };
+        let messages = if api.has_messages() { trace_assemble::request_items(api, &mut params) } else { Vec::new() };
+        let previous = if api == Api::Responses { params.remove("previous_response_id").filter(|p| !p.is_null()) } else { None };
         let body = trace_assemble::assemble(api, c.sse, &c.response);
-        let ok = c.status == 200 && c.complete && !c.truncated && body.get("error").is_none();
+        let ok = c.status == 200 && c.complete && !c.truncated && body.get("error").is_none_or(Value::is_null);
         let params_hash = hash_step(&[0; 32], &trace_assemble::sorted(&Value::Object(params.clone())).to_string());
 
+        let continued = previous
+            .as_ref()
+            .and_then(Value::as_str)
+            .and_then(|id| self.responses.get(&response_key(&c, id)).copied())
+            .filter(|h| self.links.get(h).is_some_and(|l| self.sessions.contains_key(&l.session_id)));
         let mut parts: Vec<String> = Vec::new();
-        let system_offset = match params.get("system") {
-            Some(s) if api == Api::Messages && !s.is_null() => {
+        let system = match api {
+            Api::Messages => params.get("system"),
+            Api::Responses if continued.is_none() => params.get("instructions"),
+            _ => None,
+        };
+        let system_offset = match system {
+            Some(s) if !s.is_null() => {
                 parts.push(trace_assemble::canonical(&json!({"role": "system", "content": s})));
                 1
             }
             _ => 0,
         };
-        parts.extend(messages.iter().map(trace_assemble::canonical));
-        let seed = hash_step(&[0; 32], &format!("goethe-trace-v1\0{}\0{}\0{}", c.key_id, c.model, c.session_hint.as_deref().unwrap_or("")));
+        let mut raw_after = Vec::new();
+        for (i, m) in messages.iter().enumerate() {
+            if let Some(p) = trace_assemble::item_canonical(api, m) {
+                parts.push(p);
+                raw_after.push(i + 1);
+            }
+        }
+        let inherited = continued.and_then(|h| self.links.get(&h)).map_or(0, |l| l.history);
+        let seed = continued.unwrap_or_else(|| {
+            hash_step(&[0; 32], &format!("goethe-trace-v1\0{}\0{}\0{}", c.key_id, c.model, c.session_hint.as_deref().unwrap_or("")))
+        });
         let mut chain = vec![seed];
         for p in &parts {
             let next = hash_step(chain.last().unwrap_or(&seed), p);
@@ -630,13 +692,15 @@ impl Writer {
         let request_hash = *chain.last().unwrap_or(&seed);
 
         let parent = if api.has_messages() {
-            (1..chain.len()).rev().find_map(|k| self.links.get(&chain[k]).map(|l| (k, l))).filter(|(_, l)| self.sessions.contains_key(&l.session_id))
+            let first = usize::from(continued.is_none());
+            (first..chain.len()).rev().find_map(|k| self.links.get(&chain[k]).map(|l| (k, l))).filter(|(_, l)| self.sessions.contains_key(&l.session_id))
         } else {
             None
         };
-        let (messages_from, parent_json, params_same, session_id) = match parent {
+        let (messages_from, raw_from, parent_json, params_same, session_id) = match parent {
             Some((k, l)) => (
-                k.saturating_sub(system_offset),
+                inherited + k.saturating_sub(system_offset),
+                k.saturating_sub(system_offset).checked_sub(1).map_or(0, |n| raw_after[n]),
                 json!({"turn_id": l.turn_id, "with_reply": l.with_reply}),
                 l.params == params_hash,
                 l.session_id.clone(),
@@ -652,7 +716,7 @@ impl Writer {
                     Some(s) => s,
                     None => self.new_session(&c)?,
                 };
-                (0, Value::Null, false, sid)
+                (0, 0, Value::Null, false, sid)
             }
         };
 
@@ -660,8 +724,10 @@ impl Writer {
         let session = self.sessions.get_mut(&session_id).ok_or("session vanished")?;
         let turn_id = format!("t_{}", random_hex(8));
         let started: DateTime<Utc> = c.started_at.into();
-        let reply = if ok { trace_assemble::reply_message(api, &body) } else { None };
-        let reply_hash = reply.as_ref().map(|r| hash_step(&request_hash, &trace_assemble::canonical(r)));
+        let response_id = if api == Api::Responses { body.get("id").and_then(Value::as_str).map(str::to_string) } else { None };
+        let reply_parts = if ok { trace_assemble::reply_canonical(api, &body) } else { Vec::new() };
+        let reply_hash = (!reply_parts.is_empty()).then(|| reply_parts.iter().fold(request_hash, |h, p| hash_step(&h, p)));
+        let history = inherited + (chain.len() - 1).saturating_sub(system_offset);
 
         let mut rec = Map::new();
         rec.insert("schema".into(), json!(SCHEMA));
@@ -692,13 +758,16 @@ impl Writer {
             rec.insert("params".into(), Value::Object(params));
         }
         if api.has_messages() {
-            rec.insert("messages".into(), Value::Array(messages.into_iter().skip(messages_from).collect()));
+            rec.insert("messages".into(), Value::Array(messages.into_iter().skip(raw_from).collect()));
         }
         rec.insert(
             "response".into(),
             json!({"status": c.status, "stream": c.sse, "complete": c.complete, "truncated": c.truncated, "body": body}),
         );
 
+        if let Some(p) = previous {
+            rec.insert("previous_response_id".into(), p);
+        }
         let mut line = serde_json::to_vec(&Value::Object(rec)).map_err(|e| e.to_string())?;
         line.push(b'\n');
         let mut gz = GzEncoder::new(Vec::with_capacity(line.len() / 3), Compression::default());
@@ -709,11 +778,14 @@ impl Writer {
         session.last = Instant::now();
 
         let now = Instant::now();
-        let link = |with_reply| Link { at: now, turn_id: turn_id.clone(), session_id: session_id.clone(), with_reply, params: params_hash };
+        let link = |with_reply, history| Link { at: now, turn_id: turn_id.clone(), session_id: session_id.clone(), with_reply, params: params_hash, history };
         if api.has_messages() {
-            self.add_link(request_hash, link(false));
+            self.add_link(request_hash, link(false, history));
             if let Some(h) = reply_hash {
-                self.add_link(h, link(true));
+                self.add_link(h, link(true, history + reply_parts.len()));
+                if let Some(id) = response_id {
+                    self.responses.insert(response_key(&c, &id), h);
+                }
             }
         }
         let at = now_rfc3339();
@@ -775,6 +847,8 @@ impl Writer {
         self.sessions.retain(|_, s| s.last.elapsed() < LINK_TTL);
         let live = &self.sessions;
         self.hinted.retain(|_, sid| live.contains_key(sid));
+        let links = &self.links;
+        self.responses.retain(|_, h| links.contains_key(h));
         if self.dirty && self.last_manifest.elapsed() >= MANIFEST_EVERY {
             self.write_manifest();
         }
@@ -791,6 +865,8 @@ impl Writer {
         let live = &self.sessions;
         self.hinted.retain(|_, sid| live.contains_key(sid));
         self.links.retain(|_, l| live.contains_key(&l.session_id));
+        let links = &self.links;
+        self.responses.retain(|_, h| links.contains_key(h));
         self.fingerprints.clear();
         self.models = std::fs::read(dir.join("models.json"))
             .ok()
@@ -823,7 +899,7 @@ impl Writer {
             "bytes": t.bytes,
             "first_turn_at": t.first_turn_at,
             "last_turn_at": t.last_turn_at,
-            "dropped": {"queue_full": self.dropped.load(Ordering::Relaxed), "paused": t.paused_dropped, "errors": t.errors},
+            "dropped": {"queue_full": self.queue_full_base + self.dropped.load(Ordering::Relaxed), "paused": t.paused_dropped, "errors": t.errors},
             "last_error": t.last_error,
             "paused": self.paused,
         });
@@ -850,7 +926,6 @@ impl Writer {
             if let Some(m) = entry.as_object_mut() {
                 m.insert("path".into(), json!(path));
                 m.insert("first_seen".into(), json!(now_rfc3339()));
-                m.insert("goethe_version".into(), json!(env!("CARGO_PKG_VERSION")));
             }
             self.models.insert(fp.clone(), entry);
             if let Some(dir) = &self.dir {
@@ -880,12 +955,18 @@ impl Writer {
         let dir = path.as_deref().map(|p| self.home.join(p));
         let entry = json!({
             "model_id": model_id,
+            "goethe_version": env!("CARGO_PKG_VERSION"),
+            "runtime": dir.as_deref().map(card_runtime),
             "files": dir.as_deref().map(model_files).unwrap_or_default(),
             "weights": dir.as_deref().map(weight_files).unwrap_or(Value::Null),
             "engine_args": extra,
         });
         Some((entry, path))
     }
+}
+
+fn response_key(c: &Capture, id: &str) -> String {
+    format!("{}\0{}\0{id}", c.key_id, c.model)
 }
 
 fn hint_key(c: &Capture, hint: &str) -> String {
@@ -1003,6 +1084,34 @@ fn model_files(dir: &Path) -> Map<String, Value> {
         .collect()
 }
 
+fn card_runtime(dir: &Path) -> String {
+    // The engine that serves the model: the same weights behave differently under another runtime.
+    std::fs::read_to_string(dir.join("goethe_card.toml"))
+        .ok()
+        .and_then(|t| {
+            t.lines().find_map(|l| {
+                let (k, v) = l.split_once('=')?;
+                (k.trim() == "runtime").then(|| v.trim().trim_matches('"').to_string())
+            })
+        })
+        .unwrap_or_else(|| "sglang".to_string())
+}
+
+fn single_file_sample(path: &Path, size: u64) -> Option<String> {
+    // First and last MiB of a single-file checkpoint: cheap, and catches re-patched files of the same size.
+    use std::io::{Read, Seek, SeekFrom};
+    const SAMPLE: u64 = 1 << 20;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; SAMPLE.min(size) as usize];
+    f.read_exact(&mut buf).ok()?;
+    h.update(&buf);
+    f.seek(SeekFrom::Start(size.saturating_sub(SAMPLE))).ok()?;
+    f.read_exact(&mut buf).ok()?;
+    h.update(&buf);
+    Some(hex(&h.finalize().into()))
+}
+
 fn weight_files(dir: &Path) -> Value {
     // Weight file names and sizes: hashing hundreds of GB is too slow, and these change with any re-quantization.
     let mut files: Vec<(String, u64)> = std::fs::read_dir(dir)
@@ -1012,11 +1121,18 @@ fn weight_files(dir: &Path) -> Value {
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             let size = std::fs::metadata(e.path()).ok()?.len();
-            (name.ends_with(".safetensors") || name.ends_with(".bin") || name.ends_with(".gguf")).then_some((name, size))
+            let weight = [".safetensors", ".bin", ".pt", ".pth", ".gguf", ".ninfer"].iter().any(|x| name.ends_with(x));
+            weight.then_some((name, size))
         })
         .collect();
     files.sort();
+    let samples: Map<String, Value> = files
+        .iter()
+        .filter(|(n, _)| n.ends_with(".ninfer") || n.ends_with(".gguf"))
+        .filter_map(|(n, s)| Some((n.clone(), json!(single_file_sample(&dir.join(n), *s)?))))
+        .collect();
     json!({
+        "samples": samples,
         "count": files.len(),
         "bytes": files.iter().map(|(_, s)| s).sum::<u64>(),
         "files": files.into_iter().map(|(n, s)| json!([n, s])).collect::<Vec<_>>(),
@@ -1192,6 +1308,113 @@ mod tests {
         w.write_manifest();
         assert_eq!(read()["turns_by_model"], json!({"other": 2}));
         assert_eq!((w.totals.turns, w.totals.sessions), (2, 1));
+    }
+
+    #[test]
+    fn drop_counters_survive_a_restart_and_fingerprints_cover_single_file_checkpoints() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("traces");
+        let mut w = Writer::new(tmp.path(), Arc::new(AtomicU64::new(0)));
+        w.handle(capture(&dir, "/completions", json!({"model": "m", "prompt": "x"}), json!({"choices": []})));
+        w.dropped.store(3, Ordering::Relaxed);
+        w.totals.paused_dropped = 2;
+        w.totals.errors = 1;
+        w.write_manifest();
+        let mut again = Writer::new(tmp.path(), Arc::new(AtomicU64::new(0)));
+        again.open_dir(&dir);
+        again.dropped.fetch_add(1, Ordering::Relaxed);
+        again.write_manifest();
+        let m: Value = serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(m["dropped"], json!({"queue_full": 4, "paused": 2, "errors": 1}));
+        let model = tmp.path().join("model");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("m.ninfer"), vec![1u8; 2048]).unwrap();
+        std::fs::write(model.join("goethe_card.toml"), "runtime = \"ninfer\"\n").unwrap();
+        let first = weight_files(&model);
+        assert_eq!(first["count"], 1);
+        assert_eq!(card_runtime(&model), "ninfer");
+        std::fs::write(model.join("m.ninfer"), vec![2u8; 2048]).unwrap();
+        assert_ne!(first["samples"], weight_files(&model)["samples"]);
+    }
+
+    fn output(id: &str, items: Value) -> Value {
+        json!({"id": id, "object": "response", "status": "completed", "error": null, "output": items})
+    }
+
+    #[test]
+    fn responses_resending_history_link_and_store_only_new_items() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("traces");
+        let mut w = Writer::new(tmp.path(), Arc::new(AtomicU64::new(0)));
+        let call = json!({"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "ls", "arguments": "{\"a\": 1}", "status": "completed"});
+        let think = json!({"type": "reasoning", "id": "rs_1", "summary": []});
+        let first = output("r1", json!([think, call]));
+        w.handle(capture(&dir, "/responses", json!({"model": "m", "instructions": "brief", "input": "list files"}), first));
+        let user = json!({"type": "message", "role": "user", "content": "list files"});
+        let resent = json!({"type": "function_call", "call_id": "c1", "name": "ls", "arguments": "{\"a\":1}"});
+        let result = json!({"type": "function_call_output", "call_id": "c1", "output": "a.txt"});
+        let req = json!({"model": "m", "instructions": "brief", "input": [user, resent, result]});
+        w.handle(capture(&dir, "/responses", req, output("r2", json!([{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "a.txt"}]}]))));
+        let t = turns(&dir);
+        assert_eq!(t[0]["messages"], json!([user]));
+        assert!(t[0]["reply_hash"].is_string());
+        assert_eq!(t[1]["session_id"], t[0]["session_id"]);
+        assert_eq!(t[1]["parent"], json!({"turn_id": t[0]["turn_id"], "with_reply": true}));
+        assert_eq!(t[1]["messages_from"], 2);
+        assert_eq!(t[1]["messages"], json!([result]));
+        assert_eq!(t[1]["params_from_parent"], true);
+    }
+
+    #[test]
+    fn responses_previous_id_continues_the_session_within_one_key_and_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("traces");
+        let mut w = Writer::new(tmp.path(), Arc::new(AtomicU64::new(0)));
+        let msg = |t: &str| json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": t}]});
+        w.handle(capture(&dir, "/responses", json!({"model": "m", "input": "hi"}), output("r1", json!([msg("hello")]))));
+        let req = json!({"model": "m", "previous_response_id": "r1", "input": "more"});
+        w.handle(capture(&dir, "/responses", req.clone(), output("r2", json!([msg("sure")]))));
+        let mut other = capture(&dir, "/responses", req, output("r3", json!([msg("x")])));
+        other.key_id = "k2".into();
+        w.handle(other);
+        let unknown = json!({"model": "m", "previous_response_id": "gone", "input": "again"});
+        w.handle(capture(&dir, "/responses", unknown, output("r4", json!([msg("y")]))));
+        let t = turns(&dir);
+        assert_eq!(t[1]["session_id"], t[0]["session_id"]);
+        assert_eq!(t[1]["parent"], json!({"turn_id": t[0]["turn_id"], "with_reply": true}));
+        assert_eq!(t[1]["messages_from"], 2);
+        assert_eq!(t[1]["previous_response_id"], "r1");
+        assert_eq!(t[1]["params_from_parent"], true);
+        assert_eq!(t[2]["parent"], Value::Null);
+        assert_ne!(t[2]["session_id"], t[0]["session_id"]);
+        assert_eq!(t[3]["parent"], Value::Null);
+        assert_eq!(t[3]["previous_response_id"], "gone");
+    }
+
+    #[test]
+    fn a_partial_write_is_cut_back() {
+        // A real short write needs a file size limit, which applies to the whole process, so a child runs it.
+        if let Some(path) = std::env::var_os("TRACE_TEST_LIMITED_FILE") {
+            let path = PathBuf::from(path);
+            let limit = libc::rlimit { rlim_cur: 4096, rlim_max: 4096 };
+            unsafe {
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+            }
+            append_private(&path, &[1; 3000]).unwrap();
+            assert!(append_private(&path, &[2; 3000]).is_err());
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), 3000);
+            append_private(&path, &[3; 500]).unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), 3500);
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "trace::tests::a_partial_write_is_cut_back", "--nocapture"])
+            .env("TRACE_TEST_LIMITED_FILE", tmp.path().join("file"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
     }
 
     #[test]
