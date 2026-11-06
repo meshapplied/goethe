@@ -155,6 +155,7 @@ jobs:
 
   merge:
     needs: [guard, build, build-aarch64]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -213,6 +214,7 @@ jobs:
 
   install-smoke:
     needs: merge
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -234,6 +236,7 @@ jobs:
 
   publish:
     needs: [guard, merge, install-smoke]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     environment: release
     steps:
@@ -254,6 +257,7 @@ jobs:
 
   pages:
     needs: [guard, merge, publish]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     environment:
       name: github-pages
