@@ -12,6 +12,7 @@ name: release
 #   Settings > Pages > Source: GitHub Actions, Custom domain: pkg.meshapplied.com, Enforce HTTPS
 #   DNS: CNAME pkg.meshapplied.com -> meshapplied.github.io
 # Every release is also kept as GitHub Release files.
+# If publish succeeded but pages failed, serve the release with the pages workflow (pages.yml) instead of a rerun.
 
 on:
   push:
@@ -285,5 +286,9 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
+          name: github-pages-${{ github.run_attempt }}
       - id: deploy
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
+          timeout: 1800000
