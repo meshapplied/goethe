@@ -50,17 +50,26 @@ pub struct GpuListRow {
     pub managed_mb: u64,
     pub foreign_mb: u64,
     pub status: String,
+    pub processes: Vec<GpuProcess>,
+    pub memory_util_percent: Option<u32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GpuProcess {
+    pub pid: u32,
+    pub goethe: bool,
 }
 
 pub fn list_rows(con: &Connection, home: &Path) -> Result<Vec<GpuListRow>, String> {
     let state = hw::load_hardware_state(home)?;
     let managed = placement::managed_pids(con);
     let denied = denied_set(con)?;
+    let usage = hw::gpu_usage(&managed)?;
     let mut out = Vec::new();
     for gpu in &state.gpus {
-        let managed_mb = hw::managed_vram_listed_mb(gpu.index, &managed)?;
-        let used_mb = hw::gpu_used_mb_live(gpu.index)?;
-        let foreign_mb = used_mb.saturating_sub(managed_mb);
+        let live = usage.iter().find(|u| u.index == gpu.index).ok_or(format!("gpu{} is gone; run `goethe hw profile`", gpu.index))?;
+        let managed_mb = live.managed_mb;
+        let foreign_mb = live.used_mb.saturating_sub(managed_mb);
         let is_denied = denied.contains(&gpu.index);
         out.push(GpuListRow {
             index: gpu.index,
@@ -76,6 +85,8 @@ pub fn list_rows(con: &Connection, home: &Path) -> Result<Vec<GpuListRow>, Strin
             } else {
                 "ALLOWED".to_string()
             },
+            processes: live.processes.iter().map(|&(pid, goethe)| GpuProcess { pid, goethe }).collect(),
+            memory_util_percent: live.memory_util,
         });
     }
     out.sort_by_key(|r| r.index);

@@ -317,7 +317,7 @@ The DNS record that serves the API under your own domain name, with this machine
 
 ### `goethe gpu`
 
-GPUs with their memory use and whether Goethe may use them.
+GPUs with their memory use, whether Goethe may use them, the process ids on each (Goethe's in green, others in red) and a bar of memory bandwidth use. The bar turns blue past the line at 70 %. On a terminal the table updates every second until you press `q`; piped or with `--json` it prints once. The JSON adds `processes` (`pid`, `goethe`) and `memory_util_percent`.
 
 | Option | Description |
 |---|---|
@@ -329,7 +329,7 @@ GPUs with their memory use and whether Goethe may use them.
 
 | Command | Description |
 |---|---|
-| `goethe hw profile` | GPUs and their links, CPU, memory, disk, OS, container and cloud provider |
+| `goethe hw profile` | GPUs, CPU, memory, disk, OS, container and cloud provider. GPU links, NUMA nodes and processes are in `--json` and `hardware_state.json`; `goethe gpu` shows the processes |
 | `goethe hw pick-gpus [--model <id>] [--tp <N>]` | Where `goethe load` would place a model right now, and the memory it needs |
 
 ### `goethe doctor`

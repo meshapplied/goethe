@@ -420,7 +420,6 @@ pub fn parse_nvidia_proc_version(text: &str) -> Option<String> {
 pub fn summary_lines(host: &HostInfo, env: &EnvironmentInfo, bind: &str) -> Vec<String> {
     // Human-readable host and environment lines for goethe hw profile.
     let c = &host.cpu;
-    let numa: Vec<String> = c.numa_nodes.iter().map(|n| format!("node{} cpus {}", n.node, n.cpus)).collect();
     let m = &host.memory;
     let gb = |mb: u64| mb as f64 / 1024.0;
     let mut out = vec![
@@ -433,7 +432,6 @@ pub fn summary_lines(host: &HostInfo, env: &EnvironmentInfo, bind: &str) -> Vec<
             c.logical_threads,
             c.flags.join(" ")
         ),
-        format!("NUMA: {}", if numa.is_empty() { "unknown".to_string() } else { numa.join("; ") }),
         format!(
             "RAM: {:.1} GB total, {:.1} GB available; swap {:.1}/{:.1} GB free; hugepages {}/{} free ({} kB)",
             gb(m.total_mb),
