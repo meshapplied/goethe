@@ -294,7 +294,7 @@ goethe configure api
 ```
 
 - **Local only:** programs on this machine.
-- **VPN (recommended):** devices on your Tailscale, WireGuard or ZeroTier network. Goethe detects the VPN and allows its addresses.
+- **VPN (recommended):** devices on your Tailscale, WireGuard or ZeroTier network. Goethe detects the VPN from its interface (`tailscale0`, `wg*`, `zt*`, `tun*`) and, for Tailscale, from `tailscale ip`, then allows its addresses. A `100.64.x.x` address on an ordinary network card is not taken for Tailscale, since clouds and carriers use that range too; pass `--vpn-ip` to choose an address yourself.
 - **Public network:** any address that can reach this machine. You open the port in your firewall yourself.
 
 It then asks whether to restrict access to specific IP addresses, and offers to create the first key. In scripts: `goethe configure api --mode vpn --yes`, or `--mode public --allow 203.0.113.7 --yes`.
