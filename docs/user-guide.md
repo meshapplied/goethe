@@ -218,7 +218,7 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 
 | Command | What it does |
 |---|---|
-| `goethe gpu` | Memory use and allow/deny (`--deny`, `--allow`) |
+| `goethe gpu` | Memory, processes and bandwidth use, live until `q`; allow/deny (`--deny`, `--allow`) |
 | `goethe hw profile` | GPUs, CPU, memory, disk and cloud provider |
 | `goethe doctor` | Setup check with a fix for each problem |
 | `goethe update` | Install the latest Goethe (`--check` to only look) |

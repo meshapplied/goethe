@@ -8,6 +8,9 @@ pub enum Color {
     Red,
     Green,
     Yellow,
+    Blue,
+    White,
+    Gray,
     Bold,
 }
 
@@ -35,6 +38,9 @@ fn paint_if(on: bool, text: &str, color: Color) -> String {
         Color::Red => "31",
         Color::Green => "32",
         Color::Yellow => "33",
+        Color::Blue => "38;5;117",
+        Color::White => "97",
+        Color::Gray => "38;5;238",
         Color::Bold => "1",
     };
     format!("\x1b[{code}m{text}\x1b[0m")
@@ -149,6 +155,71 @@ fn render_table(header: &[String], rows: &[Vec<String>], color: bool) -> String 
         }
     }
     out
+}
+
+pub const BAR_CELLS: usize = 20;
+
+pub fn bar(percent: u32) -> String {
+    bar_if(color_enabled(), percent)
+}
+
+fn bar_if(on: bool, percent: u32) -> String {
+    // A solid bar of BAR_CELLS cells: the first 7/10 fill white, the last 3/10 blue behind a blue line at 70 %, then the percentage.
+    let filled = (percent.min(100) as usize * BAR_CELLS + 50) / 100;
+    let knee = BAR_CELLS * 7 / 10;
+    let mut out = String::new();
+    for i in 0..BAR_CELLS {
+        if i == knee {
+            out.push_str(&paint_if(on, "\u{2502}", Color::Blue));
+        }
+        let cell = match (i < filled, on) {
+            (true, _) => paint_if(on, "\u{2588}", if i < knee { Color::White } else { Color::Blue }),
+            (false, true) => paint_if(on, "\u{2588}", Color::Gray),
+            (false, false) => "\u{2591}".to_string(),
+        };
+        out.push_str(&cell);
+    }
+    format!("{out} {:>3}%", percent.min(100))
+}
+
+pub fn live(interval: std::time::Duration, mut frame: impl FnMut() -> Result<String, String>) -> Result<(), String> {
+    // Redraw frame() on the alternate screen every interval until q, Esc or Ctrl-C; the last frame stays on the normal screen.
+    use std::io::Read;
+    if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        print!("{}", frame()?);
+        return Ok(());
+    }
+    let Some(raw) = RawMode::enter() else {
+        print!("{}", frame()?);
+        return Ok(());
+    };
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b[?1049h\x1b[?25l");
+    let mut last = String::new();
+    let result = loop {
+        match frame() {
+            Ok(text) => last = text,
+            Err(e) => break Err(e),
+        }
+        let body = format!("{last}\n(q to quit)").replace('\n', "\x1b[K\r\n");
+        let _ = write!(out, "\x1b[H{body}\x1b[K\x1b[J");
+        let _ = out.flush();
+        let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+        let ms = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
+        if unsafe { libc::poll(&mut fds, 1, ms) } > 0 {
+            let mut buf = [0u8; 16];
+            match std::io::stdin().read(&mut buf) {
+                Ok(0) | Err(_) => break Ok(()),
+                Ok(n) if parse_keys(&buf[..n]).contains(&Key::Cancel) => break Ok(()),
+                Ok(_) => {}
+            }
+        }
+    };
+    let _ = write!(out, "\x1b[?1049l");
+    let _ = out.flush();
+    drop(raw);
+    print!("{last}");
+    result
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -393,6 +464,22 @@ mod tests {
         assert_eq!(step(&spaced, 0, Key::Down), 2, "the blank spacer row is skipped");
         assert_eq!(step(&spaced, 2, Key::Up), 0);
         assert_eq!(step(&spaced, 0, Key::Digit(1)), 2, "digits count choices, not rows");
+    }
+
+    #[test]
+    fn bars_are_solid_white_then_blue_with_a_line_at_seventy_percent() {
+        let plain = |p| strip(&bar_if(true, p));
+        assert_eq!(plain(0), format!("{}\u{2502}{}   0%", "\u{2588}".repeat(14), "\u{2588}".repeat(6)));
+        assert_eq!(visible_width(&bar_if(true, 55)), BAR_CELLS + 1 + 5);
+        assert_eq!(bar_if(false, 50), format!("{}\u{2502}{}  50%", "\u{2588}".repeat(10) + &"\u{2591}".repeat(4), "\u{2591}".repeat(6)));
+        assert_eq!(bar_if(false, 250), format!("{}\u{2502}{} 100%", "\u{2588}".repeat(14), "\u{2588}".repeat(6)));
+        let full = bar_if(true, 100);
+        assert_eq!(full.matches("97m").count(), 14, "the first 7/10 is white");
+        assert_eq!(full.matches("38;5;117m").count(), 7, "the last 3/10 and the line are blue");
+        let low = bar_if(true, 30);
+        assert_eq!(low.matches("97m").count(), 6);
+        assert_eq!(low.matches("38;5;117m").count(), 1, "only the line is blue below 70 %");
+        assert_eq!(low.matches("38;5;238m").count(), 14, "the rest of the track is gray");
     }
 
     #[test]

@@ -94,7 +94,7 @@ enum Commands {
         #[command(subcommand)]
         cmd: HwCommands,
     },
-    #[command(about = "List GPUs, or allow or deny placement on one.")]
+    #[command(about = "GPUs with memory, processes and bandwidth use, live on a terminal (q quits); or allow or deny placement on one.")]
     Gpu {
         #[arg(long, num_args = 1.., value_name = "gpuN", value_parser = parse_gpu_name, conflicts_with = "deny", help = "Allow new models on these GPUs again, for example gpu0 gpu1.")]
         allow: Vec<u32>,
@@ -1216,40 +1216,53 @@ fn rpc_daemon_err(e: String) -> String {
 }
 
 fn do_gpu_list(json: bool) -> Result<(), String> {
+    // JSON once, or the table redrawn every second on a terminal until q.
     let home = goethe_home();
     ensure_layout(&home).map_err(|e| format!("layout: {e}"))?;
-    let con = db::open(&home).map_err(|e| e.to_string())?;
-    let rows = gpu_policy::list_rows(&con, &home)?;
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?
-        );
+        let con = db::open(&home).map_err(|e| e.to_string())?;
+        let rows = gpu_policy::list_rows(&con, &home)?;
+        println!("{}", serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?);
         return Ok(());
     }
-    let mut table = goethe_core::term::Table::new(&["GPU", "NAME", "SM", "VRAM TOTAL", "GOETHE", "FOREIGN", "STATUS"]);
+    goethe_core::term::live(std::time::Duration::from_secs(1), || {
+        let con = db::open(&home).map_err(|e| e.to_string())?;
+        Ok(gpu_list_text(&gpu_policy::list_rows(&con, &home)?))
+    })
+}
+
+fn gpu_list_text(rows: &[gpu_policy::GpuListRow]) -> String {
+    // VRAM, policy, process ids (goethe's green, others red) and memory bandwidth use per GPU, then unsupported GPUs.
+    use goethe_core::term::{bar, paint, Color};
+    let mut table = goethe_core::term::Table::new(&["GPU", "NAME", "VRAM TOTAL", "GOETHE", "FOREIGN", "STATUS", "PROCESSES", "BANDWIDTH"]);
     let gb = |mb: u64| format!("{:.1} GB", mb as f64 / 1024.0);
-    for r in &rows {
+    for r in rows {
+        let pids: Vec<String> = r
+            .processes
+            .iter()
+            .map(|p| paint(&p.pid.to_string(), if p.goethe { Color::Green } else { Color::Red }))
+            .collect();
         table.row(vec![
             format!("gpu{}", r.index),
             r.name.clone(),
-            r.compute_capability.clone(),
             gb(r.vram_total_mb),
             gb(r.managed_mb),
             gb(r.foreign_mb),
             goethe_core::term::status(&r.status),
+            if pids.is_empty() { "-".to_string() } else { pids.join(" ") },
+            r.memory_util_percent.map_or("-".to_string(), bar),
         ]);
     }
-    table.print();
+    let mut out = table.render();
     let notes: Vec<String> = rows
         .iter()
         .filter_map(|r| goethe_core::gpu_arch::unsupported_reason(&r.compute_capability).map(|why| format!("gpu{}: {why}", r.index)))
         .collect();
     if !notes.is_empty() {
-        println!("\nGoethe will not place models on these GPUs:\n");
-        notes.iter().for_each(|n| println!("\t{n}"));
+        out.push_str("\nGoethe will not place models on these GPUs:\n\n");
+        notes.iter().for_each(|n| out.push_str(&format!("\t{n}\n")));
     }
-    Ok(())
+    out
 }
 
 fn do_gpu_deny(id: u32) -> Result<(), String> {

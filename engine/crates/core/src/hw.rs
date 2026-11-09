@@ -302,10 +302,45 @@ pub fn live_gpus() -> Result<Vec<LiveGpu>, String> {
     Ok(out)
 }
 
-pub fn gpu_used_mb_live(gpu_index: u32) -> Result<u64, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuUsage {
+    pub index: u32,
+    pub used_mb: u64,
+    pub managed_mb: u64,
+    pub processes: Vec<(u32, bool)>,
+    pub memory_util: Option<u32>,
+}
+
+pub fn gpu_usage(managed: &HashSet<i32>) -> Result<Vec<GpuUsage>, String> {
+    // One NVML session: used and goethe-owned VRAM, process ids with ownership, and memory bandwidth use per GPU.
     let nvml = crate::nvidia_driver::nvml()?;
-    let dev = nvml.device_by_index(gpu_index).map_err(|e| format!("device {gpu_index}: {e}"))?;
-    Ok(device_memory(&dev)?.1)
+    let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
+    let mut out = Vec::new();
+    for index in 0..count {
+        let dev = nvml.device_by_index(index).map_err(|e| format!("device {index}: {e}"))?;
+        let used_mb = device_memory(&dev)?.1;
+        let mut seen: Vec<(u32, u64)> = Vec::new();
+        for p in [dev.running_compute_processes(), dev.running_graphics_processes()].into_iter().flatten().flatten() {
+            let mb = match p.used_gpu_memory {
+                UsedGpuMemory::Used(bytes) => bytes / (1024 * 1024),
+                UsedGpuMemory::Unavailable => 0,
+            };
+            match seen.iter_mut().find(|(pid, _)| *pid == p.pid) {
+                Some(entry) => entry.1 = entry.1.max(mb),
+                None => seen.push((p.pid, mb)),
+            }
+        }
+        seen.sort_unstable();
+        let owned = |pid: u32| managed.contains(&(pid as i32));
+        out.push(GpuUsage {
+            index,
+            used_mb,
+            managed_mb: seen.iter().filter(|(pid, _)| owned(*pid)).map(|(_, mb)| mb).sum(),
+            processes: seen.iter().map(|(pid, _)| (*pid, owned(*pid))).collect(),
+            memory_util: dev.utilization_rates().ok().map(|u| u.memory.min(100)),
+        });
+    }
+    Ok(out)
 }
 
 pub fn managed_vram_listed_mb(gpu_index: u32, managed: &HashSet<i32>) -> Result<u64, String> {
@@ -454,46 +489,30 @@ fn gb(mb: u64) -> String {
 }
 
 fn gpu_table(gpus: &[GpuState]) -> crate::term::Table {
-    // One row per GPU: name with SM, NUMA and unified memory below it, VRAM, PCIe, and its processes stacked in one cell.
-    use crate::term::{paint, Color};
-    let pid_width = gpus.iter().flat_map(|g| &g.running_processes).map(|p| p.pid.to_string().len()).max().unwrap_or(0);
-    let mut table = crate::term::Table::new(&["GPU", "NAME", "VRAM TOTAL", "VRAM FREE", "PCIE", "PROCESSES"]);
+    // One row per GPU: name with SM, NUMA and unified memory below it, VRAM and PCIe; processes are in goethe gpu.
+    let mut table = crate::term::Table::new(&["GPU", "NAME", "VRAM TOTAL", "VRAM FREE", "PCIE"]);
     for gpu in gpus {
         let mut notes = vec![format!("SM {}", gpu.compute_capability)];
         notes.extend(gpu.numa_node.map(|n| format!("NUMA {n}")));
         if gpu.unified_memory {
             notes.push("unified memory".to_string());
         }
-        let procs: Vec<String> = gpu
-            .running_processes
-            .iter()
-            .map(|p| {
-                let (name, user, _) = crate::foreign::process_owner(p.pid as i32);
-                let pad = " ".repeat(pid_width - p.pid.to_string().len());
-                let pid = paint(&format!("PID {}", p.pid), Color::Red);
-                format!("{pid}{pad}  {:>8}  {name} ({user})", gb(p.used_vram_mb))
-            })
-            .collect();
         table.row(vec![
             format!("gpu{}", gpu.index),
             format!("{}\n{}", gpu.name, notes.join(", ")),
             gb(gpu.vram_total_mb),
             gb(gpu.vram_free_mb),
             format!("PCIe {} x{}", gpu.pcie_gen_max.max(gpu.pcie_gen), gpu.pcie_width_max.max(gpu.pcie_width)),
-            if procs.is_empty() { "-".to_string() } else { procs.join("\n") },
         ]);
     }
     table
 }
 
 fn print_summary(state: &HardwareState) {
-    // GPUs, links, then host and environment lines.
+    // GPUs, then host and environment lines; links and processes stay in the JSON.
     println!("Goethe hardware profile at {}", state.profiled_at);
     println!("Driver: {}", state.driver);
     gpu_table(&state.gpus).print();
-    for link in &state.links {
-        println!("Link GPU {} - GPU {}: {} ({})", link.a, link.b, link.link_type, link.topo);
-    }
     if let (Some(h), Some(e)) = (&state.host, &state.environment) {
         let home = crate::paths::goethe_home();
         let bind = if home.join("state.db").is_file() { crate::nginx::public_bind(&home) } else { "127.0.0.1".into() };
