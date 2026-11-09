@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `goethe configure api` takes an address for Tailscale only when it is on a `tailscale*` interface or `tailscale ip` reports it. Before, any `100.64.0.0/10` address counted, so on clouds and carriers that use that range for NAT the whole range could be allowlisted.
 - `goethe gpu` redraws every half second instead of every second.
 
 ## 0.1.9 (2026-11-09)

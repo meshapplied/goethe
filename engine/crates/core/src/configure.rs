@@ -46,9 +46,34 @@ const PUBLIC_WARNING: &str = "exposing the API on a public network is not recomm
   - Open the gateway port in your firewall or router yourself; Goethe does not change them.
   - The certificate is self-signed, so clients must trust it or skip verification.";
 
-fn in_cgnat(ip: Ipv4Addr) -> bool {
-    let o = ip.octets();
-    o[0] == 100 && (64..128).contains(&o[1])
+pub fn tailscale_ips() -> Vec<Ipv4Addr> {
+    // This node's Tailscale IPv4 addresses as tailscaled reports them; none when Tailscale is absent, down or slow to answer.
+    let Ok(mut child) = std::process::Command::new("tailscale")
+        .args(["ip", "-4"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Vec::new();
+            }
+        }
+    }
+    let mut out = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut out);
+    }
+    out.lines().filter_map(|l| l.trim().parse().ok()).collect()
 }
 
 fn network(ip: Ipv4Addr, prefix: u8) -> String {
@@ -57,8 +82,8 @@ fn network(ip: Ipv4Addr, prefix: u8) -> String {
     format!("{}/{}", Ipv4Addr::from(u32::from(ip) & mask), prefix.min(32))
 }
 
-pub fn vpn_addrs(addrs: &[InterfaceAddr]) -> Vec<VpnAddr> {
-    // IPv4 addresses on Tailscale, WireGuard, ZeroTier and other tunnel interfaces, each with the range to allow.
+pub fn vpn_addrs(addrs: &[InterfaceAddr], tailscale: &[Ipv4Addr]) -> Vec<VpnAddr> {
+    // IPv4 addresses on Tailscale, WireGuard, ZeroTier and other tunnel interfaces with the range to allow; Tailscale needs its interface name or tailscaled's word, since 100.64.0.0/10 alone is often carrier NAT.
     let mut out = Vec::new();
     for a in addrs {
         let IpAddr::V4(ip) = a.ip else { continue };
@@ -66,7 +91,7 @@ pub fn vpn_addrs(addrs: &[InterfaceAddr]) -> Vec<VpnAddr> {
             continue;
         }
         let n = a.name.as_str();
-        let kind = if n.starts_with("tailscale") || in_cgnat(ip) {
+        let kind = if n.starts_with("tailscale") || tailscale.contains(&ip) {
             "Tailscale"
         } else if n.starts_with("wg") {
             "WireGuard"
@@ -199,15 +224,15 @@ fn configure_local() -> Result<String, String> {
     Ok("127.0.0.1".to_string())
 }
 
-fn pick_vpn(opts: &ApiOpts, vpns: &[VpnAddr]) -> Result<VpnAddr, String> {
+fn pick_vpn(opts: &ApiOpts, vpns: &[VpnAddr], tailscale: &[Ipv4Addr]) -> Result<VpnAddr, String> {
     // The --vpn-ip address, the only VPN address, or the user's pick among several.
     if let Some(ip) = opts.vpn_ip {
         let IpAddr::V4(v4) = ip else { return Err("--vpn-ip must be an IPv4 address".to_string()) };
         return Ok(vpns.iter().find(|v| v.ip == v4).cloned().unwrap_or(VpnAddr {
             name: "given".to_string(),
             ip: v4,
-            kind: if in_cgnat(v4) { "Tailscale" } else { "VPN" },
-            range: if in_cgnat(v4) { TAILSCALE_RANGE.to_string() } else { network(v4, 24) },
+            kind: if tailscale.contains(&v4) { "Tailscale" } else { "VPN" },
+            range: if tailscale.contains(&v4) { TAILSCALE_RANGE.to_string() } else { network(v4, 24) },
         }));
     }
     match vpns.len() {
@@ -234,9 +259,9 @@ fn pick_vpn(opts: &ApiOpts, vpns: &[VpnAddr]) -> Result<VpnAddr, String> {
     }
 }
 
-fn configure_vpn(opts: &ApiOpts, vpns: &[VpnAddr]) -> Result<String, String> {
+fn configure_vpn(opts: &ApiOpts, vpns: &[VpnAddr], tailscale: &[Ipv4Addr]) -> Result<String, String> {
     // Bind to the VPN address so other networks never reach the gateway, and allow the VPN's range.
-    let v = pick_vpn(opts, vpns)?;
+    let v = pick_vpn(opts, vpns, tailscale)?;
     let ranges = if opts.allow.is_empty() {
         let default = v.range.clone();
         let specific = interactive() && !opts.yes && confirm(RESTRICT_QUESTION, false, false)?;
@@ -368,7 +393,8 @@ fn offer_key(yes: bool) -> Result<(), String> {
 pub fn apply_access(opts: &ApiOpts) -> Result<String, String> {
     // Show the current setup, pick a mode (asked on a terminal), apply bind and allowlist; returns the API base URL.
     println!("{}", current_text()?);
-    let vpns = vpn_addrs(&nginx::interface_addrs().unwrap_or_default());
+    let tailscale = tailscale_ips();
+    let vpns = vpn_addrs(&nginx::interface_addrs().unwrap_or_default(), &tailscale);
     let mode = match opts.mode {
         Some(m) => m,
         None if interactive() => choose_mode(&vpns)?,
@@ -376,7 +402,7 @@ pub fn apply_access(opts: &ApiOpts) -> Result<String, String> {
     };
     let bound = match mode {
         Mode::Local => configure_local()?,
-        Mode::Vpn => configure_vpn(opts, &vpns)?,
+        Mode::Vpn => configure_vpn(opts, &vpns, &tailscale)?,
         Mode::Public => configure_public(opts)?,
     };
     let port = nginx::public_port_u16(&goethe_home());
@@ -414,7 +440,7 @@ mod tests {
             addr("zt7", "172.22.4.9", 16),
             addr("docker0", "172.17.0.1", 16),
         ];
-        let found: Vec<(String, &str, String)> = vpn_addrs(&addrs).into_iter().map(|v| (v.name, v.kind, v.range)).collect();
+        let found: Vec<(String, &str, String)> = vpn_addrs(&addrs, &[]).into_iter().map(|v| (v.name, v.kind, v.range)).collect();
         assert_eq!(
             found,
             vec![
@@ -424,6 +450,18 @@ mod tests {
                 ("zt7".to_string(), "ZeroTier", "172.22.0.0/16".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn carrier_nat_addresses_are_not_taken_for_tailscale() {
+        let nat = vec![addr("eth0", "100.72.3.4", 16)];
+        assert!(vpn_addrs(&nat, &[]).is_empty(), "a 100.64.0.0/10 address on a plain NIC is not a VPN");
+        let userspace = vec![addr("eth0", "100.72.3.4", 16)];
+        let found = vpn_addrs(&userspace, &["100.72.3.4".parse().unwrap()]);
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].kind, found[0].range.as_str()), ("Tailscale", "100.64.0.0/10"), "tailscaled vouches for it");
+        let wg = vpn_addrs(&[addr("wg0", "100.80.0.2", 24)], &[]);
+        assert_eq!((wg[0].kind, wg[0].range.as_str()), ("WireGuard", "100.80.0.0/24"), "a WireGuard tunnel in that range keeps its own subnet");
     }
 
     #[test]
