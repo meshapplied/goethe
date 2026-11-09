@@ -169,6 +169,8 @@ async fn main() {
     shutdown_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut watchdog_tick = tokio::time::interval(Duration::from_secs(5));
     watchdog_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut follow_tick = tokio::time::interval(Duration::from_secs(2));
+    follow_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut log_rotate_tick = tokio::time::interval(Duration::from_secs(3600));
     log_rotate_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut exit_code = 0;
@@ -179,6 +181,10 @@ async fn main() {
                 tokio::task::spawn_blocking(move || {
                     let _ = goethe_core::log_rotation::run_rotation_pass(&h);
                 });
+            }
+            _ = follow_tick.tick() => {
+                let h = home_rot.clone();
+                tokio::task::spawn_blocking(move || goethe_core::nginx::follow_interface(&h));
             }
             _ = watchdog_tick.tick() => {
                 let h = home_rot.clone();

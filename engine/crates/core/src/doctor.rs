@@ -78,6 +78,7 @@ const CHECKS: &[(&str, CheckFn)] = &[
     ("ports", check_ports),
     ("goethed", |_| check_goethed()),
     ("gateway", check_gateway),
+    ("network", check_network),
     ("tls", check_tls),
     ("huggingface", check_hf),
     ("registry", check_registry),
@@ -530,6 +531,28 @@ fn check_gateway(home: &Path) -> Check {
             hint: "gateway not listening".into(),
         }
     }
+}
+
+fn check_network(home: &Path) -> Check {
+    // When the gateway follows an interface: whether it has an address now, and whether the allowlist lets its clients in.
+    let Some(name) = crate::nginx::bind_interface(home) else {
+        return check("network", "OK", format!("gateway on {}", crate::nginx::public_bind(home)));
+    };
+    let Some(ip) = crate::nginx::interface_ipv4(&name) else {
+        return check("network", "WARN", format!("{name} has no IPv4 address: only this machine reaches the API until it comes back"));
+    };
+    let routes = crate::netif::routes();
+    let ranges = crate::netif::interfaces(&routes)
+        .into_iter()
+        .find(|i| i.name == name)
+        .map(|i| crate::netif::reach(&i, &routes))
+        .unwrap_or_default();
+    let allowed: Vec<crate::netif::Net> = crate::security::allowlist_list().unwrap_or_default().iter().filter_map(|c| crate::netif::Net::parse(c)).collect();
+    let shown = ranges.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ");
+    if !ranges.is_empty() && !ranges.iter().any(|r| allowed.iter().any(|a| a.overlaps(r))) {
+        return check("network", "WARN", format!("{name} reaches {shown}, but no allowlist entry covers it, so its clients are refused; run goethe configure api"));
+    }
+    check("network", "OK", format!("gateway follows {name} at {ip}"))
 }
 
 fn check_tls(home: &Path) -> Check {

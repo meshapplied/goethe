@@ -191,7 +191,29 @@ pub fn persist_max_body_mb(home: &Path) -> u64 {
     mb
 }
 
+pub fn bind_interface(home: &Path) -> Option<String> {
+    // The network interface the gateway follows, when it was configured by interface instead of by address.
+    let con = crate::db::open(home).ok()?;
+    let v: String = con
+        .query_row("SELECT value FROM goethe_settings WHERE key = 'public_bind_interface'", [], |r| r.get(0))
+        .ok()?;
+    Some(v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+pub fn interface_ipv4(name: &str) -> Option<Ipv4Addr> {
+    crate::netif::primary_ipv4(&interface_addrs()?, name).map(|(ip, _)| ip)
+}
+
+pub fn bind_waiting(home: &Path) -> Option<String> {
+    // The followed interface, when it has no IPv4 address and the gateway serves this machine only.
+    bind_interface(home).filter(|name| interface_ipv4(name).is_none())
+}
+
 pub fn public_bind(home: &Path) -> String {
+    // The address the gateway listens on now: the followed interface's address (loopback while it has none), or the stored one.
+    if let Some(name) = bind_interface(home) {
+        return interface_ipv4(&name).map_or_else(|| "127.0.0.1".to_string(), |ip| ip.to_string());
+    }
     if let Ok(con) = crate::db::open(home) {
         if let Ok(v) = con.query_row(
             "SELECT value FROM goethe_settings WHERE key = 'public_bind'",
@@ -208,7 +230,7 @@ pub fn public_bind(home: &Path) -> String {
 }
 
 pub fn set_public_bind(home: &Path, addr: &str) -> Result<String, String> {
-    // Persist the listen address and apply it: hot reload when old and new sockets cannot clash, else a restart.
+    // Listen on one fixed address (and stop following an interface).
     let ip: IpAddr = addr
         .trim()
         .parse()
@@ -216,18 +238,67 @@ pub fn set_public_bind(home: &Path, addr: &str) -> Result<String, String> {
     if !ip.is_unspecified() && !is_local_address(ip) {
         return Err(format!("{ip} is not an address of this host"));
     }
-    let lock = gateway_lock(home)?;
-    let previous = public_bind(home);
-    store_public_bind(home, &ip.to_string())?;
-    let Some(master) = verified_master(home) else {
-        return Ok(format!("gateway bind set to {ip}; it applies when goethed starts the gateway"));
+    change_bind(home, &BindSetting::Address(ip.to_string()))
+}
+
+pub fn set_public_bind_interface(home: &Path, name: &str) -> Result<String, String> {
+    // Listen on an interface's address and follow it when it changes; the interface must have an IPv4 address now.
+    let name = name.trim();
+    if !crate::netif::valid_name(name) {
+        return Err(format!("{name:?} is not a network interface name"));
+    }
+    if interface_ipv4(name).is_none() {
+        return Err(format!("{name} has no IPv4 address on this host; connect that network first (ip -4 addr show {name})"));
+    }
+    change_bind(home, &BindSetting::Interface(name.to_string()))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BindSetting {
+    Address(String),
+    Interface(String),
+}
+
+fn bind_setting(home: &Path) -> BindSetting {
+    match bind_interface(home) {
+        Some(name) => BindSetting::Interface(name),
+        None => BindSetting::Address(public_bind(home)),
+    }
+}
+
+fn store_bind(home: &Path, setting: &BindSetting) -> Result<(), String> {
+    // One transaction, so the address and the interface never disagree.
+    let mut con = crate::db::open(home).map_err(|e| e.to_string())?;
+    let tx = con.transaction().map_err(|e| e.to_string())?;
+    let (key, value, other) = match setting {
+        BindSetting::Address(v) => ("public_bind", v, "public_bind_interface"),
+        BindSetting::Interface(v) => ("public_bind_interface", v, "public_bind"),
     };
-    let listening = || format!("gateway listens on {ip} port {}", public_port_u16(home));
+    tx.execute("INSERT OR REPLACE INTO goethe_settings (key, value) VALUES (?1, ?2)", [key, value.as_str()]).map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM goethe_settings WHERE key = ?1", [other]).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn change_bind(home: &Path, next: &BindSetting) -> Result<String, String> {
+    // Persist the listen setting and apply it: hot reload when old and new sockets cannot clash, else a restart; a failed check restores the old setting.
+    let lock = gateway_lock(home)?;
+    let previous_setting = bind_setting(home);
+    let previous = public_bind(home);
+    store_bind(home, next)?;
+    let ip: IpAddr = public_bind(home).parse().map_err(|_| "unreadable gateway address".to_string())?;
+    let via = match next {
+        BindSetting::Interface(name) => format!(" ({name}; follows its address)"),
+        BindSetting::Address(_) => String::new(),
+    };
+    let Some(master) = verified_master(home) else {
+        return Ok(format!("gateway bind set to {ip}{via}; it applies when goethed starts the gateway"));
+    };
+    let listening = || format!("gateway listens on {ip}{via} port {}", public_port_u16(home));
     let bin = proc_exe(master).filter(|p| p.is_file()).unwrap_or_else(|| nginx_bin(home));
     let prefix = nginx_prefix(home);
     let checked = write_configs(home, &bin).and_then(|_| nginx_test(home, &bin, &prefix, &prefix.join("nginx.conf")));
     if let Err(e) = checked {
-        store_public_bind(home, &previous)?;
+        store_bind(home, &previous_setting)?;
         let _ = write_configs(home, &bin);
         return Err(format!("{e}; the gateway bind stays {previous}"));
     }
@@ -251,6 +322,31 @@ pub fn set_public_bind(home: &Path, addr: &str) -> Result<String, String> {
     Err(format!(
         "the gateway did not come back on {ip} within 25 s; goethed restarts it (check goethe gateway and goethe logs --gateway)"
     ))
+}
+
+pub fn follow_interface(home: &Path) {
+    // goethed, every few seconds: when the followed interface's address changed, appeared or went away, move the listener with a hot reload.
+    let Some(name) = bind_interface(home) else { return };
+    let want = public_bind(home);
+    let listen_file = nginx_prefix(home).join("listen_ip");
+    let have = fs::read_to_string(&listen_file).map(|s| s.trim().to_string()).unwrap_or_default();
+    if want == have || verified_master(home).is_none() {
+        return;
+    }
+    let Ok(Some(_lock)) = lock_gateway(home, false) else { return };
+    let message = match (want.as_str(), have.as_str()) {
+        ("127.0.0.1", _) => format!("{name} has no IPv4 address; the gateway listens on 127.0.0.1 only until it comes back"),
+        (_, "127.0.0.1") => format!("{name} is up at {want}; the gateway listens there again"),
+        _ => format!("{name} moved from {have} to {want}; the gateway follows"),
+    };
+    log_gateway(home, &message);
+    let applied = apply_locked(home);
+    let ip: Option<IpAddr> = want.parse().ok();
+    let up = ip.is_some_and(|ip| TcpStream::connect_timeout(&SocketAddr::new(ip, public_port_u16(home)), Duration::from_millis(500)).is_ok());
+    if let Err(e) = applied.and_then(|()| if up { Ok(()) } else { Err(format!("nothing answers on {want}")) }) {
+        let _ = fs::remove_file(&listen_file);
+        log_gateway_error(home, &format!("could not move the gateway to {want}: {e}; retrying"));
+    }
 }
 
 pub struct InterfaceAddr {
@@ -313,14 +409,9 @@ fn binds_clash(previous: &str, next: IpAddr) -> bool {
     previous.parse::<IpAddr>().map_or(true, |p| p != next && (p.is_unspecified() || next.is_unspecified()))
 }
 
+#[cfg(test)]
 fn store_public_bind(home: &Path, value: &str) -> Result<(), String> {
-    let con = crate::db::open(home).map_err(|e| e.to_string())?;
-    con.execute(
-        "INSERT OR REPLACE INTO goethe_settings (key, value) VALUES ('public_bind', ?1)",
-        [value],
-    )
-    .map(|_| ())
-    .map_err(|e| e.to_string())
+    store_bind(home, &BindSetting::Address(value.to_string()))
 }
 
 pub fn gateway_connect_addr(home: &Path) -> SocketAddr {
@@ -347,14 +438,17 @@ fn nginx_version(bin: &Path) -> Option<(u32, u32, u32)> {
     Some((it.next()??, it.next()??, it.next().flatten().unwrap_or(0)))
 }
 
+#[cfg(test)]
 fn render_gateway(home: &Path, bin: &Path) -> Result<String, String> {
+    let bind_raw = public_bind(home);
+    let bind: IpAddr = bind_raw.parse().map_err(|_| format!("invalid public_bind setting {bind_raw:?}"))?;
+    render_gateway_on(home, bin, bind)
+}
+
+fn render_gateway_on(home: &Path, bin: &Path, bind: IpAddr) -> Result<String, String> {
     // Fill the template from the daemon's persisted ports only, never from this process's environment.
     let dir = nginx_prefix(home);
     let mux_port = persisted_mux_port(home)?;
-    let bind_raw = public_bind(home);
-    let bind: IpAddr = bind_raw
-        .parse()
-        .map_err(|_| format!("invalid public_bind setting {bind_raw:?}"))?;
     let port = public_port_u16(home);
     let listen = match bind {
         IpAddr::V4(a) => format!("{a}:{port}"),
@@ -402,7 +496,10 @@ fn write_configs(home: &Path, bin: &Path) -> Result<(), String> {
     ensure_tls(home, &san, stale)?;
     write_private(&san_file, san.as_bytes())?;
     let gateway = dir.join("goethe_gateway.conf");
-    write_private(&gateway, render_gateway(home, bin)?.as_bytes())?;
+    let bind_raw = public_bind(home);
+    let bind: IpAddr = bind_raw.parse().map_err(|_| format!("invalid public_bind setting {bind_raw:?}"))?;
+    write_private(&gateway, render_gateway_on(home, bin, bind)?.as_bytes())?;
+    write_private(&dir.join("listen_ip"), format!("{bind}\n").as_bytes())?;
     let main_conf = format!(
         "pid nginx.pid;\nerror_log logs/error.log warn;\n\
          events {{ worker_connections 4096; }}\nhttp {{\n\
@@ -480,7 +577,8 @@ pub fn format_gateway_line(home: &Path) -> Option<String> {
     if gateway_down_reason().is_some() || verified_master(home).is_none() || !gateway_listening(home) {
         return None;
     }
-    Some(format!("gateway: https://{}", gateway_connect_addr(home)))
+    let waiting = bind_waiting(home).map(|n| format!(" (waiting for {n}; local clients only)")).unwrap_or_default();
+    Some(format!("gateway: https://{}{waiting}", gateway_connect_addr(home)))
 }
 
 pub fn gateway_listening(home: &Path) -> bool {
@@ -1022,6 +1120,30 @@ mod tests {
         assert_eq!(format_gateway_line(home), Some(format!("gateway: https://127.0.0.2:{port}")));
         stop(home);
         assert_eq!(verified_master(home), None);
+    }
+
+    #[test]
+    fn an_interface_bind_follows_its_address_and_waits_on_loopback() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        fs::create_dir_all(home.join("nginx")).unwrap();
+        fs::write(home.join("nginx/mux_port"), "30000\n").unwrap();
+        fs::write(home.join("nginx/public_port"), "8443\n").unwrap();
+        assert!(set_public_bind_interface(home, "wg 0").unwrap_err().contains("not a network interface name"));
+        assert!(set_public_bind_interface(home, "nosuchif9").unwrap_err().contains("has no IPv4 address"));
+        assert_eq!(bind_interface(home), None, "a refused interface changes nothing");
+        store_bind(home, &BindSetting::Interface("nosuchif9".into())).unwrap();
+        assert_eq!(bind_interface(home).as_deref(), Some("nosuchif9"));
+        assert_eq!(public_bind(home), "127.0.0.1", "no address yet: loopback only");
+        assert_eq!(bind_waiting(home).as_deref(), Some("nosuchif9"));
+        let conf = render_gateway(home, Path::new("/bin/false")).unwrap();
+        assert!(conf.contains("listen 127.0.0.1:8443") && !conf.contains("listen 0.0.0.0"), "{conf}");
+        assert_eq!(bind_setting(home), BindSetting::Interface("nosuchif9".into()));
+        store_public_bind(home, "0.0.0.0").unwrap();
+        assert_eq!((bind_interface(home), public_bind(home)), (None, "0.0.0.0".to_string()), "an address replaces the interface");
+        assert_eq!(bind_waiting(home), None);
+        store_bind(home, &BindSetting::Interface("lo".into())).unwrap();
+        assert_eq!(public_bind(home), "127.0.0.1", "loopback addresses are never a network to follow");
     }
 
     #[test]

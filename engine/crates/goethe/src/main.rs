@@ -291,7 +291,7 @@ enum Commands {
     },
     #[command(about = "Show where the public gateway listens, or change it.")]
     Gateway {
-        #[arg(long, value_name = "ADDRESS", help = "Listen on 127.0.0.1 (this host only), 0.0.0.0 (all addresses) or one IP of this host.")]
+        #[arg(long, value_name = "ADDRESS", help = "Listen on 127.0.0.1 (this host only), 0.0.0.0 (all addresses), one IP of this host, or an interface such as wg0 (its address is followed).")]
         bind: Option<String>,
         #[arg(long, help = "Emit JSON.")]
         json: bool,
@@ -409,9 +409,11 @@ enum ConfigureCommands {
     Api {
         #[arg(long, help = "local, vpn or public (asked on a terminal when omitted).")]
         mode: Option<String>,
-        #[arg(long = "vpn-ip", help = "VPN address of this machine to listen on (default: the detected one).")]
+        #[arg(long, value_name = "NAME", conflicts_with = "vpn_ip", help = "Network interface to serve, e.g. wg0 (any VPN or private network); the gateway follows its address.")]
+        interface: Option<String>,
+        #[arg(long = "vpn-ip", help = "A fixed address of this machine to listen on, instead of following an interface.")]
         vpn_ip: Option<std::net::IpAddr>,
-        #[arg(long = "allow", help = "Client CIDR to allow (repeatable; default for vpn: the VPN's range).")]
+        #[arg(long = "allow", help = "Client CIDR to allow (repeatable; default for vpn: the ranges the network reaches).")]
         allow: Vec<String>,
         #[arg(long, help = "Apply without questions (public mode still refuses 0.0.0.0/0).")]
         yes: bool,
@@ -795,9 +797,9 @@ fn main() {
         Commands::Status => do_status(),
         Commands::Get { cmd: GetCommands::Api { json } } | Commands::Api { json } => do_api(json),
         Commands::Start => goethe_core::onboard::run(),
-        Commands::Configure { cmd: ConfigureCommands::Api { mode, vpn_ip, allow, yes } } => {
+        Commands::Configure { cmd: ConfigureCommands::Api { mode, interface, vpn_ip, allow, yes } } => {
             let mode = mode.as_deref().map(goethe_core::configure::Mode::parse).transpose().unwrap_or_else(|e| usage(e));
-            goethe_core::configure::run_api(goethe_core::configure::ApiOpts { mode, vpn_ip, allow, yes })
+            goethe_core::configure::run_api(goethe_core::configure::ApiOpts { mode, vpn_ip, interface, allow, yes })
         }
         Commands::Down { keep_engines: false } => shutdown::run_down(),
         Commands::Down { keep_engines: true } => goethe_core::service::stop_keeping_engines().map(|(before, kept)| {
@@ -1460,15 +1462,21 @@ fn logs_target_error(target: Option<&str>, daemon: bool, gateway: bool, prune: b
 }
 
 fn do_gateway_bind(addr: &str) -> Result<(), String> {
-    // Validate the address, persist it and apply it to the running gateway; remind about the allowlist.
-    let ip: std::net::IpAddr = addr
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| usage(format!("invalid address {addr:?}: use 0.0.0.0, 127.0.0.1 or an IP address of this host")));
+    // An address, or an interface name whose address the gateway follows; persist, apply, and remind about the allowlist.
     let home = goethe_home();
     ensure_layout(&home).map_err(|e| format!("layout: {e}"))?;
-    println!("{}", nginx::set_public_bind(&home, &ip.to_string())?);
-    if !ip.is_loopback() && security::allowlist_list()?.is_empty() {
+    let loopback = match addr.trim().parse::<std::net::IpAddr>() {
+        Ok(ip) => {
+            println!("{}", nginx::set_public_bind(&home, &ip.to_string())?);
+            ip.is_loopback()
+        }
+        Err(_) if goethe_core::netif::valid_name(addr.trim()) => {
+            println!("{}", nginx::set_public_bind_interface(&home, addr.trim())?);
+            false
+        }
+        Err(_) => usage(format!("invalid address {addr:?}: use 0.0.0.0, 127.0.0.1, an IP address of this host or an interface name")),
+    };
+    if !loopback && security::allowlist_list()?.is_empty() {
         print!("\n{}", empty_allowlist_text());
     }
     Ok(())
@@ -1478,24 +1486,31 @@ fn do_gateway_status(json: bool) -> Result<(), String> {
     // Bind, port, local URL, whether our nginx serves, allowlist size and provider endpoint hints.
     let home = goethe_home();
     let bind = nginx::public_bind(&home);
+    let interface = nginx::bind_interface(&home);
+    let waiting = nginx::bind_waiting(&home).is_some();
     let port = nginx::public_port_u16(&home);
     let url = format!("https://{}", nginx::gateway_connect_addr(&home));
     let running = nginx::format_gateway_line(&home).is_some();
     let allowlist = security::allowlist_list()?.len();
     let endpoints = goethe_core::host::probe_environment(port).public_endpoints;
     if json {
-        let row = json!({"bind": bind, "port": port, "url": url, "running": running,
+        let row = json!({"bind": bind, "interface": interface, "waiting": waiting, "port": port, "url": url, "running": running,
             "allowlist_entries": allowlist, "endpoints": endpoints});
         println!("{row}");
         return Ok(());
     }
-    print!("{}", gateway_status_text(&bind, port, &url, running, allowlist, &endpoints));
+    let bind_line = match (&interface, waiting) {
+        (Some(n), true) => format!("127.0.0.1 (waiting for {n}: it has no IPv4 address, so only this host can connect)"),
+        (Some(n), false) => format!("{bind} (follows {n})"),
+        (None, _) => bind.clone(),
+    };
+    print!("{}", gateway_status_text(&bind_line, port, &url, running, allowlist, &endpoints));
     Ok(())
 }
 
 fn gateway_status_text(bind: &str, port: u16, url: &str, running: bool, allowlist: usize, endpoints: &[String]) -> String {
     // Bind and who can reach it, port, local URL, state, allowlist size, then provider endpoint hints.
-    let loopback = bind.parse::<std::net::IpAddr>().map_or(true, |ip| ip.is_loopback());
+    let loopback = bind.split_whitespace().next().and_then(|b| b.parse::<std::net::IpAddr>().ok()).is_none_or(|ip| ip.is_loopback());
     let scope = if loopback {
         "this host only; `goethe gateway --bind 0.0.0.0` accepts remote clients"
     } else {
@@ -1532,7 +1547,10 @@ fn do_status() -> Result<(), String> {
         return Ok(());
     }
     let api = match nginx::format_gateway_line(&home) {
-        Some(_) => format!("https://{}/v1", nginx::gateway_connect_addr(&home)),
+        Some(_) => match nginx::bind_waiting(&home) {
+            Some(n) => format!("https://{}/v1 (waiting for {n}; only this machine can connect until it has an address)", nginx::gateway_connect_addr(&home)),
+            None => format!("https://{}/v1", nginx::gateway_connect_addr(&home)),
+        },
         None => "not listening yet (goethe logs --gateway shows why)".to_string(),
     };
     let keys: Vec<(String, String)> = security::key_list_detailed()?

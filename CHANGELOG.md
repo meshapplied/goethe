@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- `goethe configure api` takes an address for Tailscale only when it is on a `tailscale*` interface or `tailscale ip` reports it. Before, any `100.64.0.0/10` address counted, so on clouds and carriers that use that range for NAT the whole range could be allowlisted.
+- `goethe configure api` works with any VPN or private network: it lists the networks this machine is on (tunnels and private addresses; container bridges and public network cards are left out) with the range each reaches, taken from the routing table, and still asks whether to restrict access to specific addresses. Single-device routes widen to their private block, and default routes are never allowed. Before, only Tailscale, WireGuard and ZeroTier names were recognised, and any `100.64.0.0/10` address counted as Tailscale, so clouds and carriers that use that range for NAT could have it all allowlisted.
+- The gateway follows the chosen interface instead of a fixed address: a new address is picked up within a few seconds with a hot reload, and while the interface has none it serves this machine only (shown by `goethe status`, `goethe gateway` and `goethe doctor`). `--interface <name>` picks the network without a terminal, and `goethe gateway --bind` takes an interface name too.
 - `goethe gpu` redraws every half second instead of every second.
 
 ## 0.1.9 (2026-11-09)
