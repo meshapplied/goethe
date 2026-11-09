@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.9 (2026-11-09)
 
 - `goethe learn on|off [--model ...]` lets a session keep what context compaction would drop: the user's rules and corrections, facts from chat, the goal, decisions and mistakes. A small per-session note goes into the prompt after each compaction, for any model, on chat completions, Anthropic Messages and Responses. Sessions are told apart by `X-Session-Id`. Off by default; see `docs/learn.md`.
 - `goethe gpu` updates live on a terminal until `q` and shows each GPU's process ids, Goethe's in green and others in red, and a bar of memory bandwidth use that turns blue past 70 %. The SM column is gone. Piped or with `--json` it prints once; the JSON adds `processes` and `memory_util_percent`.
