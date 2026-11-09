@@ -317,7 +317,7 @@ The DNS record that serves the API under your own domain name, with this machine
 
 ### `goethe gpu`
 
-GPUs with their memory use, whether Goethe may use them, the process ids on each (Goethe's in green, others in red) and a bar of memory bandwidth use. The bar turns blue past the line at 70 %. On a terminal the table updates every second until you press `q`; piped or with `--json` it prints once. The JSON adds `processes` (`pid`, `goethe`) and `memory_util_percent`.
+GPUs with their memory use, whether Goethe may use them, the process ids on each (Goethe's in green, others in red) and a bar of memory bandwidth use. The bar turns blue past the line at 70 %. On a terminal the table updates every half second until you press `q`; piped or with `--json` it prints once. The JSON adds `processes` (`pid`, `goethe`) and `memory_util_percent`.
 
 | Option | Description |
 |---|---|
