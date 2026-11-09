@@ -1,6 +1,7 @@
 // goethed JSON-lines RPC server over GOETHE_SOCK.
 
 mod instance_lock;
+mod curator;
 mod mux;
 
 use goethe_core::nginx;
@@ -221,6 +222,7 @@ async fn main() {
         drain_mux(&home).await;
     }
     goethe_core::trace::flush(Duration::from_secs(5));
+    goethe_core::learn::flush();
     shutdown::shutdown_daemon(&home, &sock, keep);
     std::process::exit(exit_code);
 }

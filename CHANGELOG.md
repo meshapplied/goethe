@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `goethe learn on|off [--model ...]` lets a session keep what context compaction would drop: the user's rules and corrections, facts from chat, the goal, decisions and mistakes. A small per-session note goes into the prompt after each compaction, for any model, on chat completions, Anthropic Messages and Responses. Sessions are told apart by `X-Session-Id`. Off by default; see `docs/learn.md`.
+
 ## 0.1.8 (2026-11-06)
 
 - `goethe trace on|off [--key ... | --all-keys]` records every chat, Anthropic Messages, completions and Responses request with its reply, for all models and instances, into `~/.goethe/traces` (or `--dir`), as a corpus for training later. Turns are grouped into sessions: follow-ups store only their new messages, and regenerations are kept as alternative replies. Each turn names the exact model version that produced it, and streamed replies are stored in their non-streaming shape. A manifest, a session index and a recording history describe the folder. `off` keeps the chosen keys for the next `on`. `goethe trace` shows the size. Recording turns itself off at a size limit (`--max-gb`, default 20 GB), pauses while the disk is low, and never slows a reply. The format is in `docs/traces.md`; `goethe uninstall` keeps the corpus, and `goethe remove --model` asks whether to delete that model's traces (`--delete-traces`, `--keep-traces`).

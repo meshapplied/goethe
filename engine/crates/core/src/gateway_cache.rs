@@ -1,7 +1,8 @@
-// In-memory gateway view of state.db (keys, routes, aliases, models, trace settings), reloaded when PRAGMA data_version moves.
+// In-memory gateway view of state.db (keys, routes, aliases, models, trace and learn settings), reloaded when PRAGMA data_version moves.
 
 use crate::db;
 use crate::key_usage;
+use crate::learn::{self, LearnConfig};
 use crate::security::{token_hash, ResolvedKey};
 use crate::trace::{self, TraceConfig};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 const RECHECK: Duration = Duration::from_millis(250);
 const BUSY_RETRY: Duration = Duration::from_millis(50);
 const READ_BUSY_TIMEOUT: Duration = Duration::from_millis(200);
+const DEFAULT_CONTEXT: u64 = 32_768;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Route {
@@ -30,11 +32,21 @@ pub struct Snapshot {
     aliases: HashMap<String, String>,
     models: HashMap<String, i64>,
     trace: Arc<TraceConfig>,
+    learn: Arc<LearnConfig>,
+    contexts: HashMap<String, u64>,
 }
 
 impl Snapshot {
     pub fn trace(&self) -> &TraceConfig {
         &self.trace
+    }
+
+    pub fn learn(&self) -> &LearnConfig {
+        &self.learn
+    }
+
+    pub fn context_length(&self, model_id: &str) -> u64 {
+        self.contexts.get(model_id).copied().unwrap_or(DEFAULT_CONTEXT)
     }
 
     pub fn has_key(&self, key: &ResolvedKey) -> bool {
@@ -251,14 +263,26 @@ fn load_snapshot(con: &Connection) -> rusqlite::Result<Snapshot> {
         snap.aliases.insert(alias, model_id);
     }
     let mut stmt = tx.prepare(
-        "SELECT model_id, COALESCE(CAST(strftime('%s', installed_at) AS INTEGER), 0) FROM installed_models",
+        "SELECT model_id, COALESCE(CAST(strftime('%s', installed_at) AS INTEGER), 0), COALESCE(default_ctx, 0) FROM installed_models",
     )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))?;
     for row in rows {
-        let (model_id, created) = row?;
+        let (model_id, created, ctx) = row?;
+        if let Some(ctx) = u64::try_from(ctx).ok().filter(|c| *c > 0) {
+            snap.contexts.insert(model_id.clone(), ctx);
+        }
         snap.models.insert(model_id, created);
     }
+    let mut stmt = tx.prepare("SELECT model_id, MIN(ctx_len) FROM loaded_instances WHERE ctx_len > 0 GROUP BY model_id")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    for row in rows {
+        let (model_id, ctx) = row?;
+        if let Ok(ctx) = u64::try_from(ctx) {
+            snap.contexts.insert(model_id, ctx);
+        }
+    }
     snap.trace = Arc::new(trace::load_config(&tx));
+    snap.learn = Arc::new(learn::load_config(&tx));
     Ok(snap)
 }
 

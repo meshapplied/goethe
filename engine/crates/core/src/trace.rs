@@ -173,7 +173,7 @@ fn resolve_keys(con: &Connection, wanted: &[String]) -> Result<Vec<String>, Stri
         .collect()
 }
 
-fn key_names(con: &Connection) -> HashMap<String, String> {
+pub(crate) fn key_names(con: &Connection) -> HashMap<String, String> {
     let Ok(mut stmt) = con.prepare("SELECT key_id, name FROM api_keys") else {
         return HashMap::new();
     };
@@ -182,7 +182,7 @@ fn key_names(con: &Connection) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-fn make_private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn make_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
 }
 
@@ -342,7 +342,7 @@ fn append_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     written
 }
 
-fn write_private_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     {
         let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&tmp)?;
@@ -381,6 +381,7 @@ pub struct Capture {
     pub instance_id: String,
     pub model: String,
     pub session_hint: Option<String>,
+    pub learn_note: Option<String>,
     pub request: Vec<u8>,
     pub started_at: SystemTime,
     pub duration_s: f64,
@@ -745,6 +746,9 @@ impl Writer {
         rec.insert("request_id".into(), json!(c.request_id));
         if let Some(h) = &c.session_hint {
             rec.insert("session_hint".into(), json!(h));
+        }
+        if let Some(n) = &c.learn_note {
+            rec.insert("learn_note".into(), json!(n));
         }
         if api.has_messages() {
             rec.insert("parent".into(), parent_json);
@@ -1181,6 +1185,7 @@ mod tests {
             instance_id: "i1".into(),
             model: "org/model".into(),
             session_hint: None,
+            learn_note: None,
             request: serde_json::to_vec(&request).unwrap(),
             started_at: SystemTime::now(),
             duration_s: 0.5,
