@@ -203,12 +203,13 @@ Running models with their GPUs, port, memory, restarts, requests in progress and
 
 ### `goethe configure api`
 
-Chooses who can reach the API: this machine only, your VPN (Tailscale, WireGuard or ZeroTier; recommended), or a public address. It then asks whether to restrict access to specific IP addresses.
+Chooses who can reach the API: this machine only, a VPN or other private network (recommended), or a public address. For a VPN it lists the networks this machine is on, with the ranges each one reaches, and works with any VPN that has a network interface. It then asks whether to restrict access to specific IP addresses. The gateway follows the chosen interface: when its address changes, it moves within a few seconds, and while the interface has no address only this machine can connect.
 
 | Option | Description |
 |---|---|
 | `--mode local\|vpn\|public` | The access mode (asked when omitted) |
-| `--vpn-ip <ip>` | This machine's VPN address to listen on (default: the detected one) |
+| `--interface <name>` | The network interface to serve, such as `wg0`; needed without a terminal when there are several |
+| `--vpn-ip <ip>` | A fixed address of this machine instead of an interface |
 | `--allow <cidr>` | A client address or range to allow; repeatable |
 | `--yes` | Apply without questions |
 
@@ -302,7 +303,7 @@ Where the API listens, and how many client addresses are allowed.
 
 | Option | Description |
 |---|---|
-| `--bind <address>` | Listen on `127.0.0.1` (this machine only), `0.0.0.0` (all addresses) or one IP of this machine |
+| `--bind <address>` | Listen on `127.0.0.1` (this machine only), `0.0.0.0` (all addresses), one IP of this machine, or an interface such as `wg0`, whose address is followed |
 | `--json` | JSON output |
 
 ### `goethe domain`

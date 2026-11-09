@@ -1,5 +1,6 @@
 // goethe configure api: a guided choice between local, VPN and public access to the gateway.
 
+use crate::netif::{self, Iface, Net};
 use crate::nginx::{self, InterfaceAddr};
 use crate::paths::goethe_home;
 use crate::security;
@@ -27,92 +28,52 @@ impl Mode {
 pub struct ApiOpts {
     pub mode: Option<Mode>,
     pub vpn_ip: Option<IpAddr>,
+    pub interface: Option<String>,
     pub allow: Vec<String>,
     pub yes: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VpnAddr {
-    pub name: String,
-    pub ip: Ipv4Addr,
-    pub kind: &'static str,
-    pub range: String,
+pub struct Network {
+    pub iface: Iface,
+    pub ranges: Vec<Net>,
 }
 
-const TAILSCALE_RANGE: &str = "100.64.0.0/10";
+pub fn networks() -> Vec<Network> {
+    // Private networks this machine is on, tunnels first, each with the ranges it reaches.
+    let routes = netif::routes();
+    netif::candidates(&netif::interfaces(&routes))
+        .into_iter()
+        .map(|iface| {
+            let ranges = netif::reach(&iface, &routes);
+            Network { iface, ranges }
+        })
+        .collect()
+}
+
+fn network_label(n: &Network, width: usize) -> String {
+    // "wg0   10.8.0.2   reaches 10.8.0.0/24 (tunnel)", padded so the menu lines up.
+    let reaches = if n.ranges.is_empty() {
+        "range unknown, you will be asked".to_string()
+    } else {
+        format!("reaches {}", n.ranges.iter().map(Net::to_string).collect::<Vec<_>>().join(", "))
+    };
+    let mut tags = Vec::new();
+    if n.iface.tunnel {
+        tags.push("tunnel");
+    }
+    if n.iface.default_route {
+        tags.push("default route");
+    }
+    let tags = if tags.is_empty() { String::new() } else { format!(" ({})", tags.join(", ")) };
+    format!("{:<width$}  {:<15}  {reaches}{tags}", n.iface.name, n.iface.addr.to_string())
+}
+
 const PUBLIC_WARNING: &str = "exposing the API on a public network is not recommended.
   - Anyone who can reach this machine can attempt to connect; only the allowlist and API keys stop them.
   - Allow only the client IPs you trust (goethe allowlist --add <ip>/32) and give every client its own key.
   - Open the gateway port in your firewall or router yourself; Goethe does not change them.
   - The certificate is self-signed, so clients must trust it or skip verification.";
-
-pub fn tailscale_ips() -> Vec<Ipv4Addr> {
-    // This node's Tailscale IPv4 addresses as tailscaled reports them; none when Tailscale is absent, down or slow to answer.
-    let Ok(mut child) = std::process::Command::new("tailscale")
-        .args(["ip", "-4"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    else {
-        return Vec::new();
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(50)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Vec::new();
-            }
-        }
-    }
-    let mut out = String::new();
-    if let Some(mut pipe) = child.stdout.take() {
-        let _ = std::io::Read::read_to_string(&mut pipe, &mut out);
-    }
-    out.lines().filter_map(|l| l.trim().parse().ok()).collect()
-}
-
-fn network(ip: Ipv4Addr, prefix: u8) -> String {
-    // The CIDR of the network an address with this prefix length belongs to.
-    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - u32::from(prefix.min(32))) };
-    format!("{}/{}", Ipv4Addr::from(u32::from(ip) & mask), prefix.min(32))
-}
-
-pub fn vpn_addrs(addrs: &[InterfaceAddr], tailscale: &[Ipv4Addr]) -> Vec<VpnAddr> {
-    // IPv4 addresses on Tailscale, WireGuard, ZeroTier and other tunnel interfaces with the range to allow; Tailscale needs its interface name or tailscaled's word, since 100.64.0.0/10 alone is often carrier NAT.
-    let mut out = Vec::new();
-    for a in addrs {
-        let IpAddr::V4(ip) = a.ip else { continue };
-        if ip.is_loopback() {
-            continue;
-        }
-        let n = a.name.as_str();
-        let kind = if n.starts_with("tailscale") || tailscale.contains(&ip) {
-            "Tailscale"
-        } else if n.starts_with("wg") {
-            "WireGuard"
-        } else if n.starts_with("zt") {
-            "ZeroTier"
-        } else if n.starts_with("tun") || n.starts_with("tap") || n.starts_with("nebula") {
-            "VPN tunnel"
-        } else {
-            continue;
-        };
-        let range = if kind == "Tailscale" {
-            TAILSCALE_RANGE.to_string()
-        } else if a.prefix >= 31 {
-            network(ip, 24)
-        } else {
-            network(ip, a.prefix)
-        };
-        out.push(VpnAddr { name: a.name.clone(), ip, kind, range });
-    }
-    out
-}
 
 fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
@@ -152,26 +113,28 @@ fn current_text() -> Result<String, String> {
     let home = goethe_home();
     let list = security::allowlist_list()?;
     let list = if list.is_empty() { "empty (every client refused)".to_string() } else { list.join(", ") };
+    let follows = nginx::bind_interface(&home).map(|n| format!(" (following {n})")).unwrap_or_default();
     Ok(format!(
-        "Gateway now: listening on {} port {}; allowlist: {list}",
+        "Gateway now: listening on {}{follows} port {}; allowlist: {list}",
         nginx::public_bind(&home),
         nginx::public_port_u16(&home)
     ))
 }
 
-fn choose_mode(vpns: &[VpnAddr]) -> Result<Mode, String> {
-    // The three choices in an arrow-key menu, VPN preselected when one is up; a numbered prompt when raw mode fails.
-    let detected = match vpns.first() {
-        Some(v) => format!("detected: {} {} on {}", v.kind, v.ip, v.name),
-        None => "none detected; set up Tailscale or WireGuard first".to_string(),
+fn choose_mode(nets: &[Network]) -> Result<Mode, String> {
+    // The three choices in an arrow-key menu, VPN preselected when a tunnel is up; a numbered prompt when raw mode fails.
+    let detected = if nets.is_empty() {
+        "none found, you can name one".to_string()
+    } else {
+        format!("found {}", nets.iter().map(|n| n.iface.name.as_str()).collect::<Vec<_>>().join(", "))
     };
     let options = vec![
         "Local only: programs on this machine".to_string(),
-        format!("VPN (recommended): devices on your private network ({detected})"),
+        format!("VPN or private network (recommended): {detected}"),
         "Public network (not recommended): any address that can reach this machine".to_string(),
     ];
     let modes = [Mode::Local, Mode::Vpn, Mode::Public];
-    let default = if vpns.is_empty() { 0 } else { 1 };
+    let default = if nets.iter().any(|n| n.iface.tunnel) { 1 } else { 0 };
     match crate::term::select(&options, default) {
         Ok(Some(i)) => {
             eprintln!();
@@ -224,69 +187,171 @@ fn configure_local() -> Result<String, String> {
     Ok("127.0.0.1".to_string())
 }
 
-fn pick_vpn(opts: &ApiOpts, vpns: &[VpnAddr], tailscale: &[Ipv4Addr]) -> Result<VpnAddr, String> {
-    // The --vpn-ip address, the only VPN address, or the user's pick among several.
-    if let Some(ip) = opts.vpn_ip {
-        let IpAddr::V4(v4) = ip else { return Err("--vpn-ip must be an IPv4 address".to_string()) };
-        return Ok(vpns.iter().find(|v| v.ip == v4).cloned().unwrap_or(VpnAddr {
-            name: "given".to_string(),
-            ip: v4,
-            kind: if tailscale.contains(&v4) { "Tailscale" } else { "VPN" },
-            range: if tailscale.contains(&v4) { TAILSCALE_RANGE.to_string() } else { network(v4, 24) },
-        }));
+enum Target {
+    Interface(Network),
+    Address(Ipv4Addr, Vec<Net>),
+}
+
+impl Target {
+    fn addr(&self) -> Ipv4Addr {
+        match self {
+            Target::Interface(n) => n.iface.addr,
+            Target::Address(ip, _) => *ip,
+        }
     }
-    match vpns.len() {
-        0 => Err("no VPN interface found (Tailscale, WireGuard or ZeroTier); bring one up, or pass --vpn-ip <address>".to_string()),
-        1 => Ok(vpns[0].clone()),
-        _ if !interactive() || opts.yes => Ok(vpns[0].clone()),
-        _ => {
-            let labels: Vec<String> = vpns.iter().map(|v| format!("{} {} on {}", v.kind, v.ip, v.name)).collect();
-            match crate::term::select(&labels, 0) {
-                Ok(Some(i)) => return Ok(vpns[i].clone()),
-                Ok(None) => return Err("cancelled; nothing changed".to_string()),
-                Err(_) => {}
-            }
-            for (i, l) in labels.iter().enumerate() {
-                eprintln!("  {}) {l}", i + 1);
-            }
-            let a = ask("Which VPN address? [1]:", "1")?;
-            a.parse::<usize>()
-                .ok()
-                .and_then(|n| vpns.get(n.wrapping_sub(1)))
-                .cloned()
-                .ok_or_else(|| format!("no VPN address number {a}"))
+
+    fn ranges(&self) -> &[Net] {
+        match self {
+            Target::Interface(n) => &n.ranges,
+            Target::Address(_, r) => r,
+        }
+    }
+
+    fn who(&self) -> String {
+        match self {
+            Target::Interface(n) => format!("{} clients", n.iface.name),
+            Target::Address(..) => "VPN clients".to_string(),
         }
     }
 }
 
-fn configure_vpn(opts: &ApiOpts, vpns: &[VpnAddr], tailscale: &[Ipv4Addr]) -> Result<String, String> {
-    // Bind to the VPN address so other networks never reach the gateway, and allow the VPN's range.
-    let v = pick_vpn(opts, vpns, tailscale)?;
-    let ranges = if opts.allow.is_empty() {
-        let default = v.range.clone();
+fn by_interface(name: &str, nets: &[Network]) -> Result<Target, String> {
+    // A listed network, or any interface with an IPv4 address (a tunnel on a public address, a bridge the list leaves out).
+    if let Some(n) = nets.iter().find(|n| n.iface.name == name) {
+        return Ok(Target::Interface(n.clone()));
+    }
+    if !netif::valid_name(name) {
+        return Err(format!("{name:?} is not a network interface name"));
+    }
+    let routes = netif::routes();
+    let iface = netif::interfaces(&routes)
+        .into_iter()
+        .find(|i| i.name == name)
+        .ok_or_else(|| format!("{name} has no IPv4 address on this host; connect that network first (ip -4 addr show {name})"))?;
+    let ranges = netif::reach(&iface, &routes);
+    Ok(Target::Interface(Network { iface, ranges }))
+}
+
+fn by_address(ip: IpAddr, nets: &[Network]) -> Result<Target, String> {
+    // A fixed address of this machine; its ranges come from the interface that carries it.
+    let IpAddr::V4(v4) = ip else { return Err("the address must be IPv4".to_string()) };
+    if let Some(n) = nets.iter().find(|n| n.iface.addr == v4) {
+        return Ok(Target::Address(v4, n.ranges.clone()));
+    }
+    let routes = netif::routes();
+    let iface = netif::interfaces(&routes)
+        .into_iter()
+        .find(|i| i.addr == v4)
+        .ok_or_else(|| format!("{v4} is not an address of this machine; a VPN without its own interface (userspace mode) needs local mode and the VPN's own port forwarding"))?;
+    Ok(Target::Address(v4, netif::reach(&iface, &routes)))
+}
+
+fn ask_other(nets: &[Network]) -> Result<Target, String> {
+    let a = ask("Interface name (e.g. wg0) or IP address of this machine:", "")?;
+    if a.is_empty() {
+        return Err("cancelled; nothing changed".to_string());
+    }
+    match a.parse::<IpAddr>() {
+        Ok(ip) => by_address(ip, nets),
+        Err(_) => by_interface(&a, nets),
+    }
+}
+
+fn pick_network(opts: &ApiOpts, nets: &[Network]) -> Result<Target, String> {
+    // --interface, --vpn-ip, the user's pick, or without a terminal the only network (or the only tunnel); never a guess among several.
+    if let Some(name) = &opts.interface {
+        return by_interface(name.trim(), nets);
+    }
+    if let Some(ip) = opts.vpn_ip {
+        return by_address(ip, nets);
+    }
+    let names = || nets.iter().map(|n| n.iface.name.as_str()).collect::<Vec<_>>().join(", ");
+    if !interactive() || opts.yes {
+        let tunnels: Vec<&Network> = nets.iter().filter(|n| n.iface.tunnel).collect();
+        return match (nets.len(), tunnels.len()) {
+            (0, _) => Err("no private network found on this machine; connect your VPN, or pass --interface <name>".to_string()),
+            (1, _) => Ok(Target::Interface(nets[0].clone())),
+            (_, 1) => Ok(Target::Interface(tunnels[0].clone())),
+            _ => Err(format!("several networks ({}); pass --interface <name>", names())),
+        };
+    }
+    if nets.is_empty() {
+        eprintln!("No private network found. Name the interface or address your VPN uses.");
+        return ask_other(nets);
+    }
+    let width = nets.iter().map(|n| n.iface.name.len()).max().unwrap_or(0);
+    let mut labels: Vec<String> = nets.iter().map(|n| network_label(n, width)).collect();
+    labels.push("Another interface or address...".to_string());
+    eprintln!("Which network?");
+    match crate::term::select(&labels, 0) {
+        Ok(Some(i)) if i < nets.len() => return Ok(Target::Interface(nets[i].clone())),
+        Ok(Some(_)) => return ask_other(nets),
+        Ok(None) => return Err("cancelled; nothing changed".to_string()),
+        Err(_) => {}
+    }
+    for (i, l) in labels.iter().enumerate() {
+        eprintln!("  {}) {l}", i + 1);
+    }
+    let a = ask("Choice [1]:", "1")?;
+    match a.parse::<usize>().ok().and_then(|n| n.checked_sub(1)) {
+        Some(i) if i < nets.len() => Ok(Target::Interface(nets[i].clone())),
+        Some(i) if i == nets.len() => ask_other(nets),
+        _ => Err(format!("no choice {a}")),
+    }
+}
+
+fn vpn_ranges(opts: &ApiOpts, target: &Target) -> Result<Vec<String>, String> {
+    // --allow, or the network's ranges with the usual offer to narrow them; asked outright when the ranges are unknown.
+    let raw = if !opts.allow.is_empty() {
+        opts.allow.join(",")
+    } else if target.ranges().is_empty() {
+        if !interactive() || opts.yes {
+            return Err(format!("which addresses reach {} is unknown; pass --allow <cidr>", target.addr()));
+        }
+        ask("Addresses or ranges to allow, comma separated (e.g. 10.8.0.0/24):", "")?
+    } else {
+        let default = target.ranges().iter().map(Net::to_string).collect::<Vec<_>>().join(",");
         let specific = interactive() && !opts.yes && confirm(RESTRICT_QUESTION, false, false)?;
         if specific {
-            ask("Addresses or ranges to allow, comma separated (e.g. 100.64.0.7/32):", &default)?
+            ask(&format!("Addresses or ranges to allow, comma separated [{default}]:"), &default)?
         } else {
             default
         }
-    } else {
-        opts.allow.join(",")
     };
-    let ranges: Vec<String> = ranges.split(',').map(str::trim).filter(|r| !r.is_empty()).map(String::from).collect();
+    let ranges: Vec<String> = raw.split(',').map(str::trim).filter(|r| !r.is_empty()).map(String::from).collect();
+    if ranges.is_empty() {
+        return Err("no addresses to allow; nothing changed".to_string());
+    }
     for r in &ranges {
         security::canonical_cidr(r)?;
+        if is_everyone(r) {
+            return Err(format!("{r} lets every address in; for that use --mode public"));
+        }
     }
-    println!("The gateway will listen on {} ({} on {}) and on 127.0.0.1, and allow {}.", v.ip, v.kind, v.name, ranges.join(", "));
+    Ok(ranges)
+}
+
+fn configure_vpn(opts: &ApiOpts, nets: &[Network]) -> Result<String, String> {
+    // Listen on the chosen network only (following its interface) and on 127.0.0.1, and allow its range or the addresses named.
+    let target = pick_network(opts, nets)?;
+    let ranges = vpn_ranges(opts, &target)?;
+    let place = match &target {
+        Target::Interface(n) => format!("{} ({}; follows its address)", n.iface.addr, n.iface.name),
+        Target::Address(ip, _) => format!("{ip} (fixed)"),
+    };
+    println!("The gateway will listen on {place} and on 127.0.0.1, and allow {}.", ranges.join(", "));
     if !confirm("Apply?", true, opts.yes)? {
         return Err("nothing changed".to_string());
     }
-    bind(&v.ip.to_string())?;
+    match &target {
+        Target::Interface(n) => println!("{}", nginx::set_public_bind_interface(&goethe_home(), &n.iface.name)?),
+        Target::Address(ip, _) => bind(&ip.to_string())?,
+    }
     allow("127.0.0.1/32", "this machine")?;
     for r in &ranges {
-        allow(r, &format!("{} clients", v.kind))?;
+        allow(r, &target.who())?;
     }
-    Ok(v.ip.to_string())
+    Ok(target.addr().to_string())
 }
 
 fn configure_public(opts: &ApiOpts) -> Result<String, String> {
@@ -393,16 +458,15 @@ fn offer_key(yes: bool) -> Result<(), String> {
 pub fn apply_access(opts: &ApiOpts) -> Result<String, String> {
     // Show the current setup, pick a mode (asked on a terminal), apply bind and allowlist; returns the API base URL.
     println!("{}", current_text()?);
-    let tailscale = tailscale_ips();
-    let vpns = vpn_addrs(&nginx::interface_addrs().unwrap_or_default(), &tailscale);
+    let nets = networks();
     let mode = match opts.mode {
         Some(m) => m,
-        None if interactive() => choose_mode(&vpns)?,
+        None if interactive() => choose_mode(&nets)?,
         None => return Err("no terminal to ask on: pass --mode local, --mode vpn or --mode public".to_string()),
     };
     let bound = match mode {
         Mode::Local => configure_local()?,
-        Mode::Vpn => configure_vpn(opts, &vpns, &tailscale)?,
+        Mode::Vpn => configure_vpn(opts, &nets)?,
         Mode::Public => configure_public(opts)?,
     };
     let port = nginx::public_port_u16(&goethe_home());
@@ -430,41 +494,6 @@ mod tests {
     }
 
     #[test]
-    fn vpn_interfaces_are_found_with_the_range_to_allow() {
-        let addrs = vec![
-            addr("lo", "127.0.0.1", 8),
-            addr("eno1", "192.168.1.20", 24),
-            addr("tailscale0", "100.70.155.114", 32),
-            addr("wg0", "10.8.0.2", 24),
-            addr("wg1", "10.9.0.5", 32),
-            addr("zt7", "172.22.4.9", 16),
-            addr("docker0", "172.17.0.1", 16),
-        ];
-        let found: Vec<(String, &str, String)> = vpn_addrs(&addrs, &[]).into_iter().map(|v| (v.name, v.kind, v.range)).collect();
-        assert_eq!(
-            found,
-            vec![
-                ("tailscale0".to_string(), "Tailscale", "100.64.0.0/10".to_string()),
-                ("wg0".to_string(), "WireGuard", "10.8.0.0/24".to_string()),
-                ("wg1".to_string(), "WireGuard", "10.9.0.0/24".to_string()),
-                ("zt7".to_string(), "ZeroTier", "172.22.0.0/16".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn carrier_nat_addresses_are_not_taken_for_tailscale() {
-        let nat = vec![addr("eth0", "100.72.3.4", 16)];
-        assert!(vpn_addrs(&nat, &[]).is_empty(), "a 100.64.0.0/10 address on a plain NIC is not a VPN");
-        let userspace = vec![addr("eth0", "100.72.3.4", 16)];
-        let found = vpn_addrs(&userspace, &["100.72.3.4".parse().unwrap()]);
-        assert_eq!(found.len(), 1);
-        assert_eq!((found[0].kind, found[0].range.as_str()), ("Tailscale", "100.64.0.0/10"), "tailscaled vouches for it");
-        let wg = vpn_addrs(&[addr("wg0", "100.80.0.2", 24)], &[]);
-        assert_eq!((wg[0].kind, wg[0].range.as_str()), ("WireGuard", "100.80.0.0/24"), "a WireGuard tunnel in that range keeps its own subnet");
-    }
-
-    #[test]
     fn public_ip_lines_show_the_api_and_spot_nat() {
         let local = vec![addr("eno1", "192.168.1.20", 24)];
         let nat = public_ip_lines(Ok("203.0.113.5".parse().unwrap()), 8080, &local);
@@ -481,6 +510,6 @@ mod tests {
         assert_eq!(Mode::parse("VPN"), Ok(Mode::Vpn));
         assert!(Mode::parse("lan").is_err());
         assert!(is_everyone("0.0.0.0/0") && is_everyone("::/0") && !is_everyone("203.0.113.7/32"));
-        assert_eq!(network("10.1.2.3".parse().unwrap(), 16), "10.1.0.0/16");
+        assert_eq!(Net::new("10.1.2.3".parse().unwrap(), 16).to_string(), "10.1.0.0/16");
     }
 }

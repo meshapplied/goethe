@@ -268,7 +268,7 @@ fn step_serve(model: &str) -> Result<(), String> {
 fn step_access(model: &str) -> Result<(), String> {
     // Who can reach the API, then a key for the first client, then the ready-to-use call with that key filled in.
     heading(3, "Configure API access", Some("Choose who can reach the API:"));
-    let api = configure::apply_access(&ApiOpts { mode: None, vpn_ip: None, allow: Vec::new(), yes: false })?;
+    let api = configure::apply_access(&ApiOpts { mode: None, vpn_ip: None, interface: None, allow: Vec::new(), yes: false })?;
     let token = choose_key()?;
     print!("\x1b[2J\x1b[H{}", ready_text(&api, model, &token));
     Ok(())
@@ -340,7 +340,7 @@ fn advanced() -> Result<(), String> {
             }
             Some(4) => {
                 screen("Configure API access", Some("Choose who can reach the API:"));
-                configure::apply_access(&ApiOpts { mode: None, vpn_ip: None, allow: Vec::new(), yes: false })
+                configure::apply_access(&ApiOpts { mode: None, vpn_ip: None, interface: None, allow: Vec::new(), yes: false })
                     .map(|api| Some(format!("API endpoint: {api}")))
             }
             Some(5) => create_key().map(Some),
