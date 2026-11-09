@@ -1216,7 +1216,7 @@ fn rpc_daemon_err(e: String) -> String {
 }
 
 fn do_gpu_list(json: bool) -> Result<(), String> {
-    // JSON once, or the table redrawn every second on a terminal until q.
+    // JSON once, or the table redrawn every half second on a terminal until q.
     let home = goethe_home();
     ensure_layout(&home).map_err(|e| format!("layout: {e}"))?;
     if json {
@@ -1225,7 +1225,7 @@ fn do_gpu_list(json: bool) -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?);
         return Ok(());
     }
-    goethe_core::term::live(std::time::Duration::from_secs(1), || {
+    goethe_core::term::live(std::time::Duration::from_millis(500), || {
         let con = db::open(&home).map_err(|e| e.to_string())?;
         Ok(gpu_list_text(&gpu_policy::list_rows(&con, &home)?))
     })
