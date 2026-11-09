@@ -15,6 +15,7 @@ use goethe_core::recommend;
 use goethe_core::rpc;
 use goethe_core::security;
 use goethe_core::shutdown;
+use goethe_core::learn;
 use goethe_core::trace;
 use serde_json::{json, Value};
 
@@ -35,6 +36,18 @@ List keys, or revoke one:
 
 \t→ goethe key
 \t→ goethe key --revoke <key-id>";
+
+const LEARN_HELP: &str = "A session keeps what compaction would drop: the user's rules and corrections, facts from chat, the goal, decisions and mistakes. A small note goes into the prompt after each compaction. Sessions are told apart by the client's X-Session-Id header.
+
+Every model:
+\t→ goethe learn on
+\t→ goethe learn off
+
+One model:
+\t→ goethe learn on --model my-model
+\t→ goethe learn off --model my-model
+
+goethe learn alone shows the current scope. Changes apply to the next request. Details are in docs/learn.md.";
 
 const TRACE_HELP: &str = "Record every generation request and reply, grouped into sessions, as a corpus for training later:
 
@@ -361,6 +374,17 @@ enum Commands {
         model: Option<String>,
         #[arg(long, num_args = 1.., value_name = "ALIAS", help = "Remove these aliases.")]
         remove: Vec<String>,
+    },
+    #[command(about = "Let sessions keep what context compaction would drop: turn it on or off, for every model or for some.", after_help = LEARN_HELP)]
+    Learn {
+        #[arg(value_parser = ["on", "off", "status"], help = "on, off, or status (the default).")]
+        action: Option<String>,
+        #[arg(long, num_args = 1.., value_name = "MODEL", help = "Only these models (id or alias); all, or leaving it out, means every model.")]
+        model: Vec<String>,
+        #[arg(long, hide = true, value_name = "SESSION", conflicts_with_all = ["action", "model"])]
+        print: Option<String>,
+        #[arg(long, help = "Emit JSON.")]
+        json: bool,
     },
     #[command(about = "Record requests and replies as training traces: turn it on or off, per API key, and see the size.", after_help = TRACE_HELP)]
     Trace {
@@ -880,6 +904,7 @@ fn main() {
             max_gb,
             json,
         } => do_trace(action.as_deref(), &key, all_keys, dir.as_deref(), max_gb, json),
+        Commands::Learn { action, model, print, json } => do_learn(action.as_deref(), &model, print.as_deref(), json),
     };
     match result {
         Ok(()) => {}
@@ -1055,6 +1080,49 @@ fn alias_text(rows: &[(String, String)]) -> String {
         table.row(vec![a.clone(), m.clone()]);
     }
     table.render()
+}
+
+fn do_learn(action: Option<&str>, models: &[String], print: Option<&str>, json: bool) -> Result<(), String> {
+    let home = goethe_home();
+    ensure_layout(&home).map_err(|e| format!("layout: {e}"))?;
+    if let Some(session) = print {
+        println!("{}", learn::print_session(&home, session, json)?);
+        return Ok(());
+    }
+    match action {
+        Some(a @ ("on" | "off")) => {
+            let small = learn::set(&home, a == "on", models)?;
+            for (id, ctx) in &small {
+                eprintln!("Warning: {id} has a context of {ctx} tokens. Under {} tokens, learning can cause more compactions and use more input tokens (docs/learn.md).", learn::SMALL_CONTEXT);
+            }
+            if a == "on" && !json {
+                eprintln!("Notes hold text from your sessions; only your user can read the folder. Updates are extra model calls, which no API key is charged for.");
+            }
+        }
+        _ if !models.is_empty() => usage("--model goes with on or off"),
+        _ => {}
+    }
+    let st = learn::status(&home)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&st).unwrap_or_default());
+    } else {
+        print!("{}", learn_text(&st));
+    }
+    Ok(())
+}
+
+fn learn_text(st: &Value) -> String {
+    let mut out = String::new();
+    for (name, value) in learn::status_rows(st) {
+        out.push_str(&format!("{name:<9}{value}\n"));
+    }
+    for row in st["recent"].as_array().into_iter().flatten() {
+        out.push_str(&format!("  {}  {} entries, {} compactions, {}\n", row["session"].as_str().unwrap_or(""), row["entries"], row["compactions"], row["updated_at"].as_str().unwrap_or("")));
+    }
+    if st["on"].as_bool() != Some(true) {
+        out.push_str(&goethe_core::term::commands("Turn it on with:", &["goethe learn on"]));
+    }
+    out
 }
 
 fn do_trace(action: Option<&str>, keys: &[String], all_keys: bool, dir: Option<&str>, max_gb: Option<f64>, json: bool) -> Result<(), String> {

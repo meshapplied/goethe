@@ -210,6 +210,7 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 | `goethe allowlist` | `--add` / `--remove` client addresses |
 | `goethe alias` | Short model names for clients (`--set`, `--remove`) |
 | `goethe trace` | Record requests and replies as training traces (`on`, `off`, `--key`); see [traces.md](traces.md) |
+| `goethe learn` | Let a session keep what compaction would drop (`on`, `off`, `--model`); see [learn.md](learn.md) |
 | `goethe gateway` | Where the API listens (`--bind 127.0.0.1`, `0.0.0.0` or an IP) |
 | `goethe domain` | DNS record for your own hostname (`--check <name>`) |
 

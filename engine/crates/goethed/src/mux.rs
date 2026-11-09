@@ -1,9 +1,11 @@
-// API multiplexer on 127.0.0.1 (persisted mux port): OpenAI, Anthropic and LiteLLM routes, key auth, metering, tracing and upstream auth.
+// API multiplexer on 127.0.0.1 (persisted mux port): OpenAI, Anthropic and LiteLLM routes, key auth, metering, tracing, session notes and upstream auth.
 
+use crate::curator::{self, Gates};
 use goethe_core::db;
 use goethe_core::gateway_cache::{GatewayCache, Route, Snapshot};
 use goethe_core::hw;
 use goethe_core::inflight;
+use goethe_core::learn::{self, Store};
 use goethe_core::metrics;
 use goethe_core::nginx;
 use goethe_core::paths::goethe_home;
@@ -34,7 +36,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::net::TcpListener;
 
 type MuxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
-type Upstream = Client<HttpConnector, Full<Bytes>>;
+pub type Upstream = Client<HttpConnector, Full<Bytes>>;
 type MuxRef = &'static Mux;
 
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -47,13 +49,15 @@ const SSE_LINE_CAP: usize = 1 << 20;
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 const X_SESSION_ID: HeaderName = HeaderName::from_static("x-session-id");
 
-struct Mux {
-    cache: GatewayCache,
-    client: Upstream,
+pub struct Mux {
+    pub cache: GatewayCache,
+    pub client: Upstream,
     max_body: usize,
     rpm: Mutex<HashMap<String, Instant>>,
     ready: Mutex<HashMap<String, (Instant, bool)>>,
     trace: Recorder,
+    pub learn: Arc<Store>,
+    pub learn_gates: Gates,
 }
 
 static MUX: OnceLock<Mux> = OnceLock::new();
@@ -81,8 +85,11 @@ pub fn spawn_mux() -> Result<tokio::task::JoinHandle<()>, String> {
         rpm: Mutex::new(HashMap::new()),
         ready: Mutex::new(HashMap::new()),
         trace: Recorder::start(&home),
+        learn: Store::start(&home),
+        learn_gates: Gates::default(),
     });
     let _ = mux.cache.exact();
+    curator::spawn_ticker(mux);
     Ok(tokio::spawn(serve(mux, listener)))
 }
 
@@ -435,6 +442,7 @@ async fn route_post(
     let route = live[guard.pick(&ids).unwrap_or(0)].clone();
     let stream = matches!(head.stream, Some(Value::Bool(true)));
     let body = prepare_body(path, body);
+    let (sent, retry, learn_note) = apply_note(m, &snap, path, &model, key, hint.as_deref(), &body);
     let tap = snap.trace().records(&key.key_id).then(|| api_tail(path)).filter(|t| TraceApi::from_path(t).is_some()).map(|t| {
         let cfg = snap.trace();
         Box::new(Capture {
@@ -446,6 +454,7 @@ async fn route_post(
             instance_id: route.instance_id.clone(),
             model: model.clone(),
             session_hint: hint,
+            learn_note,
             request: body.to_vec(),
             started_at: wall,
             duration_s: 0.0,
@@ -457,7 +466,46 @@ async fn route_post(
             truncated: false,
         })
     });
-    proxy(m, path, &route, body, rid, stream, guard, finish, tap).await
+    proxy(m, path, &route, sent, retry, rid, stream, guard, finish, tap).await
+}
+
+struct NoteRetry {
+    original: Bytes,
+    key_id: String,
+    session: String,
+}
+
+fn apply_note(
+    m: MuxRef,
+    snap: &Snapshot,
+    path: &str,
+    model: &str,
+    key: &ResolvedKey,
+    hint: Option<&str>,
+    body: &Bytes,
+) -> (Bytes, Option<NoteRetry>, Option<String>) {
+    // Session notes need the model turned on and a client session id; anything unusual forwards the client's bytes unchanged.
+    let unchanged = || (body.clone(), None, None);
+    let (Some(session), true) = (hint, snap.learn().applies(model)) else {
+        return unchanged();
+    };
+    let Some(api) = TraceApi::from_path(api_tail(path)).filter(|a| a.has_messages()) else {
+        return unchanged();
+    };
+    let Some(step) = m.learn.observe(&key.key_id, session, model, api, body, snap.context_length(model)) else {
+        return unchanged();
+    };
+    if let Some(job) = step.job {
+        curator::start(m, job);
+    }
+    if step.block.is_empty() {
+        return unchanged();
+    }
+    let Some(spliced) = learn::splice(api, body, &step.block) else {
+        return unchanged();
+    };
+    let retry = NoteRetry { original: body.clone(), key_id: key.key_id.clone(), session: session.to_string() };
+    (Bytes::from(spliced), Some(retry), Some(step.block))
 }
 
 fn session_hint(headers: &HeaderMap) -> Option<String> {
@@ -498,25 +546,43 @@ async fn proxy(
     path: &str,
     route: &Route,
     body: Bytes,
+    retry: Option<NoteRetry>,
     rid: &str,
     stream: bool,
     guard: inflight::InflightGuard,
     finish: Finish,
-    tap: Option<Box<Capture>>,
+    mut tap: Option<Box<Capture>>,
 ) -> Response<MuxBody> {
-    // Forward with the engine's own key (never the client's) and meter (and maybe trace) the reply as it streams back.
-    let mut builder = Request::builder()
-        .method(Method::POST)
-        .uri(format!("http://127.0.0.1:{}{path}", route.port))
-        .header(CONTENT_TYPE, "application/json")
-        .header(X_REQUEST_ID, rid);
-    if let Some(k) = &route.engine_key {
-        builder = builder.header(AUTHORIZATION, format!("Bearer {k}"));
-    }
-    let Ok(req) = builder.body(Full::new(body)) else {
+    // Forward with the engine's own key (never the client's), meter and maybe trace the reply; a 400 with a note resends the client's own request once.
+    let send = |payload: Bytes| {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri(format!("http://127.0.0.1:{}{path}", route.port))
+            .header(CONTENT_TYPE, "application/json")
+            .header(X_REQUEST_ID, rid);
+        if let Some(k) = &route.engine_key {
+            builder = builder.header(AUTHORIZATION, format!("Bearer {k}"));
+        }
+        builder.body(Full::new(payload)).map(|req| tokio::time::timeout(UPSTREAM_TIMEOUT, m.client.request(req)))
+    };
+    let Ok(call) = send(body) else {
         return finish.now(error(StatusCode::BAD_GATEWAY, "invalid upstream request", "upstream_error", "bad_gateway"));
     };
-    let resp = match tokio::time::timeout(UPSTREAM_TIMEOUT, m.client.request(req)).await {
+    let mut answered = call.await;
+    if let (Some(r), Ok(Ok(first))) = (retry, &answered) {
+        if first.status() == StatusCode::BAD_REQUEST {
+            if let Ok(call) = send(r.original) {
+                if let Some(c) = tap.as_mut() {
+                    c.learn_note = None;
+                }
+                answered = call.await;
+                if matches!(&answered, Ok(Ok(second)) if second.status().is_success()) {
+                    m.learn.note_rejected(&r.key_id, &r.session);
+                }
+            }
+        }
+    }
+    let resp = match answered {
         Ok(Ok(r)) => r,
         Ok(Err(_)) => {
             return finish.now(error(StatusCode::BAD_GATEWAY, "engine unreachable", "upstream_error", "bad_gateway"));
@@ -1319,6 +1385,8 @@ mod tests {
             rpm: Mutex::new(HashMap::new()),
             ready: Mutex::new(HashMap::new()),
             trace: Recorder::start(&dir),
+            learn: Store::start(&dir),
+            learn_gates: Gates::default(),
         }));
         let route = Route { instance_id: "i".into(), port, engine_key: None, draining: false };
         let raw = br#"{"model":"m","tools":[{"type":"function","function":{"name":"ping"}}]}"#;
@@ -1326,7 +1394,7 @@ mod tests {
         assert_eq!(body.as_ref(), &raw[..]);
         let guard = inflight::track("m");
         let finish = Finish { m: mux, label: "m".into(), key_id: "k".into(), started: Instant::now() };
-        let resp = proxy(mux, "/v1/chat/completions", &route, body, "req-1", false, guard, finish, None).await;
+        let resp = proxy(mux, "/v1/chat/completions", &route, body, None, "req-1", false, guard, finish, None).await;
         let _ = resp.into_body().collect().await.unwrap();
         let recorded = seen.lock().unwrap().clone();
         let v: Value = serde_json::from_slice(&recorded).unwrap();

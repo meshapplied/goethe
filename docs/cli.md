@@ -28,7 +28,7 @@ Exit codes:
 - [Start and stop](#start-and-stop): `start`, `up`, `status`, `down`, `service`
 - [Models](#models): `recommend`, `install`, `scan`, `models`, `config`, `remove`
 - [Running models](#running-models): `load`, `unload`, `ps`, `logs`
-- [API access](#api-access): `configure api`, `api`, `key`, `allowlist`, `alias`, `trace`, `gateway`, `domain`
+- [API access](#api-access): `configure api`, `api`, `key`, `allowlist`, `alias`, `trace`, `learn`, `gateway`, `domain`
 - [GPUs and system](#gpus-and-system): `gpu`, `hw`, `doctor`, `update`, `uninstall`, `--version`
 
 ## Start and stop
@@ -277,6 +277,23 @@ Records every generation request and reply, grouped into sessions, as a corpus f
 goethe trace on
 goethe trace on --key my-app
 goethe trace off
+```
+
+### `goethe learn [on | off]`
+
+Lets a session keep what context compaction would drop, in a small note that goes into the prompt after each compaction. Sessions are told apart by the client's `X-Session-Id` header. Without `on` or `off` it shows the scope and the sessions kept. Changes apply to the next request. `on` warns about models with a context under 100k tokens. See [learn.md](learn.md).
+
+| Option | Description |
+|---|---|
+| `--model <id or alias>...` | Only these models. `all`, or leaving it out, means every model |
+| `--print <session id>` | Show the note of a session |
+| `--json` | JSON output |
+
+```bash
+goethe learn on
+goethe learn on --model my-model
+goethe learn off --model my-model
+goethe learn --print my-session-id
 ```
 
 ### `goethe gateway`

@@ -52,6 +52,7 @@ The API is stateless, so Goethe groups turns into sessions itself:
 | `model`, `model_fingerprint` | Served model id, and the `models.json` entry that produced the turn |
 | `instance_id`, `key_id`, `request_id` | Engine instance, API key id, `X-Request-Id` |
 | `session_hint` | The client's `X-Session-Id`, when sent |
+| `learn_note` | The [session note](learn.md) the engine also received in its system prompt, when there was one. `messages` and `params` stay as the client sent them |
 | `parent` | `{"turn_id", "with_reply"}` or `null`; chat, messages and responses |
 | `messages_from` | How many history messages come from the parent |
 | `previous_response_id` | Responses only: the id the client sent, when it did |
