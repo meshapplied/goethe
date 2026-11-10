@@ -19,7 +19,11 @@ use goethe_core::learn;
 use goethe_core::trace;
 use serde_json::{json, Value};
 
-const KEY_HELP: &str = "Create a key (goethe api lists it again later):
+const KEY_HELP: &str = "Add, scope or delete keys in a menu:
+
+\t→ goethe api manage
+
+Create a key (goethe api lists it again later):
 
 \t→ goethe key --create my-app
 
@@ -260,17 +264,22 @@ enum Commands {
         #[arg(long = "keep-engines", help = "Leave loaded engines serving; the next goethed adopts them.")]
         keep_engines: bool,
     },
-    #[command(about = "Choose who can reach the API.")]
+    #[command(hide = true, about = "Older form of goethe api configure.")]
     Configure {
         #[command(subcommand)]
         cmd: ConfigureCommands,
     },
     #[command(about = "Guided setup: install a model, serve it through the API and set up access.")]
     Start,
-    #[command(about = "The API address, its keys and the models it serves.")]
+    #[command(
+        about = "The API address, its keys and the models it serves; manage keys or choose who can reach it.",
+        args_conflicts_with_subcommands = true
+    )]
     Api {
         #[arg(long, help = "JSON with api, goethed_running, keys and models.")]
         json: bool,
+        #[command(subcommand)]
+        cmd: Option<ApiCommands>,
     },
     #[command(hide = true, about = "Print connection details (same as goethe api).")]
     Get {
@@ -404,20 +413,31 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+enum ApiCommands {
+    #[command(about = "Add, scope, show or delete API keys in a menu (arrow keys, Enter).")]
+    Manage,
+    #[command(about = "Choose who can reach the API: local only, a VPN or private network (recommended), or a public network.")]
+    Configure(AccessArgs),
+}
+
+#[derive(Subcommand)]
 enum ConfigureCommands {
-    #[command(about = "Choose who can reach the API: local only, VPN (recommended) or public network.")]
-    Api {
-        #[arg(long, help = "local, vpn or public (asked on a terminal when omitted).")]
-        mode: Option<String>,
-        #[arg(long, value_name = "NAME", conflicts_with = "vpn_ip", help = "Network interface to serve, e.g. wg0 (any VPN or private network); the gateway follows its address.")]
-        interface: Option<String>,
-        #[arg(long = "vpn-ip", help = "A fixed address of this machine to listen on, instead of following an interface.")]
-        vpn_ip: Option<std::net::IpAddr>,
-        #[arg(long = "allow", help = "Client CIDR to allow (repeatable; default for vpn: the ranges the network reaches).")]
-        allow: Vec<String>,
-        #[arg(long, help = "Apply without questions (public mode still refuses 0.0.0.0/0).")]
-        yes: bool,
-    },
+    #[command(about = "Older form of goethe api configure.")]
+    Api(AccessArgs),
+}
+
+#[derive(clap::Args)]
+struct AccessArgs {
+    #[arg(long, help = "local, vpn or public (asked on a terminal when omitted).")]
+    mode: Option<String>,
+    #[arg(long, value_name = "NAME", conflicts_with = "vpn_ip", help = "Network interface to serve, e.g. wg0 (any VPN or private network); the gateway follows its address.")]
+    interface: Option<String>,
+    #[arg(long = "vpn-ip", help = "A fixed address of this machine to listen on, instead of following an interface.")]
+    vpn_ip: Option<std::net::IpAddr>,
+    #[arg(long = "allow", help = "Client CIDR to allow (repeatable; default for vpn: the ranges the network reaches).")]
+    allow: Vec<String>,
+    #[arg(long, help = "Apply without questions (public mode still refuses 0.0.0.0/0).")]
+    yes: bool,
 }
 
 #[derive(Subcommand)]
@@ -795,11 +815,13 @@ fn main() {
         Commands::Ps { json } => do_ps(json),
         Commands::Up { no_boot } => do_up(!no_boot),
         Commands::Status => do_status(),
-        Commands::Get { cmd: GetCommands::Api { json } } | Commands::Api { json } => do_api(json),
+        Commands::Get { cmd: GetCommands::Api { json } } | Commands::Api { json, cmd: None } => do_api(json),
+        Commands::Api { cmd: Some(ApiCommands::Manage), .. } => goethe_core::keys_menu::run(),
+        Commands::Api { cmd: Some(ApiCommands::Configure(a)), .. } => configure_access(a),
         Commands::Start => goethe_core::onboard::run(),
-        Commands::Configure { cmd: ConfigureCommands::Api { mode, interface, vpn_ip, allow, yes } } => {
-            let mode = mode.as_deref().map(goethe_core::configure::Mode::parse).transpose().unwrap_or_else(|e| usage(e));
-            goethe_core::configure::run_api(goethe_core::configure::ApiOpts { mode, vpn_ip, interface, allow, yes })
+        Commands::Configure { cmd: ConfigureCommands::Api(a) } => {
+            eprintln!("note: goethe configure api is now goethe api configure");
+            configure_access(a)
         }
         Commands::Down { keep_engines: false } => shutdown::run_down(),
         Commands::Down { keep_engines: true } => goethe_core::service::stop_keeping_engines().map(|(before, kept)| {
@@ -1003,7 +1025,7 @@ fn key_create_stdout(token: &str, id: &str, name: &str, raw: bool) -> String {
 }
 
 fn create_first_key() -> String {
-    goethe_core::term::commands("Create your first API key:", &["goethe key --create my-app"])
+    goethe_core::term::commands("Create your first API key:", &["goethe api manage", "goethe key --create my-app"])
 }
 
 fn key_list_text(rows: &[Value]) -> String {
@@ -1461,6 +1483,11 @@ fn logs_target_error(target: Option<&str>, daemon: bool, gateway: bool, prune: b
     }
 }
 
+fn configure_access(a: AccessArgs) -> Result<(), String> {
+    let mode = a.mode.as_deref().map(goethe_core::configure::Mode::parse).transpose().unwrap_or_else(|e| usage(e));
+    goethe_core::configure::run_api(goethe_core::configure::ApiOpts { mode, vpn_ip: a.vpn_ip, interface: a.interface, allow: a.allow, yes: a.yes })
+}
+
 fn do_gateway_bind(addr: &str) -> Result<(), String> {
     // An address, or an interface name whose address the gateway follows; persist, apply, and remind about the allowlist.
     let home = goethe_home();
@@ -1740,7 +1767,7 @@ mod tests {
         assert!(stopped.starts_with("goethe: ") && stopped.contains("not running"), "{stopped}");
         assert!(stopped.ends_with("Start it with:\n\n\t→ goethe up\n"), "{stopped}");
         let fresh = status_text(Some("https://10.0.0.2:8443/v1"), &[]);
-        assert!(fresh.contains("running\n\nAPI: https://10.0.0.2:8443/v1\n\nCreate your first API key:\n\n\t→ goethe key --create my-app\n"), "{fresh}");
+        assert!(fresh.contains("running\n\nAPI: https://10.0.0.2:8443/v1\n\nCreate your first API key:\n\n\t→ goethe api manage\n\t→ goethe key --create my-app\n"), "{fresh}");
         assert!(fresh.ends_with("\nFor more details run:\n\n\t→ goethe api\n"), "{fresh}");
         let keyed = status_text(Some("https://h/v1"), &[("ops".into(), "a1b2c3d4e5f6".into())]);
         assert!(keyed.contains("ops") && keyed.contains("a1b2c3d4e5f6") && !keyed.contains("Create your first"), "{keyed}");
@@ -1748,7 +1775,7 @@ mod tests {
 
     #[test]
     fn empty_lists_say_how_to_add_the_first_entry() {
-        assert!(key_list_text(&[]).ends_with("\t→ goethe key --create my-app\n"));
+        assert!(key_list_text(&[]).ends_with("\t→ goethe api manage\n\t→ goethe key --create my-app\n"));
         assert!(allowlist_text(&[]).ends_with("\t→ goethe allowlist --add <client-ip>/32\n"));
         assert!(alias_text(&[]).ends_with("\t→ goethe alias --set <alias> --model <model-id>\n"));
     }

@@ -28,7 +28,7 @@ Exit codes:
 - [Start and stop](#start-and-stop): `start`, `up`, `status`, `down`, `service`
 - [Models](#models): `recommend`, `install`, `scan`, `models`, `config`, `remove`
 - [Running models](#running-models): `load`, `unload`, `ps`, `logs`
-- [API access](#api-access): `configure api`, `api`, `key`, `allowlist`, `alias`, `trace`, `learn`, `gateway`, `domain`
+- [API access](#api-access): `api configure`, `api`, `api manage`, `key`, `allowlist`, `alias`, `trace`, `learn`, `gateway`, `domain`
 - [GPUs and system](#gpus-and-system): `gpu`, `hw`, `doctor`, `update`, `uninstall`, `--version`
 
 ## Start and stop
@@ -201,7 +201,7 @@ Running models with their GPUs, port, memory, restarts, requests in progress and
 
 ## API access
 
-### `goethe configure api`
+### `goethe api configure`
 
 Chooses who can reach the API: this machine only, a VPN or other private network (recommended), or a public address. For a VPN it lists the networks this machine is on, with the ranges each one reaches, and works with any VPN that has a network interface. It then asks whether to restrict access to specific IP addresses. The gateway follows the chosen interface: when its address changes, it moves within a few seconds, and while the interface has no address only this machine can connect.
 
@@ -220,6 +220,21 @@ The API address, how to authenticate, the models it serves, your API keys and a 
 | Option | Description |
 |---|---|
 | `--json` | JSON output |
+
+### `goethe api manage`
+
+A full-screen key manager in two columns, like ranger. The left column picks what to work on: **+ Create new key**, **Done**, then your keys. The right column shows the hovered entry and is where things change. For a key it shows `API key:` with the key itself, its name and id (fixed), then what can change: the allowed models (**Every model**, or ticked models), the rate limit, the expiry, **Save changes** and **Delete key**. For **+ Create new key** it is the same form with a name, ending in **Create key**.
+
+| Key | In the left column | In the right column |
+|---|---|---|
+| ↑ ↓ (or `k` `j`) | Move between entries | Move between fields |
+| → (or `l`, Enter) | Open the entry on the right; on Done, leave | |
+| ← (or `h`, Esc) | | Back to the left; asks first when there are unsaved changes |
+| Space | | Tick a model or Every model |
+| Enter | | Edit a value in place (Enter keeps it, Esc cancels), save, create, or delete (press twice) |
+| `q` | Leave | Leave at once; unsaved changes are not saved, and a note says so |
+
+On Rate limit or Expires, the bottom line shows the values they take: a whole number of requests per minute (`0` for unlimited), and `never`, days such as `30d` or a date such as `2027-01-31`. Changes apply only when saved and reach the gateway on the next request. The screen is restored on leaving, and keys created in the session are printed then. Admin keys are made with `goethe key --admin`; scripts use `goethe key`, since the menu needs a terminal (at least 64×12).
 
 ### `goethe key`
 

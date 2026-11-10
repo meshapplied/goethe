@@ -228,6 +228,7 @@ enum Key {
     Down,
     Enter,
     Cancel,
+    Space,
     Digit(usize),
     Other,
 }
@@ -239,6 +240,7 @@ fn parse_key(bytes: &[u8]) -> Key {
         [0x1b, b'[' | b'O', b'B', ..] | [b'j', ..] => Key::Down,
         [b'\r' | b'\n', ..] => Key::Enter,
         [0x03, ..] | [0x1b] | [b'q', ..] => Key::Cancel,
+        [b' ', ..] => Key::Space,
         [d @ b'1'..=b'9', ..] => Key::Digit(usize::from(d - b'1')),
         _ => Key::Other,
     }
@@ -254,6 +256,24 @@ fn parse_keys(bytes: &[u8]) -> Vec<Key> {
         i += len;
     }
     keys
+}
+
+pub(crate) fn read_keys(buf: &mut [u8; 16]) -> std::io::Result<usize> {
+    // One read from the raw terminal; a lone Esc waits 50 ms for the rest of an arrow sequence that arrived split.
+    use std::io::Read;
+    let mut n = std::io::stdin().read(&mut buf[..])?;
+    while n > 0 && n < 3 && buf[0] == 0x1b && (n == 1 || matches!(buf[1], b'[' | b'O')) {
+        let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+        if unsafe { libc::poll(&mut fds, 1, 50) } <= 0 {
+            break;
+        }
+        let more = std::io::stdin().read(&mut buf[n..])?;
+        if more == 0 {
+            break;
+        }
+        n += more;
+    }
+    Ok(n)
 }
 
 fn step(options: &[String], selected: usize, key: Key) -> usize {
@@ -295,10 +315,10 @@ pub fn ask_secret(question: &str) -> Result<String, String> {
     answer
 }
 
-struct RawMode(libc::termios);
+pub(crate) struct RawMode(libc::termios);
 
 impl RawMode {
-    fn enter() -> Option<RawMode> {
+    pub(crate) fn enter() -> Option<RawMode> {
         // Turn off line buffering, echo and signal keys on stdin; the saved settings come back on drop.
         let mut saved: libc::termios = unsafe { std::mem::zeroed() };
         if unsafe { libc::tcgetattr(0, &mut saved) } != 0 {
@@ -349,7 +369,6 @@ static HINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 
 pub fn select(options: &[String], default: usize) -> Result<Option<usize>, String> {
     // Arrow-key menu on a terminal: Ok(Some(i)) on Enter, Ok(None) when cancelled, Err when no terminal or raw mode.
-    use std::io::Read;
     if options.is_empty() || !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
         return Err("no terminal for a menu".to_string());
     }
@@ -363,9 +382,9 @@ pub fn select(options: &[String], default: usize) -> Result<Option<usize>, Strin
         selected = step(options, selected, Key::Down);
     }
     draw_menu(options, selected, false);
-    let mut buf = [0u8; 8];
+    let mut buf = [0u8; 16];
     loop {
-        let n = std::io::stdin().read(&mut buf).map_err(|e| e.to_string())?;
+        let n = read_keys(&mut buf).map_err(|e| e.to_string())?;
         if n == 0 {
             drop(raw);
             return Ok(None);
@@ -388,6 +407,61 @@ pub fn select(options: &[String], default: usize) -> Result<Option<usize>, Strin
                     }
                 }
             }
+        }
+    }
+}
+
+fn draw_checklist(options: &[String], checked: &[bool], at: usize, redraw: bool) {
+    // Each option behind [x] or [ ], the one under the cursor in light blue; a redraw first moves back up over them.
+    let mut out = String::new();
+    if redraw {
+        out.push_str(&format!("\x1b[{}A", options.len()));
+    }
+    let width = terminal_width().saturating_sub(7).max(10);
+    for (i, o) in options.iter().enumerate() {
+        let o: String = if o.chars().count() > width { o.chars().take(width - 1).chain(['.']).collect() } else { o.clone() };
+        let mark = if checked[i] { "[x]" } else { "[ ]" };
+        let line = if i == at { format!("\x1b[1;38;5;117m\u{25CF} {mark} {o}\x1b[0m") } else { format!("  {mark} {o}") };
+        out.push_str(&format!("\r\x1b[2K{line}\n"));
+    }
+    eprint!("{out}");
+    std::io::stderr().flush().ok();
+}
+
+pub fn select_many(options: &[String], checked: &[bool]) -> Result<Option<Vec<bool>>, String> {
+    // Checkbox menu: arrows move, Space ticks, Enter confirms the ticks, q cancels; Err when there is no terminal.
+    if options.is_empty() || !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        return Err("no terminal for a menu".to_string());
+    }
+    let mut ticks: Vec<bool> = (0..options.len()).map(|i| checked.get(i).copied().unwrap_or(false)).collect();
+    let raw = RawMode::enter().ok_or("could not switch the terminal to raw mode")?;
+    eprintln!("(up/down to move, Space to tick, Enter to confirm, q to go back)");
+    eprint!("\x1b[?25l");
+    let mut at = 0;
+    draw_checklist(options, &ticks, at, false);
+    let mut buf = [0u8; 16];
+    loop {
+        let n = read_keys(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            drop(raw);
+            return Ok(None);
+        }
+        for key in parse_keys(&buf[..n]) {
+            match key {
+                Key::Enter => {
+                    drop(raw);
+                    return Ok(Some(ticks));
+                }
+                Key::Cancel => {
+                    drop(raw);
+                    return Ok(None);
+                }
+                Key::Space => ticks[at] = !ticks[at],
+                Key::Up => at = (at + options.len() - 1) % options.len(),
+                Key::Down => at = (at + 1) % options.len(),
+                _ => continue,
+            }
+            draw_checklist(options, &ticks, at, true);
         }
     }
 }
@@ -453,6 +527,7 @@ mod tests {
         assert_eq!(parse_key(b"\x03"), Key::Cancel);
         assert_eq!(parse_key(b"\x1b"), Key::Cancel);
         assert_eq!(parse_key(b"3"), Key::Digit(2));
+        assert_eq!(parse_key(b" "), Key::Space);
         assert_eq!(parse_keys(b"\x1b[B\x1b[B\r"), vec![Key::Down, Key::Down, Key::Enter]);
         let three: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
         assert_eq!(step(&three, 0, Key::Up), 2);

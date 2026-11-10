@@ -1,4 +1,4 @@
-"""goethe configure api on a VPN interface in a throwaway network namespace: choice, allowlist, following."""
+"""goethe api configure on a VPN interface in a throwaway network namespace: choice, allowlist, following."""
 
 from __future__ import annotations
 
@@ -129,13 +129,13 @@ def main() -> int:
     sh("ip link set lan0 up && ip link set lan0p up")
     proc = start_goethed()
 
-    code, out = goethe("configure", "api", "--mode", "vpn", "--yes", ok=False)
+    code, out = goethe("api", "configure", "--mode", "vpn", "--yes", ok=False)
     check(
         code != 0 and "several networks" in out and "--interface" in out,
         "without a terminal, several networks need --interface",
     )
 
-    code, out = goethe("configure", "api", "--mode", "vpn", "--interface", "ts0", "--yes")
+    code, out = goethe("api", "configure", "--mode", "vpn", "--interface", "ts0", "--yes")
     key = re.search(r"API key \(default\): (\S+)", out)
     check(key is not None, "a first key is created")
     key = key.group(1) if key else ""
@@ -143,7 +143,7 @@ def main() -> int:
     check(wait_for(lambda: listening("100.88.1.2"), 5) is not None, "the gateway listens on ts0's address")
     goethe("allowlist", "--remove", "100.64.0.0/10")
 
-    code, out = goethe("configure", "api", "--mode", "vpn", "--interface", "vpn0", "--yes")
+    code, out = goethe("api", "configure", "--mode", "vpn", "--interface", "vpn0", "--yes")
     check(
         "10.77.0.2 (vpn0; follows its address)" in out and "allow 10.77.0.0/24" in out, "vpn0 is chosen with its subnet"
     )
@@ -199,10 +199,10 @@ def main() -> int:
         "no allowlist entry covers" in doctor_network(), "doctor spots an allowlist that refuses the network's clients"
     )
 
-    code, out = goethe("configure", "api", "--mode", "vpn", "--interface", "nope0", "--yes", ok=False)
+    code, out = goethe("api", "configure", "--mode", "vpn", "--interface", "nope0", "--yes", ok=False)
     check(code != 0 and "has no IPv4 address" in out, "an unknown interface is refused")
     code, out = goethe(
-        "configure", "api", "--mode", "vpn", "--interface", "vpn0", "--allow", "0.0.0.0/0", "--yes", ok=False
+        "api", "configure", "--mode", "vpn", "--interface", "vpn0", "--allow", "0.0.0.0/0", "--yes", ok=False
     )
     check(code != 0 and "lets every address in" in out, "0.0.0.0/0 is refused in VPN mode")
     check(gateway().get("interface") == "vpn0", "a refused change leaves the setting as it was")

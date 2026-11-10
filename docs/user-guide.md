@@ -44,8 +44,8 @@ goethe up
 goethe install --model zai-org/GLM-5.3-Flash --load
 
 # 2. Share it
-goethe configure api                 # this machine only, your VPN (recommended), or a public address
-goethe key --create my-laptop        # one key per app or person
+goethe api configure                 # this machine only, your VPN (recommended), or a public address
+goethe api manage                    # add, scope or delete API keys in a menu
 goethe api                           # the address to give your apps
 ```
 
@@ -204,8 +204,9 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 
 | Command | What it does |
 |---|---|
-| `goethe configure api` | Local, VPN or public access |
+| `goethe api configure` | Local, VPN or public access |
 | `goethe api` | Address, authentication, models, keys and a curl example |
+| `goethe api manage` | Add, scope, show or delete API keys in a menu |
 | `goethe key` | `--create`, `--revoke`, `--rpm`, `--expires`, `--models`, `--admin` |
 | `goethe allowlist` | `--add` / `--remove` client addresses |
 | `goethe alias` | Short model names for clients (`--set`, `--remove`) |
@@ -290,18 +291,19 @@ goethe unload --model zai-org/GLM-5.3-Flash --force   # stop now
 ## Share the API
 
 ```bash
-goethe configure api
+goethe api configure
 ```
 
 - **Local only:** programs on this machine.
-- **VPN or private network (recommended):** connect your VPN first, then pick it from the list. Any VPN with a network interface works (WireGuard, Tailscale, ZeroTier, OpenVPN, NetBird and others), and so does a cloud VM's private network. Goethe lists tunnels and interfaces on private addresses, leaves out container bridges and public network cards, and shows the range each one reaches, taken from the system's routes. When a VPN routes each device separately, the private block its address is in (such as `100.64.0.0/10` or `10.0.0.0/8`) is used, so devices added later can connect too; you can narrow it to specific addresses. Default routes are never allowed. The gateway follows the interface: a new address after a reconnect or a reboot is picked up within a few seconds, and while the interface is down only this machine can connect (`goethe status` says so). The allowlist itself only changes when you run `goethe configure api` again; `goethe doctor` warns if it no longer lets the network's clients in. A VPN without an interface (userspace mode) can't be listened on directly: use local mode and the VPN's own port forwarding.
+- **VPN or private network (recommended):** connect your VPN first, then pick it from the list. Any VPN with a network interface works (WireGuard, Tailscale, ZeroTier, OpenVPN, NetBird and others), and so does a cloud VM's private network. Goethe lists tunnels and interfaces on private addresses, leaves out container bridges and public network cards, and shows the range each one reaches, taken from the system's routes. When a VPN routes each device separately, the private block its address is in (such as `100.64.0.0/10` or `10.0.0.0/8`) is used, so devices added later can connect too; you can narrow it to specific addresses. Default routes are never allowed. The gateway follows the interface: a new address after a reconnect or a reboot is picked up within a few seconds, and while the interface is down only this machine can connect (`goethe status` says so). The allowlist itself only changes when you run `goethe api configure` again; `goethe doctor` warns if it no longer lets the network's clients in. A VPN without an interface (userspace mode) can't be listened on directly: use local mode and the VPN's own port forwarding.
 - **Public network:** any address that can reach this machine. You open the port in your firewall yourself.
 
-It then asks whether to restrict access to specific IP addresses, and offers to create the first key. In scripts: `goethe configure api --mode vpn --yes`, or `--mode public --allow 203.0.113.7 --yes`.
+It then asks whether to restrict access to specific IP addresses, and offers to create the first key. In scripts: `goethe api configure --mode vpn --yes`, or `--mode public --allow 203.0.113.7 --yes`.
 
 ### Keys
 
 ```bash
+goethe api manage                                               # full-screen: create, scope, limit or delete keys
 goethe key --create my-laptop                                   # shows the key once
 goethe key --create ci --rpm 600 --expires 30d
 goethe key --create chat-only --models zai-org/GLM-5.3-Flash
@@ -314,7 +316,7 @@ Every request needs a valid key; without one the API answers `401`. A key can ex
 
 ### Allowed addresses
 
-On top of keys, only allowed client addresses can connect. `goethe configure api` sets this up; to change it by hand:
+On top of keys, only allowed client addresses can connect. `goethe api configure` sets this up; to change it by hand:
 
 ```bash
 goethe allowlist
@@ -432,7 +434,7 @@ Optional. Set them in your shell, or in `goethe.env` inside Goethe's folder so t
 | `GOETHE_HOME` | Where Goethe keeps its files |
 | `GOETHE_PUBLIC_PORT` | API port (default 8443; another is used if it's taken) |
 | `GOETHE_NO_AUTOSTART=1` | Never set up start at boot |
-| `GOETHE_PUBLIC_IP` | Public IP shown by `goethe configure api` in public mode |
+| `GOETHE_PUBLIC_IP` | Public IP shown by `goethe api configure` in public mode |
 | `GOETHE_MAX_BODY_MB` | Largest request size in MB (default 10) |
 | `GOETHE_GATEWAY_RATE_PER_IP` | Requests per second one client address may send (default 100, bursts up to twice that) |
 | `GOETHE_GATEWAY_CONN_PER_IP` | Open API connections one client address may hold (default 512) |

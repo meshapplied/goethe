@@ -1,4 +1,4 @@
-// goethe configure api: a guided choice between local, VPN and public access to the gateway.
+// goethe api configure: a guided choice between local, VPN and public access to the gateway.
 
 use crate::netif::{self, Iface, Net};
 use crate::nginx::{self, InterfaceAddr};
@@ -242,7 +242,7 @@ fn by_address(ip: IpAddr, nets: &[Network]) -> Result<Target, String> {
     let iface = netif::interfaces(&routes)
         .into_iter()
         .find(|i| i.addr == v4)
-        .ok_or_else(|| format!("{v4} is not an address of this machine; a VPN without its own interface (userspace mode) needs local mode and the VPN's own port forwarding"))?;
+        .ok_or_else(|| format!("{v4} is not an address of this host; a VPN without its own interface (userspace mode) needs local mode and the VPN's own port forwarding"))?;
     Ok(Target::Address(v4, netif::reach(&iface, &routes)))
 }
 
@@ -364,7 +364,7 @@ fn configure_public(opts: &ApiOpts) -> Result<String, String> {
         println!("{line}");
     }
     if !confirm("Expose the API on every network interface anyway?", false, opts.yes)? {
-        return Err("nothing changed (goethe configure api again to pick local or VPN)".to_string());
+        return Err("nothing changed (goethe api configure again to pick local or VPN)".to_string());
     }
     let mut ranges = opts.allow.clone();
     let mut everyone_chosen = false;
@@ -478,7 +478,7 @@ pub fn apply_access(opts: &ApiOpts) -> Result<String, String> {
 }
 
 pub fn run_api(opts: ApiOpts) -> Result<(), String> {
-    // goethe configure api: who can reach the API, then a key if none exists, then the URL.
+    // goethe api configure: who can reach the API, then a key if none exists, then the URL.
     let api = apply_access(&opts)?;
     offer_key(opts.yes)?;
     println!("\nAPI: {api}\n\n{}", crate::term::commands("For the models and keys run:", &["goethe api"]));
