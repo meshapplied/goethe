@@ -3,12 +3,12 @@
 A long agent session loses things when its client compacts the context: rules the user gave, corrections, facts mentioned in chat. With learning on, Goethe keeps a small note per session and puts it into the prompt after each compaction, so the session keeps them. It works with any model and needs no client change beyond sending a session id. It is off until you turn it on.
 
 ```bash
-goethe learn on                      # every model
-goethe learn off                     # every model, off
-goethe learn on --model my-model     # just this model (id or alias); repeat for more
-goethe learn off --model my-model    # this model only; with every model on, it becomes an exception
-goethe learn on --model all          # the same as goethe learn on
-goethe learn                         # the current scope, and the sessions kept
+goethe api learn on                      # every model
+goethe api learn off                     # every model, off
+goethe api learn on --model my-model     # just this model (id or alias); repeat for more
+goethe api learn off --model my-model    # this model only; with every model on, it becomes an exception
+goethe api learn on --model all          # the same as goethe api learn on
+goethe api learn                         # the current scope, and the sessions kept
 ```
 
 Changes apply to the next request; no restart or reload.
@@ -24,11 +24,11 @@ Routes: `/v1/chat/completions`, `/v1/messages` (Anthropic) and `/v1/responses`. 
 ## Reading a note
 
 ```bash
-goethe learn --print my-session-id
-goethe learn --print my-session-id --json
+goethe api learn --print my-session-id
+goethe api learn --print my-session-id --json
 ```
 
-This shows the live entries by section, the superseded ones, what is in the prompt right now and what the note has cost. `goethe learn` lists the most recent session ids. Changes reach the file within 5 seconds.
+This shows the live entries by section, the superseded ones, what is in the prompt right now and what the note has cost. `goethe api learn` lists the most recent session ids. Changes reach the file within 5 seconds.
 
 ## What is kept
 
@@ -80,7 +80,7 @@ With [traces](traces.md) on, a turn stores the messages as the client sent them,
 ## Limits
 
 - Learning helps recall; it has not been shown to improve task success. Replaying two real recorded OpenCode sessions through Goethe found all 63 compactions with no failed request. Asked about facts gone from the context, the model answered 18 of 24 times with the note and 0 of 12 without. Every fact was in the note; the misses were the model answering "unknown" anyway.
-- It costs something when the context is tight, so `goethe learn on` warns about any model with a context under 100k tokens; learning still turns on. On one coding task with OpenCode at a 30k context limit, two runs each: compactions went from 8 and 9 to 11 and 14, uncached input from about 285k to 520k tokens, output from about 38k to 48k. The note's own updates were about 1% of that. Contexts of 100k and above have not been measured this way. In those runs the agent still knew the facts at the end in 1 of 2 runs without a note, from OpenCode's own summary, and in 2 of 2 with one.
+- It costs something when the context is tight, so `goethe api learn on` warns about any model with a context under 100k tokens; learning still turns on. On one coding task with OpenCode at a 30k context limit, two runs each: compactions went from 8 and 9 to 11 and 14, uncached input from about 285k to 520k tokens, output from about 38k to 48k. The note's own updates were about 1% of that. Contexts of 100k and above have not been measured this way. In those runs the agent still knew the facts at the end in 1 of 2 runs without a note, from OpenCode's own summary, and in 2 of 2 with one.
 - The note is written by the served model, so its quality depends on that model.
 - A client that sends no session id gets nothing.
 - Only OpenCode's compaction has been tested against a real client.

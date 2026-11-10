@@ -9,7 +9,9 @@ goethe <command> --help
 
 ## Conventions
 
-- Every value goes after its flag: `goethe unload --model <model>`, `goethe gpu --allow gpu0 gpu1`. A value typed without its flag prints the corrected command instead of running anything.
+- The model is a plain argument: `goethe load qwen 27b`, `goethe unload qwen-27b`. Give its id, an alias, or words from its name; when several models match, a menu asks which one (without a terminal, they are listed). `--model <id>` still works.
+- Every other value goes after its flag: `goethe gpu --allow gpu0 gpu1`. A value typed without its flag prints the corrected command instead of running anything.
+- Commands are grouped: what concerns the API is under `goethe api` (configure, manage, keys, allowlist, gateway, domain, learn, trace), and model housekeeping under `goethe models` (recommend, scan, config, alias). The older top-level forms such as `goethe key` still work and say where they moved.
 - GPUs are named as `goethe gpu` lists them: `gpu0`, `gpu1`, and so on. Flags that take GPUs accept several: `--gpu gpu2 gpu3`.
 - Model ids are Hugging Face repo names such as `zai-org/GLM-5.3-Flash`. Case doesn't matter, and the folder form `zai-org__GLM-5.3-Flash` works too. A mistyped id gets a suggestion.
 - Commands that list things accept `--json` for scripts.
@@ -25,10 +27,10 @@ Exit codes:
 
 ## Contents
 
-- [Start and stop](#start-and-stop): `start`, `up`, `status`, `down`, `service`
-- [Models](#models): `recommend`, `install`, `scan`, `models`, `config`, `remove`
+- [Start and stop](#start-and-stop): `start`, `up`, `status`, `down`
+- [Models](#models): `install`, `models`, `models recommend`, `models scan`, `models config`, `models alias`, `remove`
 - [Running models](#running-models): `load`, `unload`, `ps`, `logs`
-- [API access](#api-access): `api configure`, `api`, `api manage`, `key`, `allowlist`, `alias`, `trace`, `learn`, `gateway`, `domain`
+- [API access](#api-access): `api`, `api configure`, `api manage`, `api keys`, `api allowlist`, `api gateway`, `api domain`, `api learn`, `api trace`
 - [GPUs and system](#gpus-and-system): `gpu`, `hw`, `doctor`, `update`, `uninstall`, `--version`
 
 ## Start and stop
@@ -59,6 +61,8 @@ Stops Goethe and its models, and turns off start at boot. Loaded models come bac
 
 ### `goethe service`
 
+Not listed in `goethe --help`: `goethe up` already turns on start at boot and `goethe down` turns it off. It stays for the restore setting.
+
 | Command | Description |
 |---|---|
 | `goethe service enable` | Start Goethe at boot |
@@ -68,7 +72,7 @@ Stops Goethe and its models, and turns off start at boot. Loaded models come bac
 
 ## Models
 
-### `goethe recommend`
+### `goethe models recommend`
 
 The catalog models that fit the GPUs Goethe may use, grouped by the memory they take, with the GPUs they would load on and their download size.
 
@@ -76,13 +80,13 @@ The catalog models that fit the GPUs Goethe may use, grouped by the memory they 
 |---|---|
 | `--json` | JSON instead of a table |
 
-### `goethe install --model <id or folder>`
+### `goethe install <model or folder>`
 
 Downloads a model from Hugging Face, or registers a model folder on this machine.
 
 | Option | Description |
 |---|---|
-| `--model <id or folder>` | Hugging Face repo id, or a local folder |
+| `<model>` | A Hugging Face id (`org/name`), a local folder, or words from a catalog model's name such as `glm flash` |
 | `--load` | Load the model after installing it |
 | `--no-load` | Install only |
 | `--no-wait` | With `--load`, return without waiting until it's ready |
@@ -100,7 +104,7 @@ Downloads a model from Hugging Face, or registers a model folder on this machine
 | `--copy` | Copy a local folder instead of linking to it |
 | `--sglang-arg <flag>` | An extra engine option saved with the model |
 
-### `goethe scan`
+### `goethe models scan`
 
 Adds model folders you placed in Goethe's `models` folder yourself. It checks each one and asks before adding it; a folder that can't be served is named with the reason.
 
@@ -120,7 +124,7 @@ Installed models, then catalog models, with whether each fits this machine and i
 | `--available` | Only catalog models |
 | `--json` | JSON output |
 
-### `goethe config --model <id>`
+### `goethe models config <model>`
 
 Changes the default settings a model loads with.
 
@@ -133,7 +137,7 @@ Changes the default settings a model loads with.
 | `--sglang-arg <flag>` | Add an engine option |
 | `--clear-sglang-args` | Remove the saved engine options |
 
-### `goethe remove --model <id>...`
+### `goethe remove <model>...`
 
 Unloads a model and deletes the files Goethe downloaded. For a folder you registered in place, it only unregisters it. If [traces](traces.md) were recorded with the model, it asks whether to delete them too; the default is to keep them.
 
@@ -146,7 +150,7 @@ Unloads a model and deletes the files Goethe downloaded. For a folder you regist
 
 ## Running models
 
-### `goethe load --model <id> [-- <engine options>]`
+### `goethe load <model> [-- <engine options>]`
 
 Loads a model and waits until it answers. Goethe picks the GPUs and sizes the memory unless you choose.
 
@@ -165,9 +169,9 @@ Loads a model and waits until it answers. Goethe picks the GPUs and sizes the me
 | `-- <options>` | Extra engine options, after `--` |
 
 ```bash
-goethe load --model zai-org/GLM-5.3-Flash --gpu gpu1
-goethe load --model zai-org/GLM-5.3-Flash --gpu gpu0 gpu1 gpu2 gpu3 --ctx 65536
-goethe load --model zai-org/GLM-5.3-Flash -- --chunked-prefill-size 4096
+goethe load zai-org/GLM-5.3-Flash --gpu gpu1
+goethe load zai-org/GLM-5.3-Flash --gpu gpu0 gpu1 gpu2 gpu3 --ctx 65536
+goethe load zai-org/GLM-5.3-Flash -- --chunked-prefill-size 4096
 ```
 
 ### `goethe unload`
@@ -176,7 +180,7 @@ Stops a model. Requests in progress finish first.
 
 | Option | Description |
 |---|---|
-| `--model <id>...` | The models to stop |
+| `<model>...` | The models to stop, one argument each |
 | `--all` | Every loaded model |
 | `--force` | Stop right away |
 
@@ -192,7 +196,7 @@ Running models with their GPUs, port, memory, restarts, requests in progress and
 
 | Option | Description |
 |---|---|
-| `--model <id>` | A model's log (also takes an instance id) |
+| `<model>` | A model's log (also takes an instance id) |
 | `-f`, `--follow` | Keep printing new lines |
 | `-n`, `--lines <N>` | Number of lines (default 100) |
 | `--daemon` | Goethe's own log |
@@ -234,9 +238,9 @@ A full-screen key manager in two columns, like ranger. The left column picks wha
 | Enter | | Edit a value in place (Enter keeps it, Esc cancels), save, create, or delete (press twice) |
 | `q` | Leave | Leave at once; unsaved changes are not saved, and a note says so |
 
-On Rate limit or Expires, the bottom line shows the values they take: a whole number of requests per minute (`0` for unlimited), and `never`, days such as `30d` or a date such as `2027-01-31`. Changes apply only when saved and reach the gateway on the next request. The screen is restored on leaving, and keys created in the session are printed then. Admin keys are made with `goethe key --admin`; scripts use `goethe key`, since the menu needs a terminal (at least 64×12).
+On Rate limit or Expires, the bottom line shows the values they take: a whole number of requests per minute (`0` for unlimited), and `never`, days such as `30d` or a date such as `2027-01-31`. Changes apply only when saved and reach the gateway on the next request. The screen is restored on leaving, and keys created in the session are printed then. Admin keys are made with `goethe api keys --admin`; scripts use `goethe api keys`, since the menu needs a terminal (at least 64×12).
 
-### `goethe key`
+### `goethe api keys`
 
 Lists API keys with their limits and today's usage, or creates or revokes one.
 
@@ -248,16 +252,16 @@ Lists API keys with their limits and today's usage, or creates or revokes one.
 | `--models <a,b>` | Only these models |
 | `--admin` | Admin key: health endpoints and every model |
 | `--raw` | Print only the key, for scripts |
-| `--revoke <key id>...` | Revoke keys, by the id `goethe key` shows |
+| `--revoke <key id>...` | Revoke keys, by the id `goethe api keys` shows |
 | `--json` | JSON output |
 
 ```bash
-goethe key --create my-app
-goethe key --create ops --expires 90d --rpm 300 --admin
-API_KEY=$(goethe key --create ci --raw)
+goethe api keys --create my-app
+goethe api keys --create ops --expires 90d --rpm 300 --admin
+API_KEY=$(goethe api keys --create ci --raw)
 ```
 
-### `goethe allowlist`
+### `goethe api allowlist`
 
 Lists the client addresses allowed to reach the API, or adds or removes one.
 
@@ -267,7 +271,7 @@ Lists the client addresses allowed to reach the API, or adds or removes one.
 | `--description <text>` | A note stored with the new entries |
 | `--remove <cidr>...` | Remove addresses or ranges |
 
-### `goethe alias`
+### `goethe models alias`
 
 Short model names for clients. Changing what an alias points to moves every client that uses it.
 
@@ -277,7 +281,7 @@ Short model names for clients. Changing what an alias points to moves every clie
 | `--model <id>` | The installed model it points to |
 | `--remove <alias>...` | Remove aliases |
 
-### `goethe trace [on | off]`
+### `goethe api trace [on | off]`
 
 Records every generation request and reply, grouped into sessions, as a corpus for training later. `off` stops recording and keeps the chosen keys; `on` resumes with them (every key the first time). Without `on` or `off` it shows what is recorded, the folder, its size and the free disk. Changes apply to the next request. The format is in [traces.md](traces.md).
 
@@ -290,12 +294,12 @@ Records every generation request and reply, grouped into sessions, as a corpus f
 | `--json` | JSON output |
 
 ```bash
-goethe trace on
-goethe trace on --key my-app
-goethe trace off
+goethe api trace on
+goethe api trace on --key my-app
+goethe api trace off
 ```
 
-### `goethe learn [on | off]`
+### `goethe api learn [on | off]`
 
 Lets a session keep what context compaction would drop, in a small note that goes into the prompt after each compaction. Sessions are told apart by the client's `X-Session-Id` header. Without `on` or `off` it shows the scope and the sessions kept. Changes apply to the next request. `on` warns about models with a context under 100k tokens. See [learn.md](learn.md).
 
@@ -306,13 +310,13 @@ Lets a session keep what context compaction would drop, in a small note that goe
 | `--json` | JSON output |
 
 ```bash
-goethe learn on
-goethe learn on --model my-model
-goethe learn off --model my-model
-goethe learn --print my-session-id
+goethe api learn on
+goethe api learn on --model my-model
+goethe api learn off --model my-model
+goethe api learn --print my-session-id
 ```
 
-### `goethe gateway`
+### `goethe api gateway`
 
 Where the API listens, and how many client addresses are allowed.
 
@@ -321,7 +325,7 @@ Where the API listens, and how many client addresses are allowed.
 | `--bind <address>` | Listen on `127.0.0.1` (this machine only), `0.0.0.0` (all addresses), one IP of this machine, or an interface such as `wg0`, whose address is followed |
 | `--json` | JSON output |
 
-### `goethe domain`
+### `goethe api domain`
 
 The DNS record that serves the API under your own domain name, with this machine's address filled in.
 

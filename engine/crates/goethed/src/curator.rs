@@ -123,7 +123,7 @@ async fn run(m: &'static Mux, job: Job) {
                 completion += r.completion;
             }
             Err(e) => {
-                eprintln!("goethe learn: note update failed for {}: {e}", job.model);
+                eprintln!("goethe api learn: note update failed for {}: {e}", job.model);
                 job.failed(prompt, completion);
                 return;
             }
@@ -135,7 +135,7 @@ async fn run(m: &'static Mux, job: Job) {
             job.commit(prompt + r.prompt, completion + r.completion);
         }
         Err(e) => {
-            eprintln!("goethe learn: note update failed for {}: {e}", job.model);
+            eprintln!("goethe api learn: note update failed for {}: {e}", job.model);
             job.failed(prompt, completion);
         }
     }

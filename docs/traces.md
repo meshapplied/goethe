@@ -3,19 +3,19 @@
 Goethe can record every generation request and its reply as a corpus for training later. Recording is off until you turn it on. Nothing is scored or filtered while it records: deciding which turns go into a training run is a later, separate step (a labeler) that reads this folder.
 
 ```bash
-goethe trace on                      # every API key the first time; afterwards the keys chosen before
-goethe trace on --key my-app         # add this key (name or id); repeat for more
-goethe trace off --key ci            # every key but this one, when all keys are on
-goethe trace on --all-keys           # back to every key
-goethe trace off                     # stop recording; the chosen keys are kept for the next on
-goethe trace                         # what is recorded, folder, size, free disk
-goethe trace on --dir /data/traces --max-gb 200
-goethe trace --max-gb 100            # change the size limit only
+goethe api trace on                      # every API key the first time; afterwards the keys chosen before
+goethe api trace on --key my-app         # add this key (name or id); repeat for more
+goethe api trace off --key ci            # every key but this one, when all keys are on
+goethe api trace on --all-keys           # back to every key
+goethe api trace off                     # stop recording; the chosen keys are kept for the next on
+goethe api trace                         # what is recorded, folder, size, free disk
+goethe api trace on --dir /data/traces --max-gb 200
+goethe api trace --max-gb 100            # change the size limit only
 ```
 
 Changes apply to the next request; no restart or reload. Recorded routes: `/v1/chat/completions`, `/v1/messages` (Anthropic), `/v1/completions` and `/v1/responses`. Embeddings, rerank and token counts are not recorded.
 
-Traces hold whole prompts and replies, including anything secret that clients send. The folder is `0700` and every file `0600`. Request headers and client keys are never stored, only the key id. When the folder reaches the size limit (`--max-gb`, default 20 GB), recording turns off, as if you had run `goethe trace off`; the chosen keys are kept. `goethe trace` says why and when, and `history.jsonl` logs it with the scope that was on. `goethe trace on` refuses while the folder is over the limit: raise it in the same command (`goethe trace on --max-gb 200`) or delete traces first. When the disk has less than 10 GB free, recording pauses instead, and resumes by itself once space is freed. A full write queue drops traces instead of slowing replies. Every drop is counted in the manifest. `goethe uninstall` keeps a trace folder that lives in the Goethe home. `goethe remove --model` asks whether to delete that model's traces too (default no; `--delete-traces` or `--keep-traces` answers without asking). Deleting a model's `v1/<model>` folder by hand works too: goethed drops its lines from `sessions.jsonl`, `models.json` and the manifest on its next write.
+Traces hold whole prompts and replies, including anything secret that clients send. The folder is `0700` and every file `0600`. Request headers and client keys are never stored, only the key id. When the folder reaches the size limit (`--max-gb`, default 20 GB), recording turns off, as if you had run `goethe api trace off`; the chosen keys are kept. `goethe api trace` says why and when, and `history.jsonl` logs it with the scope that was on. `goethe api trace on` refuses while the folder is over the limit: raise it in the same command (`goethe api trace on --max-gb 200`) or delete traces first. When the disk has less than 10 GB free, recording pauses instead, and resumes by itself once space is freed. A full write queue drops traces instead of slowing replies. Every drop is counted in the manifest. `goethe uninstall` keeps a trace folder that lives in the Goethe home. `goethe remove --model` asks whether to delete that model's traces too (default no; `--delete-traces` or `--keep-traces` answers without asking). Deleting a model's `v1/<model>` folder by hand works too: goethed drops its lines from `sessions.jsonl`, `models.json` and the manifest on its next write.
 
 ## Folder
 
@@ -24,11 +24,11 @@ traces/
   manifest.json      schema version, totals (turns per model too), drops, pause reason; rewritten every 2 s by goethed
   models.json        every model version that produced a turn, by fingerprint
   sessions.jsonl     one line per session when it starts: id, start, model, key id, file
-  history.jsonl      every goethe trace on/off or setting change, and the automatic off at the size limit
+  history.jsonl      every goethe api trace on/off or setting change, and the automatic off at the size limit
   v1/<model>/<YYYY-MM-DD>/<start>_<session_id>.jsonl.gz
 ```
 
-A session file holds one JSON object per turn, one per line. Each turn is appended as its own gzip member, so `zcat`, Python's `gzip` and any multi-member gzip reader read the whole file. A crash mid-write can leave a torn last member: keep the turns read before it. The session files are the record. The manifest totals, and so the turn count in `goethe trace`, are a summary: after a crash they can stay a few seconds of turns short. `v1` is the schema version. A future format goes next to it, not over it.
+A session file holds one JSON object per turn, one per line. Each turn is appended as its own gzip member, so `zcat`, Python's `gzip` and any multi-member gzip reader read the whole file. A crash mid-write can leave a torn last member: keep the turns read before it. The session files are the record. The manifest totals, and so the turn count in `goethe api trace`, are a summary: after a crash they can stay a few seconds of turns short. `v1` is the schema version. A future format goes next to it, not over it.
 
 ## Sessions
 

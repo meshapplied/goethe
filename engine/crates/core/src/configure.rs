@@ -71,7 +71,7 @@ fn network_label(n: &Network, width: usize) -> String {
 
 const PUBLIC_WARNING: &str = "exposing the API on a public network is not recommended.
   - Anyone who can reach this machine can attempt to connect; only the allowlist and API keys stop them.
-  - Allow only the client IPs you trust (goethe allowlist --add <ip>/32) and give every client its own key.
+  - Allow only the client IPs you trust (goethe api allowlist --add <ip>/32) and give every client its own key.
   - Open the gateway port in your firewall or router yourself; Goethe does not change them.
   - The certificate is self-signed, so clients must trust it or skip verification.";
 
@@ -393,7 +393,7 @@ fn configure_public(opts: &ApiOpts) -> Result<String, String> {
         allow(r, "public client")?;
     }
     if ranges.is_empty() {
-        println!("No client addresses were added: only addresses already on the allowlist can connect (goethe allowlist --add <ip>/32).");
+        println!("No client addresses were added: only addresses already on the allowlist can connect (goethe api allowlist --add <ip>/32).");
     }
     Ok(public_host.unwrap_or_else(|| "0.0.0.0".to_string()))
 }
@@ -438,11 +438,11 @@ fn public_ip_lines(ip: Result<IpAddr, String>, port: u16, local: &[InterfaceAddr
 fn offer_key(yes: bool) -> Result<(), String> {
     // Without any API key no client can call the API, so offer one; goethe api shows it again later.
     if !security::key_list_detailed()?.is_empty() {
-        println!("API keys: {} exist (goethe key; goethe key --create <client> for each new client)", security::key_list_detailed()?.len());
+        println!("API keys: {} exist (goethe api keys; goethe api keys --create <client> for each new client)", security::key_list_detailed()?.len());
         return Ok(());
     }
     if !interactive() && !yes {
-        println!("No API keys yet: goethe key --create <client>");
+        println!("No API keys yet: goethe api keys --create <client>");
         return Ok(());
     }
     if !confirm("No API keys exist yet. Create one now?", true, yes)? {

@@ -198,7 +198,7 @@ fn probe_public_reachability(home: &Path) {
 
 fn print_public_security_advisory() {
     println!(
-        "Public mode exposes the gateway to the internet. Keep the allowlist tight (goethe allowlist --add/--remove), use API keys with scopes and rpm limits, and rotate keys."
+        "Public mode exposes the gateway to the internet. Keep the allowlist tight (goethe api allowlist --add/--remove), use API keys with scopes and rpm limits, and rotate keys."
     );
 }
 
@@ -390,12 +390,12 @@ fn check_environment(home: &Path) -> Check {
             check(
                 "environment",
                 "INFO",
-                format!("container {c} without systemd: goethe service enable starts goethed with nohup; add goethed to the container start command{volume}"),
+                format!("container {c} without systemd: goethe up starts goethed with nohup; add goethed to the container start command{volume}"),
             )
         }
-        (Some(c), true) => check("environment", "INFO", format!("container {c} with systemd: goethe service enable installs a unit")),
-        (None, true) => check("environment", "OK", "systemd is PID 1: goethe service enable installs a unit"),
-        (None, false) => check("environment", "INFO", "no systemd: goethe service enable uses crontab @reboot"),
+        (Some(c), true) => check("environment", "INFO", format!("container {c} with systemd: goethe up installs a unit")),
+        (None, true) => check("environment", "OK", "systemd is PID 1: goethe up installs a unit"),
+        (None, false) => check("environment", "INFO", "no systemd: goethe up uses crontab @reboot"),
     }
 }
 
