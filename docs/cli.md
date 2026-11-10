@@ -35,7 +35,7 @@ Exit codes:
 
 ### `goethe start`
 
-Guided setup. Starts Goethe, then walks through three steps: install a model, serve it through the API, and configure who can reach it. An advanced mode does each part on its own. Without a terminal, it prints the equivalent commands.
+Guided setup. Starts Goethe, then walks through three steps: install a model, serve it through the API, and configure who can reach it. An advanced mode does each part on its own. Without a terminal, it prints the equivalent commands. Step 3 offers only API keys that may call the model just served, and the advanced setup opens `goethe api manage` for keys.
 
 ### `goethe up`
 
