@@ -95,13 +95,13 @@ fn shown(p: &std::path::Path, dirs: &Dirs) -> String {
     p.strip_prefix(&dirs.home).map(|r| format!("~/{}", r.display())).unwrap_or_else(|_| p.display().to_string())
 }
 
-pub fn run(action: Option<&str>, shell: Option<&str>, auto: bool) -> Result<(), String> {
+pub fn run(action: Option<&str>, shell: Option<&str>) -> Result<(), String> {
     // install (the default when a shell is named), remove, or the state of each shell.
     let dirs = Dirs::from_env()?;
     match action.unwrap_or("status") {
         "install" => {
             let sh = shell_of(shell)?;
-            match completion::install(&dirs, sh, &script(sh)?, !auto)? {
+            match completion::install(&dirs, sh, &script(sh)?)? {
                 Installed::Loaded(p) => println!("Tab completion is on for {} ({}). Open a new terminal to use it.", sh.name(), shown(&p, &dirs)),
                 Installed::Sourced(p, rc) => println!(
                     "Tab completion is on for {} ({} sources {}). Open a new terminal, or run: source {}",
@@ -110,7 +110,6 @@ pub fn run(action: Option<&str>, shell: Option<&str>, auto: bool) -> Result<(), 
                     shown(&p, &dirs),
                     shown(&rc, &dirs)
                 ),
-                Installed::NeedsRc(rc) => println!("Tab completion for {}: run goethe completion install (it adds a short marked block to {}).", sh.name(), shown(&rc, &dirs)),
             }
         }
         "remove" => {

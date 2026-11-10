@@ -1031,7 +1031,7 @@ wait_gateway() {
 }
 
 summary() {
-  # How the linked CLI finds a non-default home, then the driver reboot, PATH and Tab completion notes.
+  # How the linked CLI finds a non-default home, then the driver reboot and PATH notes; Tab completion is turned on quietly.
   if [[ "${GOETHE_HOME}" != "$(default_home)" ]]; then
     echo "GOETHE_HOME=${GOETHE_HOME} is not the default: ${GOETHE_HOME}/bin/goethe${LINK_DIR:+ and ${LINK_DIR}/goethe}" \
       "find it from their own location, no export needed"
@@ -1042,8 +1042,8 @@ summary() {
   if [[ -n "${LINK_DIR}" && ":${PATH}:" != *":${LINK_DIR}:"* ]]; then
     echo "Add ${LINK_DIR} to PATH to use goethe"
   fi
-  if [[ "${GOETHE_HOME}" == "$(default_home)" ]]; then
-    "${GOETHE_HOME}/bin/goethe" completion install --auto 2>/dev/null || true
+  if [[ "${GOETHE_HOME}" == "$(default_home)" && "${GOETHE_NO_COMPLETION:-0}" != "1" ]]; then
+    "${GOETHE_HOME}/bin/goethe" completion install >/dev/null 2>&1 || true
   fi
   echo "Goethe install complete: GOETHE_HOME=${GOETHE_HOME}"
 }

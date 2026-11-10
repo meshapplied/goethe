@@ -345,8 +345,6 @@ enum Commands {
         action: Option<String>,
         #[arg(long, value_parser = ["bash", "zsh", "fish"], help = "The shell (default: yours, from $SHELL).")]
         shell: Option<String>,
-        #[arg(long, hide = true, help = "Only where no rc file needs a change (the installer uses it).")]
-        auto: bool,
     },
 }
 
@@ -986,7 +984,7 @@ fn main() {
         Commands::Api { cmd: Some(ApiCommands::Configure(a)), .. } => configure_access(a),
         Commands::Api { cmd: Some(_), .. } => unreachable!("goethe api subcommands are routed first"),
         Commands::Start => goethe_core::onboard::run(),
-        Commands::Completion { action, shell, auto } => complete::run(action.as_deref(), shell.as_deref(), auto),
+        Commands::Completion { action, shell } => complete::run(action.as_deref(), shell.as_deref()),
         Commands::Configure { cmd: ConfigureCommands::Api(a) } => {
             eprintln!("note: goethe configure api is now goethe api configure");
             configure_access(a)

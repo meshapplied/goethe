@@ -395,7 +395,7 @@ Tab completion for bash, zsh and fish. Commands, subcommands and flags complete,
 | `goethe completion install` | Turn it on for your shell (`--shell bash\|zsh\|fish` for another) |
 | `goethe completion remove` | Turn it off again |
 
-fish and bash with the bash-completion package load the script from their own completion folders; for zsh, and bash without bash-completion, `install` adds a short marked block to `~/.zshrc` or `~/.bashrc`, and `remove` takes only that block out. The installer turns it on where no rc file needs a change and otherwise prints the command. `goethe uninstall` removes it.
+fish and bash with the bash-completion package load the script from their own completion folders; for zsh, and bash without bash-completion, `install` adds a short marked block to `~/.zshrc` or `~/.bashrc`, and `remove` takes only that block out. The installer turns it on for your shell (`GOETHE_NO_COMPLETION=1` skips that), and `goethe uninstall` removes it.
 
 ### `goethe --version`
 

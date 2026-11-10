@@ -123,18 +123,13 @@ fn write(path: &Path, text: &str) -> Result<(), String> {
 pub enum Installed {
     Loaded(PathBuf),
     Sourced(PathBuf, PathBuf),
-    NeedsRc(PathBuf),
 }
 
-pub fn install(dirs: &Dirs, shell: Shell, script: &str, edit_rc: bool) -> Result<Installed, String> {
-    // Write the script, then source it from the rc file when the shell needs that (only with edit_rc).
+pub fn install(dirs: &Dirs, shell: Shell, script: &str) -> Result<Installed, String> {
+    // Write the script, then source it from the rc file when the shell does not load it by itself.
     let path = dirs.script(shell);
-    let rc = dirs.rc(shell);
-    if let (Some(rc), false) = (&rc, edit_rc) {
-        return Ok(Installed::NeedsRc(rc.clone()));
-    }
     write(&path, script)?;
-    match rc {
+    match dirs.rc(shell) {
         None => Ok(Installed::Loaded(path)),
         Some(rc) => {
             let text = std::fs::read_to_string(&rc).unwrap_or_default();
@@ -217,16 +212,18 @@ mod tests {
     fn fish_and_bash_completion_get_a_file_zsh_also_an_rc_block() {
         let tmp = tempfile::tempdir().unwrap();
         let d = dirs(tmp.path(), true);
-        assert_eq!(install(&d, Shell::Fish, "fish script", false).unwrap(), Installed::Loaded(d.script(Shell::Fish)));
+        assert_eq!(install(&d, Shell::Fish, "fish script").unwrap(), Installed::Loaded(d.script(Shell::Fish)));
         assert_eq!(std::fs::read_to_string(tmp.path().join(".config/fish/completions/goethe.fish")).unwrap(), "fish script");
-        assert_eq!(install(&d, Shell::Bash, "bash script", false).unwrap(), Installed::Loaded(d.script(Shell::Bash)));
-        assert_eq!(install(&d, Shell::Zsh, "zsh script", false).unwrap(), Installed::NeedsRc(tmp.path().join(".zshrc")), "--auto never edits an rc file");
+        assert_eq!(install(&d, Shell::Bash, "bash script").unwrap(), Installed::Loaded(d.script(Shell::Bash)));
         assert!(!installed(&d, Shell::Zsh));
         std::fs::write(tmp.path().join(".zshrc"), "export A=1\n").unwrap();
-        assert_eq!(install(&d, Shell::Zsh, "zsh script", true).unwrap(), Installed::Sourced(d.script(Shell::Zsh), tmp.path().join(".zshrc")));
+        assert_eq!(install(&d, Shell::Zsh, "zsh script").unwrap(), Installed::Sourced(d.script(Shell::Zsh), tmp.path().join(".zshrc")));
+        let once = std::fs::read_to_string(tmp.path().join(".zshrc")).unwrap();
+        install(&d, Shell::Zsh, "zsh script").unwrap();
+        assert_eq!(std::fs::read_to_string(tmp.path().join(".zshrc")).unwrap(), once, "a second install leaves one block");
         assert!(std::fs::read_to_string(tmp.path().join(".zshrc")).unwrap().contains("# goethe completion"));
         let bare = dirs(tmp.path(), false);
-        assert!(matches!(install(&bare, Shell::Bash, "bash script", true).unwrap(), Installed::Sourced(_, _)), "bash without bash-completion sources it from .bashrc");
+        assert!(matches!(install(&bare, Shell::Bash, "bash script").unwrap(), Installed::Sourced(_, _)), "bash without bash-completion sources it from .bashrc");
         let removed = remove(&d, Shell::Zsh).unwrap();
         assert_eq!(removed.len(), 2);
         assert_eq!(std::fs::read_to_string(tmp.path().join(".zshrc")).unwrap(), "export A=1\n");
