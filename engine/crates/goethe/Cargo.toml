@@ -11,5 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
 goethe-core = { path = "../core" }
 serde_json = "1"

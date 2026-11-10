@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tab completion for bash, zsh and fish (`goethe completion install`, `remove`, or the state with no argument): commands and flags, plus installed models (by id, by name in any case, by alias), GPUs, key ids and names, and network interfaces, asked from `goethe` at each Tab. The installer turns it on where no rc file needs a change and prints the command otherwise; `goethe uninstall` removes it.
 - Plain `goethe` on a terminal opens a home screen in the same two-column style as the key manager: models (load or unload), API access, keys, GPUs (allow or deny) and learning and traces, each with its state, refreshed every 5 seconds. Actions run the matching command in the normal terminal and come back.
 - A leaner command line: `goethe --help` lists 17 commands in the order they are used. API settings moved under `goethe api` (`keys`, `allowlist`, `gateway`, `domain`, `learn`, `trace`) and model housekeeping under `goethe models` (`recommend`, `scan`, `config`, `alias`); `hw`, `gpu` and `doctor` stay separate. The older top-level forms still work, hidden, and say where they moved.
 - The model is a plain argument: `goethe load qwen 27b`, `goethe unload qwen-27b`, `goethe install glm flash`. An id, an alias or words from a name; several matches bring up a menu (or are listed without a terminal). `--model` still works. Messages and docs use the new forms.

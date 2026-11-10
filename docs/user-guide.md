@@ -224,6 +224,8 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 | `goethe doctor` | Setup check with a fix for each problem |
 | `goethe update` | Install the latest Goethe (`--check` to only look) |
 | `goethe uninstall` | Remove Goethe and its models (`--keep-models` to keep them) |
+| `goethe completion install` | Tab completion for bash, zsh or fish: commands, models, keys, GPUs |
+| `goethe` | The home screen (on a terminal) |
 
 ## Add models
 
