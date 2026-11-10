@@ -419,7 +419,7 @@ fn no_terminal_text() -> String {
         "goethe start needs an interactive terminal. The same steps as commands:\n\n{}\n{}\n{}",
         term::commands("Step 1/3  Install a model:", &["goethe up", "goethe recommend", &format!("goethe install --model {EXAMPLE_ID}")]),
         term::commands("Step 2/3  Serve through an API:", &[&format!("goethe load --model {EXAMPLE_ID}")]),
-        term::commands("Step 3/3  Configure API access:", &["goethe configure api", "goethe key --create my-app"])
+        term::commands("Step 3/3  Configure API access:", &["goethe api configure", "goethe api manage"])
     )
 }
 

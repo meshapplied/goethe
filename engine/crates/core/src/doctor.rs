@@ -550,7 +550,7 @@ fn check_network(home: &Path) -> Check {
     let allowed: Vec<crate::netif::Net> = crate::security::allowlist_list().unwrap_or_default().iter().filter_map(|c| crate::netif::Net::parse(c)).collect();
     let shown = ranges.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ");
     if !ranges.is_empty() && !ranges.iter().any(|r| allowed.iter().any(|a| a.overlaps(r))) {
-        return check("network", "WARN", format!("{name} reaches {shown}, but no allowlist entry covers it, so its clients are refused; run goethe configure api"));
+        return check("network", "WARN", format!("{name} reaches {shown}, but no allowlist entry covers it, so its clients are refused; run goethe api configure"));
     }
     check("network", "OK", format!("gateway follows {name} at {ip}"))
 }

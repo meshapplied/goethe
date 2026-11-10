@@ -2,9 +2,11 @@
 
 ## Unreleased
 
-- `goethe configure api` works with any VPN or private network: it lists the networks this machine is on (tunnels and private addresses; container bridges and public network cards are left out) with the range each reaches, taken from the routing table, and still asks whether to restrict access to specific addresses. Single-device routes widen to their private block, and default routes are never allowed. Before, only Tailscale, WireGuard and ZeroTier names were recognised, and any `100.64.0.0/10` address counted as Tailscale, so clouds and carriers that use that range for NAT could have it all allowlisted.
+- `goethe api configure` works with any VPN or private network: it lists the networks this machine is on (tunnels and private addresses; container bridges and public network cards are left out) with the range each reaches, taken from the routing table, and still asks whether to restrict access to specific addresses. Single-device routes widen to their private block, and default routes are never allowed. Before, only Tailscale, WireGuard and ZeroTier names were recognised, and any `100.64.0.0/10` address counted as Tailscale, so clouds and carriers that use that range for NAT could have it all allowlisted.
 - The gateway follows the chosen interface instead of a fixed address: a new address is picked up within a few seconds with a hot reload, and while the interface has none it serves this machine only (shown by `goethe status`, `goethe gateway` and `goethe doctor`). `--interface <name>` picks the network without a terminal, and `goethe gateway --bind` takes an interface name too.
 - `goethe gpu` redraws every half second instead of every second.
+- `goethe api manage`: a full-screen key manager in two columns, like ranger. The left picks the action or key (Create new key, Done, then the keys); the right shows the hovered key's value, name and id, and changes its allowed models (Every model or ticked models), rate limit and expiry, or deletes it after a second Enter. Nothing is written until Save; `q` leaves at once and says what was not saved. On Rate limit and Expires the bottom line shows the values they take. Only changed lines are redrawn, and keys created in the session are printed after the screen closes. Key names must now be 1 to 64 visible characters.
+- `goethe configure api` is now `goethe api configure`, in the CLI, its messages and the docs. The old form still works and says so.
 
 ## 0.1.9 (2026-11-09)
 

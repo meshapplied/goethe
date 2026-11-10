@@ -207,9 +207,7 @@ pub fn key_create(
     if rpm_limit < 0 {
         return Err(format!("rpm must be 0 (unlimited) or positive, got {rpm_limit}"));
     }
-    if name.trim().is_empty() {
-        return Err("key name must not be empty".to_string());
-    }
+    key_name_check(name)?;
     let model_scope = models.map(model_scope_list).transpose()?;
     let expires_at = expires.map(parse_expires).transpose()?;
     let home = goethe_home();
@@ -242,6 +240,17 @@ pub fn key_create(
     }
 }
 
+pub fn key_name_check(name: &str) -> Result<(), String> {
+    // A name people can read in a table: 1 to 64 visible characters, no control characters.
+    if name.trim().is_empty() {
+        return Err("key name must not be empty".to_string());
+    }
+    if name.chars().count() > 64 || name.chars().any(char::is_control) {
+        return Err("key names are up to 64 letters, digits, spaces or punctuation".to_string());
+    }
+    Ok(())
+}
+
 pub fn model_scope_list(models: &str) -> Result<String, String> {
     // Comma-separated model ids without blanks; an empty scope is refused instead of creating an unscoped key.
     let ids: Vec<&str> = models.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
@@ -249,6 +258,37 @@ pub fn model_scope_list(models: &str) -> Result<String, String> {
         return Err("--models needs at least one model id (omit it for a key that may use every model)".to_string());
     }
     Ok(ids.join(","))
+}
+
+pub fn key_set_models(key_id: &str, models: Option<&str>) -> Result<(), String> {
+    // Change which models a key may use (None: every model); the gateway applies it on the next request.
+    let scope = models.map(model_scope_list).transpose()?;
+    let home = goethe_home();
+    let con = db::open(&home).map_err(|e| e.to_string())?;
+    let n = con
+        .execute("UPDATE api_keys SET model_scope = ?1 WHERE key_id = ?2", rusqlite::params![scope, key_id])
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err(format!("key {key_id} not found"));
+    }
+    Ok(())
+}
+
+pub fn key_set_limits(key_id: &str, rpm: i64, expires: Option<&str>) -> Result<(), String> {
+    // Change a key's requests per minute (0: unlimited) and expiry (None: never); the gateway applies it on the next request.
+    if rpm < 0 {
+        return Err(format!("rpm must be 0 (unlimited) or positive, got {rpm}"));
+    }
+    let expires_at = expires.map(parse_expires).transpose()?;
+    let home = goethe_home();
+    let con = db::open(&home).map_err(|e| e.to_string())?;
+    let n = con
+        .execute("UPDATE api_keys SET rpm_limit = ?1, expires_at = ?2 WHERE key_id = ?3", rusqlite::params![rpm, expires_at, key_id])
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err(format!("key {key_id} not found"));
+    }
+    Ok(())
 }
 
 pub fn key_revoke(key_id: &str) -> Result<(), String> {
@@ -372,6 +412,14 @@ pub fn token_hash(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_names_are_readable() {
+        assert!(key_name_check("dev laptop").is_ok() && key_name_check("ci-2026.11").is_ok());
+        assert!(key_name_check("").is_err() && key_name_check("  ").is_err());
+        assert!(key_name_check("\u{1b}[B").is_err(), "an arrow key typed at the prompt");
+        assert!(key_name_check(&"x".repeat(65)).is_err());
+    }
 
     #[test]
     fn model_scope_needs_a_model() {

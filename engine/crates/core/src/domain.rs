@@ -26,7 +26,7 @@ pub fn explain() -> Result<String, String> {
         Err(why) => {
             return Ok(format!(
                 "To use a domain name, other machines must reach the API first: {why}.\n\n{}",
-                crate::term::commands("Choose how they reach it:", &["goethe configure api"])
+                crate::term::commands("Choose how they reach it:", &["goethe api configure"])
             ))
         }
     };
