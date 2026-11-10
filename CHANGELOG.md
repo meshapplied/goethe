@@ -7,6 +7,7 @@
 - `goethe gpu` redraws every half second instead of every second.
 - `goethe api manage`: a full-screen key manager in two columns, like ranger. The left picks the action or key (Create new key, Done, then the keys); the right shows the hovered key's value, name and id, and changes its allowed models (Every model or ticked models), rate limit and expiry, or deletes it after a second Enter. Nothing is written until Save; `q` leaves at once and says what was not saved. On Rate limit and Expires the bottom line shows the values they take. Only changed lines are redrawn, and keys created in the session are printed after the screen closes. Key names must now be 1 to 64 visible characters.
 - `goethe configure api` is now `goethe api configure`, in the CLI, its messages and the docs. The old form still works and says so.
+- `goethe start`: the advanced setup's key entry opens the key manager (keys made there are listed when it closes); the guided step 3 offers only keys that may call the model just served, so the "Try it" call works, and asks again for an invalid key name; the ready screen points to `goethe api manage`.
 
 ## 0.1.9 (2026-11-09)
 

@@ -732,8 +732,34 @@ fn carry_out(app: &mut App, effect: Effect, made: &mut Vec<(String, String)>) ->
     Ok(())
 }
 
+pub struct Session {
+    pub created: Vec<(String, String)>,
+    pub unsaved: Option<String>,
+}
+
+impl Session {
+    pub fn summary(&self) -> Option<String> {
+        // The keys made in the session and what was left unsaved, for after the screen closes.
+        let mut lines: Vec<String> = self.created.iter().map(|(name, token)| format!("Created {name}: {token}")).collect();
+        if !self.created.is_empty() {
+            lines.push("goethe api shows every key again.".to_string());
+        }
+        lines.extend(self.unsaved.clone());
+        (!lines.is_empty()).then(|| lines.join("\n"))
+    }
+}
+
 pub fn run() -> Result<(), String> {
-    // Full screen until q or Done; keys made here are printed afterwards, since the screen they were shown on goes away.
+    // goethe api manage: the session, then what it made or left unsaved.
+    let session = session()?;
+    if let Some(text) = session.summary() {
+        println!("{text}");
+    }
+    Ok(())
+}
+
+pub fn session() -> Result<Session, String> {
+    // Full screen until q or Done; the keys made here come back to the caller, since the screen they were shown on goes away.
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         return Err(format!("goethe api manage needs a terminal. {}", crate::term::commands("In scripts:", SCRIPT_HINT).trim_end()));
     }
@@ -775,16 +801,7 @@ pub fn run() -> Result<(), String> {
     let unsaved = app.unsaved_note();
     drop(screen);
     drop(raw);
-    if let Some(note) = unsaved {
-        println!("{note}");
-    }
-    for (name, token) in &made {
-        println!("Created {name}: {token}");
-    }
-    if !made.is_empty() {
-        println!("goethe api shows every key again.");
-    }
-    outcome
+    outcome.map(|()| Session { created: made, unsaved })
 }
 
 #[cfg(test)]
@@ -983,6 +1000,17 @@ mod tests {
         let shown = plain(render(&a, 80, 24).last().unwrap());
         assert!(shown.contains("0 means unlimited"), "the format fits at 80 columns: {shown}");
         assert!(shown.starts_with("Rate limit: requests per minute"), "{shown}");
+    }
+
+    #[test]
+    fn the_session_summary_lists_new_keys_then_what_was_dropped() {
+        let none = Session { created: Vec::new(), unsaved: None };
+        assert_eq!(none.summary(), None);
+        let some = Session { created: vec![("ci".into(), "goethe_sk_x".into())], unsaved: Some("Unsaved changes to dev were not saved.".into()) };
+        assert_eq!(
+            some.summary().as_deref(),
+            Some("Created ci: goethe_sk_x\ngoethe api shows every key again.\nUnsaved changes to dev were not saved.")
+        );
     }
 
     #[test]

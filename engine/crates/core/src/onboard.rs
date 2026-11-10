@@ -269,14 +269,36 @@ fn step_access(model: &str) -> Result<(), String> {
     // Who can reach the API, then a key for the first client, then the ready-to-use call with that key filled in.
     heading(3, "Configure API access", Some("Choose who can reach the API:"));
     let api = configure::apply_access(&ApiOpts { mode: None, vpn_ip: None, interface: None, allow: Vec::new(), yes: false })?;
-    let token = choose_key()?;
+    let token = choose_key(model)?;
     print!("\x1b[2J\x1b[H{}", ready_text(&api, model, &token));
     Ok(())
 }
 
-fn choose_key() -> Result<String, String> {
-    // Use a key that exists (listed by name and id) or create one; without keys, go straight to naming the first.
-    let keys = crate::security::key_list_detailed()?;
+fn usable_keys(keys: &[serde_json::Value], model: &str) -> Vec<serde_json::Value> {
+    // Keys that may call the served model: every-model keys and keys scoped to include it.
+    keys.iter()
+        .filter(|k| {
+            let scope = k.get("models").and_then(|v| v.as_str()).filter(|m| !m.is_empty()).map(str::to_string);
+            crate::security::model_allowed(&scope, model)
+        })
+        .cloned()
+        .collect()
+}
+
+fn ask_key_name(prompt: &str) -> Result<String, String> {
+    // A key name, asked again until it is one the key table accepts.
+    loop {
+        let name = term::ask(prompt, "dev")?;
+        match crate::security::key_name_check(&name) {
+            Ok(()) => return Ok(name),
+            Err(e) => eprintln!("{e}; try again."),
+        }
+    }
+}
+
+fn choose_key(model: &str) -> Result<String, String> {
+    // Use a key that may call the served model (listed by name and id) or create one; with none, go straight to naming the first.
+    let keys = usable_keys(&crate::security::key_list_detailed()?, model);
     let field = |k: &serde_json::Value, f: &str| k.get(f).and_then(|v| v.as_str()).unwrap_or("").to_string();
     if !keys.is_empty() {
         heading(3, "Configure API access", Some("Every user needs an API key. Use one you have, or create a new one:"));
@@ -292,7 +314,7 @@ fn choose_key() -> Result<String, String> {
     }
     println!();
     let prompt = if keys.is_empty() { "Every user needs an API key. Name the first key [dev/my-app-name]:" } else { "Name the new key [dev/my-app-name]:" };
-    let name = term::ask(prompt, "dev")?;
+    let name = ask_key_name(prompt)?;
     crate::security::key_create(&name, true, None, None, None, false)
 }
 
@@ -307,7 +329,7 @@ fn ready_text(api: &str, model: &str, token: &str) -> String {
          or trust $GOETHE_HOME/nginx/certs/server.crt.\n\n{}",
         paint("Your API is ready", Color::Bold),
         term::commands("Try it:", &[&curl]),
-        term::commands("See all models and keys:", &["goethe api"])
+        term::commands("See all models and keys, or add, scope and delete keys:", &["goethe api", "goethe api manage"])
     )
 }
 
@@ -322,7 +344,7 @@ fn advanced() -> Result<(), String> {
             "Run your own model (already on this machine)",
             "Serve an installed model",
             "Configure API access",
-            "Create an API key",
+            "Manage API keys: create, scope or delete",
             "",
             "Finish",
         ];
@@ -343,7 +365,7 @@ fn advanced() -> Result<(), String> {
                 configure::apply_access(&ApiOpts { mode: None, vpn_ip: None, interface: None, allow: Vec::new(), yes: false })
                     .map(|api| Some(format!("API endpoint: {api}")))
             }
-            Some(5) => create_key().map(Some),
+            Some(5) => crate::keys_menu::session().map(|s| s.summary()),
             _ => {
                 print!("\n{}", term::commands("Check everything at any time with:", &["goethe status"]));
                 return Ok(());
@@ -379,13 +401,6 @@ fn gpus() -> Result<(), String> {
             _ => return Ok(()),
         }
     }
-}
-
-fn create_key() -> Result<String, String> {
-    screen("Create an API key", None);
-    let name = term::ask("Every user needs an API key. Name the key [dev/my-app-name]:", "dev")?;
-    let token = crate::security::key_create(&name, true, None, None, None, false)?;
-    Ok(format!("API key for {name}: {token}\ngoethe api shows it again at any time."))
 }
 
 fn installed_ids() -> Vec<String> {
@@ -434,6 +449,15 @@ mod tests {
         assert!(text.contains("-H \"Authorization: Bearer goethe_sk_abc\""), "{text}");
         assert!(text.contains("\"model\": \"org/m\""), "{text}");
         assert!(!text.contains("<key>"));
+        assert!(text.ends_with("\t\u{2192} goethe api\n\t\u{2192} goethe api manage\n"), "{text}");
+    }
+
+    #[test]
+    fn only_keys_that_may_call_the_model_are_offered() {
+        let key = |name: &str, models: Option<&str>| serde_json::json!({"name": name, "models": models});
+        let keys = vec![key("all", None), key("chat", Some("org/chat")), key("both", Some("org/m,org/chat")), key("blank", Some(""))];
+        let names: Vec<String> = usable_keys(&keys, "org/m").iter().map(|k| k["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names, ["all", "both", "blank"], "a key scoped to other models would fail the Try it call");
     }
 
     #[test]
