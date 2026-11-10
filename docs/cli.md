@@ -27,13 +27,17 @@ Exit codes:
 
 ## Contents
 
-- [Start and stop](#start-and-stop): `start`, `up`, `status`, `down`
+- [Start and stop](#start-and-stop): `goethe`, `start`, `up`, `status`, `down`
 - [Models](#models): `install`, `models`, `models recommend`, `models scan`, `models config`, `models alias`, `remove`
 - [Running models](#running-models): `load`, `unload`, `ps`, `logs`
 - [API access](#api-access): `api`, `api configure`, `api manage`, `api keys`, `api allowlist`, `api gateway`, `api domain`, `api learn`, `api trace`
 - [GPUs and system](#gpus-and-system): `gpu`, `hw`, `doctor`, `update`, `uninstall`, `--version`
 
 ## Start and stop
+
+### `goethe`
+
+On a terminal, plain `goethe` opens the home screen: the sections on the left (Models, API access, API keys, GPUs, Learning & traces, Done), their state and what can be done on the right, refreshed every 5 seconds. ↑↓ move, → opens a section, ← goes back, `q` leaves. Enter on a model loads or unloads it; the access, key, learning and trace rows run `goethe api configure`, `goethe api manage`, `goethe api learn` and `goethe api trace` in the normal terminal and come back on Enter; Enter on a GPU allows or denies it. Without a terminal, `goethe` prints the commands.
 
 ### `goethe start`
 

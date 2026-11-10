@@ -766,6 +766,13 @@ fn main() {
         println!("{}", goethe_core::build_info::build_line());
         return;
     }
+    if args.len() == 1 && std::io::IsTerminal::is_terminal(&std::io::stdin()) && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        if let Err(e) = goethe_core::home::run() {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let cli = Cli::try_parse().unwrap_or_else(|e| {
         let stray = e.get(clap::error::ContextKind::InvalidArg).map(|v| v.to_string());
         if let Some(fixed) = stray.and_then(|v| corrected_command(&args, &v)) {
