@@ -1,4 +1,4 @@
-// goethe scan: register model directories the user downloaded and moved into GOETHE_HOME/models.
+// goethe models scan: register model directories the user downloaded and moved into GOETHE_HOME/models.
 
 use crate::db;
 use crate::install;
@@ -84,7 +84,7 @@ pub fn run(opts: ScanOpts) -> Result<(), String> {
     };
     if findings.iter().all(|f| matches!(f.state, State::Registered(_))) {
         say(&format!(
-            "No new model directories in {}. Move a downloaded model folder (config.json plus .safetensors) there, for example {}/<org>__<name>, then run goethe scan.",
+            "No new model directories in {}. Move a downloaded model folder (config.json plus .safetensors) there, for example {}/<org>__<name>, then run goethe models scan.",
             models.display(),
             models.display()
         ));
@@ -157,7 +157,7 @@ pub fn run(opts: ScanOpts) -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?);
     }
     if pending > 0 {
-        eprintln!("re-run with --yes to add {pending} model(s), or run goethe scan in a terminal to choose");
+        eprintln!("re-run with --yes to add {pending} model(s), or run goethe models scan in a terminal to choose");
         std::process::exit(3);
     }
     if failed {
@@ -178,7 +178,7 @@ fn add_model(home: &Path, id: &str, dir: &Path, entry: Option<crate::registry::R
     let planned = install::plan_in_place(home, id, dir, entry)?;
     let mut out: Box<dyn Write> = if json { Box::new(std::io::stderr()) } else { Box::new(std::io::stdout()) };
     install::commit(home, &planned, "added", &mut out)?;
-    writeln!(out, "next: goethe load --model {id}").map_err(|e| e.to_string())
+    writeln!(out, "next: goethe load {id}").map_err(|e| e.to_string())
 }
 
 pub struct Found {
@@ -245,7 +245,7 @@ fn hf_cache_models() -> Vec<(String, PathBuf)> {
 }
 
 pub fn register_found(home: &Path, f: &Found) -> Result<(), String> {
-    // A folder in GOETHE_HOME/models is registered like goethe scan does; one elsewhere is linked in like goethe install does.
+    // A folder in GOETHE_HOME/models is registered like goethe models scan does; one elsewhere is linked in like goethe install does.
     if f.in_models {
         return add_model(home, &f.id, &f.path, None, false);
     }
@@ -270,7 +270,7 @@ fn candidate_dirs(home: &Path, dir: Option<&str>) -> Result<Vec<PathBuf>, String
         Ok(rel) if !rel.as_os_str().is_empty() => Ok(vec![models.join(rel)]),
         _ => {
             eprintln!(
-                "error: {} is not inside {}: move it there and run goethe scan, or register it where it is with goethe install --model {}",
+                "error: {} is not inside {}: move it there and run goethe models scan, or register it where it is with goethe install {}",
                 canonical.display(),
                 models.display(),
                 canonical.display()
@@ -324,7 +324,7 @@ pub fn survey(home: &Path, con: &Connection, dirs: Vec<PathBuf>, m: &Machine) ->
             continue;
         }
         if meta.is_ok_and(|m| m.file_type().is_symlink()) {
-            let why = format!("a symlink; register the folder it points to with goethe install --model {}", canonical.display());
+            let why = format!("a symlink; register the folder it points to with goethe install {}", canonical.display());
             out.push(Finding { path, name, state: State::Unsupported(why) });
             continue;
         }
@@ -457,14 +457,14 @@ fn incomplete_download(dir: &Path) -> Option<String> {
     let marks = |n: &str| [".incomplete", ".partial", ".part", ".aria2", ".tmp"].iter().any(|s| n.ends_with(s));
     let name = dir.file_name()?.to_string_lossy().to_string();
     if marks(&name) {
-        return Some("unfinished download (folder name); finish it, then run goethe scan".to_string());
+        return Some("unfinished download (folder name); finish it, then run goethe models scan".to_string());
     }
     let mut stack = vec![dir.to_path_buf(), dir.join(".cache/huggingface/download")];
     while let Some(d) = stack.pop() {
         for e in fs::read_dir(&d).into_iter().flatten().flatten() {
             let n = e.file_name().to_string_lossy().to_string();
             if marks(&n) {
-                return Some(format!("unfinished download ({n}); finish it, then run goethe scan"));
+                return Some(format!("unfinished download ({n}); finish it, then run goethe models scan"));
             }
             if d != dir && e.file_type().is_ok_and(|t| t.is_dir()) {
                 stack.push(e.path());

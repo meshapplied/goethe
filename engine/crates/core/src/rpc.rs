@@ -33,7 +33,7 @@ pub struct RpcReply {
 }
 
 pub fn daemon_unavailable_message() -> &'static str {
-    "goethed is not running: start it with `goethe up` (or `goethe service enable` to start it at boot)"
+    "goethed is not running: start it with `goethe up`"
 }
 
 pub fn map_daemon_err(e: String) -> String {

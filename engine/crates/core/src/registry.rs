@@ -113,9 +113,9 @@ impl RegistryModel {
     pub fn manual_download_reason(&self) -> Option<&str> {
         // Entries goethe cannot download: weights published elsewhere, or gated on Hugging Face.
         if self.manual_download.unwrap_or(false) {
-            Some("weights are not on Hugging Face; place them in GOETHE_HOME/models and run goethe scan")
+            Some("weights are not on Hugging Face; place them in GOETHE_HOME/models and run goethe models scan")
         } else if self.gated.unwrap_or(false) {
-            Some("gated on Hugging Face; download it with your own account and run goethe scan")
+            Some("gated on Hugging Face; download it with your own account and run goethe models scan")
         } else {
             None
         }
@@ -912,7 +912,7 @@ mod validate_tests {
         let reg = bundled().unwrap();
         let mut found = false;
         for line in readme.lines() {
-            if let Some(rest) = line.split("goethe install --model ").nth(1) {
+            if let Some(rest) = line.split("goethe install ").nth(1) {
                 let id = rest.split_whitespace().next().unwrap();
                 found = true;
                 assert!(reg.models.iter().any(|m| m.id == id), "{id}");

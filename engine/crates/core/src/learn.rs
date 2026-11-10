@@ -1242,7 +1242,7 @@ impl Store {
                 if self.save(&id, &s).is_ok() {
                     s.dirty = false;
                 } else {
-                    eprintln!("goethe learn: could not save session {}", s.session);
+                    eprintln!("goethe api learn: could not save session {}", s.session);
                 }
             }
         }

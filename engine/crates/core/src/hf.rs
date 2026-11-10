@@ -89,7 +89,7 @@ pub fn preflight_model(model_id: &str, revision: Option<&str>) -> Result<ModelPr
 
 pub fn gated_guidance(model_id: &str) -> String {
     format!(
-        "{model_id} is gated or private on Hugging Face, so it needs your Hugging Face token. After accepting its license on huggingface.co, run: goethe install --model {model_id} --hf-token"
+        "{model_id} is gated or private on Hugging Face, so it needs your Hugging Face token. After accepting its license on huggingface.co, run: goethe install {model_id} --hf-token"
     )
 }
 

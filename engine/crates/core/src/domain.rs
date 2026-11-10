@@ -36,7 +36,7 @@ pub fn explain() -> Result<String, String> {
          \tapi.example.com  A  {ip}\n\n\
          This works for public and private addresses alike; a VPN or LAN address only resolves to clients on that network.\n\
          Clients then use https://api.example.com:{port}/v1, with the same certificate settings as for the IP address.\n\n{}",
-        crate::term::commands("Check that it worked:", &["goethe domain --check api.example.com"])
+        crate::term::commands("Check that it worked:", &["goethe api domain --check api.example.com"])
     ))
 }
 
@@ -75,7 +75,7 @@ pub fn check(domain: &str) -> Result<String, String> {
     if ok {
         Ok(format!("{text}\nClients can use: https://{domain}:{port}/v1\n"))
     } else {
-        Err(format!("{text}\n{}", crate::term::commands("How to set it up:", &["goethe domain"])))
+        Err(format!("{text}\n{}", crate::term::commands("How to set it up:", &["goethe api domain"])))
     }
 }
 

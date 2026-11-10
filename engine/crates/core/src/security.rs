@@ -85,7 +85,7 @@ pub fn allowlist_remove(cidr: &str) -> Result<(), String> {
         rows.filter_map(|r| r.ok()).collect()
     };
     if removed.is_empty() {
-        return Err(format!("{raw} is not in the allowlist (goethe allowlist shows the entries)"));
+        return Err(format!("{raw} is not in the allowlist (goethe api allowlist shows the entries)"));
     }
     con.execute(
         "DELETE FROM ip_allowlist WHERE cidr = ?1 OR cidr = ?2",
@@ -142,13 +142,13 @@ fn render_allowlist(con: &Connection) -> Result<String, String> {
     let rows = stmt
         .query_map([], |r| r.get::<_, String>(0))
         .map_err(|e| e.to_string())?;
-    let mut out = String::from("# managed by goethe allowlist\n");
+    let mut out = String::from("# managed by goethe api allowlist\n");
     for raw in rows.filter_map(|r| r.ok()) {
         match canonical_cidr(&raw) {
             Ok(c) => {
                 let _ = writeln!(out, "allow {c};");
             }
-            Err(_) => eprintln!("warning: ignoring invalid allowlist entry {raw:?}; remove it with goethe allowlist --remove"),
+            Err(_) => eprintln!("warning: ignoring invalid allowlist entry {raw:?}; remove it with goethe api allowlist --remove"),
         }
     }
     Ok(out)

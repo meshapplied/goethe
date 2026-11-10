@@ -23,12 +23,12 @@ Or step by step:
 
     goethe up                             # start goethed and the gateway, and start them at boot
     goethe hw profile                     # GPUs and links, CPU, RAM, disk, OS, container and cloud
-    goethe recommend                      # registry models that fit this machine
-    goethe install --model <id> --load    # download, verify, register, wait until RUNNING (or --no-wait)
+    goethe models recommend                      # registry models that fit this machine
+    goethe install <id> --load    # download, verify, register, wait until RUNNING (or --no-wait)
     goethe ps [--json]                    # instances (instance_id, slot_key, status), gateway URL
     goethe --version                      # version, git commit, build date
-    goethe allowlist --add 127.0.0.1/32   # the public gateway denies everything by default
-    goethe key --create me --raw          # prints the API key once
+    goethe api allowlist --add 127.0.0.1/32   # the public gateway denies everything by default
+    goethe api keys --create me --raw          # prints the API key once
     goethe status                         # running or not, API URL, key names and ids
 
     curl -k https://127.0.0.1:8443/v1/chat/completions \
@@ -47,41 +47,41 @@ Or step by step:
 
 ## Models
 
-Any public Hugging Face repo can be installed. Gated and private repos need `--hf-token`, which asks for a Hugging Face token, checks it and uses it for that download only (it is never stored); `goethe start` offers the same. Only registry models appear in `goethe recommend`.
+Any public Hugging Face repo can be installed. Gated and private repos need `--hf-token`, which asks for a Hugging Face token, checks it and uses it for that download only (it is never stored); `goethe start` offers the same. Only registry models appear in `goethe models recommend`.
 
-    goethe install --model org/model      # public repo from Hugging Face
-    goethe install --model org/model --hf-token   # gated or private repo: asks for your token
-    goethe install --model ./my-model-dir # local directory, registered in place (--copy to copy)
-    goethe install --model org/model --sglang-arg --reasoning-parser --sglang-arg qwen3
+    goethe install org/model      # public repo from Hugging Face
+    goethe install org/model --hf-token   # gated or private repo: asks for your token
+    goethe install ./my-model-dir # local directory, registered in place (--copy to copy)
+    goethe install org/model --sglang-arg --reasoning-parser --sglang-arg qwen3
     goethe models                         # installed and available: loaded instances, or fits: N.N GB per GPU / does not fit
-    goethe remove --model org/model       # deletes what Goethe downloaded, copied or scanned
+    goethe remove org/model       # deletes what Goethe downloaded, copied or scanned
 
-Downloads resume per file, every weight is checked against its Hugging Face sha256 (a changed file is hashed again on re-install), and free disk is checked first. Engine flags are inferred from `config.json` (Qwen3-family models get `--reasoning-parser qwen3`, and the chat template picks `--tool-call-parser qwen3_coder` or `qwen25`; registry and your own flags win) and can be set with `--sglang-arg` on `install` and `config`, or `goethe load --model <id> -- <args>` for one run. Flags Goethe sets itself (`--host`, `--port`, `--tp-size`, `--context-length`, `--max-running-requests`, `--mem-fraction-static`, `--max-mamba-cache-size`, `--api-key`, `--served-model-name`) are refused there; use `--gpu`, `--tp`, `--ctx` and `--max-conc` instead. Repos that ship their own Python code need `goethe install --trust-remote-code`.
+Downloads resume per file, every weight is checked against its Hugging Face sha256 (a changed file is hashed again on re-install), and free disk is checked first. Engine flags are inferred from `config.json` (Qwen3-family models get `--reasoning-parser qwen3`, and the chat template picks `--tool-call-parser qwen3_coder` or `qwen25`; registry and your own flags win) and can be set with `--sglang-arg` on `install` and `config`, or `goethe load <id> -- <args>` for one run. Flags Goethe sets itself (`--host`, `--port`, `--tp-size`, `--context-length`, `--max-running-requests`, `--mem-fraction-static`, `--max-mamba-cache-size`, `--api-key`, `--served-model-name`) are refused there; use `--gpu`, `--tp`, `--ctx` and `--max-conc` instead. Repos that ship their own Python code need `goethe install --trust-remote-code`.
 
-`goethe remove` on a folder installed in place (`goethe install --model ./dir`) only unregisters it and prints the `rm -rf` command, because Goethe does not delete files it did not create. A loaded model is drained and unloaded first (asks on a terminal, `--yes` in scripts).
+`goethe remove` on a folder installed in place (`goethe install ./dir`) only unregisters it and prints the `rm -rf` command, because Goethe does not delete files it did not create. A loaded model is drained and unloaded first (asks on a terminal, `--yes` in scripts).
 
 ## Models you download yourself
 
 A model folder you placed yourself goes into `$GOETHE_HOME/models`, and Goethe registers it:
 
     mv /data/org-model $GOETHE_HOME/models/org__model
-    goethe scan                           # asks per model; --yes adds all, --json for scripts
-    goethe load --model org/model
+    goethe models scan                           # asks per model; --yes adds all, --json for scripts
+    goethe load org/model
 
-`goethe scan` registers folders it can serve: a `config.json` with an architecture the installed SGLang knows, safetensors weights (all shards present), a quantization SGLang supports, and a size that fits the GPUs. It names the reason for anything it skips. `org__model` becomes `org/model`, any other name `local/<name>`. Scanned models live in Goethe's models folder, so `goethe remove` deletes them.
+`goethe models scan` registers folders it can serve: a `config.json` with an architecture the installed SGLang knows, safetensors weights (all shards present), a quantization SGLang supports, and a size that fits the GPUs. It names the reason for anything it skips. `org__model` becomes `org/model`, any other name `local/<name>`. Scanned models live in Goethe's models folder, so `goethe remove` deletes them.
 
 ## Daily use
 
-    goethe load --model <id> [--gpu gpuN ...] [--tp N] [--ep N] [--ctx N] [--max-conc N] [--replica] [--no-wait] [--json] [-- <sglang flags>]
-    goethe unload --model <id> [--force] | --all  # drains in-flight requests (new ones get 503), then unloads; --force cuts them
+    goethe load <id> [--gpu gpuN ...] [--tp N] [--ep N] [--ctx N] [--max-conc N] [--replica] [--no-wait] [--json] [-- <sglang flags>]
+    goethe unload <id> [--force] | --all  # drains in-flight requests (new ones get 503), then unloads; --force cuts them
     goethe list                               # alias of goethe models
-    goethe alias [--set <alias> --model <id> | --remove <alias>]   # no flags lists them; an alias is not empty and not an installed id; installing that id later removes it
+    goethe models alias [--set <alias> --model <id> | --remove <alias>]   # no flags lists them; an alias is not empty and not an installed id; installing that id later removes it
     goethe gpu [--json]                       # index, compute capability, managed and foreign VRAM, ALLOWED or DENIED
     goethe gpu --deny gpuN | --allow gpuN     # denied GPUs are skipped by automatic placement and refused with --gpu
-    goethe config --model <id> --ctx 32768 --max-conc 4
-    goethe logs --model <id> [-f] [-n 200]  # also --daemon, --gateway, --prune
+    goethe models config <id> --ctx 32768 --max-conc 4
+    goethe logs <id> [-f] [-n 200]  # also --daemon, --gateway, --prune
     goethe doctor [--json] [--probe-public]  # checks with a fix hint each; probe-public needs GOETHE_CANARY_URL for a real answer
-    goethe gateway [--bind 0.0.0.0]       # where the public gateway listens (default 127.0.0.1), or move it
+    goethe api gateway [--bind 0.0.0.0]       # where the public gateway listens (default 127.0.0.1), or move it
     goethe service enable                 # start goethed at boot (systemd, systemd --user, or cron)
     goethe up                             # start daemon and gateway; prints the goethe status summary
     goethe status                         # goethe: running or not running, the API URL, key names and ids
@@ -94,21 +94,21 @@ A model folder you placed yourself goes into `$GOETHE_HOME/models`, and Goethe r
 
 Boot entries belong to one home: `service disable` and `uninstall` remove only the unit or cron line that names this `GOETHE_HOME`, and `service enable` refuses when the systemd unit already starts another home.
 
-Loaded models are restored after a daemon restart or reboot unless you unloaded them, in the order they were first loaded, one engine per GPU at a time. A blocking `goethe load` waits until the instance from that command is RUNNING (or FAILED) and ends with `RUNNING: <model> instance <id> on GPU <g> port <p> (<t> s)`; `--json` prints the instance row instead. Loading a model that is already loaded reports it and exits 0; `--replica` starts another instance. SGLang flags for one run go after `--`; anything else unknown is a usage error (exit 2). A value typed without its flag (`goethe unload <id>`, `goethe gpu allow gpu0`) prints the corrected command (`goethe unload --model <id>`) and runs nothing. Crashed engines are restarted with backoff. If goethed itself crashes or is restarted without `goethe down`, healthy engines keep serving and are adopted when it starts again. Every engine carries an identity (boot id, start time, instance tag) that is checked before Goethe signals it, so a reused PID is never signaled.
+Loaded models are restored after a daemon restart or reboot unless you unloaded them, in the order they were first loaded, one engine per GPU at a time. A blocking `goethe load` waits until the instance from that command is RUNNING (or FAILED) and ends with `RUNNING: <model> instance <id> on GPU <g> port <p> (<t> s)`; `--json` prints the instance row instead. Loading a model that is already loaded reports it and exits 0; `--replica` starts another instance. SGLang flags for one run go after `--`; anything else unknown is a usage error (exit 2). A value typed without its flag (`goethe unload <id>`, `goethe gpu allow gpu0`) prints the corrected command (`goethe unload <id>`) and runs nothing. Crashed engines are restarted with backoff. If goethed itself crashes or is restarted without `goethe down`, healthy engines keep serving and are adopted when it starts again. Every engine carries an identity (boot id, start time, instance tag) that is checked before Goethe signals it, so a reused PID is never signaled.
 
 ## Cloud and containers
 
 `goethe hw profile` and `goethe doctor` report the container (Docker, Podman, Kubernetes, LXC), whether systemd runs, and the cloud: RunPod, Vast.ai, Lambda, AWS, GCP, Azure, OCI, CoreWeave or Paperspace, from environment variables and DMI only (no network calls).
 
-- RunPod and Vast.ai: state goes to `/workspace/.goethe` on the persistent volume, and Goethe prints the public endpoint for the gateway port (`https://<pod>-<port>.proxy.runpod.net`, or the Vast port mapping). Remote clients need `goethe gateway --bind 0.0.0.0` and an allowlist entry for the address they connect from.
+- RunPod and Vast.ai: state goes to `/workspace/.goethe` on the persistent volume, and Goethe prints the public endpoint for the gateway port (`https://<pod>-<port>.proxy.runpod.net`, or the Vast port mapping). Remote clients need `goethe api gateway --bind 0.0.0.0` and an allowlist entry for the address they connect from.
 - No systemd as PID 1: `goethe service enable` uses `nohup` and cron instead of a unit.
 - `doctor` warns when `state.db` sits on a network filesystem, when free RAM is low for models that offload to host memory, and when disk is short for the installed models.
 
 ## Security
 
-- The public gateway (nginx, TLS, self-signed by default) allows only addresses added with `goethe allowlist --add <cidr>` (`--remove <cidr>` removes one, plain `goethe allowlist` lists them).
-- It listens on 127.0.0.1 unless you run `goethe gateway --bind 0.0.0.0` (or one IP address of this host); `goethe gateway --bind 127.0.0.1` closes it again and `goethe gateway` shows bind, port, URL and allowlist size. Moving between loopback and 0.0.0.0 restarts nginx (a few seconds without the gateway); `goethe domain --add <domain>` also binds 0.0.0.0; plain `goethe domain` explains the setup and `goethe domain --check <domain>` verifies it.
-- API keys: `goethe key --create <name> [--rpm N] [--expires 30d] [--models a,b] [--admin] [--raw]`, `goethe key`, `goethe key --revoke <id>`. Keys are stored hashed; usage per key is counted. `--rpm` defaults to 120; `--rpm 0` means unlimited and `goethe key` shows it as `unlimited`. An empty name or `--models` is refused.
+- The public gateway (nginx, TLS, self-signed by default) allows only addresses added with `goethe api allowlist --add <cidr>` (`--remove <cidr>` removes one, plain `goethe api allowlist` lists them).
+- It listens on 127.0.0.1 unless you run `goethe api gateway --bind 0.0.0.0` (or one IP address of this host); `goethe api gateway --bind 127.0.0.1` closes it again and `goethe api gateway` shows bind, port, URL and allowlist size. Moving between loopback and 0.0.0.0 restarts nginx (a few seconds without the gateway); `goethe api domain --add <domain>` also binds 0.0.0.0; plain `goethe api domain` explains the setup and `goethe api domain --check <domain>` verifies it.
+- API keys: `goethe api keys --create <name> [--rpm N] [--expires 30d] [--models a,b] [--admin] [--raw]`, `goethe api keys`, `goethe api keys --revoke <id>`. Keys are stored hashed; usage per key is counted. `--rpm` defaults to 120; `--rpm 0` means unlimited and `goethe api keys` shows it as `unlimited`. An empty name or `--models` is refused.
 - A key with `--models` sees only those models in `/v1/models`. Requests for any other model, or for a model that is not loaded, get 404 `Model Not Found`.
 - Health: `/health` (public), `/health/ready?model=<id>` (200 only when that model's engine answers), `/health/admin` (admin key only; other callers get 404) returns GPU VRAM, instances with in-flight counts, and inactive models.
 - Engines listen on loopback only and each one gets its own random API key, so a local process cannot use an engine without going through the gateway. SGLang refuses keys with `--tokenizer-worker-num` above 1; such engines run keyless (still loopback only).
@@ -128,9 +128,9 @@ Add models without writing numbers by hand:
     goethe registry add --repo org/model-a --repo org/model-b --file cdn/v1/registry.json [--overlay hand-written.json] [--dry-run]
     goethe registry validate --source cdn/v1/registry.json --online --check-sglang
 
-`add` measures size, KV elements, heads, context and the memory spec from Hugging Face, merges hand-written fields from the overlay, validates, and writes atomically. Gated repos cannot be measured without logging in, so their entries are written by hand with `"gated": true`. Entries with `"gated": true` or `"manual_download": true` are never recommended: `goethe recommend` lists them as manual downloads with their fit, `goethe models` labels them, `goethe install` explains where to put the files for `goethe scan`, and `validate --online` does not require weights on Hugging Face for `manual_download` entries.
+`add` measures size, KV elements, heads, context and the memory spec from Hugging Face, merges hand-written fields from the overlay, validates, and writes atomically. Gated repos cannot be measured without logging in, so their entries are written by hand with `"gated": true`. Entries with `"gated": true` or `"manual_download": true` are never recommended: `goethe models recommend` lists them as manual downloads with their fit, `goethe models` labels them, `goethe install` explains where to put the files for `goethe models scan`, and `validate --online` does not require weights on Hugging Face for `manual_download` entries.
 
-`goethe recommend` and `goethe models` judge fit with the plan `goethe load` would make on the live GPUs (shrinking context, then concurrency) plus the overhead learned from earlier loads, and say how much is missing when nothing fits.
+`goethe models recommend` and `goethe models` judge fit with the plan `goethe load` would make on the live GPUs (shrinking context, then concurrency) plus the overhead learned from earlier loads, and say how much is missing when nothing fits.
 
 ## Defaults worth knowing
 
@@ -169,4 +169,4 @@ The gate first builds, runs `cargo test` and clippy, and uses those fresh binari
 
 ## Troubleshooting
 
-Run `goethe doctor` first. Gated or private model: accept its license on Hugging Face, then `goethe install --model <id> --hf-token`. A load exits 3 or reports missing VRAM because of other software on the GPU: the message lists the processes and the command to stop each one yourself, or pick other GPUs with `--gpu`. `nginx binary not found`: install nginx or set `NGINX_BIN`. Logs: `goethe logs --model <id>`, `goethe logs --daemon`, `goethe logs --gateway`.
+Run `goethe doctor` first. Gated or private model: accept its license on Hugging Face, then `goethe install <id> --hf-token`. A load exits 3 or reports missing VRAM because of other software on the GPU: the message lists the processes and the command to stop each one yourself, or pick other GPUs with `--gpu`. `nginx binary not found`: install nginx or set `NGINX_BIN`. Logs: `goethe logs <id>`, `goethe logs --daemon`, `goethe logs --gateway`.

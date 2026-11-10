@@ -26,7 +26,7 @@ pub fn ensure_service_ports(home: &Path) -> Result<(), String> {
     write_port_file(home, "nginx/public_port", public)?;
     if pub_notice {
         eprintln!(
-            "goethe gateway: default ports busy, listening on 127.0.0.1:{public} (persisted under nginx/public_port)"
+            "goethe api gateway: default ports busy, listening on 127.0.0.1:{public} (persisted under nginx/public_port)"
         );
     }
     Ok(())

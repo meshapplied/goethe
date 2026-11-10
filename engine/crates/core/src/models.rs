@@ -155,7 +155,7 @@ fn match_installed(id: &str, rows: &[(String, String)]) -> Result<String, Option
 fn not_installed_message(id: &str, near: Option<&str>) -> String {
     match near {
         Some(m) => format!("model {id} is not installed; did you mean {m}? (goethe models lists installed models)"),
-        None => format!("model {id} is not installed (goethe models lists installed models; goethe install --model {id} adds it)"),
+        None => format!("model {id} is not installed (goethe models lists installed models; goethe install {id} adds it)"),
     }
 }
 
@@ -377,7 +377,7 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool, delete_traces: Option<
     if let Some(src) = &plan.source {
         steps.push(format!("unregister the model; your files in {src} stay on disk"));
     }
-    host::confirm(&format!("goethe remove --model {model_id} will:\n  {}\nProceed?", steps.join("\n  ")), yes)?;
+    host::confirm(&format!("goethe remove {model_id} will:\n  {}\nProceed?", steps.join("\n  ")), yes)?;
     let traces = trace::model_traces(&home, model_id)?;
     let drop_traces = match (&traces, delete_traces) {
         (None, _) => false,
@@ -624,6 +624,22 @@ pub fn host_ram_warning(home: &Path, model_id: &str) -> Option<String> {
     })
 }
 
+pub fn word_matches(query: &str, ids: &[String]) -> Vec<String> {
+    // The ids that contain every word of the query, ignoring case; words split on spaces, -, _ and /.
+    let words: Vec<String> = query
+        .split(|c: char| c.is_whitespace() || matches!(c, '-' | '_' | '/'))
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let mut hits: Vec<String> = ids.iter().filter(|id| words.iter().all(|w| id.to_lowercase().contains(w.as_str()))).cloned().collect();
+    hits.sort();
+    hits.dedup();
+    hits
+}
+
 pub fn installed_ids(home: &Path) -> Vec<String> {
     let Ok(con) = db::open(home) else {
         return Vec::new();
@@ -638,6 +654,17 @@ pub fn installed_ids(home: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn words_find_models_by_any_part_of_their_name() {
+        let ids: Vec<String> = ["meshapplied/Qwen3.8-27B-NVFP4-NInfer", "nvidia/Qwen3.8-27B-NVFP4", "nvidia/Qwen2.5-VL-7B-Instruct-NVFP4"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(word_matches("ninfer", &ids), ["meshapplied/Qwen3.8-27B-NVFP4-NInfer"]);
+        assert_eq!(word_matches("qwen 27b", &ids).len(), 2, "two 27B models: the user picks");
+        assert_eq!(word_matches("qwen-27b", &ids), word_matches("qwen 27b", &ids), "dashes split words like spaces");
+        assert_eq!(word_matches("VL", &ids), ["nvidia/Qwen2.5-VL-7B-Instruct-NVFP4"]);
+        assert!(word_matches("llama", &ids).is_empty());
+        assert!(word_matches("  ", &ids).is_empty());
+    }
+
     use super::*;
 
     #[test]

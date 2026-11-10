@@ -175,7 +175,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     if entry.as_ref().is_some_and(|e| e.manual_download.unwrap_or(false)) {
         return Err(format!(
             "the weights of {} are not on Hugging Face, so goethe cannot download them. Put the model folder \
-             (config.json and safetensors) at {} and run: goethe scan",
+             (config.json and safetensors) at {} and run: goethe models scan",
             opts.model_id,
             card_dir.display()
         ));
@@ -451,7 +451,7 @@ fn register(home: &Path, opts: &InstallOpts, t: Target) -> Result<(), String> {
 }
 
 pub fn plan_in_place(home: &Path, model_id: &str, dir: &Path, entry: Option<RegistryModel>) -> Result<Planned, String> {
-    // A directory already inside models/ (goethe scan): managed, card written next to the weights.
+    // A directory already inside models/ (goethe models scan): managed, card written next to the weights.
     let opts = InstallOpts {
         model_id: model_id.to_string(),
         ..InstallOpts::default()
@@ -569,7 +569,7 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
     let mut inferred = Vec::new();
     for (flag, value, why) in sgl::infer_parsers(&cfg, dir) {
         if [&base_args, &old_args, &cli_args].iter().all(|a| !sgl::has_flag(a, &flag)) {
-            notes.push(format!("{flag} {value} inferred: {why} (change it with goethe config --sglang-arg)"));
+            notes.push(format!("{flag} {value} inferred: {why} (change it with goethe models config --sglang-arg)"));
             inferred.extend([flag, value]);
         }
     }

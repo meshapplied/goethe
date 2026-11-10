@@ -445,7 +445,7 @@ fn restart_goethed(home: &Path) -> Result<(), String> {
         Some(args) => {
             let ok = Command::new("systemctl").args(&args).status().map_err(|e| e.to_string())?.success();
             if !ok {
-                return Err(format!("systemctl {} failed; start goethed with goethe service enable", args.join(" ")));
+                return Err(format!("systemctl {} failed; start goethed with goethe up", args.join(" ")));
             }
             println!("started the new goethed with systemctl {}", args.join(" "));
         }

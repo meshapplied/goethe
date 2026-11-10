@@ -5,7 +5,7 @@ The ternary and NVFP4 models we publish on Hugging Face. Each one is in Goethe's
 🤗 [View our models](https://meshapplied.com/models)
 
 ```bash
-goethe install --model meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest --load
+goethe install meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest --load
 ```
 
 | Model | What it is | Runs on |
@@ -15,7 +15,7 @@ goethe install --model meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest --load
 | [`meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest`](https://huggingface.co/meshapplied/DeepSeek-V4.1-Flash-Ternary-Latest) | DeepSeek-V4.1-Flash with ternary experts | Four 96 GB Blackwell GPUs |
 | [`meshapplied/Qwen3.8-27B-NVFP4-NInfer`](https://huggingface.co/meshapplied/Qwen3.8-27B-NVFP4-NInfer) | Qwen3.8-27B in NVFP4 | 32 GB Blackwell. Weights: [`neroued/Qwen3.8-27B-nvfp4-NInfer`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) file `qwen3_8_27b_nvfp4.ninfer` |
 
-`goethe recommend` shows which of them fit your GPUs. Each model's card on Hugging Face has its full results.
+`goethe models recommend` shows which of them fit your GPUs. Each model's card on Hugging Face has its full results.
 
 The numbers below were measured on RTX PRO 6000 Blackwell GPUs (96 GB).
 

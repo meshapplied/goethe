@@ -420,7 +420,7 @@ fn new_model(before: &[String]) -> Option<String> {
 
 fn later_text(model: Option<&str>) -> String {
     // How to pick up where the user stopped.
-    let load = model.map(|m| format!("goethe load --model {m}"));
+    let load = model.map(|m| format!("goethe load {m}"));
     let mut lines = vec!["goethe start"];
     if let Some(l) = load.as_deref() {
         lines.push(l);
@@ -432,8 +432,8 @@ fn no_terminal_text() -> String {
     // The same three steps as commands, for scripts and terminals without arrow keys.
     format!(
         "goethe start needs an interactive terminal. The same steps as commands:\n\n{}\n{}\n{}",
-        term::commands("Step 1/3  Install a model:", &["goethe up", "goethe recommend", &format!("goethe install --model {EXAMPLE_ID}")]),
-        term::commands("Step 2/3  Serve through an API:", &[&format!("goethe load --model {EXAMPLE_ID}")]),
+        term::commands("Step 1/3  Install a model:", &["goethe up", "goethe models recommend", &format!("goethe install {EXAMPLE_ID}")]),
+        term::commands("Step 2/3  Serve through an API:", &[&format!("goethe load {EXAMPLE_ID}")]),
         term::commands("Step 3/3  Configure API access:", &["goethe api configure", "goethe api manage"])
     )
 }
@@ -466,7 +466,7 @@ mod tests {
         for step in ["Step 1/3  Install a model", "Step 2/3  Serve through an API", "Step 3/3  Configure API access"] {
             assert!(text.contains(step), "{text}");
         }
-        assert!(text.contains(&format!("goethe install --model {EXAMPLE_ID}")));
+        assert!(text.contains(&format!("goethe install {EXAMPLE_ID}")));
         assert_eq!(later_text(Some("org/m")).matches("\u{2192}").count(), 2);
     }
 }

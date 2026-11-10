@@ -6,9 +6,9 @@ use serde_json::Value;
 use std::io::{IsTerminal, Write};
 
 const SCRIPT_HINT: &[&str] = &[
-    "goethe key --create my-app",
-    "goethe key --create my-app --models <model-id>",
-    "goethe key --revoke <key-id>",
+    "goethe api keys --create my-app",
+    "goethe api keys --create my-app --models <model-id>",
+    "goethe api keys --revoke <key-id>",
 ];
 const DEFAULT_RPM: i64 = 120;
 const MIN_WIDTH: usize = 64;
