@@ -43,6 +43,10 @@ pub fn run(opts: UninstallOpts) -> Result<(), String> {
     }
     plan.push(format!("delete everything else in {}", home.display()));
     plan.push("remove installer symlinks that point into GOETHE_HOME".to_string());
+    let default_home = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".goethe")).is_some_and(|d| d == home);
+    if default_home {
+        plan.push("remove Tab completion (goethe completion remove)".to_string());
+    }
     if opts.yes {
         println!("goethe uninstall will:\n  {}", plan.join("\n  "));
     }
@@ -50,6 +54,9 @@ pub fn run(opts: UninstallOpts) -> Result<(), String> {
     shutdown::run_down().map_err(|e| format!("could not stop goethed ({e}); stop it, then run goethe uninstall again"))?;
     crate::service::run_disable()?;
     remove_installer_symlinks(&home);
+    if default_home {
+        crate::completion::remove_all();
+    }
     let kept: Vec<PathBuf> = match &models {
         Some(m) => {
             for p in &m.delete {

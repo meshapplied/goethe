@@ -27,6 +27,8 @@ pub mod sglang_validate;
 pub mod nginx;
 pub mod netif;
 pub mod keys_menu;
+pub mod home;
+pub mod completion;
 pub mod nvidia_driver;
 pub mod onboard;
 pub mod security;

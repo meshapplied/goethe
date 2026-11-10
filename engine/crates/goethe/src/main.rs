@@ -1,6 +1,7 @@
 // goethe CLI entrypoint for hardware, install, config, and load commands.
 
-use clap::{Parser, Subcommand};
+mod complete;
+use clap::{CommandFactory, Parser, Subcommand};
 use goethe_core::alias;
 use goethe_core::config::{self, ConfigOpts};
 use goethe_core::db;
@@ -100,9 +101,9 @@ enum Commands {
     },
     #[command(display_order = 13, about = "GPUs with memory, processes and bandwidth, live; allow or deny one.")]
     Gpu {
-        #[arg(long, num_args = 1.., value_name = "gpuN", value_parser = parse_gpu_name, conflicts_with = "deny", help = "Allow new models on these GPUs again, for example gpu0 gpu1.")]
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::gpus), long, num_args = 1.., value_name = "gpuN", value_parser = parse_gpu_name, conflicts_with = "deny", help = "Allow new models on these GPUs again, for example gpu0 gpu1.")]
         allow: Vec<u32>,
-        #[arg(long, num_args = 1.., value_name = "gpuN", value_parser = parse_gpu_name, help = "Keep new models off these GPUs (running ones stay), for example gpu0 gpu1.")]
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::gpus), long, num_args = 1.., value_name = "gpuN", value_parser = parse_gpu_name, help = "Keep new models off these GPUs (running ones stay), for example gpu0 gpu1.")]
         deny: Vec<u32>,
         #[arg(long, help = "Emit JSON.")]
         json: bool,
@@ -121,7 +122,7 @@ enum Commands {
         max_conc: Option<u64>,
         #[arg(long, help = "Tensor parallel size (0 = auto).")]
         tp: Option<u64>,
-        #[arg(long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "GPUs to load on after installing, as goethe gpu lists them: --gpu gpu2 gpu3.")]
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::gpus), long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "GPUs to load on after installing, as goethe gpu lists them: --gpu gpu2 gpu3.")]
         gpu: Vec<u32>,
         #[arg(long, hide = true, conflicts_with = "gpu", help = "Comma-separated GPU indices (older form of --gpu).")]
         gpus: Option<String>,
@@ -174,7 +175,7 @@ enum Commands {
     },
     #[command(display_order = 7, about = "Unload and delete an installed model (a folder of your own is only unregistered).")]
     Remove {
-        #[arg(value_name = "MODEL", required_unless_present = "model_id", help = "Installed models to remove: ids, aliases or words from a name, one argument each.")]
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", required_unless_present = "model_id", help = "Installed models to remove: ids, aliases or words from a name, one argument each.")]
         model: Vec<String>,
         #[arg(long = "model", num_args = 1.., value_name = "ID", hide = true, conflicts_with = "model", help = "Older form of the model argument.")]
         model_id: Vec<String>,
@@ -194,11 +195,11 @@ enum Commands {
         after_help = "Extra SGLang flags go after --, for example:\n\n\t→ goethe load deepseek-ai/DeepSeek-V4.1-Flash-1017 --ctx 32768 -- --chunked-prefill-size 4096"
     )]
     Load {
-        #[arg(value_name = "MODEL", num_args = 1.., required_unless_present = "model_id", help = "Installed model: id, alias or words from its name, such as qwen 27b.")]
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", num_args = 1.., required_unless_present = "model_id", help = "Installed model: id, alias or words from its name, such as qwen 27b.")]
         model: Vec<String>,
         #[arg(long = "model", value_name = "ID", hide = true, conflicts_with = "model", help = "Older form of the model argument.")]
         model_id: Option<String>,
-        #[arg(long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "GPUs to load on, as goethe gpu lists them: --gpu gpu3, or --gpu gpu2 gpu3 to split the model across both (the number of GPUs is the tensor-parallel size).")]
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::gpus), long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "GPUs to load on, as goethe gpu lists them: --gpu gpu3, or --gpu gpu2 gpu3 to split the model across both (the number of GPUs is the tensor-parallel size).")]
         gpu: Vec<u32>,
         #[arg(long, hide = true, conflicts_with = "gpu", help = "Comma-separated GPU indices (older form of --gpu).")]
         gpus: Option<String>,
@@ -225,7 +226,7 @@ enum Commands {
     },
     #[command(display_order = 9, about = "Stop serving a model.")]
     Unload {
-        #[arg(value_name = "MODEL", conflicts_with = "all", help = "Models to unload (every instance): ids, aliases or words from a name, one argument each.")]
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", conflicts_with = "all", help = "Models to unload (every instance): ids, aliases or words from a name, one argument each.")]
         model: Vec<String>,
         #[arg(long = "model", num_args = 1.., value_name = "ID", hide = true, conflicts_with_all = ["all", "model"], help = "Older form of the model argument.")]
         model_id: Vec<String>,
@@ -291,7 +292,7 @@ enum Commands {
     Domain(DomainArgs),
     #[command(display_order = 10, about = "Model, goethed or gateway logs.")]
     Logs {
-        #[arg(value_name = "MODEL", num_args = 1.., help = "Model (id, alias or words from its name) or instance id whose engine log to show.")]
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", num_args = 1.., help = "Model (id, alias or words from its name) or instance id whose engine log to show.")]
         model: Vec<String>,
         #[arg(long = "model", value_name = "ID", hide = true, conflicts_with = "model", help = "Older form of the model argument.")]
         target: Option<String>,
@@ -338,6 +339,13 @@ enum Commands {
     Learn(LearnArgs),
     #[command(hide = true, about = "Record requests and replies as training traces: turn it on or off, per API key, and see the size.", after_help = TRACE_HELP)]
     Trace(TraceArgs),
+    #[command(display_order = 18, about = "Tab completion for bash, zsh and fish: models, keys, GPUs and interfaces complete too.")]
+    Completion {
+        #[arg(value_parser = ["install", "remove", "status"], help = "install, remove, or status (the default).")]
+        action: Option<String>,
+        #[arg(long, value_parser = ["bash", "zsh", "fish"], help = "The shell (default: yours, from $SHELL).")]
+        shell: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -390,7 +398,7 @@ struct ScanArgs {
 
 #[derive(clap::Args)]
 struct ConfigArgs {
-    #[arg(value_name = "MODEL", num_args = 1.., required_unless_present = "model_id", help = "Installed model: id, alias or words from its name.")]
+    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", num_args = 1.., required_unless_present = "model_id", help = "Installed model: id, alias or words from its name.")]
     model: Vec<String>,
     #[arg(long = "model", value_name = "ID", hide = true, conflicts_with = "model", help = "Older form of the model argument.")]
     model_id: Option<String>,
@@ -400,7 +408,7 @@ struct ConfigArgs {
     max_conc: Option<u64>,
     #[arg(long, help = "Default tensor parallel size.")]
     tp: Option<u64>,
-    #[arg(long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "Default GPUs for this model, as goethe gpu lists them: --gpu gpu2 gpu3.")]
+    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::gpus), long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "Default GPUs for this model, as goethe gpu lists them: --gpu gpu2 gpu3.")]
     gpu: Vec<u32>,
     #[arg(long, hide = true, conflicts_with = "gpu", help = "Comma-separated GPU indices (older form of --gpu).")]
     gpus: Option<String>,
@@ -412,7 +420,7 @@ struct ConfigArgs {
 
 #[derive(clap::Args)]
 struct GatewayArgs {
-    #[arg(long, value_name = "ADDRESS", help = "Listen on 127.0.0.1 (this host only), 0.0.0.0 (all addresses), one IP of this host, or an interface such as wg0 (its address is followed).")]
+    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::binds), long, value_name = "ADDRESS", help = "Listen on 127.0.0.1 (this host only), 0.0.0.0 (all addresses), one IP of this host, or an interface such as wg0 (its address is followed).")]
     bind: Option<String>,
     #[arg(long, help = "Emit JSON.")]
     json: bool,
@@ -448,7 +456,7 @@ struct KeyArgs {
     admin: bool,
     #[arg(long, requires = "create", help = "Print only the key, for scripts.")]
     raw: bool,
-    #[arg(long, num_args = 1.., value_name = "KEY_ID", help = "Revoke the keys with these ids (from goethe api keys).")]
+    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::key_ids), long, num_args = 1.., value_name = "KEY_ID", help = "Revoke the keys with these ids (from goethe api keys).")]
     revoke: Vec<String>,
     #[arg(long, help = "Emit JSON.")]
     json: bool,
@@ -458,9 +466,9 @@ struct KeyArgs {
 struct AliasArgs {
     #[arg(long, value_name = "ALIAS", conflicts_with = "remove", requires = "model", help = "Alias name clients may use as the model field.")]
     set: Option<String>,
-    #[arg(long, value_name = "ID", requires = "set", help = "Installed model id the alias points to.")]
+    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), long, value_name = "ID", requires = "set", help = "Installed model id the alias points to.")]
     model: Option<String>,
-    #[arg(long, num_args = 1.., value_name = "ALIAS", help = "Remove these aliases.")]
+    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::aliases), long, num_args = 1.., value_name = "ALIAS", help = "Remove these aliases.")]
     remove: Vec<String>,
 }
 
@@ -468,7 +476,7 @@ struct AliasArgs {
 struct LearnArgs {
     #[arg(value_parser = ["on", "off", "status"], help = "on, off, or status (the default).")]
     action: Option<String>,
-    #[arg(long, num_args = 1.., value_name = "MODEL", help = "Only these models (id or alias); all, or leaving it out, means every model.")]
+    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models_or_all), long, num_args = 1.., value_name = "MODEL", help = "Only these models (id or alias); all, or leaving it out, means every model.")]
     model: Vec<String>,
     #[arg(long, hide = true, value_name = "SESSION", conflicts_with_all = ["action", "model"])]
     print: Option<String>,
@@ -480,7 +488,7 @@ struct LearnArgs {
 struct TraceArgs {
     #[arg(value_parser = ["on", "off", "status"], help = "on, off, or status (the default).")]
     action: Option<String>,
-    #[arg(long, num_args = 1.., value_name = "KEY", help = "Add these API keys (name or id) with on, or leave them out with off.")]
+    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::key_names), long, num_args = 1.., value_name = "KEY", help = "Add these API keys (name or id) with on, or leave them out with off.")]
     key: Vec<String>,
     #[arg(long = "all-keys", conflicts_with = "key", help = "With on: record every API key, clearing the chosen keys and exceptions.")]
     all_keys: bool,
@@ -503,7 +511,7 @@ enum ConfigureCommands {
 struct AccessArgs {
     #[arg(long, help = "local, vpn or public (asked on a terminal when omitted).")]
     mode: Option<String>,
-    #[arg(long, value_name = "NAME", conflicts_with = "vpn_ip", help = "Network interface to serve, e.g. wg0 (any VPN or private network); the gateway follows its address.")]
+    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::interfaces), long, value_name = "NAME", conflicts_with = "vpn_ip", help = "Network interface to serve, e.g. wg0 (any VPN or private network); the gateway follows its address.")]
     interface: Option<String>,
     #[arg(long = "vpn-ip", help = "A fixed address of this machine to listen on, instead of following an interface.")]
     vpn_ip: Option<std::net::IpAddr>,
@@ -595,7 +603,7 @@ enum HwCommands {
     PickGpus {
         #[arg(long, help = "Tensor parallel size (default: the model's, else 1).")]
         tp: Option<u64>,
-        #[arg(long, help = "Installed model id whose VRAM budget to place.")]
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), long, help = "Installed model id whose VRAM budget to place.")]
         model: Option<String>,
     },
 }
@@ -757,6 +765,7 @@ fn print_version() {
 }
 
 fn main() {
+    clap_complete::CompleteEnv::with_factory(Cli::command).bin("goethe").complete();
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 2 && (args[1] == "--version" || args[1] == "-V") {
         print_version();
@@ -764,6 +773,13 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "--build-info" {
         println!("{}", goethe_core::build_info::build_line());
+        return;
+    }
+    if args.len() == 1 && std::io::IsTerminal::is_terminal(&std::io::stdin()) && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        if let Err(e) = goethe_core::home::run() {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
         return;
     }
     let cli = Cli::try_parse().unwrap_or_else(|e| {
@@ -968,6 +984,7 @@ fn main() {
         Commands::Api { cmd: Some(ApiCommands::Configure(a)), .. } => configure_access(a),
         Commands::Api { cmd: Some(_), .. } => unreachable!("goethe api subcommands are routed first"),
         Commands::Start => goethe_core::onboard::run(),
+        Commands::Completion { action, shell } => complete::run(action.as_deref(), shell.as_deref()),
         Commands::Configure { cmd: ConfigureCommands::Api(a) } => {
             eprintln!("note: goethe configure api is now goethe api configure");
             configure_access(a)

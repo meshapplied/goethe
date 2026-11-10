@@ -62,7 +62,7 @@ fn rpm_text(rpm: i64) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Input {
+pub(crate) enum Input {
     Up,
     Down,
     Left,
@@ -75,7 +75,7 @@ enum Input {
     Char(char),
 }
 
-fn parse_input(bytes: &[u8]) -> Vec<Input> {
+pub(crate) fn parse_input(bytes: &[u8]) -> Vec<Input> {
     // Arrows (CSI or SS3), Enter, Space, Backspace, Ctrl-C, a lone Esc, and typed characters; other escape sequences are skipped.
     let chars: Vec<char> = String::from_utf8_lossy(bytes).chars().collect();
     let mut out = Vec::new();
@@ -454,7 +454,7 @@ impl App {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Style {
+pub(crate) enum Style {
     Plain,
     Bold,
     Dim,
@@ -464,16 +464,16 @@ enum Style {
     Hovered,
 }
 
-struct Line {
-    text: String,
-    style: Style,
+pub(crate) struct Line {
+    pub(crate) text: String,
+    pub(crate) style: Style,
 }
 
-fn line(text: impl Into<String>, style: Style) -> Line {
+pub(crate) fn line(text: impl Into<String>, style: Style) -> Line {
     Line { text: text.into(), style }
 }
 
-fn paint(text: &str, style: Style) -> String {
+pub(crate) fn paint(text: &str, style: Style) -> String {
     let code = match style {
         Style::Plain => return text.to_string(),
         Style::Bold | Style::Hovered => "1",
@@ -485,7 +485,7 @@ fn paint(text: &str, style: Style) -> String {
     format!("\x1b[{code}m{text}\x1b[0m")
 }
 
-fn fit(text: &str, width: usize) -> String {
+pub(crate) fn fit(text: &str, width: usize) -> String {
     // Cut to the width with an ellipsis, then pad with spaces.
     let n = text.chars().count();
     let cut: String = if n > width { text.chars().take(width.saturating_sub(1)).chain(['\u{2026}']).collect() } else { text.to_string() };
@@ -584,7 +584,7 @@ fn right_lines(app: &App) -> (Vec<Line>, usize) {
     (lines, at)
 }
 
-fn window(len: usize, hovered: usize, rows: usize) -> usize {
+pub(crate) fn window(len: usize, hovered: usize, rows: usize) -> usize {
     // First line to show so the hovered one stays visible with a line of context.
     if len <= rows || hovered + 2 <= rows {
         return 0;
@@ -643,7 +643,7 @@ fn render(app: &App, width: usize, height: usize) -> Vec<String> {
     out
 }
 
-fn screen_size() -> (usize, usize) {
+pub(crate) fn screen_size() -> (usize, usize) {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     if unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
         (usize::from(ws.ws_col), usize::from(ws.ws_row))
@@ -652,10 +652,10 @@ fn screen_size() -> (usize, usize) {
     }
 }
 
-struct Screen;
+pub(crate) struct Screen;
 
 impl Screen {
-    fn open() -> Screen {
+    pub(crate) fn open() -> Screen {
         // The alternate screen, cleared, cursor hidden; the user's scrollback comes back on close.
         print!("\x1b[?1049h\x1b[H\x1b[2J\x1b[?25l");
         let _ = std::io::stdout().flush();
@@ -670,7 +670,7 @@ impl Drop for Screen {
     }
 }
 
-fn frame_update(last: &[String], next: &[String]) -> String {
+pub(crate) fn frame_update(last: &[String], next: &[String]) -> String {
     // Only the lines that changed, each rewritten in place; everything when the size changed.
     if last.len() != next.len() {
         return format!("\x1b[H\x1b[2J{}", next.join("\r\n"));

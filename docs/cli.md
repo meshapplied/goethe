@@ -27,13 +27,17 @@ Exit codes:
 
 ## Contents
 
-- [Start and stop](#start-and-stop): `start`, `up`, `status`, `down`
+- [Start and stop](#start-and-stop): `goethe`, `start`, `up`, `status`, `down`
 - [Models](#models): `install`, `models`, `models recommend`, `models scan`, `models config`, `models alias`, `remove`
 - [Running models](#running-models): `load`, `unload`, `ps`, `logs`
 - [API access](#api-access): `api`, `api configure`, `api manage`, `api keys`, `api allowlist`, `api gateway`, `api domain`, `api learn`, `api trace`
-- [GPUs and system](#gpus-and-system): `gpu`, `hw`, `doctor`, `update`, `uninstall`, `--version`
+- [GPUs and system](#gpus-and-system): `gpu`, `hw`, `doctor`, `update`, `uninstall`, `completion`, `--version`
 
 ## Start and stop
+
+### `goethe`
+
+On a terminal, plain `goethe` opens the home screen: the sections on the left (Models, API access, API keys, GPUs, Learning & traces, Done), their state and what can be done on the right, refreshed every 5 seconds. ↑↓ move, → opens a section, ← goes back, `q` leaves. Enter on a model loads or unloads it; the access, key, learning and trace rows run `goethe api configure`, `goethe api manage`, `goethe api learn` and `goethe api trace` in the normal terminal and come back on Enter; Enter on a GPU allows or denies it. Without a terminal, `goethe` prints the commands.
 
 ### `goethe start`
 
@@ -380,6 +384,18 @@ Removes Goethe and the models it installed. Folders of your own that you registe
 |---|---|
 | `--keep-models` | Keep the installed models |
 | `--yes` | Don't ask |
+
+### `goethe completion [install | remove]`
+
+Tab completion for bash, zsh and fish. Commands, subcommands and flags complete, and so do live values: installed models (by full id, by the name after the organisation, in any case, and by alias), GPU names, API key ids and names, network interfaces and bind addresses. The shell asks `goethe` for them at each Tab, so they are always current.
+
+| Command | Description |
+|---|---|
+| `goethe completion` | Whether it is on for each shell |
+| `goethe completion install` | Turn it on for your shell (`--shell bash\|zsh\|fish` for another) |
+| `goethe completion remove` | Turn it off again |
+
+fish and bash with the bash-completion package load the script from their own completion folders; for zsh, and bash without bash-completion, `install` adds a short marked block to `~/.zshrc` or `~/.bashrc`, and `remove` takes only that block out. The installer turns it on for your shell (`GOETHE_NO_COMPLETION=1` skips that), and `goethe uninstall` removes it.
 
 ### `goethe --version`
 
