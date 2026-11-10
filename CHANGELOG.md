@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-11-10)
 
 - Tab completion for bash, zsh and fish (`goethe completion install`, `remove`, or the state with no argument): commands and flags, plus installed models (by id, by name in any case, by alias), GPUs, key ids and names, and network interfaces, asked from `goethe` at each Tab. The installer turns it on for your shell (`GOETHE_NO_COMPLETION=1` skips that); `goethe uninstall` removes it.
 - Plain `goethe` on a terminal opens a home screen in the same two-column style as the key manager: models (load or unload), API access, keys, GPUs (allow or deny) and learning and traces, each with its state, refreshed every 5 seconds. Actions run the matching command in the normal terminal and come back.
