@@ -156,7 +156,7 @@ Add models without writing numbers by hand:
 
 Releases come from GitHub, never from a laptop:
 - Every pull request to `main` and every merge runs `.github/workflows/ci.yml`: Rust build, tests and clippy, the style lint, the CPU gates (`gate.sh 0`, `stage6_integrity`) and an unsigned x86_64 package build.
-- To release, set the version in `crates/*/Cargo.toml` through a pull request, then push a tag `vX.Y.Z` on that `main` commit (or run the release workflow by hand on `main`).
+- To release: `engine/packaging/release.sh prepare X.Y.Z` opens the version bump PR from `main` (the three crates, `Cargo.lock`, and the `## Unreleased` changelog section dated); after it is merged, `engine/packaging/release.sh tag X.Y.Z` tags that `main` commit and starts the release workflow. Approve `publish` when it waits. By hand: set the version in `crates/*/Cargo.toml` through a pull request, then push a tag `vX.Y.Z` on that `main` commit (or run the release workflow by hand on `main`).
 - `.github/workflows/release.yml` then checks the commit is on `main` and the tag matches the version, reruns CI, and builds both architectures with `--release` using the `GOETHE_SIGN_KEY` secret. It verifies the checksums, signature, embedded key fingerprint and BUILDINFO, and installs the package in a clean Ubuntu 22.04 container.
 - After an approval on the `release` environment, it publishes the GitHub release and deploys the package tree to GitHub Pages, which serves it at `https://pkg.meshapplied.com/` (DNS: `CNAME pkg -> meshapplied.github.io`). `https://meshapplied.com/install.sh` redirects there from the website.
 - Existing installs then pick the release up with `goethe update`.
