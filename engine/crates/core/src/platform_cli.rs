@@ -129,17 +129,11 @@ fn read_authkey(raw: &str) -> Result<Secret, String> {
 
 fn check_home_writable(home: &Path) -> Result<(), String> {
     // Fail before contacting the platform when the credentials could not be stored safely.
-    use std::os::unix::fs::MetadataExt;
-    match std::fs::metadata(home) {
-        Ok(m) if m.mode() & 0o022 != 0 => Err(format!(
-            "{} can be written by other users (mode {:o}), so goethe will not keep credentials there; fix it with: chmod go-w {}",
-            home.display(),
-            m.mode() & 0o777,
-            home.display()
-        )),
-        Ok(_) if !crate::paths::is_writable(home) => Err(format!("{} is not writable", home.display())),
-        _ => Ok(()),
+    platform::check_home(home)?;
+    if home.exists() && !crate::paths::is_writable(home) {
+        return Err(format!("{} is not writable", home.display()));
     }
+    Ok(())
 }
 
 fn existing_link(home: &Path) -> Option<Credentials> {
@@ -296,7 +290,7 @@ pub fn uninstall_logout(home: &Path) {
 }
 
 pub fn is_linked(home: &Path) -> bool {
-    platform::credentials_path(home).exists()
+    platform::credentials_path(home).exists() || home.join("credentials").exists()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

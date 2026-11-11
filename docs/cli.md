@@ -417,7 +417,7 @@ Links this node to a workspace. Prints a link and a code, then waits until the l
 
 The installer takes the same flags: `curl -fsSL .../install.sh | bash -s -- --authkey msh_ak_...` (or `GOETHE_AUTHKEY=...`).
 
-The credentials live in `GOETHE_HOME/credentials` (mode 0600). Goethe refuses a credentials file other users can read, or one you do not own, and says how to fix it. When the platform revokes the node (for example after it is removed there), heartbeats stop and `goethe status` says `Revoked` until the next `goethe login`.
+The credentials and the heartbeat state live in `GOETHE_HOME/platform/` (directory 0700, files 0600). Goethe refuses a credentials file or folder other users can read, a symlink, or one you do not own, and says how to fix it; it also refuses a `GOETHE_HOME` that every user can write to (a group-writable one is fine). When the platform revokes the node (for example after it is removed there), heartbeats stop and `goethe status` says `Revoked` until the next `goethe login`.
 
 ### `goethe logout`
 

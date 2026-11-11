@@ -121,16 +121,100 @@ fn is_loopback_host(host: &str) -> bool {
     host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
+pub fn platform_dir(home: &Path) -> PathBuf {
+    home.join("platform")
+}
+
 pub fn credentials_path(home: &Path) -> PathBuf {
-    home.join("credentials")
+    platform_dir(home).join("credentials")
 }
 
 pub fn state_path(home: &Path) -> PathBuf {
-    home.join("platform_state.json")
+    platform_dir(home).join("platform_state.json")
 }
 
-fn read_private(path: &Path, cap: u64) -> Result<Option<String>, String> {
-    // A regular file owned by this user and closed to group and others, or None when it does not exist.
+fn legacy_paths(home: &Path) -> [(PathBuf, PathBuf); 2] {
+    [(home.join("credentials"), credentials_path(home)), (home.join("platform_state.json"), state_path(home))]
+}
+
+pub fn check_home(home: &Path) -> Result<(), String> {
+    // GOETHE_HOME must be ours and not writable by every user without the sticky bit; group-writable is normal with user private groups.
+    let m = match fs::metadata(home) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("cannot read {}: {e}", home.display())),
+    };
+    let uid = unsafe { libc::geteuid() };
+    if m.uid() != uid {
+        return Err(format!("{} belongs to uid {}, not to you (uid {uid}), so goethe will not keep credentials there", home.display(), m.uid()));
+    }
+    if m.mode() & 0o002 != 0 && m.mode() & 0o1000 == 0 {
+        return Err(format!(
+            "{} can be written by every user (mode {:o}), so goethe will not keep credentials there; fix it with: chmod o-w {}",
+            home.display(),
+            m.mode() & 0o7777,
+            home.display()
+        ));
+    }
+    Ok(())
+}
+
+fn check_private_dir(dir: &Path, fix: bool) -> Result<bool, String> {
+    // The platform directory: a real directory owned by this user and closed to group and others (fixed to 0700 when allowed); false when missing.
+    let m = match fs::symlink_metadata(dir) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("cannot read {}: {e}", dir.display())),
+    };
+    if !m.file_type().is_dir() {
+        return Err(format!("{} is not a directory (a symlink or a file); remove it and run goethe login again", dir.display()));
+    }
+    let uid = unsafe { libc::geteuid() };
+    if m.uid() != uid {
+        return Err(format!("{} belongs to uid {}, not to you (uid {uid}); remove it, or fix it with: chown {uid} {}", dir.display(), m.uid(), dir.display()));
+    }
+    if m.mode() & 0o077 != 0 {
+        if !fix {
+            return Err(format!("{} can be read by other users (mode {:o}); fix it with: chmod 700 {}", dir.display(), m.mode() & 0o777, dir.display()));
+        }
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| format!("cannot chmod 700 {}: {e}", dir.display()))?;
+    }
+    Ok(true)
+}
+
+pub fn ensure_platform_dir(home: &Path) -> Result<PathBuf, String> {
+    // GOETHE_HOME/platform at 0700, created or tightened as needed; GOETHE_HOME itself is only checked, never changed.
+    check_home(home)?;
+    if !home.exists() {
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(home).map_err(|e| format!("cannot create {}: {e}", home.display()))?;
+    }
+    let dir = platform_dir(home);
+    if !check_private_dir(&dir, true)? {
+        fs::DirBuilder::new().mode(0o700).create(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        check_private_dir(&dir, true)?;
+    }
+    Ok(dir)
+}
+
+fn migrate(home: &Path) {
+    // Move credentials and state from GOETHE_HOME (where early builds kept them) into the platform directory, once.
+    for (old, new) in legacy_paths(home) {
+        let pending = fs::symlink_metadata(&old).is_ok() && fs::symlink_metadata(&new).is_err();
+        if pending && read_private(&old, MAX_CREDENTIALS_BYTES.max(MAX_STATE_BYTES), false).is_ok() && ensure_platform_dir(home).is_ok() {
+            let _ = fs::rename(&old, &new);
+        }
+    }
+}
+
+fn read_private(path: &Path, cap: u64, in_private_dir: bool) -> Result<Option<String>, String> {
+    // A regular file owned by this user and closed to group and others, in a directory that is too, or None when it does not exist.
+    if in_private_dir {
+        if let Some(dir) = path.parent() {
+            if !check_private_dir(dir, false)? {
+                return Ok(None);
+            }
+        }
+    }
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -165,21 +249,8 @@ fn read_private(path: &Path, cap: u64) -> Result<Option<String>, String> {
 pub fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
     // Temp file 0600 beside the target, fsync, rename over it, fsync the directory.
     let dir = path.parent().ok_or_else(|| format!("{} has no parent directory", path.display()))?;
-    if !dir.exists() {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    }
-    let dir_meta = fs::metadata(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
-    if dir_meta.mode() & 0o022 != 0 {
-        return Err(format!(
-            "{} can be written by other users (mode {:o}), so they could replace the file; fix it with: chmod go-w {}",
-            dir.display(),
-            dir_meta.mode() & 0o777,
-            dir.display()
-        ));
+    if !check_private_dir(dir, false)? {
+        return Err(format!("{} does not exist", dir.display()));
     }
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let nanos = std::time::SystemTime::now()
@@ -211,8 +282,11 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
 
 pub fn load_credentials(home: &Path) -> Result<Option<Credentials>, String> {
     // The saved link, or None when this node was never linked; a damaged or exposed file is an error, never silently used.
-    let path = credentials_path(home);
-    let Some(text) = read_private(&path, MAX_CREDENTIALS_BYTES)? else {
+    migrate(home);
+    let (legacy, current) = legacy_paths(home)[0].clone();
+    let old_only = fs::symlink_metadata(&current).is_err() && fs::symlink_metadata(&legacy).is_ok();
+    let path = if old_only { legacy } else { current };
+    let Some(text) = read_private(&path, MAX_CREDENTIALS_BYTES, !old_only)? else {
         return Ok(None);
     };
     let creds: Credentials = serde_json::from_str(&text)
@@ -244,17 +318,24 @@ pub fn clean_text(s: &str, max: usize) -> String {
 pub fn save_credentials(home: &Path, c: &Credentials) -> Result<(), String> {
     validate_credentials(c)?;
     let data = serde_json::to_vec_pretty(c).map_err(|e| e.to_string())?;
+    ensure_platform_dir(home)?;
     write_private(&credentials_path(home), &data)
 }
 
 pub fn remove_credentials(home: &Path) -> Result<bool, String> {
     // Delete the credentials and the heartbeat state; true when there was a link to remove.
-    let _ = fs::remove_file(state_path(home));
-    match fs::remove_file(credentials_path(home)) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(format!("cannot remove {}: {e}", credentials_path(home).display())),
+    let mut removed = false;
+    for (old, new) in legacy_paths(home) {
+        for path in [new, old] {
+            match fs::remove_file(&path) {
+                Ok(()) => removed |= path.ends_with("credentials"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("cannot remove {}: {e}", path.display())),
+            }
+        }
     }
+    let _ = fs::remove_dir(platform_dir(home));
+    Ok(removed)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,7 +365,7 @@ pub fn link_key(c: &Credentials) -> String {
 
 pub fn load_state(home: &Path, link: &str) -> PlatformState {
     // The heartbeat state for this link; a state left by an older link, or an unreadable one, counts as fresh.
-    read_private(&state_path(home), MAX_STATE_BYTES)
+    read_private(&state_path(home), MAX_STATE_BYTES, true)
         .ok()
         .flatten()
         .and_then(|t| serde_json::from_str::<PlatformState>(&t).ok())
@@ -294,6 +375,7 @@ pub fn load_state(home: &Path, link: &str) -> PlatformState {
 
 pub fn save_state(home: &Path, state: &PlatformState) -> Result<(), String> {
     let data = serde_json::to_vec_pretty(state).map_err(|e| e.to_string())?;
+    ensure_platform_dir(home)?;
     write_private(&state_path(home), &data)
 }
 
@@ -469,9 +551,9 @@ mod tests {
         save_credentials(&home, &creds()).unwrap();
         let meta = fs::metadata(credentials_path(&home)).unwrap();
         assert_eq!(meta.mode() & 0o777, 0o600);
-        assert_eq!(fs::metadata(&home).unwrap().mode() & 0o777, 0o700, "a home created here is 0700");
+        assert_eq!(fs::metadata(platform_dir(&home)).unwrap().mode() & 0o777, 0o700);
         assert_eq!(load_credentials(&home).unwrap(), Some(creds()));
-        let leftovers: Vec<_> = fs::read_dir(&home).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains(".tmp.")).collect();
+        let leftovers: Vec<_> = fs::read_dir(platform_dir(&home)).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains(".tmp.")).collect();
         assert!(leftovers.is_empty());
         let mut next = creds();
         next.node_id = "node-456".into();
@@ -510,12 +592,54 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_writable_directory_is_refused() {
+    fn a_group_writable_home_works_and_a_world_writable_one_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o777)).unwrap();
-        let err = save_credentials(dir.path(), &creds()).unwrap_err();
-        assert!(err.contains("chmod go-w"), "{err}");
-        assert!(!credentials_path(dir.path()).exists());
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o775)).unwrap();
+        save_credentials(dir.path(), &creds()).unwrap();
+        assert_eq!(load_credentials(dir.path()).unwrap(), Some(creds()));
+        assert_eq!(fs::metadata(dir.path()).unwrap().mode() & 0o7777, 0o775, "GOETHE_HOME is never changed");
+        assert_eq!(fs::metadata(platform_dir(dir.path())).unwrap().mode() & 0o777, 0o700);
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o1777)).unwrap();
+        assert!(save_credentials(dir.path(), &creds()).is_ok(), "sticky world-writable is allowed");
+        let other = tempfile::tempdir().unwrap();
+        fs::set_permissions(other.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        let err = save_credentials(other.path(), &creds()).unwrap_err();
+        assert!(err.contains("chmod o-w"), "{err}");
+        assert!(!platform_dir(other.path()).exists());
+    }
+
+    #[test]
+    fn the_platform_directory_is_tightened_or_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        fs::create_dir(platform_dir(home)).unwrap();
+        fs::set_permissions(platform_dir(home), fs::Permissions::from_mode(0o755)).unwrap();
+        save_credentials(home, &creds()).unwrap();
+        assert_eq!(fs::metadata(platform_dir(home)).unwrap().mode() & 0o777, 0o700, "a loose directory is chmodded 0700");
+        fs::set_permissions(platform_dir(home), fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(load_credentials(home).unwrap_err().contains("chmod 700"), "reading never loosens the check");
+        fs::set_permissions(platform_dir(home), fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(remove_credentials(home).unwrap());
+        assert!(!platform_dir(home).exists());
+        let target = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(target.path(), platform_dir(home)).unwrap();
+        assert!(save_credentials(home, &creds()).unwrap_err().contains("not a directory"));
+        assert!(load_credentials(home).unwrap_err().contains("not a directory"));
+    }
+
+    #[test]
+    fn credentials_from_the_old_place_move_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        fs::set_permissions(home, fs::Permissions::from_mode(0o775)).unwrap();
+        for (name, body) in [("credentials", serde_json::to_string(&creds()).unwrap()), ("platform_state.json", r#"{"link":"x"}"#.to_string())] {
+            fs::write(home.join(name), body).unwrap();
+            fs::set_permissions(home.join(name), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert_eq!(load_credentials(home).unwrap(), Some(creds()));
+        assert!(!home.join("credentials").exists() && !home.join("platform_state.json").exists());
+        assert!(credentials_path(home).exists() && state_path(home).exists());
+        assert_eq!(load_state(home, "x").link, "x");
     }
 
     #[test]
