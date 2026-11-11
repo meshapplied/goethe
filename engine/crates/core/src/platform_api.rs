@@ -87,7 +87,7 @@ impl Client {
 
     pub fn auth_start(&self, hostname: &str, fingerprint: &str) -> Result<Started, ApiError> {
         let body = json!({"action": "start", "hostname": hostname, "version": env!("CARGO_PKG_VERSION"), "fingerprint": fingerprint});
-        parse_started(&self.post("/api/device/auth", body.to_string().as_bytes(), None)?)
+        parse_started(&self.post("/api/device/auth", body.to_string().as_bytes(), None)?, self.base.starts_with("http://"))
     }
 
     pub fn auth_poll(&self, device_code: &Secret) -> Result<Poll, ApiError> {
@@ -201,7 +201,7 @@ fn malformed(what: &str) -> ApiError {
     ApiError::Malformed(what.to_string())
 }
 
-pub fn parse_started(v: &Value) -> Result<Started, ApiError> {
+pub fn parse_started(v: &Value, dev: bool) -> Result<Started, ApiError> {
     #[derive(Deserialize)]
     struct Raw {
         device_code: String,
@@ -217,7 +217,8 @@ pub fn parse_started(v: &Value) -> Result<Started, ApiError> {
     if r.user_code.is_empty() || r.user_code.len() > 32 || !r.user_code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err(malformed("the user code is not valid"));
     }
-    let uri = crate::platform::check_link(&r.verification_uri_complete).map_err(|_| malformed("the verification link is not a valid https URL"))?;
+    let check = if dev { crate::platform::check_dev_link } else { crate::platform::check_link };
+    let uri = check(&r.verification_uri_complete).map_err(|_| malformed("the verification link is not a valid https URL"))?;
     Ok(Started {
         device_code: Secret::new(r.device_code),
         user_code: r.user_code,

@@ -92,6 +92,30 @@ pub fn check_link(raw: &str) -> Result<String, String> {
     Ok(format!("{}://{rest}", scheme.to_ascii_lowercase()))
 }
 
+pub fn check_dev_link(raw: &str) -> Result<String, String> {
+    // A link from a local development platform: also plain http to a private, CGNAT (Tailscale) or loopback address.
+    if let Ok(ok) = check_link(raw) {
+        return Ok(ok);
+    }
+    let url = raw.trim();
+    let rest = url.strip_prefix("http://").ok_or_else(|| format!("{url:?} is not an http or https link"))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') || url.chars().any(|c| c.is_control() || c.is_whitespace()) || url.len() > 1024 {
+        return Err(format!("{url:?} is not a usable link"));
+    }
+    let host = url_host(authority).ok_or_else(|| format!("{url:?} has no valid host"))?;
+    let private = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_private() || v4.is_loopback() || (v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1])),
+        Ok(std::net::IpAddr::V6(v6)) => v6.is_loopback(),
+        Err(_) => false,
+    };
+    if private {
+        Ok(url.to_string())
+    } else {
+        Err(format!("{url:?} must use https"))
+    }
+}
+
 fn url_host(authority: &str) -> Option<String> {
     // The host of an authority (brackets kept off IPv6), with a numeric port if one is given.
     let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
@@ -505,6 +529,17 @@ pub fn poke_daemon() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_local_dev_platform_may_link_over_http_to_private_addresses_only() {
+        assert!(check_dev_link("http://100.70.155.114:3000/device?code=ABCD-1234").is_ok(), "Tailscale address");
+        assert!(check_dev_link("http://192.168.1.5:3000/device").is_ok() && check_dev_link("http://127.0.0.1:3000/x").is_ok());
+        assert!(check_dev_link("https://platform.meshapplied.com/device?code=A").is_ok());
+        assert!(check_dev_link("http://evil.example.com/device").is_err(), "a public host still needs https");
+        assert!(check_dev_link("http://8.8.8.8/device").is_err());
+        assert!(check_dev_link("http://user@10.0.0.1/x").is_err() && check_dev_link("ftp://10.0.0.1/x").is_err());
+        assert!(check_link("http://100.70.155.114:3000/device").is_err(), "the production check is unchanged");
+    }
 
     fn creds() -> Credentials {
         Credentials {
