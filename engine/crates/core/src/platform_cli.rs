@@ -86,9 +86,10 @@ pub fn wait_for_approval(
             Ok(Poll::Expired) => return Err(WaitError::Failed("the code expired before it was approved; run goethe login again".into())),
             Ok(Poll::Denied) => return Err(WaitError::Failed("the login was denied on the platform; nothing was linked".into())),
             Ok(Poll::Approved(a)) => return Ok(a),
-            Err(ApiError::Status(404, _)) => {
+            Err(ApiError::Status(404, code)) if code == "invalid_device_code" => {
                 return Err(WaitError::Failed("the platform no longer knows this code (already used or unknown); run goethe login again".into()))
             }
+            Err(e @ ApiError::Status(404, _)) => on_blip(&e),
             Err(e) if e.retryable() => on_blip(&e),
             Err(e) => return Err(WaitError::Failed(e.to_string())),
         }
@@ -407,6 +408,8 @@ mod tests {
         assert_eq!(slept.len(), 2, "a used or unknown code stops the polling");
         let (r, _, blips) = run(vec![Err(ApiError::RateLimited(Duration::from_secs(2))), Ok(Poll::Approved(approved()))], &started(3, 900), None);
         assert!(r.is_ok() && blips == 1);
+        let (r, _, blips) = run(vec![Err(ApiError::Status(404, String::new())), Ok(Poll::Pending), Ok(Poll::Approved(approved()))], &started(1, 900), None);
+        assert!(r.is_ok() && blips == 1, "a 404 page without the platform's own code (a deploy or a proxy) is only a blip");
     }
 
     #[test]
