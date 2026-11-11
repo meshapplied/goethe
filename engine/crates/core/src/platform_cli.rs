@@ -151,9 +151,21 @@ fn logout_remote(c: &Credentials, timeout: Duration) -> Result<(), String> {
     Client::new(&c.platform_url, timeout).and_then(|client| client.logout(&c.token).map_err(|e| e.to_string()))
 }
 
+fn is_revoked(home: &Path, c: &Credentials) -> bool {
+    platform::load_state(home, &platform::link_key(c)).revoked_at.is_some()
+}
+
+fn relink_intro(workspace: &str, revoked: bool) -> String {
+    if revoked {
+        format!("The previous link (workspace {workspace}) was revoked on the platform; linking again.")
+    } else {
+        format!("This node is linked to workspace {workspace}; logging in again replaces that link.")
+    }
+}
+
 fn replace_old_link(home: &Path, old: Option<Credentials>) -> Result<(), String> {
-    // A new login replaces the old link: log the old node out (best effort), then drop its credentials.
-    let Some(old) = old else {
+    // A new login replaces the old link: log a live old node out (best effort; a revoked one is already gone), then drop its credentials.
+    let Some(old) = old.filter(|o| !is_revoked(home, o)) else {
         return platform::remove_credentials(home).map(|_| ());
     };
     let ws = platform::clean_text(&old.workspace.name, 64);
@@ -209,7 +221,7 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
     let key = authkey.map(read_authkey).transpose()?;
     let old = existing_link(&home);
     if let Some(o) = &old {
-        println!("This node is linked to workspace {}; logging in again replaces that link.", platform::clean_text(&o.workspace.name, 64));
+        println!("{}", relink_intro(&platform::clean_text(&o.workspace.name, 64), is_revoked(&home, o)));
     }
     let client = Client::new(&url, REQUEST_TIMEOUT)?;
     let (hostname, fingerprint) = (platform::hostname(), platform::fingerprint());
@@ -459,6 +471,36 @@ mod tests {
         assert!(heartbeat_text(&ok, false, now).0.starts_with("not sent, goethed is not running"));
         let fresh = PlatformState::default();
         assert_eq!(heartbeat_text(&fresh, true, now).0, "waiting for the first one");
+    }
+
+    #[test]
+    fn a_revoked_link_is_replaced_without_a_logout_call() {
+        use std::os::unix::fs::PermissionsExt;
+        let m = mock::serve(vec![(200, r#"{"ok":true}"#.into())]);
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let c = Credentials {
+            platform_url: m.url.clone(),
+            node_id: "n1".into(),
+            workspace: Workspace { id: "w".into(), name: "Personal".into() },
+            token: Secret::new("mesh_node_gggggggggggggggggggg"),
+            linked_at: "t".into(),
+        };
+        platform::save_credentials(home, &c).unwrap();
+        assert!(!is_revoked(home, &c));
+        assert!(relink_intro("Personal", false).contains("logging in again replaces that link"));
+        let st = PlatformState { link: platform::link_key(&c), revoked_at: Some("t".into()), ..Default::default() };
+        platform::save_state(home, &st).unwrap();
+        assert!(is_revoked(home, &c));
+        assert_eq!(relink_intro("Personal", true), "The previous link (workspace Personal) was revoked on the platform; linking again.");
+        replace_old_link(home, Some(c.clone())).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(*m.connections.lock().unwrap(), 0, "no logout call for a revoked link");
+        assert_eq!(platform::load_credentials(home).unwrap(), None);
+        platform::save_credentials(home, &c).unwrap();
+        replace_old_link(home, Some(c)).unwrap();
+        assert_eq!(m.seen.lock().unwrap()[0].path, "/api/device/logout", "a live link is logged out");
     }
 
     #[test]
