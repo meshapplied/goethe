@@ -2,16 +2,14 @@
 
 use crate::platform::clean_text;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 const MAX_INSTALLED: usize = 512;
 const MAX_LOADED: usize = 128;
 const MAX_ADDRESSES: usize = 64;
 const MAX_GPUS: usize = 64;
-const DISK_REFRESH: Duration = Duration::from_secs(3600);
 const LIVE_STATUSES: &str = "('STARTING', 'RUNNING', 'RESTARTING', 'DRAINING', 'STOPPING')";
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -117,12 +115,11 @@ pub struct Loaded {
 
 pub struct Collector {
     pub daemon_started_at: String,
-    disk: HashMap<String, (f64, Instant)>,
 }
 
 impl Collector {
     pub fn new(daemon_started_at: String) -> Collector {
-        Collector { daemon_started_at, disk: HashMap::new() }
+        Collector { daemon_started_at }
     }
 
     pub fn build(&mut self, home: &Path, reason: &str, reported_public_ip: Option<&str>) -> StateSnapshot {
@@ -159,27 +156,18 @@ impl Collector {
     }
 
     fn installed(&mut self, con: &rusqlite::Connection, home: &Path) -> Vec<Installed> {
-        // Id, size on disk (walked at most hourly per model) and runtime from the model card.
+        // Id, the same size goethe models shows in its DISK column, and the runtime from the model card.
         let rows: Vec<(String, String)> = con
             .prepare("SELECT model_id, local_path FROM installed_models ORDER BY model_id")
             .and_then(|mut s| s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
             .unwrap_or_default();
-        let ids: HashSet<&String> = rows.iter().map(|(id, _)| id).collect();
-        self.disk.retain(|id, _| ids.contains(id));
+        let disk = crate::models::disk_gb_by_model(con);
         rows.iter()
             .take(MAX_INSTALLED)
             .map(|(id, local)| {
                 let dir = home.join(local);
-                let disk_gb = match self.disk.get(id) {
-                    Some((gb, at)) if at.elapsed() < DISK_REFRESH => *gb,
-                    _ => {
-                        let target = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-                        let gb = (crate::models::dir_usage_gb(&target).0 * 100.0).round() / 100.0;
-                        self.disk.insert(id.clone(), (gb, Instant::now()));
-                        gb
-                    }
-                };
-                let runtime = std::fs::read_to_string(dir.join("goethe_card.toml"))
+                let disk_gb = disk.get(id).map(|gb| (gb.max(0.0) * 10.0).round() / 10.0).unwrap_or(0.0);
+        let runtime = std::fs::read_to_string(dir.join("goethe_card.toml"))
                     .ok()
                     .and_then(|t| toml::from_str::<toml::Value>(&t).ok())
                     .and_then(|c| c.get("runtime").and_then(|v| v.as_str()).map(str::to_string))
@@ -488,7 +476,7 @@ mod tests {
         let con = crate::db::open(&home).unwrap();
         con.execute(
             "INSERT INTO installed_models (model_id, local_path, architecture, static_vram_gb, kv_bytes_per_token, default_ctx, default_max_conc, default_tp)
-             VALUES ('org/m', 'models/org__m', 'X', 1.0, 1, 4096, 4, 1)",
+             VALUES ('org/m', 'models/org__m', 'X', 15.27, 1, 4096, 4, 1)",
             [],
         )
         .unwrap();
@@ -537,7 +525,7 @@ mod tests {
             assert!(v["network"]["gateway"].get(key).is_some(), "gateway.{key}");
         }
         assert!(v["network"].get("public_ip").is_some() && v["network"]["addresses"].is_array());
-        assert_eq!(v["models"]["installed"], serde_json::json!([{"id": "org/m", "disk_gb": 0.0, "runtime": "ninfer"}]));
+        assert_eq!(v["models"]["installed"], serde_json::json!([{"id": "org/m", "disk_gb": 15.3, "runtime": "ninfer"}]));
         assert_eq!(
             v["models"]["loaded"],
             serde_json::json!([{"instance_id": "inst-1", "model_id": "org/m", "gpus": [3], "tp_size": 1, "ctx": 100000, "max_conc": 4, "status": "RUNNING", "port": 30001, "in_flight": 0}]),
@@ -562,6 +550,19 @@ mod tests {
         for k in all_keys(&v) {
             assert!(!["token", "key", "api_key", "engine_key", "path", "local_path", "env", "pid", "args"].contains(&k.as_str()), "field {k}");
         }
+    }
+
+    #[test]
+    fn a_symlinked_model_reports_the_size_goethe_models_shows() {
+        let (_dir, home) = seeded_home();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::rename(home.join("models/org__m"), elsewhere.path().join("m")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path().join("m"), home.join("models/org__m")).unwrap();
+        let s = Collector::new(String::new()).build(&home, "interval", None);
+        let con = crate::db::open(&home).unwrap();
+        let listed = crate::models::disk_gb_by_model(&con)["org/m"];
+        assert_eq!(format!("{:.1}", s.models.installed[0].disk_gb), format!("{listed:.1}"));
+        assert_eq!(s.models.installed[0].runtime, "ninfer", "the card is read through the link");
     }
 
     #[test]
