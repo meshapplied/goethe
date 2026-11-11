@@ -1070,6 +1070,49 @@ get_started() {
   printf '\nGet started:\n\n\t→ goethe start\n'
 }
 
+parse_args() {
+  # --authkey KEY (or GOETHE_AUTHKEY) links the node to the platform after install; --platform-url picks the platform.
+  AUTHKEY="${GOETHE_AUTHKEY:-}"
+  PLATFORM_URL=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --authkey)
+        [[ $# -ge 2 ]] || { echo "--authkey needs a key (msh_ak_...)" >&2; exit 2; }
+        AUTHKEY="$2"
+        shift 2
+        ;;
+      --authkey=*)
+        AUTHKEY="${1#--authkey=}"
+        shift
+        ;;
+      --platform-url)
+        [[ $# -ge 2 ]] || { echo "--platform-url needs a URL" >&2; exit 2; }
+        PLATFORM_URL="$2"
+        shift 2
+        ;;
+      --platform-url=*)
+        PLATFORM_URL="${1#--platform-url=}"
+        shift
+        ;;
+      *)
+        echo "note: ignoring unknown installer argument $1" >&2
+        shift
+        ;;
+    esac
+  done
+}
+
+link_platform() {
+  # Link with the auth key through stdin so it never shows in the process list; a failure leaves the install in place.
+  [[ -n "${AUTHKEY}" ]] || return 0
+  local args=(login --authkey -)
+  [[ -n "${PLATFORM_URL}" ]] && args+=(--platform-url "${PLATFORM_URL}")
+  echo
+  if ! printf '%s\n' "${AUTHKEY}" | "${GOETHE_HOME}/bin/goethe" "${args[@]}"; then
+    echo "WARNING: goethe is installed, but linking to the platform failed; retry with: goethe login --authkey <key>" >&2
+  fi
+}
+
 show_banner() {
   # The GOETHE wordmark in light blue on a fresh install, or one line in narrow terminals.
   local cols
@@ -1098,6 +1141,7 @@ main() {
   # Verify prerequisites and the signed CDN, install everything under GOETHE_HOME; goethed stays down unless upgraded.
   HOME="${HOME:-$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)}"
   export HOME
+  parse_args "$@"
   show_banner
   CDN="${GOETHE_PKG_URL:-${DEFAULT_PKG_URL}}"
   CDN="${CDN%/}"
@@ -1169,6 +1213,7 @@ main() {
     echo "note: no GPU profile yet (${profile##*$'\n'}); goethe doctor shows the state once the GPU is usable" >&2
   fi
   summary
+  link_platform
   get_started
 }
 

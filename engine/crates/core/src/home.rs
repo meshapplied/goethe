@@ -19,10 +19,11 @@ enum Section {
     Keys,
     Gpus,
     Features,
+    Platform,
     Done,
 }
 
-const SECTIONS: [Section; 6] = [Section::Models, Section::Access, Section::Keys, Section::Gpus, Section::Features, Section::Done];
+const SECTIONS: [Section; 7] = [Section::Models, Section::Access, Section::Keys, Section::Gpus, Section::Features, Section::Platform, Section::Done];
 
 fn title(s: Section) -> &'static str {
     match s {
@@ -31,6 +32,7 @@ fn title(s: Section) -> &'static str {
         Section::Keys => "API keys",
         Section::Gpus => "GPUs",
         Section::Features => "Learning & traces",
+        Section::Platform => "Platform",
         Section::Done => "Done",
     }
 }
@@ -65,6 +67,19 @@ struct Snapshot {
     learn: String,
     trace_on: bool,
     trace: String,
+    platform: Vec<String>,
+    linked: bool,
+}
+
+fn platform_info(link: crate::platform_cli::Link) -> (Vec<String>, bool) {
+    // Plain lines for the Platform section and whether a link exists to log out of.
+    use crate::platform_cli::Link;
+    match link {
+        Link::NotLinked => (vec!["Not linked. Linking is optional: it shows this node on the Mesh platform.".into()], false),
+        Link::Unreadable(e) => (vec![format!("Credentials not usable: {e}")], true),
+        Link::Linked { revoked: true, workspace, .. } => (vec![format!("Revoked (was workspace {workspace}); log in again to relink.")], true),
+        Link::Linked { workspace, heartbeat, .. } => (vec![format!("Linked    workspace {workspace}"), format!("Heartbeat {heartbeat}")], true),
+    }
 }
 
 fn snapshot() -> Snapshot {
@@ -135,7 +150,10 @@ fn snapshot() -> Snapshot {
     let learn_on = learn["on"].as_bool().unwrap_or(false);
     let trace = crate::trace::status(&home).unwrap_or_default();
     let trace_on = trace["recording"].as_bool().unwrap_or(false);
+    let (platform, linked) = platform_info(crate::platform_cli::link_state(&home, running));
     Snapshot {
+        platform,
+        linked,
         running,
         api: format!("https://{}/v1", crate::nginx::gateway_connect_addr(&home)),
         listens,
@@ -204,6 +222,7 @@ impl App {
                 out.push(line(format!("Learning  {}", s.learn), Style::Plain));
                 out.push(line(format!("Traces    {}", s.trace), Style::Plain));
             }
+            Section::Platform => out.extend(s.platform.iter().map(|l| line(l.clone(), Style::Plain))),
             Section::Done => out.push(line("Leave the home screen.", Style::Dim)),
         }
         out
@@ -238,6 +257,8 @@ impl App {
                 row(format!("Learning: turn {}", if s.learn_on { "off" } else { "on" }), Action::Run(args(&["api", "learn", if s.learn_on { "off" } else { "on" }]))),
                 row(format!("Traces: turn {}", if s.trace_on { "off" } else { "on" }), Action::Run(args(&["api", "trace", if s.trace_on { "off" } else { "on" }]))),
             ],
+            Section::Platform if s.linked => vec![row("Log out (unlink this node)".into(), Action::Run(args(&["logout"]))), row("Log in again (replace the link)".into(), Action::Run(args(&["login"])))],
+            Section::Platform => vec![row("Log in (link this node)".into(), Action::Run(args(&["login"])))],
             Section::Done => Vec::new(),
         }
     }
@@ -450,6 +471,8 @@ mod tests {
             learn: "off".into(),
             trace_on: true,
             trace: "recording into /t".into(),
+            platform: vec!["Not linked.".into()],
+            linked: false,
         }
     }
 
@@ -508,6 +531,21 @@ mod tests {
         assert_eq!(pick(3, 0), Action::ToggleGpu(3, true), "an allowed GPU is denied");
         assert_eq!(pick(4, 0), Action::Run(args(&["api", "learn", "on"])));
         assert_eq!(pick(4, 1), Action::Run(args(&["api", "trace", "off"])), "recording traces are turned off");
+        assert_eq!(pick(5, 0), Action::Run(args(&["login"])));
+        let mut b = app(true);
+        b.snap.linked = true;
+        b.left = 5;
+        b.handle(Input::Right);
+        assert_eq!(b.handle(Input::Enter), Action::Run(args(&["logout"])));
+    }
+
+    #[test]
+    fn platform_lines_follow_the_link() {
+        use crate::platform_cli::Link;
+        assert!(!platform_info(Link::NotLinked).1);
+        let (lines, linked) = platform_info(Link::Linked { workspace: "Lab".into(), revoked: false, heartbeat: "OK (2 s ago)".into(), ok: true });
+        assert!(linked && lines[0].contains("Lab") && lines[1].contains("OK (2 s ago)"));
+        assert!(platform_info(Link::Linked { workspace: "Lab".into(), revoked: true, heartbeat: String::new(), ok: false }).0[0].starts_with("Revoked"));
     }
 
     #[test]

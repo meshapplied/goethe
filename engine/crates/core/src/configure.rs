@@ -398,25 +398,9 @@ fn configure_public(opts: &ApiOpts) -> Result<String, String> {
     Ok(public_host.unwrap_or_else(|| "0.0.0.0".to_string()))
 }
 
-const PUBLIC_IP_URL: &str = "https://api.ipify.org";
-
 fn lookup_public_ip() -> Result<IpAddr, String> {
-    // This machine's address as the internet sees it; GOETHE_PUBLIC_IP overrides, GOETHE_PUBLIC_IP_LOOKUP=0 disables.
-    if let Some(ip) = crate::paths::setting("GOETHE_PUBLIC_IP") {
-        return ip.trim().parse().map_err(|_| format!("GOETHE_PUBLIC_IP {ip:?} is not an IP address"));
-    }
-    if crate::paths::setting("GOETHE_PUBLIC_IP_LOOKUP").is_some_and(|v| v.trim() == "0") || crate::hf::offline_mode() {
-        return Err("lookup disabled (GOETHE_PUBLIC_IP_LOOKUP=0 or offline mode; set GOETHE_PUBLIC_IP to name it)".to_string());
-    }
-    let url = crate::paths::setting("GOETHE_PUBLIC_IP_URL").unwrap_or_else(|| PUBLIC_IP_URL.to_string());
-    let body = crate::net::agent()
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(4))
-        .call()
-        .map_err(|e| format!("lookup at {url} failed ({e}); no internet access, or outbound HTTPS is blocked"))?
-        .into_string()
-        .map_err(|e| e.to_string())?;
-    body.trim().parse().map_err(|_| format!("{url} answered {:?}, not an IP address", body.trim()))
+    // This machine's address as the internet sees it, asked of the Mesh platform; GOETHE_PUBLIC_IP overrides, GOETHE_PUBLIC_IP_LOOKUP=0 disables.
+    crate::platform::lookup_public_ip(&goethe_home())
 }
 
 fn public_ip_lines(ip: Result<IpAddr, String>, port: u16, local: &[InterfaceAddr]) -> Vec<String> {

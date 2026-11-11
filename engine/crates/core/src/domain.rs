@@ -2,7 +2,6 @@
 
 use crate::nginx;
 use crate::paths::goethe_home;
-use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
@@ -80,25 +79,9 @@ pub fn check(domain: &str) -> Result<String, String> {
 }
 
 pub fn public_ipv4() -> Result<String, String> {
-    if let Ok(v) = std::env::var("GOETHE_PUBLIC_IP") {
-        let t = v.trim();
-        if !t.is_empty() {
-            return parse_public_v4(t);
-        }
-    }
-    let resp = crate::net::agent()
-        .get("https://api.ipify.org")
-        .timeout(Duration::from_secs(5))
-        .call()
-        .map_err(|e| format!("public IP lookup failed: {e}"))?;
-    if resp.status() != 200 {
-        return Err(format!("public IP lookup HTTP {}", resp.status()));
-    }
-    let mut body = String::new();
-    resp.into_reader()
-        .read_to_string(&mut body)
-        .map_err(|e| e.to_string())?;
-    parse_public_v4(body.trim())
+    // The public IPv4 from GOETHE_PUBLIC_IP or the platform's /api/ip (GOETHE_PUBLIC_IP_URL overrides).
+    let ip = crate::platform::lookup_public_ip(&goethe_home()).map_err(|e| format!("public IP lookup failed: {e}"))?;
+    parse_public_v4(&ip.to_string())
 }
 
 fn parse_public_v4(s: &str) -> Result<String, String> {

@@ -15,11 +15,14 @@ impl ureq::Resolver for Ipv4First {
 }
 
 pub fn agent() -> ureq::Agent {
-    // Agent with IPv4-first resolution and a 5 s connect timeout.
+    agent_builder().build()
+}
+
+pub fn agent_builder() -> ureq::AgentBuilder {
+    // Builder with IPv4-first resolution and a 5 s connect timeout, for clients that add their own limits.
     ureq::AgentBuilder::new()
         .resolver(Ipv4First)
         .timeout_connect(Duration::from_secs(5))
-        .build()
 }
 
 #[cfg(test)]

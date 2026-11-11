@@ -226,6 +226,8 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 | `goethe uninstall` | Remove Goethe and its models (`--keep-models` to keep them) |
 | `goethe completion install` | Tab completion for bash, zsh or fish: commands, models, keys, GPUs |
 | `goethe` | The home screen (on a terminal) |
+| `goethe login` | Optional: link this node to the Mesh platform to see its health there (`--authkey` without a browser) |
+| `goethe logout` | Unlink it again |
 
 ## Add models
 
@@ -441,6 +443,9 @@ Optional. Set them in your shell, or in `goethe.env` inside Goethe's folder so t
 | `GOETHE_MAX_BODY_MB` | Largest request size in MB (default 10) |
 | `GOETHE_GATEWAY_RATE_PER_IP` | Requests per second one client address may send (default 100, bursts up to twice that) |
 | `GOETHE_GATEWAY_CONN_PER_IP` | Open API connections one client address may hold (default 512) |
+| `GOETHE_PLATFORM_URL` | Platform `goethe login` links to (default `https://platform.meshapplied.com`) |
+| `GOETHE_PUBLIC_IP_URL` | Where `goethe api configure`, `goethe api domain` and `goethe doctor` look up the public IP (default: the platform's `/api/ip`; a plain-text or `{"ip": ...}` answer both work) |
+| `GOETHE_PUBLIC_IP_LOOKUP=0` | Never look up the public IP (set `GOETHE_PUBLIC_IP` to name it) |
 | `NO_COLOR=1` | Turn off colored output |
 
 ## Troubleshooting

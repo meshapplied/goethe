@@ -154,7 +154,7 @@ fn sys(name: &str, file: &str) -> Option<String> {
     std::fs::read_to_string(Path::new("/sys/class/net").join(name).join(file)).ok().map(|s| s.trim().to_string())
 }
 
-fn is_tunnel(name: &str) -> bool {
+pub fn is_tunnel(name: &str) -> bool {
     // No link layer (WireGuard, tun, most VPN clients) or a point-to-point link.
     let flags = sys(name, "flags").and_then(|f| u32::from_str_radix(f.trim_start_matches("0x"), 16).ok()).unwrap_or(0);
     sys(name, "type").as_deref() == Some(ARPHRD_NONE) || flags & IFF_POINTOPOINT != 0

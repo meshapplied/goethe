@@ -392,7 +392,7 @@ pub fn is_network_fs(fs_type: &str, cloud: &str) -> bool {
     NETWORK_FS.contains(&base) || base == "fuse" || base == "fuseblk" || (base == "overlay" && cloud == "runpod")
 }
 
-fn os_release_name(text: &str) -> String {
+pub fn os_release_name(text: &str) -> String {
     // PRETTY_NAME from /etc/os-release.
     text.lines()
         .find_map(|l| l.strip_prefix("PRETTY_NAME="))

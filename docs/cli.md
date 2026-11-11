@@ -32,12 +32,13 @@ Exit codes:
 - [Running models](#running-models): `load`, `unload`, `ps`, `logs`
 - [API access](#api-access): `api`, `api configure`, `api manage`, `api keys`, `api allowlist`, `api gateway`, `api domain`, `api learn`, `api trace`
 - [GPUs and system](#gpus-and-system): `gpu`, `hw`, `doctor`, `update`, `uninstall`, `completion`, `--version`
+- [Platform](#platform): `login`, `logout`
 
 ## Start and stop
 
 ### `goethe`
 
-On a terminal, plain `goethe` opens the home screen: the sections on the left (Models, API access, API keys, GPUs, Learning & traces, Done), their state and what can be done on the right, refreshed every 5 seconds. ↑↓ move, → opens a section, ← goes back, `q` leaves. Enter on a model loads or unloads it; the access, key, learning and trace rows run `goethe api configure`, `goethe api manage`, `goethe api learn` and `goethe api trace` in the normal terminal and come back on Enter; Enter on a GPU allows or denies it. Without a terminal, `goethe` prints the commands.
+On a terminal, plain `goethe` opens the home screen: the sections on the left (Models, API access, API keys, GPUs, Learning & traces, Platform, Done), their state and what can be done on the right, refreshed every 5 seconds. ↑↓ move, → opens a section, ← goes back, `q` leaves. Enter on a model loads or unloads it; the access, key, learning and trace rows run `goethe api configure`, `goethe api manage`, `goethe api learn` and `goethe api trace` in the normal terminal and come back on Enter; Enter on a GPU allows or denies it; the Platform rows run `goethe login` or `goethe logout`. Without a terminal, `goethe` prints the commands.
 
 ### `goethe start`
 
@@ -53,7 +54,7 @@ Starts Goethe and the API gateway, and starts them at every boot from now on. Mo
 
 ### `goethe status`
 
-Whether Goethe is running, the API address, and the names and ids of your API keys.
+Whether Goethe is running, the API address, and the names and ids of your API keys. The last lines show the [platform](#platform) link (`Linked (workspace X)`, `Not linked`, or `Revoked`) and, when linked, the last heartbeat (`OK (2 s ago)` or `failing: <reason>`).
 
 ### `goethe down`
 
@@ -378,7 +379,7 @@ Installs the latest Goethe. Loaded models keep serving.
 
 ### `goethe uninstall`
 
-Removes Goethe and the models it installed. Folders of your own that you registered stay.
+Removes Goethe and the models it installed. Folders of your own that you registered stay. A node linked to the platform is logged out first (best effort) and its credentials go with the rest.
 
 | Option | Description |
 |---|---|
@@ -400,3 +401,24 @@ fish and bash with the bash-completion package load the script from their own co
 ### `goethe --version`
 
 Prints the version, and the upgrade command when a newer version is available. `goethe --build-info` adds the commit and build date.
+
+## Platform
+
+Linking is optional. A node that is not linked never contacts the platform. A linked node's goethed sends a health snapshot every 10 seconds, and right after a model loads or unloads: hostname, OS, environment (bare metal, VM, container, cloud), network addresses, the gateway address, GPUs with memory use, and installed and loaded models. It never sends API keys, engine keys, prompts, traces, file paths, environment variables or command lines. Inference never depends on the platform.
+
+### `goethe login`
+
+Links this node to a workspace. Prints a link and a code, then waits until the login is approved in the browser (Ctrl-C cancels; the code expires after 15 minutes). Logging in again replaces the current link and logs the old node out. A running goethed sends its first heartbeat within a second; otherwise it starts with `goethe up`.
+
+| Option | Description |
+|---|---|
+| `--authkey <msh_ak_...>` | Link without a browser, with an auth key from the platform; `--authkey -` reads it from stdin so it stays out of the process list |
+| `--platform-url <url>` | Another platform (default: `GOETHE_PLATFORM_URL`, else `https://platform.meshapplied.com`). Must be HTTPS; plain HTTP only for `localhost` and `*.localhost` |
+
+The installer takes the same flags: `curl -fsSL .../install.sh | bash -s -- --authkey msh_ak_...` (or `GOETHE_AUTHKEY=...`).
+
+The credentials and the heartbeat state live in `GOETHE_HOME/platform/` (directory 0700, files 0600). Goethe refuses a credentials file or folder other users can read, a symlink, or one you do not own, and says how to fix it; it also refuses a `GOETHE_HOME` that every user can write to (a group-writable one is fine). When the platform revokes the node (for example after it is removed there), heartbeats stop and `goethe status` says `Revoked` until the next `goethe login`.
+
+### `goethe logout`
+
+Removes this node from its workspace and deletes the local credentials. When the platform cannot be reached, the local link is still removed and the node shows offline on the platform until you remove it there.

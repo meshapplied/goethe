@@ -459,6 +459,7 @@ fn start_engine(
         stop_one(&req.home, &identity);
         return Err(err1(format!("record instance: {e}; engine stopped")));
     }
+    crate::platform::state_changed();
     let hold = coordinator::reserve(&instance_id, &plan.gpus, budget);
     if let Err(e) = crate::logs::append_spawn_index(&req.home, &instance_id, model_id, &log_path) {
         eprintln!("append_spawn_index({instance_id}): {e}");
@@ -735,7 +736,9 @@ fn mark_running(s: &Starting) -> bool {
     if changed == 1 {
         let _ = autostart::mark_desired(&tx, &s.params);
     }
-    tx.commit().is_ok() && changed == 1
+    let ok = tx.commit().is_ok() && changed == 1;
+    crate::platform::state_changed();
+    ok
 }
 
 fn cancel_engine(s: &Starting) {
@@ -778,6 +781,7 @@ fn settle(con: &Connection, s: &Starting, status: &str) {
     };
     let _ = con.execute("DELETE FROM watchdog_probe_state WHERE instance_id = ?1", [&s.instance_id]);
     load_slot::clear_instance_notices(&s.instance_id);
+    crate::platform::state_changed();
 }
 
 fn stop_one(home: &Path, id: &Identity) -> bool {
@@ -1134,6 +1138,7 @@ pub fn handle_unload(
         }
     }
     teardown(&con, &home, &list);
+    crate::platform::state_changed();
     append_goethed_log(
         &home,
         &format!("unload done ms={} instances={}\n", t0.elapsed().as_millis(), list.len()),
@@ -1547,6 +1552,7 @@ fn retire(con: &Connection, home: &Path, i: &Inst, from: &str, to: &str) -> bool
     );
     let _ = con.execute("DELETE FROM watchdog_probe_state WHERE instance_id = ?1", [&i.instance_id]);
     load_slot::clear_instance_notices(&i.instance_id);
+    crate::platform::state_changed();
     true
 }
 

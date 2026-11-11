@@ -339,6 +339,15 @@ enum Commands {
     Learn(LearnArgs),
     #[command(hide = true, about = "Record requests and replies as training traces: turn it on or off, per API key, and see the size.", after_help = TRACE_HELP)]
     Trace(TraceArgs),
+    #[command(display_order = 19, about = "Link this node to the Mesh platform (optional): a browser login, or --authkey for headless machines.")]
+    Login {
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::platform_urls), long = "platform-url", value_name = "URL", help = "Platform to link to (default: the GOETHE_PLATFORM_URL setting, else https://platform.meshapplied.com).")]
+        platform_url: Option<String>,
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::authkey_stdin), long, value_name = "KEY", help = "Link without a browser using an auth key (msh_ak_...); - reads it from stdin.")]
+        authkey: Option<String>,
+    },
+    #[command(display_order = 20, about = "Unlink this node from the Mesh platform and remove its local credentials.")]
+    Logout,
     #[command(display_order = 18, about = "Tab completion for bash, zsh and fish: models, keys, GPUs and interfaces complete too.")]
     Completion {
         #[arg(value_parser = ["install", "remove", "status"], help = "install, remove, or status (the default).")]
@@ -984,6 +993,8 @@ fn main() {
         Commands::Api { cmd: Some(ApiCommands::Configure(a)), .. } => configure_access(a),
         Commands::Api { cmd: Some(_), .. } => unreachable!("goethe api subcommands are routed first"),
         Commands::Start => goethe_core::onboard::run(),
+        Commands::Login { platform_url, authkey } => goethe_core::platform_cli::login(platform_url.as_deref(), authkey.as_deref()),
+        Commands::Logout => goethe_core::platform_cli::logout(),
         Commands::Completion { action, shell } => complete::run(action.as_deref(), shell.as_deref()),
         Commands::Configure { cmd: ConfigureCommands::Api(a) } => {
             eprintln!("note: goethe configure api is now goethe api configure");
@@ -1773,6 +1784,7 @@ fn do_status() -> Result<(), String> {
     let home = goethe_home();
     if !goethe_core::service::goethed_running() {
         print!("{}", status_text(None, &[]));
+        print_platform_lines(&home, false);
         return Ok(());
     }
     let api = match nginx::format_gateway_line(&home) {
@@ -1790,7 +1802,13 @@ fn do_status() -> Result<(), String> {
         })
         .collect();
     print!("{}", status_text(Some(&api), &keys));
+    print_platform_lines(&home, true);
     Ok(())
+}
+
+fn print_platform_lines(home: &std::path::Path, running: bool) {
+    // The platform link and the last heartbeat, after the rest of goethe status.
+    println!("\n{}", goethe_core::platform_cli::status_lines(home, running).join("\n"));
 }
 
 fn status_text(api: Option<&str>, keys: &[(String, String)]) -> String {

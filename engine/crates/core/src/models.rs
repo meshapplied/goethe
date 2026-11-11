@@ -62,6 +62,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
     let con = db::open(&home).map_err(|e| e.to_string())?;
     let loaded = loaded_instances(&con);
     let installed = installed_rows(&home, &con)?;
+    let disk = disk_gb_by_model(&con);
     let reg = fetch(&registry_url()).ok();
     let view = crate::placement::load_hw(&home).map(|hw| View::capacity(&home, hw));
     let mut rows = Vec::new();
@@ -76,7 +77,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
             rows.push(ModelRow {
                 id: m.id.clone(),
                 status,
-                gb: m.input.static_vram_gb,
+                gb: disk.get(&m.id).copied().unwrap_or(m.input.static_vram_gb),
                 fit,
                 custom: is_custom_model(&m.id, reg.as_ref()).then_some(true),
                 verdict,
@@ -231,6 +232,13 @@ fn list_text(rows: &[ModelRow], free_gb: Option<String>) -> String {
         }
     }
     out.trim_end().to_string() + "\n"
+}
+
+pub fn disk_gb_by_model(con: &Connection) -> HashMap<String, f64> {
+    // The DISK column of goethe models for installed models: the recorded weight size, also right for symlinked folders.
+    con.prepare("SELECT model_id, static_vram_gb FROM installed_models")
+        .and_then(|mut s| s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))?.collect())
+        .unwrap_or_default()
 }
 
 fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, String> {
