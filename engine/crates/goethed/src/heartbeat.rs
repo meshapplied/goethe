@@ -19,7 +19,7 @@ pub fn spawn(home: PathBuf) {
 }
 
 fn fresh(home: &std::path::Path, started_at: &str) -> Worker {
-    Worker::new(home.to_path_buf(), Collector::new(snapshot::public_ip_lookup_enabled(), started_at.to_string()))
+    Worker::new(home.to_path_buf(), Collector::new(started_at.to_string()))
 }
 
 async fn run(home: PathBuf, notify: Arc<Notify>, started_at: String) {

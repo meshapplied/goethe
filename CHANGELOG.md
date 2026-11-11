@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `goethe login` links a node to the Mesh platform with a browser login (device code), or without one with `--authkey msh_ak_...` (also an installer flag); `goethe logout` unlinks it. Linking is optional: without it Goethe never contacts the platform. A linked goethed sends a health snapshot every 10 seconds and right after loads and unloads (no keys, prompts, paths or command lines), backs off when the platform is unreachable, and stops when the node is revoked. `goethe status` and the home screen show the link and the last heartbeat; `goethe uninstall` logs the node out. See the Platform section of `docs/cli.md`.
+- Goethe no longer asks a third party for the public IP: `goethe api configure`, `goethe api domain` and `goethe doctor` ask the Mesh platform's `/api/ip` (`GOETHE_PUBLIC_IP_URL`, `GOETHE_PUBLIC_IP` and `GOETHE_PUBLIC_IP_LOOKUP=0` still work), and a linked node reports the address the platform saw in its last heartbeat.
 
 ## 0.2.0 (2026-11-10)
 

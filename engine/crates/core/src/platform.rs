@@ -271,6 +271,10 @@ pub struct PlatformState {
     pub last_error: Option<String>,
     #[serde(default)]
     pub failures: u32,
+    #[serde(default)]
+    pub public_ip: Option<String>,
+    #[serde(default)]
+    pub public_ip_at: Option<String>,
 }
 
 pub fn link_key(c: &Credentials) -> String {
@@ -319,6 +323,58 @@ pub fn hostname() -> String {
     } else {
         name
     }
+}
+
+pub fn public_ip_url(home: &Path) -> Result<String, String> {
+    // GOETHE_PUBLIC_IP_URL, else /api/ip on the linked platform, else on the configured or default one.
+    if let Some(u) = crate::paths::setting("GOETHE_PUBLIC_IP_URL") {
+        return Ok(u.trim().to_string());
+    }
+    let base = match load_credentials(home) {
+        Ok(Some(c)) => c.platform_url,
+        _ => platform_url()?,
+    };
+    Ok(format!("{base}/api/ip"))
+}
+
+pub fn parse_ip_answer(url: &str, body: &str) -> Result<std::net::IpAddr, String> {
+    // {"ip": "..."} from the platform, {"ip": null} when it sees no public address, or a plain-text address.
+    let text = body.trim();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+        if let Some(obj) = v.as_object() {
+            return match obj.get("ip") {
+                Some(serde_json::Value::String(s)) => s.trim().parse().map_err(|_| format!("{url} answered {:?}, not an IP address", clean_text(s, 64))),
+                Some(serde_json::Value::Null) => Err(format!("{url} sees no public address for this machine (it reaches out from a private network)")),
+                _ => Err(format!("{url} answered JSON without an ip field")),
+            };
+        }
+    }
+    text.parse().map_err(|_| format!("{url} answered {:?}, not an IP address", clean_text(text, 64)))
+}
+
+pub fn lookup_public_ip(home: &Path) -> Result<std::net::IpAddr, String> {
+    // GOETHE_PUBLIC_IP when set; else one GET to public_ip_url (4 s, 1 KB), unless GOETHE_PUBLIC_IP_LOOKUP=0 or offline mode.
+    use std::io::Read;
+    if let Some(ip) = crate::paths::setting("GOETHE_PUBLIC_IP") {
+        return ip.trim().parse().map_err(|_| format!("GOETHE_PUBLIC_IP {ip:?} is not an IP address"));
+    }
+    if crate::paths::setting("GOETHE_PUBLIC_IP_LOOKUP").is_some_and(|v| v.trim() == "0") || crate::hf::offline_mode() {
+        return Err("lookup disabled (GOETHE_PUBLIC_IP_LOOKUP=0 or offline mode; set GOETHE_PUBLIC_IP to name it)".to_string());
+    }
+    let url = public_ip_url(home)?;
+    let resp = crate::net::agent()
+        .get(&url)
+        .set("Accept", "application/json, text/plain")
+        .set("User-Agent", &format!("goethe/{}", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(4))
+        .call()
+        .map_err(|e| match e {
+            ureq::Error::Status(code, _) => format!("lookup at {url} failed (HTTP {code})"),
+            ureq::Error::Transport(t) => format!("lookup at {url} failed ({}); no internet access, or outbound HTTPS is blocked", t.kind()),
+        })?;
+    let mut buf = Vec::new();
+    resp.into_reader().take(1024).read_to_end(&mut buf).map_err(|e| format!("lookup at {url} failed ({e})"))?;
+    parse_ip_answer(&url, &String::from_utf8_lossy(&buf))
 }
 
 pub const CHANGE_STATE: u8 = 1;
@@ -483,6 +539,27 @@ mod tests {
         again.token = Secret::new("mesh_node_ffffffffffffffffffffffffffffffff");
         assert_ne!(link_key(&creds()), link_key(&again), "a new token with the same node id is a new link");
         assert!(!link_key(&creds()).contains("mesh_node_"));
+    }
+
+    #[test]
+    fn ip_answers_in_json_or_plain_text() {
+        let u = "https://p.example.com/api/ip";
+        assert_eq!(parse_ip_answer(u, r#"{"ip":"203.0.113.5"}"#).unwrap().to_string(), "203.0.113.5");
+        assert_eq!(parse_ip_answer(u, "198.51.100.7\n").unwrap().to_string(), "198.51.100.7");
+        assert_eq!(parse_ip_answer(u, "2001:db8::1").unwrap().to_string(), "2001:db8::1");
+        assert!(parse_ip_answer(u, r#"{"ip":null}"#).unwrap_err().contains("no public address"));
+        assert!(parse_ip_answer(u, r#"{"error":"rate_limited"}"#).unwrap_err().contains("without an ip"));
+        assert!(parse_ip_answer(u, "<html>").unwrap_err().contains("not an IP address"));
+    }
+
+    #[test]
+    fn the_ip_lookup_asks_the_linked_platform() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        save_credentials(dir.path(), &creds()).unwrap();
+        if crate::paths::setting("GOETHE_PUBLIC_IP_URL").is_none() {
+            assert_eq!(public_ip_url(dir.path()).unwrap(), "https://platform.example.com/api/ip");
+        }
     }
 
     #[test]

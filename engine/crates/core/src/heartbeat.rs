@@ -75,7 +75,7 @@ impl Worker {
                 Err(e) => return (self.failed(&mut state, e), self.backoff()),
             }
         }
-        let snap = self.collector.build(&self.home, &self.reason_word(reason));
+        let snap = self.collector.build(&self.home, &self.reason_word(reason), state.public_ip.as_deref());
         let loaded = snap.models.loaded.len();
         let data = match snapshot::encode(&snap) {
             Ok(d) => d,
@@ -93,6 +93,10 @@ impl Worker {
                 }
                 self.failures = 0;
                 state.last_ok_at = Some(snapshot::now_rfc3339());
+                if let Some(ip) = reply.public_ip {
+                    state.public_ip = ip;
+                    state.public_ip_at = state.last_ok_at.clone();
+                }
                 state.last_error = None;
                 state.failures = 0;
                 let _ = platform::save_state(&self.home, &state);
@@ -216,7 +220,7 @@ mod tests {
     }
 
     fn worker(home: &std::path::Path) -> Worker {
-        Worker::new(home.to_path_buf(), Collector::new(false, "2026-11-11T10:00:00Z".into()))
+        Worker::new(home.to_path_buf(), Collector::new("2026-11-11T10:00:00Z".into()))
     }
 
     #[test]
@@ -235,18 +239,28 @@ mod tests {
 
     #[test]
     fn a_link_sends_the_snapshot_with_the_token() {
-        let m = mock::serve(vec![(200, r#"{"ok":true,"node_id":"n1","at":"t","interval":30}"#.into()), (200, r#"{"ok":true,"interval":600}"#.into())]);
+        let m = mock::serve(vec![
+            (200, r#"{"ok":true,"node_id":"n1","at":"t","interval":30,"public_ip":"198.51.100.9"}"#.into()),
+            (200, r#"{"ok":true,"interval":600}"#.into()),
+        ]);
         let dir = home();
         link(dir.path(), &m.url);
         let mut w = worker(dir.path());
         let (out, next) = w.step(Reason::Start);
         assert_eq!(out, Outcome::Sent);
         assert!(next >= Duration::from_secs(29) && next <= Duration::from_secs(31), "{next:?}");
+        let st = platform::load_state(dir.path(), &key());
+        assert_eq!(st.public_ip.as_deref(), Some("198.51.100.9"));
+        assert!(st.public_ip_at.is_some());
         let (_, next) = w.step(Reason::Interval);
         assert!(next <= Duration::from_secs(61), "the server interval is capped at 60 s: {next:?}");
         let seen = m.seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0].path, "/api/device/heartbeat");
+        let second: serde_json::Value = serde_json::from_str(&seen[1].body).unwrap();
+        let reported = second["network"]["public_ip"].as_str().map(str::to_string);
+        assert!(reported.is_some(), "the reply's address is reported from the next heartbeat on");
+        assert_eq!(platform::load_state(dir.path(), &key()).public_ip.as_deref(), Some("198.51.100.9"), "a reply without public_ip keeps the last one");
         assert_eq!(seen[0].authorization.as_deref(), Some(format!("Bearer {TOKEN}").as_str()));
         assert!(!seen[0].body.contains(TOKEN));
         let v: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();

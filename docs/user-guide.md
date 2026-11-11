@@ -444,7 +444,8 @@ Optional. Set them in your shell, or in `goethe.env` inside Goethe's folder so t
 | `GOETHE_GATEWAY_RATE_PER_IP` | Requests per second one client address may send (default 100, bursts up to twice that) |
 | `GOETHE_GATEWAY_CONN_PER_IP` | Open API connections one client address may hold (default 512) |
 | `GOETHE_PLATFORM_URL` | Platform `goethe login` links to (default `https://platform.meshapplied.com`) |
-| `GOETHE_PUBLIC_IP_LOOKUP=0` | A linked node does not look up its public IP (otherwise at most once an hour) |
+| `GOETHE_PUBLIC_IP_URL` | Where `goethe api configure`, `goethe api domain` and `goethe doctor` look up the public IP (default: the platform's `/api/ip`; a plain-text or `{"ip": ...}` answer both work) |
+| `GOETHE_PUBLIC_IP_LOOKUP=0` | Never look up the public IP (set `GOETHE_PUBLIC_IP` to name it) |
 | `NO_COLOR=1` | Turn off colored output |
 
 ## Troubleshooting

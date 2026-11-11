@@ -12,8 +12,6 @@ const MAX_LOADED: usize = 128;
 const MAX_ADDRESSES: usize = 64;
 const MAX_GPUS: usize = 64;
 const DISK_REFRESH: Duration = Duration::from_secs(3600);
-const PUBLIC_IP_REFRESH: Duration = Duration::from_secs(3600);
-const PUBLIC_IP_URL: &str = "https://api.ipify.org";
 const LIVE_STATUSES: &str = "('STARTING', 'RUNNING', 'RESTARTING', 'DRAINING', 'STOPPING')";
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -118,24 +116,22 @@ pub struct Loaded {
 }
 
 pub struct Collector {
-    pub public_ip_lookup: bool,
     pub daemon_started_at: String,
     disk: HashMap<String, (f64, Instant)>,
-    public_ip: Option<(Option<String>, Instant)>,
 }
 
 impl Collector {
-    pub fn new(public_ip_lookup: bool, daemon_started_at: String) -> Collector {
-        Collector { public_ip_lookup, daemon_started_at, disk: HashMap::new(), public_ip: None }
+    pub fn new(daemon_started_at: String) -> Collector {
+        Collector { daemon_started_at, disk: HashMap::new() }
     }
 
-    pub fn build(&mut self, home: &Path, reason: &str) -> StateSnapshot {
+    pub fn build(&mut self, home: &Path, reason: &str, reported_public_ip: Option<&str>) -> StateSnapshot {
         // Every part is best effort: one that cannot be read comes out empty instead of failing the heartbeat.
         let root = crate::host::sysroot();
         let read = |rel: &str| std::fs::read_to_string(root.join(rel)).unwrap_or_default();
         let con = crate::db::open(home).ok();
         let addresses = addresses();
-        let public_ip = self.public_ip(&addresses);
+        let public_ip = public_ip(&addresses, reported_public_ip);
         let models = match &con {
             Some(c) => Models { installed: self.installed(c, home), loaded: loaded(c) },
             None => Models { installed: Vec::new(), loaded: Vec::new() },
@@ -194,43 +190,14 @@ impl Collector {
             })
             .collect()
     }
+}
 
-    fn public_ip(&mut self, addresses: &[Address]) -> Option<String> {
-        // A public address on an interface first; else one lookup per hour, never when turned off.
-        if let Some(a) = addresses.iter().find(|a| a.scope == "public" && a.ip.parse::<Ipv4Addr>().is_ok()) {
-            return Some(a.ip.clone());
-        }
-        if !self.public_ip_lookup {
-            return None;
-        }
-        if let Some((ip, at)) = &self.public_ip {
-            if at.elapsed() < PUBLIC_IP_REFRESH {
-                return ip.clone();
-            }
-        }
-        let ip = lookup_public_ip();
-        self.public_ip = Some((ip.clone(), Instant::now()));
-        ip
+pub fn public_ip(addresses: &[Address], reported: Option<&str>) -> Option<String> {
+    // A public IPv4 on an interface first, else the address the platform saw in its last heartbeat reply; never a third party.
+    if let Some(a) = addresses.iter().find(|a| a.scope == "public" && a.ip.parse::<Ipv4Addr>().is_ok()) {
+        return Some(a.ip.clone());
     }
-}
-
-pub fn public_ip_lookup_enabled() -> bool {
-    crate::paths::setting("GOETHE_PUBLIC_IP_LOOKUP").is_none_or(|v| !matches!(v.trim(), "0" | "false" | "off" | "no"))
-}
-
-fn lookup_public_ip() -> Option<String> {
-    // Plain-text IP from a public echo service, 3 s at most, a tiny capped answer that must parse as a global address.
-    use std::io::Read;
-    let agent = crate::net::agent_builder()
-        .redirects(0)
-        .timeout(Duration::from_secs(3))
-        .user_agent(&format!("goethe/{}", env!("CARGO_PKG_VERSION")))
-        .build();
-    let resp = agent.get(PUBLIC_IP_URL).call().ok()?;
-    let mut buf = Vec::new();
-    resp.into_reader().take(64).read_to_end(&mut buf).ok()?;
-    let ip: IpAddr = String::from_utf8(buf).ok()?.trim().parse().ok()?;
-    (scope_of(ip, false) == "public").then(|| ip.to_string())
+    reported.and_then(|r| r.parse::<IpAddr>().ok()).filter(|ip| scope_of(*ip, false) == "public").map(|ip| ip.to_string())
 }
 
 pub fn now_rfc3339() -> String {
@@ -504,6 +471,11 @@ mod tests {
         assert_eq!(gateway_url("0.0.0.0", 8080, &[]), "https://127.0.0.1:8080/v1");
         assert_eq!(gateway_url("::1", 8443, &[]), "https://[::1]:8443/v1");
         assert_eq!(short_bus_id("00000000:01:00.0"), "0000:01:00.0");
+        assert_eq!(public_ip(&addrs, Some("198.51.100.9")).as_deref(), Some("203.0.113.5"), "an interface address wins");
+        let private = vec![a("192.168.1.5", "private")];
+        assert_eq!(public_ip(&private, Some("198.51.100.9")).as_deref(), Some("198.51.100.9"));
+        assert_eq!(public_ip(&private, None), None, "null until the first reply");
+        assert_eq!(public_ip(&private, Some("10.0.0.1")), None);
         assert_eq!(parse_uptime("12345.67 999.0\n"), 12345);
     }
 
@@ -544,8 +516,8 @@ mod tests {
     #[test]
     fn snapshot_has_the_contract_shape_and_no_secrets() {
         let (_dir, home) = seeded_home();
-        let mut c = Collector::new(false, "2026-11-11T10:00:00Z".into());
-        let s = c.build(&home, "start");
+        let mut c = Collector::new("2026-11-11T10:00:00Z".into());
+        let s = c.build(&home, "start", None);
         let text = String::from_utf8(encode(&s).unwrap()).unwrap();
         for secret in ["SECRET", "sk-engine", "ek-ENGINE", "gk_live", "HASH", "secret-home-path", "4242", "mesh_node_", "--api-key", "safetensors", "goethe_card"] {
             assert!(!text.contains(secret), "{secret} leaked into {text}");
@@ -595,7 +567,7 @@ mod tests {
     #[test]
     fn an_oversize_snapshot_sheds_installed_models_first() {
         let (_dir, home) = seeded_home();
-        let mut s = Collector::new(false, String::new()).build(&home, "interval");
+        let mut s = Collector::new(String::new()).build(&home, "interval", None);
         let one = s.models.installed[0].clone();
         s.models.installed = vec![Installed { id: "x".repeat(200), ..one }; 2000];
         let data = encode(&s).unwrap();

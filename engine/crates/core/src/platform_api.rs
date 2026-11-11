@@ -194,6 +194,7 @@ pub enum Poll {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeartbeatReply {
     pub interval: Option<u64>,
+    pub public_ip: Option<Option<String>>,
 }
 
 fn malformed(what: &str) -> ApiError {
@@ -274,7 +275,16 @@ pub fn parse_heartbeat(v: &Value) -> Result<HeartbeatReply, ApiError> {
         None | Some(Value::Null) => None,
         Some(i) => Some(i.as_u64().ok_or_else(|| malformed("heartbeat interval is not a number"))?),
     };
-    Ok(HeartbeatReply { interval })
+    let public_ip = match v.get("public_ip") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(s)) => {
+            let ip: std::net::IpAddr = s.trim().parse().map_err(|_| malformed("heartbeat public_ip is not an IP address"))?;
+            Some(Some(ip.to_string()))
+        }
+        Some(_) => return Err(malformed("heartbeat public_ip is not a string")),
+    };
+    Ok(HeartbeatReply { interval, public_ip })
 }
 
 #[cfg(test)]
@@ -429,14 +439,22 @@ mod tests {
 
     #[test]
     fn heartbeat_reply_and_size_limit() {
-        let m = mock::serve(vec![(200, r#"{"ok":true,"node_id":"n1","at":"t","interval":10}"#.into()), (200, r#"{"ok":false}"#.into())]);
+        let m = mock::serve(vec![
+            (200, r#"{"ok":true,"node_id":"n1","at":"t","interval":10,"public_ip":"203.0.113.5"}"#.into()),
+            (200, r#"{"ok":true,"public_ip":null}"#.into()),
+            (200, r#"{"ok":true,"public_ip":"nope"}"#.into()),
+            (200, r#"{"ok":false}"#.into()),
+        ]);
         let c = Client::new(&m.url, Duration::from_secs(5)).unwrap();
         let t = Secret::new(TOKEN);
-        assert_eq!(c.heartbeat(&t, b"{}").unwrap().interval, Some(10));
+        let r = c.heartbeat(&t, b"{}").unwrap();
+        assert_eq!((r.interval, r.public_ip), (Some(10), Some(Some("203.0.113.5".to_string()))));
+        assert_eq!(c.heartbeat(&t, b"{}").unwrap().public_ip, Some(None));
+        assert!(c.heartbeat(&t, b"{}").is_err());
         assert!(c.heartbeat(&t, b"{}").is_err());
         let big = vec![b' '; MAX_SNAPSHOT_BYTES + 1];
         assert!(matches!(c.heartbeat(&t, &big), Err(ApiError::Malformed(_))));
-        assert_eq!(m.seen.lock().unwrap().len(), 2, "an oversize snapshot is never sent");
+        assert_eq!(m.seen.lock().unwrap().len(), 4, "an oversize snapshot is never sent");
     }
 
     #[test]
