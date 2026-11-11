@@ -1,5 +1,6 @@
 // goethed JSON-lines RPC server over GOETHE_SOCK.
 
+mod heartbeat;
 mod instance_lock;
 mod curator;
 mod mux;
@@ -71,6 +72,10 @@ fn dispatch(req: Request) -> (bool, i32, String, String, Value) {
             Ok(v) => (true, 0, String::new(), String::new(), v),
             Err((code, msg)) => (false, code, String::new(), msg, Value::Null),
         },
+        "platform_changed" => {
+            goethe_core::platform::notify(goethe_core::platform::CHANGE_LINK);
+            (true, 0, String::new(), String::new(), Value::Null)
+        }
         "shutdown" => {
             if req.params.get("keep_engines").and_then(|v| v.as_bool()).unwrap_or(false) {
                 shutdown::request_shutdown_keeping_engines();
@@ -161,6 +166,7 @@ async fn main() {
     }
     eprintln!("goethed listening on {}", sock.display());
     goethe_core::autostart::spawn_restore_background();
+    heartbeat::spawn(home.clone());
     let _ = goethe_core::log_rotation::run_rotation_pass(&home);
     let home_rot = home.clone();
     let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");

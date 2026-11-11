@@ -555,7 +555,7 @@ fn remove_owned(home: &Path, p: &Path) -> Result<(), String> {
     r.map_err(|e| format!("delete {}: {e}", p.display()))
 }
 
-fn dir_usage_gb(p: &Path) -> (f64, f64) {
+pub fn dir_usage_gb(p: &Path) -> (f64, f64) {
     // GB of files under p (each inode once, links not followed) and the GB deleting p frees.
     fn walk(p: &Path, inodes: &mut HashMap<(u64, u64), (u64, u64, u64)>) {
         let Ok(meta) = fs::symlink_metadata(p) else {

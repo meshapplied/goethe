@@ -50,6 +50,19 @@ pub fn interfaces() -> Vec<CompletionCandidate> {
         .collect()
 }
 
+pub fn platform_urls() -> Vec<CompletionCandidate> {
+    // The default platform, and the configured one when it differs.
+    let mut out = vec![candidate(goethe_core::platform::DEFAULT_PLATFORM_URL, "Mesh platform")];
+    if let Some(u) = goethe_core::paths::setting(goethe_core::platform::URL_SETTING).filter(|u| u != goethe_core::platform::DEFAULT_PLATFORM_URL) {
+        out.push(candidate(&u, "GOETHE_PLATFORM_URL"));
+    }
+    out
+}
+
+pub fn authkey_stdin() -> Vec<CompletionCandidate> {
+    vec![candidate("-", "read the auth key from stdin")]
+}
+
 pub fn binds() -> Vec<CompletionCandidate> {
     let mut out = vec![candidate("127.0.0.1", "this machine only"), candidate("0.0.0.0", "every address")];
     out.extend(interfaces());

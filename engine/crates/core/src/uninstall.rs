@@ -41,6 +41,10 @@ pub fn run(opts: UninstallOpts) -> Result<(), String> {
     if keep_traces {
         plan.push(format!("keep {} (training traces; delete the folder yourself if you do not want them)", traces.display()));
     }
+    let linked = crate::platform_cli::is_linked(&home);
+    if linked {
+        plan.push("log this node out of the platform and delete its credentials".to_string());
+    }
     plan.push(format!("delete everything else in {}", home.display()));
     plan.push("remove installer symlinks that point into GOETHE_HOME".to_string());
     let default_home = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".goethe")).is_some_and(|d| d == home);
@@ -53,6 +57,9 @@ pub fn run(opts: UninstallOpts) -> Result<(), String> {
     crate::host::confirm(&format!("goethe uninstall will:\n  {}\nProceed?", plan.join("\n  ")), opts.yes)?;
     shutdown::run_down().map_err(|e| format!("could not stop goethed ({e}); stop it, then run goethe uninstall again"))?;
     crate::service::run_disable()?;
+    if linked {
+        crate::platform_cli::uninstall_logout(&home);
+    }
     remove_installer_symlinks(&home);
     if default_home {
         crate::completion::remove_all();
