@@ -17,6 +17,9 @@ const OWNED_FLAGS: &[&str] = &[
     "--swa-full-tokens-ratio",
     "--api-key",
     "--served-model-name",
+    "--pack",
+    "--weights",
+    "--tokenizer",
 ];
 const QUIET_PATHS: &[&str] = &["/health", "/v1/models", "/get_model_info"];
 const ENV_KEEP: &[&str] = &["PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "LD_LIBRARY_PATH"];
@@ -126,7 +129,7 @@ fn default_cuda_home(home: &Path, card: &[(String, String)]) -> Vec<(String, Str
     crate::cuda_toolkit::bundled_home(home).map(|d| vec![("CUDA_HOME".to_string(), d.to_string_lossy().into_owned())]).unwrap_or_default()
 }
 
-fn resolve_python(home: &Path) -> PathBuf {
+pub fn resolve_python(home: &Path) -> PathBuf {
     let p = home.join("py-env/bin/python");
     if p.is_file() {
         return p;
@@ -513,7 +516,50 @@ pub fn command(spec: &EngineSpec) -> Result<Command, String> {
     if spec.card.get("runtime").and_then(|v| v.as_str()) == Some("ninfer") {
         return ninfer_command(spec);
     }
+    if spec.card.get("runtime").and_then(|v| v.as_str()) == Some("goethe-engine") {
+        return goethe_engine_command(spec);
+    }
     Ok(sglang_command(spec))
+}
+
+pub const PACK_FILE: &str = "pack.gcpack";
+pub const PACK_VERIFY: &str = "pack.verify.json";
+
+fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
+    // The pack and the weights its verification listed (in order), both next to the tokenizer in the model dir.
+    let dir = spec.model_path;
+    let text = std::fs::read_to_string(dir.join(PACK_VERIFY)).map_err(|e| format!("{}: {e}; run goethe install again", dir.join(PACK_VERIFY).display()))?;
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{PACK_VERIFY}: {e}"))?;
+    let weights: Vec<PathBuf> = v["weights"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).map(|f| dir.join(f)).collect();
+    if weights.is_empty() || weights.iter().any(|w| !w.is_file()) {
+        return Err(format!("{}: the weights the pack names are missing", dir.display()));
+    }
+    let mut cmd = Command::new(resolve_python(spec.home));
+    cmd.args(["-m", "goethe_engine", "serve", "--host", "127.0.0.1", "--port"])
+        .arg(spec.port.to_string())
+        .arg("--context-length")
+        .arg(spec.ctx.to_string())
+        .arg("--max-running-requests")
+        .arg(spec.max_conc.to_string())
+        .arg("--served-model-name")
+        .arg(spec.served_name)
+        .arg("--api-key")
+        .arg(spec.engine_key)
+        .arg("--pack")
+        .arg(dir.join(PACK_FILE))
+        .arg("--weights")
+        .args(&weights)
+        .arg("--tokenizer")
+        .arg(dir);
+    let gpus: Vec<String> = spec.gpus.iter().map(|g| g.to_string()).collect();
+    cmd.env_clear()
+        .envs(kept_env())
+        .envs(card_env(spec))
+        .env("CUDA_VISIBLE_DEVICES", gpus.join(","))
+        .env("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+        .env(INSTANCE_ENV, spec.instance_id)
+        .env_remove("GOETHE_ENGINE_ALLOW_UNSIGNED"); // it disables the engine's signature checks: never passed on
+    Ok(cmd)
 }
 
 fn sglang_command(spec: &EngineSpec) -> Command {
@@ -845,5 +891,78 @@ mod tests {
         let has = |cc: &str| arch_env(Path::new("/h"), cc).iter().any(|(k, v)| k == "SGLANG_DISABLE_SILU_FP4_QUANT_FUSION" && v == "1");
         assert!(has("8.0") && has("8.6") && has("8.9") && has("9.0"));
         assert!(!has("10.0") && !has("12.0"));
+    }
+}
+#[cfg(test)]
+mod goethe_engine_tests {
+    use super::*;
+
+    fn cmd_in(dir: &Path, card: &str) -> Result<Command, String> {
+        let card: toml::Value = toml::from_str(card).unwrap();
+        let spec = EngineSpec {
+            home: Path::new("/h"),
+            instance_id: "inst-x",
+            served_name: "org/m",
+            engine_key: "k",
+            model_path: dir,
+            card: &card,
+            port: 30001,
+            ctx: 4096,
+            max_conc: 4,
+            tp: 1,
+            mem_frac: 0.5,
+            gpus: &[3],
+            cc: "12.0",
+            load_extra: &[],
+        };
+        command(&spec)
+    }
+
+    fn model_dir(weights: &[&str]) -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        for w in weights {
+            std::fs::write(d.path().join(w), b"w").unwrap();
+        }
+        std::fs::write(d.path().join(PACK_VERIFY), serde_json::json!({ "weights": weights }).to_string()).unwrap();
+        d
+    }
+
+    #[test]
+    fn launches_the_engine_with_the_pack_the_listed_weights_and_the_tokenizer_dir() {
+        let d = model_dir(&["t.gguf", "d.gguf"]);
+        let c = cmd_in(d.path(), "runtime = \"goethe-engine\"").unwrap();
+        let a: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(&a[..3], ["-m", "goethe_engine", "serve"]);
+        let at = |f: &str| a.iter().position(|x| x == f).unwrap();
+        let dir = d.path().to_string_lossy().into_owned();
+        assert_eq!(a[at("--pack") + 1], format!("{dir}/{PACK_FILE}"));
+        assert_eq!(a[at("--weights") + 1..at("--tokenizer")], [format!("{dir}/t.gguf"), format!("{dir}/d.gguf")]);
+        assert_eq!(a[at("--tokenizer") + 1], dir);
+        assert_eq!(a[at("--max-running-requests") + 1], "4");
+    }
+
+    #[test]
+    fn missing_verification_or_weights_refuse_to_launch() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(cmd_in(d.path(), "runtime = \"goethe-engine\"").is_err());
+        let d = model_dir(&["t.gguf"]);
+        std::fs::remove_file(d.path().join("t.gguf")).unwrap();
+        assert!(cmd_in(d.path(), "runtime = \"goethe-engine\"").unwrap_err().contains("missing"));
+    }
+
+    #[test]
+    fn unsigned_override_is_never_passed_on() {
+        let d = model_dir(&["t.gguf"]);
+        let c = cmd_in(d.path(), "runtime = \"goethe-engine\"\n[env]\nGOETHE_ENGINE_ALLOW_UNSIGNED = \"1\"").unwrap();
+        let v = c.get_envs().find(|(k, _)| *k == "GOETHE_ENGINE_ALLOW_UNSIGNED");
+        assert!(v.is_none_or(|(_, v)| v.is_none()));
+        assert!(!ENV_KEEP.contains(&"GOETHE_ENGINE_ALLOW_UNSIGNED") && !ENV_KEEP_PREFIX.iter().any(|p| "GOETHE_ENGINE_ALLOW_UNSIGNED".starts_with(p)));
+    }
+
+    #[test]
+    fn pack_weights_and_tokenizer_flags_are_owned() {
+        for bad in ["--pack", "--pack=x", "--weights", "--tokenizer", "--tokenizer=/x"] {
+            assert!(check_extra_args(&[bad.to_string(), "v".into()]).unwrap_err().contains("not allowed"), "{bad}");
+        }
     }
 }
