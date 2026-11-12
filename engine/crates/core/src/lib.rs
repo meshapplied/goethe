@@ -15,6 +15,7 @@ pub mod memory_spec;
 pub mod model_facts;
 pub mod models;
 pub mod net;
+pub mod packs;
 pub mod paths;
 pub mod placement;
 pub mod ports;
