@@ -43,4 +43,17 @@ else
   SGLANG_BUILD_RUST_EXTS=none "${UV}" pip install --python "${VENV}/bin/python" --no-deps -e "${FORK_ROOT}/python"
 fi
 
+# goethe-engine wheel from its PIN: installed only once the PIN names a release; the hash is enforced.
+PIN="${SCRIPT_DIR}/../goethe-engine/PIN"
+if [[ -f "${PIN}" ]]; then
+  ENGINE_URL="$(sed -n "s/^GOETHE_ENGINE_WHEEL_URL=//p" "${PIN}")"
+  ENGINE_SHA="$(sed -n "s/^GOETHE_ENGINE_WHEEL_SHA256=//p" "${PIN}")"
+  if [[ -n "${ENGINE_URL}" && -n "${ENGINE_SHA}" ]]; then
+    ENGINE_REQ="$(mktemp)"
+    trap 'rm -f "${ENGINE_REQ}"' EXIT
+    echo "goethe-engine @ ${ENGINE_URL} --hash=sha256:${ENGINE_SHA}" > "${ENGINE_REQ}"
+    "${UV}" pip install --python "${VENV}/bin/python" --require-hashes --no-deps -r "${ENGINE_REQ}"
+  fi
+fi
+
 echo "Python environment ready: ${VENV}"
