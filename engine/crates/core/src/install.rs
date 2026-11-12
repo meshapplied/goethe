@@ -446,8 +446,22 @@ impl Planned {
 }
 
 fn register(home: &Path, opts: &InstallOpts, t: Target) -> Result<(), String> {
-    let planned = plan(home, opts, &t)?;
+    let mut planned = plan(home, opts, &t)?;
+    use_pack(home, &mut planned)?;
     commit(home, &planned, "installed", &mut std::io::stdout())
+}
+
+fn use_pack(home: &Path, p: &mut Planned) -> Result<(), String> {
+    // With a pack store configured and a verified pack for these files and this GPU, the card names goethe-engine.
+    // No store, no GPU or no match: the card stays as planned. Any other failure aborts before the card is written.
+    let Some(url) = crate::packs::store_url(home)? else { return Ok(()) };
+    let Some(gpu) = crate::hw::profile(home).ok().and_then(|h| h.gpus.into_iter().next()) else { return Ok(()) };
+    let Some(arch) = crate::gpu_arch::lookup(&gpu.compute_capability) else { return Ok(()) };
+    let broker = crate::packs::HttpBroker { store: url, tokens: &crate::packs::EnvToken };
+    if crate::packs::pull(home, &p.dir, &arch.tag(), &broker, &crate::packs::python_runner(home))? {
+        p.table.insert("runtime".into(), toml::Value::String("goethe-engine".into()));
+    }
+    Ok(())
 }
 
 pub fn plan_in_place(home: &Path, model_id: &str, dir: &Path, entry: Option<RegistryModel>) -> Result<Planned, String> {
