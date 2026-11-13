@@ -1,6 +1,7 @@
 // goethe doctor health checks for local install.
 
 use crate::hf;
+use crate::pyenv::{self, Layer};
 use crate::paths::{goethe_home, goethe_sock};
 use crate::registry::{fetch, registry_url};
 use crate::rpc;
@@ -422,15 +423,27 @@ fn check_cloud(home: &Path) -> Check {
 }
 
 fn check_pyenv(home: &Path) -> Check {
-    // The hermetic py-env has a python and an installed sglang distribution, read from disk (importing takes seconds).
+    // The hermetic py-env's python and base layer, then SGLang and goethe-engine when installed, read from disk.
     let env = home.join("py-env");
     if !env.join("bin/python").is_file() {
-        return check("py-env", "FAIL", "run the installer or goethe update --engine");
+        return check("py-env", "FAIL", "run the installer");
     }
     let (python, sglang) = pyenv_versions(&env);
+    if !pyenv::has(home, Layer::Base) {
+        return check("py-env", "FAIL", format!("python {python} but no huggingface_hub (the hf CLI); run the installer again"));
+    }
+    let engine = match pyenv::engine_installed(home) {
+        Some(v) if v == pyenv::ENGINE_VERSION => format!(", goethe-engine {v}"),
+        Some(v) => format!(", goethe-engine {v} (goethe pins {}; it updates with the next kernel pack install)", pyenv::ENGINE_VERSION),
+        None => String::new(),
+    };
     match sglang.or_else(|| sglang_from_python(&env.join("bin/python"))) {
-        Some(sglang) => check("py-env", "OK", format!("sglang {sglang}, python {python}")),
-        None => check("py-env", "FAIL", format!("python {python} but no sglang distribution; run goethe update --engine")),
+        Some(sglang) => check("py-env", "OK", format!("sglang {sglang}{engine}, python {python}")),
+        None => check(
+            "py-env",
+            "OK",
+            format!("python {python}{engine}; SGLang not installed yet; it installs with the first model that needs it"),
+        ),
     }
 }
 

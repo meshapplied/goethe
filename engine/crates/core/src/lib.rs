@@ -22,6 +22,7 @@ pub mod platform_api;
 pub mod platform_cli;
 pub mod heartbeat;
 pub mod placement;
+pub mod pyenv;
 pub mod ports;
 pub mod recommend;
 pub mod registry;

@@ -28,6 +28,7 @@ from lib.goethe_test import (
     http_get,
     http_post,
     main_exit,
+    mark_sglang_layer,
     require_cli,
     roomiest_test_gpu,
     run,
@@ -238,16 +239,18 @@ def _serve_and_install(cdn: Path, new: Path) -> None:
                 prefix = run([str(home / "py-env" / "bin" / "python"), "-c", "import sys; print(sys.prefix)"]).stdout
                 if Path(prefix.strip()).resolve() != (home / "py-env").resolve():
                     raise RuntimeError(f"installer py-env is not a venv in the temp home: {prefix.strip()}")
-                probe = "import sglang, torch; print(torch.__version__)"
+                absent = "print(*(u.find_spec(m) is None for m in ['sglang', 'torch']))"
+                probe = f"import importlib.util as u, huggingface_hub; {absent}"
                 imp = run([str(home / "py-env" / "bin" / "python"), "-c", probe])
-                if imp.returncode != 0 or "+cu130" not in imp.stdout:
-                    raise RuntimeError(f"py-env lacks the hash-locked torch/sglang: {imp.stderr[-400:]}")
+                if imp.returncode != 0 or imp.stdout.split() != ["True", "True"]:
+                    raise RuntimeError(f"py-env is not the base layer (hf, no torch or SGLang): {imp.stderr[-400:]}")
                 for sub in ("bin/goethe", "bin/goethed", "bin/uv", "nginx/certs/server.key", "hardware_state.json"):
                     if not (home / sub).exists():
                         raise RuntimeError(f"missing {sub} after install")
                 bin_dir = home / "py-env" / "bin"
                 (bin_dir / "python-real").symlink_to(os.readlink(bin_dir / "python"))
                 write_stub_python(bin_dir, bin_dir / "python-real")
+                mark_sglang_layer(home / "py-env")
                 goethe = str(home / "bin" / "goethe")
                 _up_after_install(goethe, env)
                 _check_goethe_env(home, goethe, env, pkg_url, late)

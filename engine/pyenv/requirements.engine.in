@@ -1,0 +1,7 @@
+# Engine layer: goethe-engine's runtime (torch, transformers for its tokenizer) and gguf, which the
+# install flow uses with transformers to extract tokenizer.json from GGUF files. The goethe-engine wheel
+# itself comes from goethe-engine/PIN. Versions come from requirements.in (layers.sh).
+huggingface-hub
+torch
+transformers
+gguf

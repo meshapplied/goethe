@@ -1,0 +1,3 @@
+# Base layer: what goethe uses on every machine. The hf CLI downloads models (hf.rs); the installer's
+# CUDA-compat step and doctor need only the interpreter. Versions come from requirements.in (layers.sh).
+huggingface-hub

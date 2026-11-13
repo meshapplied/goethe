@@ -367,7 +367,7 @@ GeForce and TITAN cards need driver 580 or newer. Check the driver with `nvidia-
 ## Software requirements
 
 - Linux on x86_64 or ARM64 with glibc 2.30 or newer, for example Ubuntu 20.04+ or Debian 11+.
-- Disk space for your models, plus about 12 GB for Goethe itself.
+- Disk space for your models, plus about 2 GB for Goethe itself and about 8 GB more for SGLang, which installs once, with the first model that needs it.
 - No CUDA toolkit: Goethe brings its own CUDA runtime and compiler.
 
 The installer checks the machine first and installs missing pieces, such as a C++ compiler or the NVIDIA driver, after asking. `GOETHE_INSTALL_DEPS=1` and `GOETHE_INSTALL_DRIVER=1` answer yes in advance, `=0` no. Inside a container it never touches the driver, which belongs to the host. A GPU problem never stops the install; `goethe doctor` names the fix afterwards:
