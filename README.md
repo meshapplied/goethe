@@ -58,7 +58,7 @@ print(reply.choices[0].message.content)
 - **Easy to serve.** Every model you load is served at the same URL; a request picks its model by name.
 - **Fast.** Use the custom kernel attachments to accelerate and optimise model capability.
 - **Private by default.** Nothing reaches the API until you allow it. Rate-limit, expire, scope or revoke keys at any time.
-- **Fits your network.** This machine only, Tailscale / WireGuard / ZeroTier, or a public IP. `goethe api configure` walks you through the choice.
+- **Fits your network.** This machine only, a VPN, or a public IP. `goethe api configure` walks you through the choice.
 - **Many models, many GPUs.** Run several models side by side, split large models across GPUs, and keep other GPU software running next to Goethe.
 - **Always on.** Loaded models come back after a reboot or a crash.
 
