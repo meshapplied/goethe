@@ -161,7 +161,9 @@ pub fn ensure(home: &Path, layer: Layer) -> Result<(), String> {
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
     let pkg = pkg_base_url();
-    let result = fetch_signed_sums(home, &pkg, &tmp).and_then(|sums| install_from(home, &pkg, &sums, &tmp, layer));
+    let result = fetch_signed_sums(home, &pkg, &tmp)
+        .map_err(|e| format!("could not get the signed package list from {pkg} ({e}); nothing was changed, run the command again"))
+        .and_then(|sums| install_from(home, &pkg, &sums, &tmp, layer));
     let _ = fs::remove_dir_all(&tmp);
     result?;
     if !has(home, layer) {
@@ -351,6 +353,20 @@ mod tests {
             for name in ["huggingface-hub", "torch", "transformers", "gguf"] {
                 assert!(engine.contains_key(name), "engine{suffix} lock lacks {name}");
             }
+        }
+    }
+
+    #[test]
+    #[ignore = "installs from the CDN in GOETHE_PKG_URL into GOETHE_TEST_PYENV_HOME"]
+    fn ensure_from_cdn() {
+        // Manual check: GOETHE_TEST_PYENV_LAYERS=engine,sglang installs those layers in that order, then again as no-ops.
+        let home = PathBuf::from(std::env::var("GOETHE_TEST_PYENV_HOME").expect("set GOETHE_TEST_PYENV_HOME"));
+        let layers = std::env::var("GOETHE_TEST_PYENV_LAYERS").unwrap_or_else(|_| "base".to_string());
+        for name in layers.split(',') {
+            let layer = [Layer::Base, Layer::Engine, Layer::Sglang].into_iter().find(|l| l.name() == name).expect("base, engine or sglang");
+            ensure(&home, layer).unwrap();
+            assert!(has(&home, layer));
+            ensure(&home, layer).unwrap();
         }
     }
 

@@ -710,7 +710,8 @@ install_pyenv() {
     echo "verified CDN artifacts for ${ARCH}"
     exit 0
   fi
-  if [[ -x "${GOETHE_HOME}/py-env/bin/python" ]]; then
+  if [[ -x "${GOETHE_HOME}/py-env/bin/python" ]] &&
+    compgen -G "${GOETHE_HOME}/py-env/lib/python3*/site-packages/huggingface_hub-*.dist-info" >/dev/null; then
     done_line "Python environment already set up at ${GOETHE_HOME}/py-env; left as it is"
     return 0
   fi
