@@ -141,7 +141,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
             rows.push(ModelRow {
                 id: o.hf_repo.clone(),
                 status: "available".to_string(),
-                gb: 0.0,
+                gb: crate::packs::model_gb(&home, o).unwrap_or(0.0),
                 fit: format!("kernel pack for {}", o.arch),
                 custom: None,
                 optimised: Some(true),
@@ -151,7 +151,8 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
         println!("{}", serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?);
     } else {
         print!("{}", list_text(&rows, view.as_ref().map(View::free_text)));
-        print!("{}", packs_text(&pack_only, linked));
+        let sized: Vec<(&crate::packs::Offer, Option<f64>)> = pack_only.iter().map(|o| (*o, crate::packs::model_gb(&home, o))).collect();
+        print!("{}", packs_text(&sized, linked));
     }
     Ok(())
 }
@@ -235,15 +236,15 @@ fn verdict(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<u
 
 const OPTIMISED: &str = " (optimised kernels available)";
 
-fn packs_text(offers: &[&crate::packs::Offer], linked: bool) -> String {
+fn packs_text(offers: &[(&crate::packs::Offer, Option<f64>)], linked: bool) -> String {
     // Models that run on goethe-engine with optimised kernels on this machine's GPUs, and how to get them.
     use crate::term::{paint, Color, Table};
     if offers.is_empty() {
         return String::new();
     }
-    let mut table = Table::new(&["MODEL", "GPU"]);
-    for o in offers {
-        table.row(vec![format!("{}{OPTIMISED}", o.hf_repo), o.arch.clone()]);
+    let mut table = Table::new(&["MODEL", "DISK"]);
+    for (o, gb) in offers {
+        table.row(vec![format!("{}{OPTIMISED}", o.hf_repo), gb.map_or("-".to_string(), |g| format!("{g:.1} GB"))]);
     }
     let how = if linked {
         "goethe install MODEL downloads the model and its verified kernels".to_string()

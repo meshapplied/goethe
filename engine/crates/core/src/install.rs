@@ -118,6 +118,7 @@ struct Target {
 struct PackChoice {
     offer: crate::packs::Offer,
     creds: crate::platform::Credentials,
+    plan: Option<crate::packs::Plan>,
 }
 
 enum PackDecision {
@@ -194,9 +195,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         ));
     }
     if let Some(e) = entry.as_ref() {
-        if let Some(line) = crate::recommend::preview(home, e)? {
-            println!("{line}");
-        }
+        crate::recommend::preview(home, e)?;
     }
     let dl = DownloadOpts {
         revision: entry.as_ref().and_then(|e| e.revision.clone()),
@@ -231,17 +230,27 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         });
     }
     let declined = match pack_decision(home, opts)? {
-        PackDecision::Use(choice) => {
+        PackDecision::Use(mut choice) => {
             // Only the files the pack was built for, at its pinned revision; the engine layer once, on first use.
             crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
-            let pack_dl = DownloadOpts {
-                revision: Some(choice.offer.revision.clone()),
-                force: opts.force,
-                no_verify: opts.no_verify,
-                only: Some(choice.offer.files.clone()),
-            };
+            let login = crate::packs::Login(choice.creds.clone());
+            let broker = crate::packs::HttpBroker::new(&choice.creds.platform_url, &login);
+            let plan = crate::packs::plan(home, &opts.model_id, &choice.offer.arch, &broker, &crate::packs::python_runner(home))?
+                .ok_or_else(|| format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch))?;
+            let rev = choice.offer.revision.clone();
+            let pre = hf::preflight_model(&choice.offer.hf_repo, Some(&rev))?;
+            let size = |f: &String| pre.siblings.iter().find(|s| &s.rfilename == f).map(|s| s.size);
+            let files = plan
+                .variants
+                .iter()
+                .find(|v| v.iter().all(|f| size(f).is_some()))
+                .cloned()
+                .ok_or_else(|| format!("{}: the model files its kernel pack was built for are not in the repository", choice.offer.hf_repo))?;
+            announce(&opts.model_id, &format!("optimised kernels ({})", choice.offer.arch), files.iter().filter_map(size).sum());
+            let pack_dl = DownloadOpts { revision: Some(rev), force: opts.force, no_verify: opts.no_verify, only: Some(files.clone()) };
             hf::ensure_model(home, &choice.offer.hf_repo, &card_dir, &pack_dl)?;
-            gguf_metadata(home, &card_dir, &choice.offer)?;
+            gguf_metadata(home, &card_dir, &choice.offer.format, &files)?;
+            choice.plan = Some(plan);
             return Ok(Target {
                 model_id: opts.model_id.clone(),
                 card_dir,
@@ -256,6 +265,11 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         PackDecision::None => false,
     };
     sglang_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), declined)?;
+    if !hf::offline_mode() {
+        if let Ok(pre) = hf::preflight_model(&opts.model_id, dl.revision.as_deref()) {
+            announce(&opts.model_id, "SGLang", hf::download_bytes(&pre.siblings));
+        }
+    }
     hf::ensure_model(home, &opts.model_id, &card_dir, &dl)?;
     Ok(Target {
         model_id: opts.model_id.clone(),
@@ -266,6 +280,11 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         ternary: None,
         pack: None,
     })
+}
+
+fn announce(model: &str, engine: &str, bytes: u64) {
+    // One line before the download: what is installed, with which engine, and how much it fetches.
+    println!("{model} · {engine} · {:.1} GB", bytes as f64 / GIB);
 }
 
 fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String> {
@@ -280,7 +299,7 @@ fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String
     };
     let linked = || crate::platform::load_credentials(home).ok().flatten();
     if let Some(creds) = linked() {
-        return Ok(PackDecision::Use(Box::new(PackChoice { offer, creds })));
+        return Ok(PackDecision::Use(Box::new(PackChoice { offer, creds, plan: None })));
     }
     if !ask_login(&offer, opts)? {
         return Ok(PackDecision::Declined);
@@ -290,7 +309,7 @@ fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String
         return Ok(PackDecision::Declined);
     }
     match linked() {
-        Some(creds) => Ok(PackDecision::Use(Box::new(PackChoice { offer, creds }))),
+        Some(creds) => Ok(PackDecision::Use(Box::new(PackChoice { offer, creds, plan: None }))),
         None => Ok(PackDecision::Declined),
     }
 }
@@ -378,16 +397,16 @@ if tok:
     t.save_pretrained(out)
 "#;
 
-fn gguf_metadata(home: &Path, dir: &Path, offer: &crate::packs::Offer) -> Result<(), String> {
+fn gguf_metadata(home: &Path, dir: &Path, format: &str, files: &[String]) -> Result<(), String> {
     // A GGUF repo ships no config.json or tokenizer.json: transformers writes both from the GGUF header, offline, once. Written to a temp dir and moved in, so a failed run never leaves a half written config behind.
-    if offer.format != "gguf" {
+    if format != "gguf" {
         return Ok(());
     }
     let (cfg, tok) = (!dir.join("config.json").is_file(), !dir.join("tokenizer.json").is_file());
     if !cfg && !tok {
         return Ok(());
     }
-    let mut files = offer.files.clone();
+    let mut files = files.to_vec();
     files.sort();
     let first = files.first().ok_or("the pack names no weights file")?;
     let out = dir.join(".goethe-meta.tmp");
@@ -658,13 +677,12 @@ fn register(home: &Path, opts: &InstallOpts, t: Target) -> Result<(), String> {
 fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) -> Result<(), String> {
     // Pull with this node's login (goethe-engine verifies index, identity, pack and arch), then point the card at it.
     let login = crate::packs::Login(c.creds.clone());
-    let broker = crate::packs::HttpBroker { store: c.creds.platform_url.clone(), tokens: &login };
+    let broker = crate::packs::HttpBroker::new(&c.creds.platform_url, &login);
     let run = crate::packs::python_runner(home);
+    let plan = c.plan.as_ref().ok_or("no kernel pack plan")?;
     println!("installing the optimised kernels for {} ...", c.offer.arch);
-    if !crate::packs::pull(home, &p.dir, &c.offer.arch, &broker, &run)? {
-        return Err(format!("the signed pack index has no pack for these files on {}; nothing was installed", c.offer.arch));
-    }
-    let max = crate::packs::max_ctx(&p.dir, &run)?;
+    let variant = crate::packs::finish(home, &p.dir, &c.offer.arch, plan, &broker, &run)?;
+    let max = crate::packs::max_ctx(&p.dir, &variant, &run)?;
     if cli_ctx.is_some_and(|x| x > max) {
         p.notes.push(format!("ctx {} is longer than the kernels support; using {max}", cli_ctx.unwrap_or(max)));
     }

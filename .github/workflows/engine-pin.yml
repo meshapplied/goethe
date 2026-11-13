@@ -1,0 +1,62 @@
+# Opens a PR to dev that moves engine/goethe-engine/PIN to the newest goethe-engine release (wheel URL and checked sha256).
+name: engine-pin
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  pin:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+      - name: Newest release against the pin
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(gh release view -R meshapplied/goethe-engine --json tagName -q .tagName)"
+          ver="${tag#v}"
+          have="$(sed -n 's/^GOETHE_ENGINE_VERSION=//p' engine/goethe-engine/PIN)"
+          newest="$(printf '%s\n%s\n' "$have" "$ver" | sort -V | tail -1)"
+          if [[ "$ver" == "$have" || "$newest" != "$ver" ]]; then
+            echo "pin $have is current (latest release $ver)"
+            exit 0
+          fi
+          if git ls-remote --exit-code --heads origin "engine-pin-$ver" >/dev/null; then
+            echo "engine-pin-$ver already open"
+            exit 0
+          fi
+          echo "ver=$ver" >>"$GITHUB_OUTPUT"
+      - name: Wheel and its sha256
+        if: steps.rel.outputs.ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.rel.outputs.ver }}
+        run: |
+          wheel="goethe_engine-${VER}-py3-none-any.whl"
+          url="https://github.com/meshapplied/goethe-engine/releases/download/v${VER}/${wheel}"
+          curl -fsSL -o "$RUNNER_TEMP/$wheel" "$url"
+          want="$(curl -fsSL "$url.sha256" | cut -d' ' -f1)"
+          got="$(sha256sum "$RUNNER_TEMP/$wheel" | cut -d' ' -f1)"
+          [[ "$want" =~ ^[0-9a-f]{64}$ && "$want" == "$got" ]] || { echo "sha256 of $wheel does not match its .sha256"; exit 1; }
+          printf 'GOETHE_ENGINE_VERSION=%s\nGOETHE_ENGINE_WHEEL_URL=%s\nGOETHE_ENGINE_WHEEL_SHA256=%s\n' "$VER" "$url" "$got" >engine/goethe-engine/PIN
+      - name: Pull request
+        if: steps.rel.outputs.ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.rel.outputs.ver }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "engine-pin-$VER"
+          git commit -am "Pin goethe-engine $VER"
+          git push origin "engine-pin-$VER"
+          gh pr create --base dev --head "engine-pin-$VER" --title "Pin goethe-engine $VER" \
+            --body "goethe-engine $VER is released; this moves the PIN to its wheel (sha256 checked against the release). Check the release notes for pack index or ABI changes before merging."
