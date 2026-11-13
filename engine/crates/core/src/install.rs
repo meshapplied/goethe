@@ -722,7 +722,7 @@ fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, S
         swa_kv_elems_per_request: 0,
         linear_state_bytes_per_request: 0,
     };
-    let ctx = opts.ctx.unwrap_or(100_000).min(facts.max_ctx);
+    let ctx = opts.ctx.unwrap_or(facts.max_ctx).min(facts.max_ctx);
     let max_conc = opts.max_conc.unwrap_or(4);
     let card = GoetheCard {
         model_id: t.model_id.clone(),
@@ -840,7 +840,8 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
             .unwrap_or(default)
     };
     let entry = t.entry.as_ref();
-    let ctx = pick(opts.ctx, "context_length", entry.and_then(|e| e.default_ctx), facts.max_ctx.min(131072));
+    // The model's whole context window by default; placement lowers it at load time when VRAM cannot hold it.
+    let ctx = pick(opts.ctx, "context_length", None, entry.and_then(|e| e.effective_max_ctx()).unwrap_or(facts.max_ctx).min(facts.max_ctx));
     let max_conc = pick(opts.max_conc, "max_running_requests", entry.and_then(|e| e.default_max_conc), 8);
     let tp = pick(opts.tp, "tp_size", entry.and_then(|e| e.default_tp), 0);
     let ep = pick(None, "ep_size", None, 1);

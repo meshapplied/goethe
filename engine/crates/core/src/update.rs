@@ -95,9 +95,20 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     if differs("SGLang") || differs("goethe-engine") {
         let _lock = pyenv::lock(home)?;
         for (what, layer) in [("SGLang", Layer::Sglang), ("goethe-engine", Layer::Engine)] {
-            if differs(what) {
+            if differs(what) && !(bins && layer == Layer::Engine) {
                 pyenv::install_from(home, pkg, &sums, tmp, layer).map_err(|e| format!("{e}; goethe update --engine retries"))?;
             }
+        }
+    }
+    if bins && pyenv::engine_installed(home).is_some() {
+        // The new binary may pin another goethe-engine: it brings the engine layer to its own pin (a no-op when equal).
+        let ok = std::process::Command::new(home.join("bin/goethe"))
+            .args(["update", "--engine", "--yes"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("note: goethe-engine was not brought to the new pin; run goethe update --engine");
         }
     }
     if let Some(t) = ternary {
