@@ -46,7 +46,6 @@ pub struct DownloadOpts {
     pub revision: Option<String>,
     pub force: bool,
     pub no_verify: bool,
-    /// Download only these weight files (plus the repo's small metadata files), e.g. the one GGUF a kernel pack names.
     pub only: Option<Vec<String>>,
 }
 

@@ -269,8 +269,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
 }
 
 fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String> {
-    // A pack in the platform's index for this model and a local GPU: used when the node is logged in; otherwise the user
-    // may log in now. Without a login no pack is ever downloaded.
+    // A pack in the platform's index for this model and a local GPU: used when the node is logged in; otherwise the user may log in now. Without a login no pack is ever downloaded.
     let archs = crate::packs::local_archs(home);
     if archs.is_empty() {
         return Ok(PackDecision::None);
@@ -380,8 +379,7 @@ if tok:
 "#;
 
 fn gguf_metadata(home: &Path, dir: &Path, offer: &crate::packs::Offer) -> Result<(), String> {
-    // A GGUF repo ships no config.json or tokenizer.json: transformers writes both from the GGUF header, offline, once.
-    // Written to a temp dir and moved in, so a failed run never leaves a half written config behind.
+    // A GGUF repo ships no config.json or tokenizer.json: transformers writes both from the GGUF header, offline, once. Written to a temp dir and moved in, so a failed run never leaves a half written config behind.
     if offer.format != "gguf" {
         return Ok(());
     }
@@ -840,7 +838,6 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
             .unwrap_or(default)
     };
     let entry = t.entry.as_ref();
-    // The model's whole context window by default; placement lowers it at load time when VRAM cannot hold it.
     let ctx = pick(opts.ctx, "context_length", None, entry.and_then(|e| e.effective_max_ctx()).unwrap_or(facts.max_ctx).min(facts.max_ctx));
     let max_conc = pick(opts.max_conc, "max_running_requests", entry.and_then(|e| e.default_max_conc), 8);
     let tp = pick(opts.tp, "tp_size", entry.and_then(|e| e.default_tp), 0);

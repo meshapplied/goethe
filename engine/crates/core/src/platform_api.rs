@@ -107,6 +107,15 @@ impl Client {
         parse_heartbeat(&self.post("/api/device/heartbeat", snapshot, Some(token))?)
     }
 
+    pub fn token_lifetime(&self, token: &Secret, ttl_seconds: Option<u64>) -> Result<Option<String>, ApiError> {
+        // This node's own token lifetime (None: no limit of its own); the reply names when the token now expires, if ever.
+        let v = self.post("/api/device/token-lifetime", json!({ "ttl_seconds": ttl_seconds }).to_string().as_bytes(), Some(token))?;
+        if v.get("ok") != Some(&Value::Bool(true)) {
+            return Err(ApiError::Malformed("token-lifetime did not return ok".into()));
+        }
+        Ok(v.get("expires_at").and_then(|e| e.as_str()).map(String::from))
+    }
+
     pub fn logout(&self, token: &Secret) -> Result<(), ApiError> {
         // A token the platform no longer knows is already logged out.
         match self.post("/api/device/logout", b"{}", Some(token)) {
