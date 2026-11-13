@@ -34,7 +34,18 @@ pub struct SglangInfo {
     pub key: String,
     pub archs: BTreeSet<String>,
     pub quants: BTreeSet<String>,
+    #[serde(default)]
+    pub bundled: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SglangSnapshot {
+    pub sglang: String,
+    pub archs: BTreeSet<String>,
+    pub quants: BTreeSet<String>,
+}
+
+const SGLANG_SNAPSHOT: &str = include_str!("../../../cdn/v1/sglang_support.json");
 
 pub struct Gpu {
     pub cc: f64,
@@ -303,7 +314,7 @@ fn machine(home: &Path, con: &Connection) -> Machine {
         })
         .unwrap_or_default();
     Machine {
-        sglang: sglang_info(home),
+        sglang: Some(sglang_support(home)),
         gpus,
     }
 }
@@ -413,8 +424,9 @@ pub fn classify(dir: &Path, m: &Machine) -> Verdict {
     let mut notes = Vec::new();
     match &m.sglang {
         Some(info) if !archs.iter().any(|a| info.archs.contains(a)) => {
-            return Verdict::Unsupported(format!("architecture {arch} is not served by the installed SGLang"));
+            return Verdict::Unsupported(format!("architecture {arch} is not served by {}", sglang_name(info)));
         }
+        Some(info) if info.bundled => notes.push(format!("SGLang not installed yet; checked against {}", bundled_label(info))),
         Some(_) => {}
         None => notes.push("SGLang not found in the py-env; architecture not verified".to_string()),
     }
@@ -422,7 +434,7 @@ pub fn classify(dir: &Path, m: &Machine) -> Verdict {
     if let (Some(q), Some(info)) = (&method, &m.sglang) {
         let known = info.quants.contains(q) || (q == "gptq" && info.quants.contains("gptq_marlin"));
         if !known {
-            return Verdict::Unsupported(format!("quantization {q} is not supported by the installed SGLang"));
+            return Verdict::Unsupported(format!("quantization {q} is not supported by {}", sglang_name(info)));
         }
     }
     if let Err(why) = gpu_fitness(quant_format(&cfg, dir), &m.gpus, &mut notes) {
@@ -557,6 +569,23 @@ fn quant_method(cfg: &Value, dir: &Path) -> Option<String> {
     Some(modelopt_name(hq.pointer("/quantization/quant_algo").and_then(|v| v.as_str())))
 }
 
+pub fn sglang_serves(info: &SglangInfo, cfg: &Value) -> Result<(), String> {
+    // From config.json alone (before any download): SGLang has a model class for an architecture and the quantization.
+    let archs = architectures(cfg);
+    let Some(arch) = archs.first() else {
+        return Err("its config.json names no architecture".to_string());
+    };
+    if !archs.iter().any(|a| info.archs.contains(a)) {
+        return Err(format!("SGLang does not serve its architecture {arch}"));
+    }
+    if let Some(q) = quant_method(cfg, Path::new("")) {
+        if !(info.quants.contains(&q) || (q == "gptq" && info.quants.contains("gptq_marlin"))) {
+            return Err(format!("SGLang does not support its quantization {q}"));
+        }
+    }
+    Ok(())
+}
+
 fn quant_format(cfg: &Value, dir: &Path) -> &'static str {
     let text = format!(
         "{}{}",
@@ -614,6 +643,57 @@ fn dtype_label(cfg: &Value) -> String {
     .to_string()
 }
 
+fn sglang_name(info: &SglangInfo) -> &'static str {
+    if info.bundled {
+        "Goethe's SGLang build"
+    } else {
+        "the installed SGLang"
+    }
+}
+
+fn bundled_label(info: &SglangInfo) -> String {
+    format!("the bundled list of SGLang {}", info.key.trim_start_matches("bundled:"))
+}
+
+pub fn sglang_support(home: &Path) -> SglangInfo {
+    // The installed SGLang's architectures and quantizations, else the bundled snapshot of the pinned build.
+    sglang_info(home).unwrap_or_else(|| {
+        let snap = bundled_snapshot();
+        SglangInfo { key: format!("bundled:{}", snap.sglang), archs: snap.archs, quants: snap.quants, bundled: true }
+    })
+}
+
+pub fn bundled_snapshot() -> SglangSnapshot {
+    serde_json::from_str(SGLANG_SNAPSHOT).expect("cdn/v1/sglang_support.json is checked by cargo test")
+}
+
+fn sglang_dist(site: &Path) -> Option<String> {
+    // The sglang-<version>.dist-info directory name in a site-packages (or an unpacked wheel).
+    fs::read_dir(site)
+        .ok()?
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .find(|n| n.starts_with("sglang-") && n.ends_with(".dist-info"))
+}
+
+pub fn read_sglang(site: &Path) -> Option<SglangSnapshot> {
+    // EntryClass names and CUDA quantization methods of the SGLang in a site-packages or unpacked wheel, as text.
+    let dist = sglang_dist(site)?;
+    let srt = site.join("sglang/srt");
+    let mut archs = BTreeSet::new();
+    for e in fs::read_dir(srt.join("models")).ok()?.flatten() {
+        if e.path().extension().and_then(|x| x.to_str()) == Some("py") {
+            archs.extend(entry_classes(&fs::read_to_string(e.path()).unwrap_or_default()));
+        }
+    }
+    if archs.is_empty() {
+        return None;
+    }
+    let quants = quant_methods(&fs::read_to_string(srt.join("layers/quantization/__init__.py")).unwrap_or_default());
+    let version = dist.trim_start_matches("sglang-").trim_end_matches(".dist-info").to_string();
+    Some(SglangSnapshot { sglang: version, archs, quants })
+}
+
 pub fn sglang_info(home: &Path) -> Option<SglangInfo> {
     // EntryClass names and CUDA quantization methods of the py-env's SGLang, read as text, cached per build.
     let lib = home.join("py-env/lib");
@@ -622,11 +702,7 @@ pub fn sglang_info(home: &Path) -> Option<SglangInfo> {
         .flatten()
         .map(|e| e.path().join("site-packages"))
         .find(|p| p.join("sglang/srt/models").is_dir())?;
-    let dist = fs::read_dir(&site)
-        .ok()?
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .find(|n| n.starts_with("sglang-") && n.ends_with(".dist-info"))?;
+    let dist = sglang_dist(&site)?;
     let stamp = fs::metadata(site.join(&dist).join("RECORD"))
         .and_then(|m| m.modified())
         .ok()
@@ -642,18 +718,8 @@ pub fn sglang_info(home: &Path) -> Option<SglangInfo> {
     {
         return Some(c);
     }
-    let srt = site.join("sglang/srt");
-    let mut archs = BTreeSet::new();
-    for e in fs::read_dir(srt.join("models")).ok()?.flatten() {
-        if e.path().extension().and_then(|x| x.to_str()) == Some("py") {
-            archs.extend(entry_classes(&fs::read_to_string(e.path()).unwrap_or_default()));
-        }
-    }
-    if archs.is_empty() {
-        return None;
-    }
-    let quants = quant_methods(&fs::read_to_string(srt.join("layers/quantization/__init__.py")).unwrap_or_default());
-    let info = SglangInfo { key, archs, quants };
+    let snap = read_sglang(&site)?;
+    let info = SglangInfo { key, archs: snap.archs, quants: snap.quants, bundled: false };
     if let Ok(text) = serde_json::to_string(&info) {
         let _ = fs::write(&cache, text);
     }
@@ -721,6 +787,25 @@ pub fn quant_methods(source: &str) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sglang_support_is_read_from_config_json_alone() {
+        let info = SglangInfo {
+            key: String::new(),
+            archs: ["LlamaForCausalLM".to_string()].into(),
+            quants: ["fp8".to_string(), "gptq_marlin".to_string()].into(),
+            bundled: false,
+        };
+        let ok = serde_json::json!({"architectures": ["LlamaForCausalLM"]});
+        assert!(sglang_serves(&info, &ok).is_ok());
+        let gptq = serde_json::json!({"architectures": ["LlamaForCausalLM"], "quantization_config": {"quant_method": "gptq"}});
+        assert!(sglang_serves(&info, &gptq).is_ok());
+        let awq = serde_json::json!({"architectures": ["LlamaForCausalLM"], "quantization_config": {"quant_method": "awq"}});
+        assert!(sglang_serves(&info, &awq).unwrap_err().contains("quantization awq"));
+        let other = serde_json::json!({"architectures": ["NewForCausalLM"]});
+        assert!(sglang_serves(&info, &other).unwrap_err().contains("architecture NewForCausalLM"));
+        assert!(sglang_serves(&info, &serde_json::json!({})).is_err());
+    }
     use serde_json::json;
 
     fn machine(total: f64) -> Machine {
@@ -729,6 +814,7 @@ mod tests {
                 key: "k".into(),
                 archs: ["LlamaForCausalLM".to_string()].into_iter().collect(),
                 quants: ["fp8", "compressed-tensors", "modelopt_fp4"].iter().map(|s| s.to_string()).collect(),
+                bundled: false,
             }),
             gpus: vec![Gpu { cc: 12.0, total_gb: total, free_gb: total * 0.9 }],
         }
@@ -741,6 +827,37 @@ mod tests {
             "hidden_size": 64, "max_position_embeddings": 4096, "torch_dtype": "bfloat16"});
         fs::write(d.join("config.json"), cfg.to_string()).unwrap();
         d
+    }
+
+    #[test]
+    fn bundled_snapshot_stands_in_for_a_missing_sglang() {
+        let snap = bundled_snapshot();
+        assert!(!snap.sglang.is_empty() && snap.archs.contains("LlamaForCausalLM") && snap.quants.contains("fp8"), "{snap:?}");
+        let dir = tempfile::tempdir().unwrap();
+        let info = sglang_support(dir.path());
+        assert!(info.bundled && info.key == format!("bundled:{}", snap.sglang));
+        let mut m = machine(96.0);
+        m.sglang = Some(info);
+        let d = model(dir.path(), "m", "LlamaForCausalLM");
+        fs::write(d.join("model.safetensors"), vec![0u8; 4096]).unwrap();
+        match classify(&d, &m) {
+            Verdict::Supported { notes, .. } => assert!(notes.iter().any(|n| n.starts_with("SGLang not installed yet")), "{notes:?}"),
+            v => panic!("{v:?}"),
+        }
+    }
+
+    #[test]
+    #[ignore = "needs an SGLang site-packages or unpacked wheel in GOETHE_SGLANG_SITE"]
+    fn sglang_snapshot_matches() {
+        // Compare (or with GOETHE_SGLANG_SNAPSHOT_WRITE=1 regenerate) cdn/v1/sglang_support.json from an SGLang on disk.
+        let site = PathBuf::from(std::env::var("GOETHE_SGLANG_SITE").expect("set GOETHE_SGLANG_SITE"));
+        let snap = read_sglang(&site).unwrap_or_else(|| panic!("no SGLang with models in {}", site.display()));
+        if std::env::var("GOETHE_SGLANG_SNAPSHOT_WRITE").as_deref() == Ok("1") {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../cdn/v1/sglang_support.json");
+            fs::write(&path, serde_json::to_string_pretty(&snap).unwrap() + "\n").unwrap();
+            return;
+        }
+        assert_eq!(bundled_snapshot(), snap, "cdn/v1/sglang_support.json is stale; regenerate it with GOETHE_SGLANG_SNAPSHOT_WRITE=1");
     }
 
     #[test]

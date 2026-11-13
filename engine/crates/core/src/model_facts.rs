@@ -354,8 +354,18 @@ pub fn weight_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 pub fn weights_gb(dir: &Path) -> Result<f64, String> {
+    // Safetensors weights, else the .gguf files of a kernel pack install.
+    let mut files = weight_files(dir)?;
+    if files.is_empty() {
+        files = std::fs::read_dir(dir)
+            .map_err(|e| format!("{}: {e}", dir.display()))?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("gguf") && p.is_file())
+            .collect();
+    }
     let mut bytes = 0u64;
-    for p in weight_files(dir)? {
+    for p in files {
         bytes += std::fs::metadata(&p).map_err(|e| format!("{}: {e}", p.display()))?.len();
     }
     Ok(bytes as f64 / GIB)

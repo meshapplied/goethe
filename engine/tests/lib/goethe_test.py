@@ -711,6 +711,13 @@ def test_public_port(home: Path) -> int:
     return int(home_goethe_env(home)["GOETHE_PUBLIC_PORT"])
 
 
+def mark_sglang_layer(env: Path) -> None:
+    """Dist-info markers so goethe sees the base and SGLang layers in a stub py-env (the stub engine stands in)."""
+    site = env / "lib" / "python3.11" / "site-packages"
+    for dist in ("huggingface_hub-0.0.0", "torch-0.0.0", "sglang-0.0.0+stub"):
+        (site / f"{dist}.dist-info").mkdir(parents=True, exist_ok=True)
+
+
 def write_stub_python(pyenv_bin: Path, real: Path) -> None:
     """Replace py-env/bin/python (unlinked first: never write through a venv symlink) with a stub launcher."""
     wrapper = pyenv_bin / "python"
@@ -795,6 +802,7 @@ def temp_home(
                 write_stub_python(pyenv_bin, real)
             else:
                 shutil.copy2(real, pyenv_bin / "python")
+            mark_sglang_layer(td / "py-env")
         yield td
         ok = True
     finally:

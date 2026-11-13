@@ -46,6 +46,8 @@ pub struct DownloadOpts {
     pub revision: Option<String>,
     pub force: bool,
     pub no_verify: bool,
+    /// Download only these weight files (plus the repo's small metadata files), e.g. the one GGUF a kernel pack names.
+    pub only: Option<Vec<String>>,
 }
 
 pub fn hf_endpoint() -> String {
@@ -234,11 +236,16 @@ pub fn weight_bytes_from_siblings(model_id: &str, revision: &str, siblings: &[Hf
 pub fn ensure_model(home: &Path, model_id: &str, local_dir: &Path, opts: &DownloadOpts) -> Result<(), String> {
     // Preflight first (nothing is created for a bad repo), then always resume hf download, then verify.
     let revision = opts.revision.clone().unwrap_or_else(|| "main".to_string());
-    if !opts.force && is_installed_fast(local_dir, &revision, opts.no_verify) {
+    let only = opts.only.as_deref();
+    let present = |dir: &Path| match only {
+        Some(files) => files.iter().all(|f| dir.join(f).is_file()),
+        None => dir.join("config.json").exists(),
+    };
+    if !opts.force && present(local_dir) && is_installed_fast(local_dir, &revision, opts.no_verify) {
         return Ok(());
     }
     if offline_mode() {
-        if !local_dir.join("config.json").exists() {
+        if !present(local_dir) {
             return Err(format!(
                 "HF_HUB_OFFLINE=1 but {model_id} is not present under {}",
                 local_dir.display()
@@ -247,12 +254,20 @@ pub fn ensure_model(home: &Path, model_id: &str, local_dir: &Path, opts: &Downlo
         return write_revision(local_dir, &revision);
     }
     let pre = preflight_model(model_id, Some(&revision))?;
-    if !has_weight_files(&pre.siblings) {
-        return Err(format!(
-            "{model_id}: repository has no model weight files (no .safetensors at revision {revision}); nothing was installed"
-        ));
-    }
-    let excludes = download_excludes(&pre.siblings);
+    let excludes = match only {
+        Some(files) => {
+            if let Some(f) = files.iter().find(|f| !pre.siblings.iter().any(|s| &s.rfilename == *f)) {
+                return Err(format!("{model_id}: {f} is not in the repository at revision {revision}; nothing was installed"));
+            }
+            only_excludes(&pre.siblings, files)
+        }
+        None if !has_weight_files(&pre.siblings) => {
+            return Err(format!(
+                "{model_id}: repository has no model weight files (no .safetensors at revision {revision}); nothing was installed"
+            ));
+        }
+        None => download_excludes(&pre.siblings),
+    };
     let files = wanted(&pre.siblings, &excludes);
     disk_preflight(home, bytes_needed(&files, local_dir))?;
     fs::create_dir_all(local_dir).map_err(|e| format!("{}: {e}", local_dir.display()))?;
@@ -262,6 +277,20 @@ pub fn ensure_model(home: &Path, model_id: &str, local_dir: &Path, opts: &Downlo
         return write_revision(local_dir, &revision);
     }
     verify_model(local_dir, &revision, &files, home, model_id, &excludes)
+}
+
+pub fn only_excludes(siblings: &[HfSibling], keep: &[String]) -> Vec<String> {
+    // Every repo file but the kept weight files and small root metadata (tokenizer, config, chat template, license).
+    let meta = |n: &str| {
+        !n.contains('/')
+            && [".json", ".jinja", ".txt", ".model", ".md"].iter().any(|x| n.ends_with(x))
+    };
+    siblings
+        .iter()
+        .map(|s| s.rfilename.as_str())
+        .filter(|n| !keep.iter().any(|k| k == n) && !(meta(n) && siblings.iter().any(|s| s.rfilename == *n && s.size < 64 << 20)))
+        .map(String::from)
+        .collect()
 }
 
 pub fn is_installed_fast(local_dir: &Path, revision: &str, no_verify: bool) -> bool {
@@ -659,6 +688,21 @@ fn available_bytes(path: &Path) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pack_install_downloads_its_weights_and_the_small_metadata_only() {
+        let s = vec![
+            sib("m-Q8_0.gguf", 700 << 20),
+            sib("m-Q4_K_M.gguf", 400 << 20),
+            sib("tokenizer.json", 7 << 20),
+            sib("README.md", 5),
+            sib("sub/x.json", 5),
+            sib("huge.json", 100 << 20),
+        ];
+        let ex = only_excludes(&s, &["m-Q8_0.gguf".to_string()]);
+        assert_eq!(ex, vec!["m-Q4_K_M.gguf", "sub/x.json", "huge.json"]);
+        assert_eq!(wanted(&s, &ex).iter().map(|f| f.rfilename.as_str()).collect::<Vec<_>>(), ["m-Q8_0.gguf", "tokenizer.json", "README.md"]);
+    }
 
     fn sib(name: &str, size: u64) -> HfSibling {
         HfSibling {

@@ -112,6 +112,18 @@ struct Target {
     managed: bool,
     source_dir: Option<PathBuf>,
     ternary: Option<TernaryDirs>,
+    pack: Option<PackChoice>,
+}
+
+struct PackChoice {
+    offer: crate::packs::Offer,
+    creds: crate::platform::Credentials,
+}
+
+enum PackDecision {
+    None,
+    Declined,
+    Use(Box<PackChoice>),
 }
 
 pub struct TernaryDirs {
@@ -170,6 +182,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             managed: false,
             source_dir: file.parent().map(|p| p.to_path_buf()),
             ternary: None,
+            pack: None,
         });
     }
     if entry.as_ref().is_some_and(|e| e.manual_download.unwrap_or(false)) {
@@ -189,6 +202,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         revision: entry.as_ref().and_then(|e| e.revision.clone()),
         force: opts.force,
         no_verify: opts.no_verify,
+        only: None,
     };
     if let Some(e) = entry.as_ref().filter(|e| e.effective_runtime() == "ternary") {
         crate::runtime::require_ternary_runtime(home)?;
@@ -202,6 +216,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             revision: ternary_base_revision(&dirs.pack, base),
             force: opts.force,
             no_verify: opts.no_verify,
+            only: None,
         };
         hf::ensure_model(home, base, &dirs.base, &base_dl)?;
         build_farm(&dirs.base, &card_dir)?;
@@ -212,8 +227,35 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             managed: true,
             source_dir: None,
             ternary: Some(dirs),
+            pack: None,
         });
     }
+    let declined = match pack_decision(home, opts)? {
+        PackDecision::Use(choice) => {
+            // Only the files the pack was built for, at its pinned revision; the engine layer once, on first use.
+            crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
+            let pack_dl = DownloadOpts {
+                revision: Some(choice.offer.revision.clone()),
+                force: opts.force,
+                no_verify: opts.no_verify,
+                only: Some(choice.offer.files.clone()),
+            };
+            hf::ensure_model(home, &choice.offer.hf_repo, &card_dir, &pack_dl)?;
+            gguf_metadata(home, &card_dir, &choice.offer)?;
+            return Ok(Target {
+                model_id: opts.model_id.clone(),
+                card_dir,
+                entry,
+                managed: true,
+                source_dir: None,
+                ternary: None,
+                pack: Some(*choice),
+            });
+        }
+        PackDecision::Declined => true,
+        PackDecision::None => false,
+    };
+    sglang_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), declined)?;
     hf::ensure_model(home, &opts.model_id, &card_dir, &dl)?;
     Ok(Target {
         model_id: opts.model_id.clone(),
@@ -222,7 +264,164 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         managed: true,
         source_dir: None,
         ternary: None,
+        pack: None,
     })
+}
+
+fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String> {
+    // A pack in the platform's index for this model and a local GPU: used when the node is logged in; otherwise the user
+    // may log in now. Without a login no pack is ever downloaded.
+    let archs = crate::packs::local_archs(home);
+    if archs.is_empty() {
+        return Ok(PackDecision::None);
+    }
+    let Some(index) = crate::packs::catalog(home) else { return Ok(PackDecision::None) };
+    let Some(offer) = crate::packs::offers(&index, &opts.model_id, &archs).into_iter().next() else {
+        return Ok(PackDecision::None);
+    };
+    let linked = || crate::platform::load_credentials(home).ok().flatten();
+    if let Some(creds) = linked() {
+        return Ok(PackDecision::Use(Box::new(PackChoice { offer, creds })));
+    }
+    if !ask_login(&offer, opts)? {
+        return Ok(PackDecision::Declined);
+    }
+    if let Err(e) = crate::platform_cli::login(None, None) {
+        eprintln!("note: {e}; continuing without the optimised kernels");
+        return Ok(PackDecision::Declined);
+    }
+    match linked() {
+        Some(creds) => Ok(PackDecision::Use(Box::new(PackChoice { offer, creds }))),
+        None => Ok(PackDecision::Declined),
+    }
+}
+
+fn ask_login(offer: &crate::packs::Offer, opts: &InstallOpts) -> Result<bool, String> {
+    // Asked only on a terminal; elsewhere one note, and the install continues with SGLang.
+    let what = format!("Optimised kernels for {} are available for this GPU ({})", opts.model_id, offer.arch);
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        eprintln!("note: {what} to nodes logged in to the Goethe platform (goethe login); continuing without them");
+        return Ok(false);
+    }
+    let a = crate::term::ask(&format!("{what}.\nLog in to the Goethe platform to install them? Otherwise goethe uses SGLang. [Y/n]"), "y")?;
+    Ok(a.to_ascii_lowercase().starts_with('y'))
+}
+
+fn sglang_check(home: &Path, model_id: &str, revision: Option<&str>, entry: Option<&RegistryModel>, declined: bool) -> Result<(), String> {
+    // Before any download: SGLang must serve the model's architecture and quantization (catalog entries are vetted).
+    if entry.is_some() || hf::offline_mode() {
+        return Ok(());
+    }
+    let rev = revision.unwrap_or("main");
+    let pre = hf::preflight_model(model_id, Some(rev))?;
+    let hint = if declined {
+        " Optimised kernels exist for it on this GPU: run goethe login, then goethe install again."
+    } else {
+        ""
+    };
+    if !pre.siblings.iter().any(|s| s.rfilename == "config.json") {
+        if pre.siblings.iter().any(|s| s.rfilename.ends_with(".gguf")) {
+            let none = if declined { "" } else { ", and no optimised kernel pack exists for it on this machine's GPUs" };
+            return Err(format!("{model_id} is not supported: it ships GGUF files only, which SGLang does not serve{none}.{hint}"));
+        }
+        return Ok(());
+    }
+    let cfg = hf::fetch_config_json(model_id, rev)?;
+    crate::scan::sglang_serves(&crate::scan::sglang_support(home), &cfg).map_err(|why| format!("{model_id} is not supported: {why}.{hint}"))
+}
+
+const GGUF_META: &str = r#"
+import collections, os, sys
+from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerFast
+from transformers.modeling_gguf_pytorch_utils import load_gguf_checkpoint
+from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES as M
+from transformers.models.auto.tokenization_auto import TOKENIZER_MAPPING_NAMES, tokenizer_class_from_name
+d, f, out, cfg, tok = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1", sys.argv[5] == "1"
+if cfg:
+    # The header's config, with per-layer counts (e.g. KV heads of sliding and global layers) folded to the config's
+    # scalar and its num_global_* field, which strict config classes require.
+    raw = dict(load_gguf_checkpoint(os.path.join(d, f), return_tensors=False)["config"])
+    mt = raw.pop("model_type")
+    raw.pop("_model_name_or_path", None)
+    for k, v in list(raw.items()):
+        if isinstance(v, list) and k.startswith("num_") and v and all(isinstance(x, int) for x in v):
+            common = collections.Counter(v).most_common()
+            raw[k] = common[0][0]
+            if len(common) > 1:
+                raw.setdefault(k.replace("num_", "num_global_", 1), common[-1][0])
+    c = AutoConfig.for_model(mt, **raw)
+    if not getattr(c, "architectures", None) and mt in M:
+        c.architectures = [M[mt]]
+    c.save_pretrained(out)
+    from transformers import GenerationConfig
+    GenerationConfig.from_model_config(c).save_pretrained(out)   # the model's stop ids (e.g. end of turn and eos)
+if tok:
+    try:
+        t = AutoTokenizer.from_pretrained(d, gguf_file=f)
+    except Exception:
+        name = TOKENIZER_MAPPING_NAMES.get(AutoConfig.from_pretrained(out).model_type) if cfg else None
+        cls = tokenizer_class_from_name(name if isinstance(name, str) else (name[1] or name[0])) if name else PreTrainedTokenizerFast
+        t = cls.from_pretrained(d, gguf_file=f)
+        # A generic tokenizer knows nothing of the model's specials: take them from the GGUF header (control tokens,
+        # and the bos/eos/unk/pad ids), so chat turns end where the model ends them.
+        from gguf import GGUFReader
+        h = GGUFReader(os.path.join(d, f)).fields
+        val = lambda k, i: bytes(h[k].parts[h[k].data[i]]).decode() if h[k].types[-1].name == "STRING" else int(h[k].parts[h[k].data[i]][0])
+        n = len(h["tokenizer.ggml.tokens"].data)
+        tokens = [val("tokenizer.ggml.tokens", i) for i in range(n)]
+        if "tokenizer.ggml.token_type" in h:
+            ctrl = [tokens[i] for i in range(n) if val("tokenizer.ggml.token_type", i) == 3]
+            t.add_special_tokens({"additional_special_tokens": ctrl}, replace_extra_special_tokens=False)
+        for role in ("bos", "eos", "unk", "pad"):
+            k = f"tokenizer.ggml.{role}_token_id"
+            if k in h:
+                setattr(t, f"{role}_token", tokens[val(k, 0)])
+    t.save_pretrained(out)
+"#;
+
+fn gguf_metadata(home: &Path, dir: &Path, offer: &crate::packs::Offer) -> Result<(), String> {
+    // A GGUF repo ships no config.json or tokenizer.json: transformers writes both from the GGUF header, offline, once.
+    // Written to a temp dir and moved in, so a failed run never leaves a half written config behind.
+    if offer.format != "gguf" {
+        return Ok(());
+    }
+    let (cfg, tok) = (!dir.join("config.json").is_file(), !dir.join("tokenizer.json").is_file());
+    if !cfg && !tok {
+        return Ok(());
+    }
+    let mut files = offer.files.clone();
+    files.sort();
+    let first = files.first().ok_or("the pack names no weights file")?;
+    let out = dir.join(".goethe-meta.tmp");
+    let _ = fs::remove_dir_all(&out);
+    fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let run = std::process::Command::new(crate::engine_cmd::resolve_python(home))
+        .arg("-I")
+        .arg("-c")
+        .arg(GGUF_META)
+        .arg(dir)
+        .arg(first)
+        .arg(&out)
+        .arg(if cfg { "1" } else { "0" })
+        .arg(if tok { "1" } else { "0" })
+        .env("HF_HUB_OFFLINE", "1")
+        .env("TRANSFORMERS_OFFLINE", "1")
+        .env("HF_HUB_DISABLE_TELEMETRY", "1")
+        .output()
+        .map_err(|e| format!("reading the GGUF metadata: {e}"))?;
+    if !run.status.success() {
+        let _ = fs::remove_dir_all(&out);
+        let err = String::from_utf8_lossy(&run.stderr);
+        let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+        return Err(format!("could not read the tokenizer and config from {first}: {last}"));
+    }
+    for e in fs::read_dir(&out).map_err(|e| e.to_string())?.flatten() {
+        let to = dir.join(e.file_name());
+        if !to.exists() {
+            fs::rename(e.path(), &to).map_err(|err| format!("{}: {err}", to.display()))?;
+        }
+    }
+    fs::remove_dir_all(&out).map_err(|e| e.to_string())
 }
 
 pub fn ternary_dirs(home: &Path, pack: &str, base: &str) -> TernaryDirs {
@@ -290,6 +489,7 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         managed: opts.copy_local,
         source_dir: (!opts.copy_local).then_some(src),
         ternary: None,
+        pack: None,
     })
 }
 
@@ -433,6 +633,7 @@ pub struct Planned {
     managed: bool,
     source_dir: Option<PathBuf>,
     quant: Option<String>,
+    engine: Option<String>,
 }
 
 impl Planned {
@@ -446,21 +647,41 @@ impl Planned {
 }
 
 fn register(home: &Path, opts: &InstallOpts, t: Target) -> Result<(), String> {
+    // The card is written last: any failure before it (pack refused, SGLang setup failed) leaves no card behind.
     let mut planned = plan(home, opts, &t)?;
-    use_pack(home, &mut planned)?;
+    match &t.pack {
+        Some(choice) => use_pack(home, &mut planned, choice, opts.ctx)?,
+        None if crate::engine_cmd::ninfer_in(&t.card_dir).is_none() => crate::pyenv::ensure(home, crate::pyenv::Layer::Sglang)?,
+        None => {}
+    }
     commit(home, &planned, "installed", &mut std::io::stdout())
 }
 
-fn use_pack(home: &Path, p: &mut Planned) -> Result<(), String> {
-    // With a pack store configured and a verified pack for these files and this GPU, the card names goethe-engine.
-    // No store, no GPU or no match: the card stays as planned. Any other failure aborts before the card is written.
-    let Some(url) = crate::packs::store_url(home)? else { return Ok(()) };
-    let Some(gpu) = crate::hw::profile(home).ok().and_then(|h| h.gpus.into_iter().next()) else { return Ok(()) };
-    let Some(arch) = crate::gpu_arch::lookup(&gpu.compute_capability) else { return Ok(()) };
-    let broker = crate::packs::HttpBroker { store: url, tokens: &crate::packs::EnvToken };
-    if crate::packs::pull(home, &p.dir, &arch.tag(), &broker, &crate::packs::python_runner(home))? {
-        p.table.insert("runtime".into(), toml::Value::String("goethe-engine".into()));
+fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) -> Result<(), String> {
+    // Pull with this node's login (goethe-engine verifies index, identity, pack and arch), then point the card at it.
+    let login = crate::packs::Login(c.creds.clone());
+    let broker = crate::packs::HttpBroker { store: c.creds.platform_url.clone(), tokens: &login };
+    let run = crate::packs::python_runner(home);
+    println!("installing the optimised kernels for {} ...", c.offer.arch);
+    if !crate::packs::pull(home, &p.dir, &c.offer.arch, &broker, &run)? {
+        return Err(format!("the signed pack index has no pack for these files on {}; nothing was installed", c.offer.arch));
     }
+    let max = crate::packs::max_ctx(&p.dir, &run)?;
+    if cli_ctx.is_some_and(|x| x > max) {
+        p.notes.push(format!("ctx {} is longer than the kernels support; using {max}", cli_ctx.unwrap_or(max)));
+    }
+    p.ctx = p.ctx.min(max);
+    p.extra.clear();
+    p.notes.retain(|n| !n.contains("SGLang") && !n.contains("--"));
+    p.quant = None;
+    p.kv_dtype = "auto".into();
+    let t = &mut p.table;
+    t.insert("runtime".into(), toml::Value::String("goethe-engine".into()));
+    t.insert("context_length".into(), toml::Value::Integer(p.ctx as i64));
+    t.insert("extra_sglang_args".into(), toml::Value::Array(Vec::new()));
+    t.insert("kv_cache_dtype".into(), toml::Value::String("auto".into()));
+    t.insert("supported_sm".into(), toml::Value::Array(crate::packs::arch_ccs(&c.offer.arch).into_iter().map(toml::Value::String).collect()));
+    p.engine = Some(format!("goethe-engine with optimised kernels for {} (verified)", c.offer.arch));
     Ok(())
 }
 
@@ -477,6 +698,7 @@ pub fn plan_in_place(home: &Path, model_id: &str, dir: &Path, entry: Option<Regi
         managed: true,
         source_dir: None,
         ternary: None,
+        pack: None,
     };
     plan(home, &opts, &t)
 }
@@ -546,6 +768,7 @@ fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, S
         managed: t.managed,
         source_dir: t.source_dir.clone(),
         quant: Some("nvfp4".into()),
+        engine: None,
     })
 }
 
@@ -666,6 +889,7 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         notes,
         managed: t.managed,
         source_dir: t.source_dir.clone(),
+        engine: None,
     })
 }
 
@@ -720,6 +944,9 @@ pub fn commit(home: &Path, p: &Planned, verb: &str, out: &mut dyn Write) -> Resu
         p.kv_dtype,
         p.facts.attention
     ));
+    if let Some(e) = &p.engine {
+        lines.push(format!("  engine    {e}"));
+    }
     if let Some(q) = &p.quant {
         lines.push(format!("  quant     {q}, detected by SGLang"));
     }

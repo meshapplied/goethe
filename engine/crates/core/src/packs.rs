@@ -6,16 +6,17 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The login token. The login flow fills this in; until it does, GOETHE_PACKS_TOKEN stands in for it.
+/// The bearer token for pack downloads. Only the platform login supplies one: packs never install without it.
 pub trait TokenSource {
     fn token(&self) -> Result<String, String>;
 }
 
-pub struct EnvToken;
+/// The node token of this machine's platform link.
+pub struct Login(pub crate::platform::Credentials);
 
-impl TokenSource for EnvToken {
+impl TokenSource for Login {
     fn token(&self) -> Result<String, String> {
-        std::env::var("GOETHE_PACKS_TOKEN").map_err(|_| "not logged in to the pack store".to_string())
+        Ok(self.0.token.expose().to_string())
     }
 }
 
@@ -34,7 +35,7 @@ pub struct HttpBroker<'a> {
 impl HttpBroker<'_> {
     fn get(&self, path: &str) -> Result<Box<dyn Read>, String> {
         // Redirects are followed by hand: the bearer token goes to the store, never to the redirect target.
-        let agent = ureq::AgentBuilder::new().redirects(0).build();
+        let agent = crate::net::agent_builder().redirects(0).timeout_read(std::time::Duration::from_secs(60)).build();
         let token = self.tokens.token()?;
         let mut req = agent.get(&format!("{}{path}", self.store.trim_end_matches('/'))).set("Authorization", &format!("Bearer {token}"));
         for _ in 0..2 {
@@ -47,6 +48,11 @@ impl HttpBroker<'_> {
                     req = agent.get(to);
                 }
                 Ok(r) => return Ok(Box::new(r.into_reader())),
+                Err(ureq::Error::Status(401, _)) => {
+                    return Err("the platform did not accept this node's login (logged out or removed); run goethe login".into())
+                }
+                Err(ureq::Error::Status(403, _)) => return Err("the platform refused the kernel pack for this workspace".into()),
+                Err(ureq::Error::Status(429, _)) => return Err("the platform is rate limiting pack downloads; try again in a minute".into()),
                 Err(ureq::Error::Status(c, _)) => return Err(format!("{path}: HTTP {c}")),
                 Err(e) => return Err(format!("{path}: {e}")),
             }
@@ -89,11 +95,151 @@ pub fn python_runner(home: &Path) -> impl Fn(&[String]) -> Result<(i32, String),
     }
 }
 
-/// The store URL, from packs.toml in the goethe home (`url = "https://..."`). Absent: no store, nothing changes.
-pub fn store_url(home: &Path) -> Result<Option<String>, String> {
-    let Ok(text) = std::fs::read_to_string(home.join("packs.toml")) else { return Ok(None) };
-    let t: toml::Table = toml::from_str(&text).map_err(|e| format!("packs.toml: {e}"))?;
-    Ok(t.get("url").and_then(|v| v.as_str()).map(String::from))
+/// Pack index ABI and runtimes the pinned goethe-engine runs (goethe_engine.pack ABI and RUNTIMES); a catalog entry
+/// outside them can never match, so it is never offered.
+const ENGINE_ABI_MAJOR: u64 = 2;
+const ENGINE_RUNTIMES: &[(&str, u64)] = &[("gc-c", 1)];
+const CATALOG_MISS_SECS: u64 = 300;
+
+/// A pack the platform's public index lists for a model and one of this machine's GPU architectures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Offer {
+    pub arch: String,
+    pub hf_repo: String,
+    pub revision: String,
+    pub format: String,
+    pub files: Vec<String>,
+}
+
+/// The platform this machine talks to for packs: the one it is linked to, else the configured default.
+pub fn platform_base(home: &Path) -> Result<String, String> {
+    match crate::platform::load_credentials(home) {
+        Ok(Some(c)) => Ok(c.platform_url),
+        _ => crate::platform::platform_url(),
+    }
+}
+
+/// The platform's public pack index (unverified bytes), revalidated with its ETag and cached under packs/catalog.
+/// Only decides what to offer: everything installed is verified by goethe-engine against the signed index again.
+/// None when the platform is unreachable and nothing is cached; a failure is remembered for a few minutes.
+pub fn catalog(home: &Path) -> Option<Vec<u8>> {
+    let dir = home.join("packs").join("catalog");
+    let (body, etag, miss) = (dir.join("index.json"), dir.join("etag"), dir.join("miss"));
+    let cached = || std::fs::read(&body).ok();
+    let recent_miss = std::fs::metadata(&miss)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() < CATALOG_MISS_SECS);
+    if recent_miss || crate::hf::offline_mode() {
+        return cached();
+    }
+    let base = platform_base(home).ok()?;
+    let mut req = crate::net::agent().get(&format!("{}/packs/v2/index", base.trim_end_matches('/'))).timeout(std::time::Duration::from_secs(10));
+    if let (Some(tag), true) = (std::fs::read_to_string(&etag).ok(), body.is_file()) {
+        req = req.set("If-None-Match", tag.trim());
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    match req.call() {
+        Ok(r) if r.status() == 304 => {
+            let _ = std::fs::remove_file(&miss);
+            cached()
+        }
+        Ok(r) => {
+            let tag = r.header("ETag").map(String::from);
+            let bytes = read_all(r.into_reader()).ok()?;
+            let _ = std::fs::write(&body, &bytes);
+            match tag {
+                Some(t) => std::fs::write(&etag, t).ok(),
+                None => std::fs::remove_file(&etag).ok(),
+            };
+            let _ = std::fs::remove_file(&miss);
+            Some(bytes)
+        }
+        Err(_) => {
+            let _ = std::fs::write(&miss, b"");
+            cached()
+        }
+    }
+}
+
+/// Entries of `index` for `model_id` (case-insensitive) on one of `archs`, in `archs` order, that the pinned engine can run.
+pub fn offers(index: &[u8], model_id: &str, archs: &[String]) -> Vec<Offer> {
+    offers_where(index, archs, |repo| repo.eq_ignore_ascii_case(model_id))
+}
+
+/// Every entry of `index` on one of `archs` that the pinned engine can run, whatever the model.
+pub fn offers_any(index: &[u8], archs: &[String]) -> Vec<Offer> {
+    offers_where(index, archs, |_| true)
+}
+
+fn offers_where(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> Vec<Offer> {
+    let Ok(ix) = serde_json::from_slice::<serde_json::Value>(index) else { return Vec::new() };
+    if ix["schema"] != "gc-pack-index" || ix["version"] != 2 {
+        return Vec::new();
+    }
+    let engine = version(crate::pyenv::ENGINE_VERSION);
+    let mut out = Vec::new();
+    for arch in archs {
+        for e in ix["entries"].as_array().into_iter().flatten() {
+            let m = &e["model"];
+            let runs = ENGINE_RUNTIMES.iter().any(|(k, v)| e["runtime"]["kind"] == *k && e["runtime"]["version"] == *v);
+            let fits = e["arch"].as_str() == Some(arch.as_str())
+                && e["abi_major"].as_u64() == Some(ENGINE_ABI_MAJOR)
+                && runs
+                && e["min_engine"].as_str().and_then(version).is_some_and(|v| Some(v) <= engine)
+                && m["hf_repo"].as_str().is_some_and(&model);
+            let files: Vec<String> = m["files"].as_object().map(|f| f.keys().cloned().collect()).unwrap_or_default();
+            if !fits || files.is_empty() || files.iter().any(|f| !safe_name(f)) {
+                continue;
+            }
+            let offer = Offer {
+                arch: arch.clone(),
+                hf_repo: m["hf_repo"].as_str().unwrap_or_default().to_string(),
+                revision: m["revision"].as_str().unwrap_or("main").to_string(),
+                format: m["format"].as_str().unwrap_or_default().to_string(),
+                files,
+            };
+            if !out.contains(&offer) {
+                out.push(offer);
+            }
+        }
+    }
+    out
+}
+
+fn version(s: &str) -> Option<(u64, u64, u64)> {
+    let mut it = s.split('.').map(|x| x.parse::<u64>().ok());
+    let v = (it.next()??, it.next()??, it.next()??);
+    it.next().is_none().then_some(v)
+}
+
+fn safe_name(f: &str) -> bool {
+    // A plain file name in the repo root: the download and the model dir never see a path from the index.
+    !f.is_empty() && !f.contains(['/', '\\']) && f != "." && f != ".." && !f.starts_with('.')
+}
+
+/// The distinct pack architectures (sm_XX tags) of this machine's usable GPUs, most GPUs first.
+pub fn local_archs(home: &Path) -> Vec<String> {
+    let Ok(hw) = crate::hw::profile(home) else { return Vec::new() };
+    let denied = crate::db::open(home).ok().and_then(|c| crate::gpu_policy::denied_set(&c).ok()).unwrap_or_default();
+    let mut count: Vec<(String, usize)> = Vec::new();
+    for g in hw.gpus.into_iter().filter(|g| !denied.contains(&g.index)) {
+        if let Some(a) = crate::gpu_arch::lookup(&g.compute_capability) {
+            match count.iter_mut().find(|(t, _)| *t == a.tag()) {
+                Some(c) => c.1 += 1,
+                None => count.push((a.tag(), 1)),
+            }
+        }
+    }
+    count.sort_by_key(|c| std::cmp::Reverse(c.1));
+    count.into_iter().map(|(t, _)| t).collect()
+}
+
+/// The compute capabilities whose pack architecture is `arch`: the card's supported_sm, so placement keeps the model
+/// on GPUs the pack was built for.
+pub fn arch_ccs(arch: &str) -> Vec<String> {
+    crate::gpu_arch::supported_list().into_iter().filter(|cc| crate::gpu_arch::lookup(cc).is_some_and(|a| a.tag() == arch)).collect()
 }
 
 fn serial_path(home: &Path) -> PathBuf {
@@ -106,6 +252,22 @@ fn last_serial(home: &Path) -> u64 {
 
 fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
+}
+
+/// The longest context any bucket of the verified pack in `dir` serves (`goethe-engine pack show`): the card's ctx cap.
+pub fn max_ctx(dir: &Path, run: Runner) -> Result<u64, String> {
+    let (_, out) = run(&["pack".into(), "show".into(), s(&dir.join(PACK_FILE))])?;
+    out.lines()
+        .filter_map(|l| l.split_whitespace().skip_while(|w| *w != "maxctx").nth(1)?.parse::<u64>().ok())
+        .max()
+        .ok_or_else(|| "pack show: no bucket lists a maxctx".to_string())
+}
+
+fn already(pack: &Path, want: &str) -> bool {
+    // The pack file in the model dir is the one the entry names (a reinstall downloads nothing again).
+    let Ok(mut f) = std::fs::File::open(pack) else { return false };
+    let mut h = Sha256::new();
+    std::io::copy(&mut f, &mut h).is_ok() && format!("{:x}", h.finalize()) == want
 }
 
 fn download(mut r: Box<dyn Read>, want: &str, dest: &Path) -> Result<(), String> {
@@ -158,7 +320,9 @@ pub fn pull(home: &Path, dir: &Path, arch: &str, broker: &dyn Broker, run: Runne
         }
         e
     };
-    download(broker.pack(&sha)?, &sha, &pack).map_err(undo)?;
+    if !already(&pack, &sha) {
+        download(broker.pack(&sha).map_err(undo)?, &sha, &pack).map_err(undo)?;
+    }
     std::fs::write(&psig, sig).map_err(|e| undo(e.to_string()))?;
     let ok = run(&[v("pack"), v("verify"), s(&pack), v("--arch"), v(arch)]).map_err(undo)?.1;
     std::fs::write(&pv, ok).map_err(|e| undo(e.to_string()))?;
@@ -270,6 +434,29 @@ mod tests {
         nothing_left(dir.path());
     }
 
+    struct Refuses;
+    impl Broker for Refuses {
+        fn index(&self) -> Result<Vec<u8>, String> {
+            Ok(b"{}".to_vec())
+        }
+        fn index_sig(&self) -> Result<Vec<u8>, String> {
+            Ok(b"sig".to_vec())
+        }
+        fn pack(&self, _: &str) -> Result<Box<dyn Read>, String> {
+            Err("the platform did not accept this node's login".into())
+        }
+    }
+
+    #[test]
+    fn a_refused_pack_download_leaves_no_pack_files_from_an_earlier_install() {
+        let (home, dir) = dirs();
+        for f in [format!("{PACK_FILE}.sig"), PACK_VERIFY.to_string()] {
+            std::fs::write(dir.path().join(f), b"old").unwrap();
+        }
+        assert!(pull(home.path(), dir.path(), "sm_120a", &Refuses, &engine(&[])).unwrap_err().contains("login"));
+        nothing_left(dir.path());
+    }
+
     #[test]
     fn an_index_the_engine_refuses_fails_before_any_download() {
         // foreign key, expired index, serial below the stored one: all are exit 1 of index verify
@@ -301,14 +488,6 @@ mod tests {
         assert!(pull(home.path(), dir.path(), "sm_120a", &Fake::ok(), &run).unwrap_err().contains("not lowercase"));
     }
 
-    #[test]
-    fn no_store_url_means_no_store() {
-        let home = tempfile::tempdir().unwrap();
-        assert_eq!(store_url(home.path()).unwrap(), None);
-        std::fs::write(home.path().join("packs.toml"), "url = \"https://s.example\"\n").unwrap();
-        assert_eq!(store_url(home.path()).unwrap().as_deref(), Some("https://s.example"));
-    }
-
     struct Tok(Result<String, String>);
     impl TokenSource for Tok {
         fn token(&self) -> Result<String, String> {
@@ -337,6 +516,59 @@ mod tests {
         (url, h)
     }
 
+    fn index(entries: serde_json::Value) -> Vec<u8> {
+        serde_json::json!({"schema": "gc-pack-index", "version": 2, "serial": 3, "entries": entries}).to_string().into_bytes()
+    }
+
+    fn entry(repo: &str, arch: &str) -> serde_json::Value {
+        serde_json::json!({"model": {"hf_repo": repo, "revision": "abc", "format": "gguf", "files": {"m-Q8_0.gguf": "00"}},
+            "arch": arch, "abi_major": 2, "runtime": {"kind": "gc-c", "version": 1}, "min_engine": "0.1.0", "file_sha256": "11"})
+    }
+
+    #[test]
+    fn offers_follow_the_model_the_local_archs_and_what_the_engine_runs() {
+        let archs = vec!["sm_120a".to_string(), "sm_90a".to_string()];
+        let mut abi1 = entry("org/m-GGUF", "sm_120a");
+        abi1["abi_major"] = 1.into();
+        let mut newer = entry("org/m-GGUF", "sm_120a");
+        newer["min_engine"] = "9.0.0".into();
+        let mut path = entry("org/m-GGUF", "sm_120a");
+        path["model"]["files"] = serde_json::json!({"../x.gguf": "00"});
+        let ix = index(serde_json::json!([abi1, newer, path, entry("org/other", "sm_120a"), entry("org/m-GGUF", "sm_100a"), entry("Org/M-gguf", "sm_90a")]));
+        let o = offers(&ix, "org/m-gguf", &archs);
+        assert_eq!(o.len(), 1);
+        assert_eq!((o[0].arch.as_str(), o[0].files.clone(), o[0].revision.as_str()), ("sm_90a", vec!["m-Q8_0.gguf".to_string()], "abc"));
+        assert_eq!(offers_any(&ix, &archs).len(), 2);
+        assert!(offers(b"not json", "org/m-gguf", &archs).is_empty());
+        let mut v1: serde_json::Value = serde_json::from_slice(&ix).unwrap();
+        v1["version"] = 1.into();
+        assert!(offers(v1.to_string().as_bytes(), "org/m-gguf", &archs).is_empty());
+    }
+
+    #[test]
+    fn the_card_names_the_compute_capabilities_of_the_pack_arch() {
+        let ccs = arch_ccs("sm_120a");
+        assert!(ccs.contains(&"12.0".to_string()) && !ccs.contains(&"9.0".to_string()));
+    }
+
+    #[test]
+    fn max_ctx_is_the_longest_bucket() {
+        let d = tempfile::tempdir().unwrap();
+        let run = |_: &[String]| Ok((0, "a  b4  ncol   1 maxctx   4096 3 files\nb  b4  ncol   8 maxctx  32768 3 files\n".to_string()));
+        assert_eq!(max_ctx(d.path(), &run).unwrap(), 32768);
+        let none = |_: &[String]| Ok((0, String::new()));
+        assert!(max_ctx(d.path(), &none).is_err());
+    }
+
+    #[test]
+    fn a_pack_already_in_place_is_not_downloaded_again() {
+        let (home, dir) = dirs();
+        std::fs::write(dir.path().join(PACK_FILE), BYTES).unwrap();
+        let b = Fake { pack: b"other".to_vec(), ..Fake::ok() };
+        assert!(pull(home.path(), dir.path(), "sm_120a", &b, &engine(&[])).unwrap());
+        assert_eq!(*b.fetched.borrow(), 0);
+    }
+
     #[test]
     fn the_bearer_token_goes_to_the_store_and_never_to_the_redirect_target() {
         let (target, target_seen) = serve("HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\npack bytes".into());
@@ -352,7 +584,7 @@ mod tests {
     fn http_401_and_a_missing_login_are_errors() {
         let (store, _h) = serve("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into());
         let b = HttpBroker { store, tokens: &Tok(Ok("bad".into())) };
-        assert!(b.index().unwrap_err().contains("HTTP 401"));
+        assert!(b.index().unwrap_err().contains("goethe login"));
         let b = HttpBroker { store: "http://127.0.0.1:1".into(), tokens: &Tok(Err("not logged in".into())) };
         assert!(b.index().unwrap_err().contains("not logged in"));
     }

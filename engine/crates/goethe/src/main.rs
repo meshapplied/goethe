@@ -311,7 +311,7 @@ enum Commands {
     Update {
         #[arg(long, help = "Print available versions only.")]
         check: bool,
-        #[arg(long, help = "Update SGLang engine packages.")]
+        #[arg(long, help = "Update the installed engines (SGLang, goethe-engine); one not installed yet is left out.")]
         engine: bool,
         #[arg(long, help = "Update ternary runtime packages.")]
         ternary: bool,

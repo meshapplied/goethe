@@ -568,14 +568,14 @@ install_cuda_compat() {
 }
 
 check_disk() {
-  # The Python environment needs about 12 GB; stop before downloading when the disk cannot hold it.
-  local need_gb=12 free_kb
+  # The base Python environment needs well under 2 GB; stop before downloading when the disk cannot hold it.
+  local need_gb=2 free_kb
   if [[ -x "${GOETHE_HOME}/py-env/bin/python" ]]; then
     return 0
   fi
   free_kb="$(df -Pk "${GOETHE_HOME}" 2>/dev/null | awk 'NR == 2 {print $4}')"
   if [[ "${free_kb}" =~ ^[0-9]+$ ]] && ((free_kb < need_gb * 1024 * 1024)); then
-    echo "only $((free_kb / 1024 / 1024)) GB free at ${GOETHE_HOME}; Goethe needs about ${need_gb} GB for its Python environment, plus room for models. Free space or set GOETHE_HOME to a larger disk, then rerun" >&2
+    echo "only $((free_kb / 1024 / 1024)) GB free at ${GOETHE_HOME}; Goethe needs about ${need_gb} GB to install, plus room for models and their engine (SGLang takes about 8 GB when the first model needs it). Free space or set GOETHE_HOME to a larger disk, then rerun" >&2
     exit 1
   fi
 }
@@ -685,7 +685,8 @@ verify_cdn() {
   SUMS_FILE="${GOETHE_HOME}/SHA256SUMS"
   load_sums
   local rel
-  for rel in "bin/linux-${ARCH}/goethe" "bin/linux-${ARCH}/goethed" "bin/linux-${ARCH}/uv" "pyenv/${LOCK}"; do
+  for rel in "bin/linux-${ARCH}/goethe" "bin/linux-${ARCH}/goethed" "bin/linux-${ARCH}/uv" "pyenv/${LOCK}" \
+    "pyenv/${BASE_LOCK}" "pyenv/${ENGINE_LOCK}"; do
     if ! awk -v a="${rel}" '$2 == a { found = 1; exit } END { exit !found }' "${SUMS_FILE}"; then
       echo "CDN missing ${rel} for arch ${ARCH}" >&2
       exit 1
@@ -695,29 +696,27 @@ verify_cdn() {
 }
 
 install_pyenv() {
-  # Fetch uv, the arch lock and bootstrap.sh, then build the hermetic py-env with the SGLang wheel.
-  local wheel_name
+  # Fetch uv, the arch locks and bootstrap.sh, then build only the base py-env; an existing py-env is left as it is.
+  local rel
   if [[ ! -x "${GOETHE_HOME}/bin/uv" ]]; then
     fetch "bin/linux-${ARCH}/uv" "${GOETHE_HOME}/bin/uv" "Downloading uv, the Python package installer"
     chmod +x "${GOETHE_HOME}/bin/uv"
   fi
   mkdir -p "${GOETHE_HOME}/pyenv"
-  fetch "pyenv/${LOCK}" "${GOETHE_HOME}/pyenv/${LOCK}"
-  fetch "pyenv/bootstrap.sh" "${GOETHE_HOME}/pyenv/bootstrap.sh"
+  for rel in "${BASE_LOCK}" "${ENGINE_LOCK}" "${LOCK}" bootstrap.sh; do
+    fetch "pyenv/${rel}" "${GOETHE_HOME}/pyenv/${rel}"
+  done
   if [[ "${GOETHE_VERIFY_ONLY:-}" == "1" ]]; then
     echo "verified CDN artifacts for ${ARCH}"
     exit 0
   fi
-  fetch "wheels/LATEST" "${GOETHE_HOME}/pyenv/LATEST"
-  wheel_name="$(tr -d '[:space:]' <"${GOETHE_HOME}/pyenv/LATEST")"
-  if [[ ! "${wheel_name}" =~ ^sglang-[A-Za-z0-9_.+-]+\.whl$ ]]; then
-    echo "invalid wheel name in wheels/LATEST: ${wheel_name}" >&2
-    exit 1
+  if [[ -x "${GOETHE_HOME}/py-env/bin/python" ]] &&
+    compgen -G "${GOETHE_HOME}/py-env/lib/python3*/site-packages/huggingface_hub-*.dist-info" >/dev/null; then
+    done_line "Python environment already set up at ${GOETHE_HOME}/py-env; left as it is"
+    return 0
   fi
-  fetch "wheels/${wheel_name}" "${GOETHE_HOME}/pyenv/${wheel_name}" "Downloading Goethe's SGLang build"
-  echo "  Installing PyTorch, SGLang and the CUDA libraries (about 8 GB; a few minutes on a fast connection)"
-  GOETHE_ARCH="${ARCH}" UV="${GOETHE_HOME}/bin/uv" GOETHE_SGLANG_WHEEL="${GOETHE_HOME}/pyenv/${wheel_name}" \
-    bash "${GOETHE_HOME}/pyenv/bootstrap.sh"
+  echo "  Setting up the base Python environment (about 30 MB); SGLang installs with the first model that needs it"
+  GOETHE_ARCH="${ARCH}" UV="${GOETHE_HOME}/bin/uv" bash "${GOETHE_HOME}/pyenv/bootstrap.sh" base
 }
 
 install_ternary() {
@@ -1113,6 +1112,27 @@ link_platform() {
   fi
 }
 
+offer_login() {
+  # Not linked and no --authkey: offer the device-flow login on a terminal, else one line on how to log in later.
+  local later="run goethe login any time to link this node to the Goethe platform" answer args=(login)
+  [[ -z "${AUTHKEY}" ]] || return 0
+  [[ ! -e "${GOETHE_HOME}/platform/credentials" && ! -e "${GOETHE_HOME}/credentials" ]] || return 0
+  if ! can_ask; then
+    echo "Not logged in: ${later} (logged-in nodes get optimised kernels for supported models)"
+    return 0
+  fi
+  printf '\nLog in to the Goethe platform now? Logged-in nodes get optimised kernels for supported models. [Y/n] ' >/dev/tty
+  read -r answer </dev/tty || answer="n"
+  if [[ -n "${answer}" && "${answer}" != [Yy]* ]]; then
+    echo "Not logged in: ${later}"
+    return 0
+  fi
+  [[ -n "${PLATFORM_URL}" ]] && args+=(--platform-url "${PLATFORM_URL}")
+  if ! "${GOETHE_HOME}/bin/goethe" "${args[@]}" </dev/tty; then
+    echo "Login did not finish; goethe is installed: ${later}" >&2
+  fi
+}
+
 show_banner() {
   # The GOETHE wordmark in light blue on a fresh install, or one line in narrow terminals.
   local cols
@@ -1151,8 +1171,12 @@ main() {
     exit 1
   fi
   LOCK="requirements.lock"
+  BASE_LOCK="requirements.base.lock"
+  ENGINE_LOCK="requirements.engine.lock"
   if [[ "${ARCH}" == "aarch64" ]]; then
     LOCK="requirements.aarch64.lock"
+    BASE_LOCK="requirements.base.aarch64.lock"
+    ENGINE_LOCK="requirements.engine.aarch64.lock"
   fi
   SECURE=0
   SUMS_FILE=""
@@ -1214,6 +1238,7 @@ main() {
   fi
   summary
   link_platform
+  offer_login
   get_started
 }
 

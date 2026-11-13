@@ -1,6 +1,7 @@
 // Signed package updates from GOETHE_PKG_URL: verify everything, then swap both binaries.
 
 use crate::paths::{ensure_layout, goethe_home};
+use crate::pyenv::{self, Layer};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::fs;
@@ -37,10 +38,7 @@ pub fn run(opts: UpdateOpts) -> Result<(), String> {
 }
 
 fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<(), String> {
-    fetch_pkg_file(pkg, "SHA256SUMS", &tmp.join("SHA256SUMS"))?;
-    fetch_pkg_file(pkg, "SHA256SUMS.sig", &tmp.join("SHA256SUMS.sig"))?;
-    verify_sums_signature(home, tmp)?;
-    let sums = tmp.join("SHA256SUMS");
+    let sums = fetch_signed_sums(home, pkg, tmp)?;
     let version_file = fetch_verified(pkg, &sums, "VERSION", tmp)?;
     let remote_ver = fs::read_to_string(&version_file).map_err(|e| e.to_string())?.trim().to_string();
     let local_ver = local_version();
@@ -55,7 +53,7 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
         ));
     }
     let arch = normalize_arch();
-    let engine = if opts.engine { Some(engine_delta(home, pkg, &sums, tmp)?) } else { None };
+    let (sglang, engine) = if opts.engine { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
     let ternary = if opts.ternary { ternary_delta(home, &sums) } else { None };
     let bins = order != Ordering::Equal || binaries_differ(home, &sums, &arch)?;
     let local_commit = option_env!("GOETHE_GIT_COMMIT").unwrap_or("unknown");
@@ -65,7 +63,12 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
         .and_then(|text| buildinfo_commit(&text, local_commit.trim_end_matches("-dirty").len()));
     let published = published_label(&remote_ver, remote_commit.as_deref(), local_commit, bins && order == Ordering::Equal);
     let installed = if bins { build_label(&local_ver, Some(local_commit)) } else { published.clone() };
-    let parts = [("goethe", Some(Delta::of(&installed, &published, bins))), ("engine", engine), ("ternary pack", ternary)];
+    let parts = [
+        ("goethe", Some(Delta::of(&installed, &published, bins))),
+        ("SGLang", sglang),
+        ("goethe-engine", engine),
+        ("ternary pack", ternary),
+    ];
     let pending: Vec<(&str, Delta)> = parts.into_iter().filter_map(|(what, d)| d.map(|d| (what, d))).collect();
     for (what, d) in &pending {
         println!("{}", d.line(what));
@@ -80,17 +83,22 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
         staged.push(stage(pkg, &sums, &rel, tmp, &home.join("bin").join(bin))?);
     }
     let differs = |what: &str| pending.iter().any(|(w, d)| *w == what && d.differs);
-    let wheel = if differs("engine") { Some(stage_engine(home, pkg, &sums, tmp, &arch, &mut staged)?) } else { None };
+    if differs("SGLang") {
+        pyenv::sglang_wheel(home, pkg, &sums, tmp)?;
+    }
     let ternary = if differs("ternary pack") { stage_ternary(pkg, &sums, tmp)? } else { None };
     let was_running = crate::service::goethed_running();
     swap_all(&staged)?;
     if bins {
         crate::service::refresh_unit(home);
     }
-    if let Some(w) = wheel {
-        bootstrap_engine(home, &w)?;
-        let name = w.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        fs::write(home.join("pyenv/LATEST"), format!("{name}\n")).map_err(|e| e.to_string())?;
+    if differs("SGLang") || differs("goethe-engine") {
+        let _lock = pyenv::lock(home)?;
+        for (what, layer) in [("SGLang", Layer::Sglang), ("goethe-engine", Layer::Engine)] {
+            if differs(what) {
+                pyenv::install_from(home, pkg, &sums, tmp, layer).map_err(|e| format!("{e}; goethe update --engine retries"))?;
+            }
+        }
     }
     if let Some(t) = ternary {
         unpack_ternary(home, &t)?;
@@ -162,6 +170,27 @@ impl Delta {
             format!("{what} {installed} is up to date")
         }
     }
+}
+
+fn pyenv_deltas(home: &Path, base: &str, sums: &Path, tmp: &Path) -> Result<(Option<Delta>, Option<Delta>), String> {
+    // The py-env layers that are present, against what is published; an absent layer is never installed here.
+    if !pyenv::has(home, Layer::Base) {
+        println!("no Python environment at {}; run the installer", home.join("py-env").display());
+        return Ok((None, None));
+    }
+    let sglang = if pyenv::has(home, Layer::Sglang) { Some(engine_delta(home, base, sums, tmp)?) } else { None };
+    let engine = pyenv::engine_installed(home).map(|v| Delta {
+        differs: !pyenv::has(home, Layer::Engine),
+        installed: Some(v),
+        published: pyenv::ENGINE_VERSION.to_string(),
+    });
+    if sglang.is_none() {
+        println!("SGLang is not installed; it installs with the first model that needs it");
+    }
+    if engine.is_none() {
+        println!("goethe-engine is not installed; it installs with the first kernel pack");
+    }
+    Ok((sglang, engine))
 }
 
 fn engine_delta(home: &Path, base: &str, sums: &Path, tmp: &Path) -> Result<Delta, String> {
@@ -240,7 +269,7 @@ pub fn compare_versions(a: &str, b: &str) -> Ordering {
     })
 }
 
-fn normalize_arch() -> String {
+pub(crate) fn normalize_arch() -> String {
     let raw = std::env::var("GOETHE_ARCH")
         .ok()
         .or_else(|| {
@@ -277,6 +306,14 @@ fn fetch_pkg_file(base: &str, rel: &str, dest: &Path) -> Result<(), String> {
 
 const PROPAGATING: &str = "a new release may still be propagating through the package host's cache (up to 10 minutes): run goethe update again in a few minutes, nothing was changed";
 
+pub(crate) fn fetch_signed_sums(home: &Path, pkg: &str, tmp: &Path) -> Result<PathBuf, String> {
+    // SHA256SUMS and its signature into tmp, checked against GOETHE_HOME/release_pub.pem.
+    fetch_pkg_file(pkg, "SHA256SUMS", &tmp.join("SHA256SUMS"))?;
+    fetch_pkg_file(pkg, "SHA256SUMS.sig", &tmp.join("SHA256SUMS.sig"))?;
+    verify_sums_signature(home, tmp)?;
+    Ok(tmp.join("SHA256SUMS"))
+}
+
 fn verify_sums_signature(home: &Path, tmp: &Path) -> Result<(), String> {
     let pub_pem = home.join("release_pub.pem");
     if !pub_pem.is_file() {
@@ -297,7 +334,7 @@ fn verify_sums_signature(home: &Path, tmp: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn lookup_sum(sums_path: &Path, rel: &str) -> Result<String, String> {
+pub(crate) fn lookup_sum(sums_path: &Path, rel: &str) -> Result<String, String> {
     let text = fs::read_to_string(sums_path).map_err(|e| e.to_string())?;
     text.lines()
         .find_map(|line| {
@@ -308,7 +345,7 @@ fn lookup_sum(sums_path: &Path, rel: &str) -> Result<String, String> {
         .ok_or_else(|| format!("SHA256SUMS missing entry for {rel}"))
 }
 
-fn fetch_verified(base: &str, sums: &Path, rel: &str, tmp: &Path) -> Result<PathBuf, String> {
+pub(crate) fn fetch_verified(base: &str, sums: &Path, rel: &str, tmp: &Path) -> Result<PathBuf, String> {
     // Download rel into staging and require the hash listed in the signed SHA256SUMS.
     let expected = lookup_sum(sums, rel)?;
     let part = tmp.join(rel.replace('/', "__"));
@@ -355,7 +392,7 @@ fn swap_all(staged: &[Staged]) -> Result<(), String> {
     Ok(())
 }
 
-fn sha256_file(path: &Path) -> Result<String, String> {
+pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
     let mut f = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut h = Sha256::new();
     let mut buf = [0u8; 65536];
@@ -367,37 +404,6 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         h.update(&buf[..n]);
     }
     Ok(format!("{:x}", h.finalize()))
-}
-
-fn stage_engine(home: &Path, base: &str, sums: &Path, tmp: &Path, arch: &str, staged: &mut Vec<Staged>) -> Result<PathBuf, String> {
-    // Stage bootstrap.sh, the lock file and the wheel named by the verified wheels/LATEST.
-    let pyenv = home.join("pyenv");
-    staged.push(stage(base, sums, "pyenv/bootstrap.sh", tmp, &pyenv.join("bootstrap.sh"))?);
-    let arch_lock = format!("pyenv/requirements.{arch}.lock");
-    let lock = if lookup_sum(sums, &arch_lock).is_ok() { arch_lock } else { "pyenv/requirements.lock".to_string() };
-    let lock_name = lock.trim_start_matches("pyenv/").to_string();
-    staged.push(stage(base, sums, &lock, tmp, &pyenv.join(lock_name))?);
-    let latest = fetch_verified(base, sums, "wheels/LATEST", tmp)?;
-    let wheel_name = fs::read_to_string(&latest).map_err(|e| e.to_string())?.trim().to_string();
-    if wheel_name.is_empty() || wheel_name.contains('/') {
-        return Err(format!("wheels/LATEST names an invalid wheel {wheel_name:?}"));
-    }
-    let dest = pyenv.join(&wheel_name);
-    staged.push(stage(base, sums, &format!("wheels/{wheel_name}"), tmp, &dest)?);
-    Ok(dest)
-}
-
-fn bootstrap_engine(home: &Path, wheel: &Path) -> Result<(), String> {
-    let status = Command::new("bash")
-        .arg(home.join("pyenv/bootstrap.sh"))
-        .env("GOETHE_HOME", home)
-        .env("GOETHE_SGLANG_WHEEL", wheel)
-        .status()
-        .map_err(|e| e.to_string())?;
-    if !status.success() {
-        return Err("py-env bootstrap failed".to_string());
-    }
-    Ok(())
 }
 
 fn stage_ternary(base: &str, sums: &Path, tmp: &Path) -> Result<Option<PathBuf>, String> {

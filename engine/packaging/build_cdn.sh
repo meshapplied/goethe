@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assemble engine/dist/cdn: patched SGLang wheel, pinned uv, portable binaries, hashed locks, BUILDINFO, signature.
+# Assemble engine/dist/cdn: patched SGLang wheel, pinned uv, portable binaries, hashed layer locks, BUILDINFO, signature.
 
 set -euo pipefail
 
@@ -40,6 +40,24 @@ for a in "${ARCH_LIST[@]}"; do
     exit 1
   fi
 done
+
+check_sglang_snapshot() {
+  # The bundled cdn/v1/sglang_support.json must describe the wheel being shipped (release builds fail, others warn).
+  local wheel="$1" site="${BUILD_TMP}/wheel-site"
+  rm -rf "${site}"
+  python3 -I -m zipfile -e "${wheel}" "${site}"
+  if (cd "${ROOT}" && GOETHE_SGLANG_SITE="${site}" cargo test --locked -q -p goethe-core --lib -- --ignored --exact \
+    scan::tests::sglang_snapshot_matches >"${BUILD_TMP}/snapshot.log" 2>&1); then
+    return 0
+  fi
+  tail -n 20 "${BUILD_TMP}/snapshot.log" >&2
+  echo "cdn/v1/sglang_support.json does not match $(basename "${wheel}"); regenerate it with:" >&2
+  echo "  GOETHE_SGLANG_SITE=<unpacked wheel> GOETHE_SGLANG_SNAPSHOT_WRITE=1 cargo test -p goethe-core --lib -- --ignored --exact scan::tests::sglang_snapshot_matches" >&2
+  if [[ "${RELEASE}" -eq 1 ]]; then
+    exit 1
+  fi
+  echo "WARNING: shipping a stale SGLang support snapshot (not a --release build)" >&2
+}
 
 pub_fingerprint() {
   openssl pkey -pubin -in "$1" -outform DER | sha256sum | awk '{print $1}'
@@ -137,6 +155,7 @@ fi
 )
 rm -f "${DIST}/wheels/.gitignore"
 (cd "${DIST}/wheels" && ls -t sglang-*.whl | head -n1 >LATEST)
+check_sglang_snapshot "${DIST}/wheels/$(cat "${DIST}/wheels/LATEST")"
 
 if [[ "${WITH_TERNARY}" -eq 1 ]]; then
   if [[ ! -d "${REPO}/ternary-kernels" ]]; then
@@ -162,8 +181,8 @@ done
 cp "${ROOT}/cdn/goethed.service" "${DIST}/goethed.service"
 cp "${ROOT}/../LICENSE" "${ROOT}/../NOTICE" "${DIST}/"
 cp "${ROOT}/cdn/v1/registry.json" "${DIST}/v1/registry.json"
-cp "${ROOT}/pyenv/requirements.lock" "${ROOT}/pyenv/requirements.aarch64.lock" "${ROOT}/pyenv/bootstrap.sh" \
-  "${DIST}/pyenv/"
+(cd "${ROOT}" && cargo test --locked -q -p goethe-core --lib -- --exact pyenv::tests::layer_locks_are_subsets_of_the_main_lock)
+cp "${ROOT}"/pyenv/requirements*.lock "${ROOT}/pyenv/bootstrap.sh" "${DIST}/pyenv/"
 "${ROOT}/packaging/subst_install_pubkey.sh" "${ROOT}/cdn/install.sh" "${RELEASE_PUB}" \
   "${DIST}/install.sh"
 if [[ -n "${GOETHE_SIGN_KEY:-}" ]]; then

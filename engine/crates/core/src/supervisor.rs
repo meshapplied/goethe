@@ -184,6 +184,15 @@ fn insts(con: &Connection, filter: &str, args: &[&dyn ToSql]) -> rusqlite::Resul
     rows.collect()
 }
 
+fn runtime_layer(card: &toml::Value) -> Option<crate::pyenv::Layer> {
+    // The py-env layer a card's runtime runs on: goethe-engine, SGLang (also under ternary), none for ninfer.
+    match card.get("runtime").and_then(|v| v.as_str()) {
+        Some("ninfer") => None,
+        Some("goethe-engine") => Some(crate::pyenv::Layer::Engine),
+        _ => Some(crate::pyenv::Layer::Sglang),
+    }
+}
+
 pub fn handle_load(params: LoadParams) -> Result<(Value, String), LoadErr> {
     // Validate, then plan, gate, spawn and record one engine; the health wait continues on a background thread.
     let home = goethe_home();
@@ -270,6 +279,9 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
         );
         let result = json!({"instance_id": first.0, "status": first.1, "already_loaded": true});
         return Ok(Step::Loaded(result, message));
+    }
+    if let Some(layer) = runtime_layer(&req.card) {
+        crate::pyenv::require(&req.home, layer, model_id).map_err(err1)?;
     }
     let snap = foreign::snapshot().map_err(err1)?;
     if let Some(g) = req.pinned.iter().find(|g| !snap.iter().any(|s| s.index == **g)) {

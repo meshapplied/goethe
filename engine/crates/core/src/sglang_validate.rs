@@ -12,11 +12,14 @@ pub fn validate_registry_sglang(reg: &Registry, online: bool) -> Vec<String> {
     if !py.is_file() {
         return vec!["note: --check-sglang skipped (py-env not present)".to_string()];
     }
-    let flags = launch_server_flags(&py);
-    let reasoning = reasoning_parser_keys(&py);
-    let tool = tool_call_parser_keys(&py);
-    let arch_keys = sglang_model_arch_keys(&py);
     let mut errors = Vec::new();
+    let (flags, reasoning, tool, arch_keys) = if crate::pyenv::has(&home, crate::pyenv::Layer::Sglang) {
+        (launch_server_flags(&py), reasoning_parser_keys(&py), tool_call_parser_keys(&py), sglang_model_arch_keys(&py))
+    } else {
+        // Without SGLang only the architectures can be checked, against the bundled list of the pinned build.
+        errors.push("note: SGLang not installed yet: --check-sglang checks architectures only, against the bundled list".to_string());
+        (Vec::new(), Vec::new(), Vec::new(), crate::scan::sglang_support(&home).archs.into_iter().collect())
+    };
     for m in &reg.models {
         if m.effective_runtime() == "ternary" {
             continue;

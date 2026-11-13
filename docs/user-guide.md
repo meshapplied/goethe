@@ -239,6 +239,8 @@ goethe install zai-org/GLM-5.3-Flash --load     # download and load in one step
 
 The model id is the Hugging Face repo name. Any [supported model](#supported-models) on Hugging Face works, not only the catalog. Useful flags: `--load`, `--ctx`, `--max-conc`, `--trust-remote-code` (only for models you trust) and `--hf-token`.
 
+**Optimised kernels:** for some models Goethe has kernel packs compiled for your GPU, which serve the model with goethe-engine instead of SGLang. `goethe install` picks them automatically on a node that is logged in to the Goethe platform (`goethe login`): it downloads only the files the pack was built for, then the pack, and verifies both before writing the model's card. On a node that is not logged in, `goethe install` offers to log in, or continues with SGLang when SGLang serves the model. Packs never install without a login. `goethe models` lists the models that have optimised kernels for this machine. SGLang and goethe-engine are each downloaded once, the first time a model needs them.
+
 **Gated or private models:** accept the license on the model's Hugging Face page, create a read token at huggingface.co/settings/tokens, then run `goethe install <org>/<model> --hf-token` and type the token when asked. It is used for that download only and never stored. In `goethe start`, choose "A private or gated model".
 
 **Models you already have:** move the folder into Goethe's `models` folder and run `goethe models scan`; it checks each folder and asks before adding it. A folder named `<org>__<model>` gets the id `<org>/<model>`. To register a folder where it is:
@@ -367,7 +369,7 @@ GeForce and TITAN cards need driver 580 or newer. Check the driver with `nvidia-
 ## Software requirements
 
 - Linux on x86_64 or ARM64 with glibc 2.30 or newer, for example Ubuntu 20.04+ or Debian 11+.
-- Disk space for your models, plus about 12 GB for Goethe itself.
+- Disk space for your models, plus about 2 GB for Goethe itself and about 8 GB more for SGLang, which installs once, with the first model that needs it.
 - No CUDA toolkit: Goethe brings its own CUDA runtime and compiler.
 
 The installer checks the machine first and installs missing pieces, such as a C++ compiler or the NVIDIA driver, after asking. `GOETHE_INSTALL_DEPS=1` and `GOETHE_INSTALL_DRIVER=1` answer yes in advance, `=0` no. Inside a container it never touches the driver, which belongs to the host. A GPU problem never stops the install; `goethe doctor` names the fix afterwards:
@@ -427,7 +429,7 @@ Dense, mixture-of-experts, hybrid (linear attention and Mamba) and vision-langua
 | INT8 (W8A8) | 8-bit integer |
 | Mixed precision | NVFP4 and FP8 in one model |
 
-The format is detected from the model files. GGUF and `.bin` (PyTorch pickle) weights are not supported; use the safetensors release of the model.
+The format is detected from the model files. `.bin` (PyTorch pickle) weights are not supported; use the safetensors release of the model. GGUF models run only with [optimised kernels](#add-models) (goethe-engine, logged-in nodes); `goethe install` says before downloading anything when a model is not supported.
 
 ## Settings
 
