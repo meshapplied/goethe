@@ -321,7 +321,7 @@ pub fn pull(home: &Path, dir: &Path, arch: &str, broker: &dyn Broker, run: Runne
         e
     };
     if !already(&pack, &sha) {
-        download(broker.pack(&sha)?, &sha, &pack).map_err(undo)?;
+        download(broker.pack(&sha).map_err(undo)?, &sha, &pack).map_err(undo)?;
     }
     std::fs::write(&psig, sig).map_err(|e| undo(e.to_string()))?;
     let ok = run(&[v("pack"), v("verify"), s(&pack), v("--arch"), v(arch)]).map_err(undo)?.1;
@@ -431,6 +431,29 @@ mod tests {
         let (home, dir) = dirs();
         let b = Fake { index: Err("/packs/v2/index: HTTP 401".into()), ..Fake::ok() };
         assert!(pull(home.path(), dir.path(), "sm_120a", &b, &engine(&[])).unwrap_err().contains("401"));
+        nothing_left(dir.path());
+    }
+
+    struct Refuses;
+    impl Broker for Refuses {
+        fn index(&self) -> Result<Vec<u8>, String> {
+            Ok(b"{}".to_vec())
+        }
+        fn index_sig(&self) -> Result<Vec<u8>, String> {
+            Ok(b"sig".to_vec())
+        }
+        fn pack(&self, _: &str) -> Result<Box<dyn Read>, String> {
+            Err("the platform did not accept this node's login".into())
+        }
+    }
+
+    #[test]
+    fn a_refused_pack_download_leaves_no_pack_files_from_an_earlier_install() {
+        let (home, dir) = dirs();
+        for f in [format!("{PACK_FILE}.sig"), PACK_VERIFY.to_string()] {
+            std::fs::write(dir.path().join(f), b"old").unwrap();
+        }
+        assert!(pull(home.path(), dir.path(), "sm_120a", &Refuses, &engine(&[])).unwrap_err().contains("login"));
         nothing_left(dir.path());
     }
 
