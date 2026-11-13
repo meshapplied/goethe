@@ -100,7 +100,7 @@ impl<'a> HttpBroker<'a> {
 
 impl Broker for HttpBroker<'_> {
     fn index(&self) -> Result<Vec<u8>, String> {
-        self.bytes("/packs/v2/index")
+        self.bytes("/packs/v2/index.json")
     }
     fn index_sig(&self) -> Result<Vec<u8>, String> {
         self.bytes("/packs/v2/index.sig")
@@ -198,7 +198,7 @@ pub fn catalog(home: &Path) -> Option<Vec<u8>> {
         return cached();
     }
     let base = platform_base(home).ok()?;
-    let mut req = crate::net::agent().get(&format!("{}/packs/v2/index", base.trim_end_matches('/'))).timeout(std::time::Duration::from_secs(10));
+    let mut req = crate::net::agent().get(&format!("{}/packs/v2/index.json", base.trim_end_matches('/'))).timeout(std::time::Duration::from_secs(10));
     if let (Some(tag), true) = (std::fs::read_to_string(&etag).ok(), body.is_file()) {
         req = req.set("If-None-Match", tag.trim());
     }
