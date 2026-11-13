@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""goethe update --engine fetches the verified wheel and hands it to bootstrap.sh."""
+"""goethe update --engine refreshes the py-env layers that are present (verified wheel to bootstrap.sh), no others."""
 
 from __future__ import annotations
 
@@ -22,11 +22,13 @@ def _cdn_tree(dist: Path) -> None:
     pyenv.mkdir(parents=True)
     (pyenv / "bootstrap.sh").write_text(
         "#!/bin/bash\n"
-        'echo "GOETHE_SGLANG_WHEEL=$GOETHE_SGLANG_WHEEL" >"$GOETHE_HOME/pyenv/bootstrap.env"\n'
+        'echo "LAYER=$1 GOETHE_SGLANG_WHEEL=$GOETHE_SGLANG_WHEEL" >"$GOETHE_HOME/pyenv/bootstrap.env"\n'
         'sha256sum "$GOETHE_SGLANG_WHEEL" >>"$GOETHE_HOME/pyenv/bootstrap.env"\n',
         encoding="utf-8",
     )
-    (pyenv / "requirements.lock").write_text("lock\n", encoding="utf-8")
+    suffix = ".aarch64" if ARCH == "aarch64" else ""
+    for stem in ("requirements", "requirements.base", "requirements.engine"):
+        (pyenv / f"{stem}{suffix}.lock").write_text("lock\n", encoding="utf-8")
     (dist / "wheels").mkdir()
     (dist / "wheels" / "LATEST").write_text("wheel.whl\n", encoding="utf-8")
     (dist / "wheels" / "wheel.whl").write_bytes(b"wheel-bytes")
@@ -34,6 +36,7 @@ def _cdn_tree(dist: Path) -> None:
     bindir.mkdir(parents=True)
     (bindir / "goethe").write_bytes(b"goethe")
     (bindir / "goethed").write_bytes(b"goethed")
+    (bindir / "uv").write_bytes(b"uv")
 
 
 def main() -> None:
@@ -64,8 +67,20 @@ def main() -> None:
             if not envf.is_file():
                 raise RuntimeError("bootstrap not run")
             text = envf.read_text(encoding="utf-8")
-            if f"GOETHE_SGLANG_WHEEL={wheel}" not in text:
-                raise RuntimeError(f"bootstrap did not receive the wheel path: {text!r}")
+            if f"LAYER=sglang GOETHE_SGLANG_WHEEL={wheel}" not in text:
+                raise RuntimeError(f"bootstrap did not receive the sglang layer and wheel path: {text!r}")
+        with temp_home(stub_python=True, tag="engine") as home:
+            shutil.copy(pub, home / "release_pub.pem")
+            shutil.rmtree(home / "py-env/lib/python3.11/site-packages/sglang-0.0.0+stub.dist-info")
+            rr = run(
+                [str(goethe), "update", "--engine", "--yes"],
+                env={"GOETHE_HOME": str(home), "GOETHE_PKG_URL": f"http://127.0.0.1:{srv.server_address[1]}"},
+                timeout=120,
+            )
+            if rr.returncode != 0 or "SGLang is not installed" not in rr.stdout:
+                raise RuntimeError(rr.stderr or rr.stdout)
+            if (home / "pyenv" / "bootstrap.env").exists() or (home / "pyenv" / "wheel.whl").exists():
+                raise RuntimeError("update --engine installed SGLang into a py-env that did not have it")
         print("stage3_engine_update ok")
     finally:
         if srv is not None:

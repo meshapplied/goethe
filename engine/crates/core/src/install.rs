@@ -327,10 +327,7 @@ fn sglang_check(home: &Path, model_id: &str, revision: Option<&str>, entry: Opti
         return Ok(());
     }
     let cfg = hf::fetch_config_json(model_id, rev)?;
-    match crate::pyenv::sglang_support(home) {
-        Some(info) => crate::scan::sglang_serves(&info, &cfg).map_err(|why| format!("{model_id} is not supported: {why}.{hint}")),
-        None => Ok(()),
-    }
+    crate::scan::sglang_serves(&crate::scan::sglang_support(home), &cfg).map_err(|why| format!("{model_id} is not supported: {why}.{hint}"))
 }
 
 const GGUF_META: &str = r#"
