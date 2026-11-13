@@ -101,7 +101,6 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
         }
     }
     if bins && pyenv::engine_installed(home).is_some() {
-        // The new binary may pin another goethe-engine: it brings the engine layer to its own pin (a no-op when equal).
         let ok = std::process::Command::new(home.join("bin/goethe"))
             .args(["update", "--engine", "--yes"])
             .status()

@@ -108,7 +108,7 @@ impl Worker {
                 state.last_error = Some(ApiError::Unauthorized.to_string());
                 state.last_error_at = Some(now);
                 let _ = platform::save_state(&self.home, &state);
-                self.note("platform: the token was revoked; heartbeats stop until goethe login");
+                self.note("platform: the token was revoked or expired; heartbeats stop until goethe login");
                 self.client = None;
                 (Outcome::Revoked, INTERVAL)
             }

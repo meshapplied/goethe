@@ -157,7 +157,7 @@ fn is_revoked(home: &Path, c: &Credentials) -> bool {
 
 fn relink_intro(workspace: &str, revoked: bool) -> String {
     if revoked {
-        format!("The previous link (workspace {workspace}) was revoked on the platform; linking again.")
+        format!("The previous link (workspace {workspace}) was revoked or expired on the platform; linking again.")
     } else {
         format!("This node is linked to workspace {workspace}; logging in again replaces that link.")
     }
@@ -291,6 +291,43 @@ pub fn logout() -> Result<(), String> {
     Ok(())
 }
 
+pub fn parse_lifetime(raw: &str) -> Result<Option<u64>, String> {
+    // "never", or a number with h, d or w (hours, days, weeks); at least one hour.
+    let s = raw.trim().to_ascii_lowercase();
+    if s == "never" {
+        return Ok(None);
+    }
+    let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let n: u64 = num.parse().map_err(|_| format!("{raw:?}: use never, or a number with h, d or w (for example 30d)"))?;
+    let secs = match unit {
+        "h" => n * 3600,
+        "d" => n * 86_400,
+        "w" => n * 7 * 86_400,
+        _ => return Err(format!("{raw:?}: use never, or a number with h, d or w (for example 30d)")),
+    };
+    if secs < 3600 {
+        return Err("the shortest lifetime is 1h".into());
+    }
+    Ok(Some(secs))
+}
+
+pub fn token_lifetime(raw: &str) -> Result<(), String> {
+    // Hidden goethe token-lifetime: limit how long this node's login lasts (the workspace's setting still applies).
+    let ttl = parse_lifetime(raw)?;
+    let home = goethe_home();
+    let c = platform::load_credentials(&home)?.ok_or("this node is not logged in (goethe login)")?;
+    let client = Client::new(&c.platform_url, REQUEST_TIMEOUT)?;
+    let expires = client.token_lifetime(&c.token, ttl).map_err(|e| match e {
+        ApiError::Unauthorized => "the platform did not accept this node's login (revoked or expired); run goethe login".to_string(),
+        e => e.to_string(),
+    })?;
+    match expires {
+        Some(at) => println!("This node's login expires at {at}."),
+        None => println!("This node's login does not expire."),
+    }
+    Ok(())
+}
+
 pub fn uninstall_logout(home: &Path) {
     // Best effort for goethe uninstall: log the node out quickly; the credentials go with the home.
     if let Ok(Some(c)) = platform::load_credentials(home) {
@@ -362,7 +399,7 @@ pub fn status_lines(home: &Path, daemon_running: bool) -> Vec<String> {
     match link_state(home, daemon_running) {
         Link::NotLinked => vec![format!("Platform: Not linked ({})", "goethe login")],
         Link::Unreadable(e) => vec![format!("Platform: {} ({e})", paint("credentials not usable", Color::Red))],
-        Link::Linked { revoked: true, .. } => vec![format!("Platform: {} (goethe login)", paint("Revoked", Color::Red))],
+        Link::Linked { revoked: true, .. } => vec![format!("Platform: {} (goethe login)", paint("Revoked or expired", Color::Red))],
         Link::Linked { workspace, heartbeat, ok, .. } => vec![
             format!("Platform: {} (workspace {workspace})", paint("Linked", Color::Green)),
             format!("Heartbeat: {}", if ok { paint(&heartbeat, Color::Green) } else { paint(&heartbeat, Color::Yellow) }),
@@ -373,6 +410,17 @@ pub fn status_lines(home: &Path, daemon_running: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_lifetimes_parse_never_hours_days_weeks() {
+        assert_eq!(parse_lifetime("never").unwrap(), None);
+        assert_eq!(parse_lifetime("2h").unwrap(), Some(7200));
+        assert_eq!(parse_lifetime("30d").unwrap(), Some(30 * 86_400));
+        assert_eq!(parse_lifetime("1W").unwrap(), Some(7 * 86_400));
+        for bad in ["0h", "30", "30m", "d", "", "-1d"] {
+            assert!(parse_lifetime(bad).is_err(), "{bad}");
+        }
+    }
     use crate::platform::{PlatformState, Workspace};
     use crate::platform_api::mock;
 
@@ -493,7 +541,7 @@ mod tests {
         let st = PlatformState { link: platform::link_key(&c), revoked_at: Some("t".into()), ..Default::default() };
         platform::save_state(home, &st).unwrap();
         assert!(is_revoked(home, &c));
-        assert_eq!(relink_intro("Personal", true), "The previous link (workspace Personal) was revoked on the platform; linking again.");
+        assert_eq!(relink_intro("Personal", true), "The previous link (workspace Personal) was revoked or expired on the platform; linking again.");
         replace_old_link(home, Some(c.clone())).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(*m.connections.lock().unwrap(), 0, "no logout call for a revoked link");

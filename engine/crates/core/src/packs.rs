@@ -6,12 +6,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The bearer token for pack downloads. Only the platform login supplies one: packs never install without it.
 pub trait TokenSource {
     fn token(&self) -> Result<String, String>;
 }
 
-/// The node token of this machine's platform link.
 pub struct Login(pub crate::platform::Credentials);
 
 impl TokenSource for Login {
@@ -20,7 +18,6 @@ impl TokenSource for Login {
     }
 }
 
-/// The three broker routes. Every error is final: the caller never falls back to unverified bytes.
 pub trait Broker {
     fn index(&self) -> Result<Vec<u8>, String>;
     fn index_sig(&self) -> Result<Vec<u8>, String>;
@@ -49,7 +46,7 @@ impl HttpBroker<'_> {
                 }
                 Ok(r) => return Ok(Box::new(r.into_reader())),
                 Err(ureq::Error::Status(401, _)) => {
-                    return Err("the platform did not accept this node's login (logged out or removed); run goethe login".into())
+                    return Err("the platform did not accept this node's login (logged out, removed, or its login expired); run goethe login".into())
                 }
                 Err(ureq::Error::Status(403, _)) => return Err("the platform refused the kernel pack for this workspace".into()),
                 Err(ureq::Error::Status(429, _)) => return Err("the platform is rate limiting pack downloads; try again in a minute".into()),
@@ -79,7 +76,6 @@ fn read_all(mut r: impl Read) -> Result<Vec<u8>, String> {
     Ok(v)
 }
 
-/// Runs `goethe-engine ARGS`: (exit code, stdout).
 pub type Runner<'a> = &'a dyn Fn(&[String]) -> Result<(i32, String), String>;
 
 pub fn python_runner(home: &Path) -> impl Fn(&[String]) -> Result<(i32, String), String> {
@@ -95,13 +91,10 @@ pub fn python_runner(home: &Path) -> impl Fn(&[String]) -> Result<(i32, String),
     }
 }
 
-/// Pack index ABI and runtimes the pinned goethe-engine runs (goethe_engine.pack ABI and RUNTIMES); a catalog entry
-/// outside them can never match, so it is never offered.
 const ENGINE_ABI_MAJOR: u64 = 2;
 const ENGINE_RUNTIMES: &[(&str, u64)] = &[("gc-c", 1)];
 const CATALOG_MISS_SECS: u64 = 300;
 
-/// A pack the platform's public index lists for a model and one of this machine's GPU architectures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Offer {
     pub arch: String,
@@ -111,18 +104,16 @@ pub struct Offer {
     pub files: Vec<String>,
 }
 
-/// The platform this machine talks to for packs: the one it is linked to, else the configured default.
 pub fn platform_base(home: &Path) -> Result<String, String> {
+    // The platform this machine talks to for packs: the one it is linked to, else the configured default.
     match crate::platform::load_credentials(home) {
         Ok(Some(c)) => Ok(c.platform_url),
         _ => crate::platform::platform_url(),
     }
 }
 
-/// The platform's public pack index (unverified bytes), revalidated with its ETag and cached under packs/catalog.
-/// Only decides what to offer: everything installed is verified by goethe-engine against the signed index again.
-/// None when the platform is unreachable and nothing is cached; a failure is remembered for a few minutes.
 pub fn catalog(home: &Path) -> Option<Vec<u8>> {
+    // The platform's public pack index (unverified bytes), revalidated with its ETag and cached under packs/catalog. Only decides what to offer: everything installed is verified by goethe-engine against the signed index again. None when the platform is unreachable and nothing is cached; a failure is remembered for a few minutes.
     let dir = home.join("packs").join("catalog");
     let (body, etag, miss) = (dir.join("index.json"), dir.join("etag"), dir.join("miss"));
     let cached = || std::fs::read(&body).ok();
@@ -163,13 +154,13 @@ pub fn catalog(home: &Path) -> Option<Vec<u8>> {
     }
 }
 
-/// Entries of `index` for `model_id` (case-insensitive) on one of `archs`, in `archs` order, that the pinned engine can run.
 pub fn offers(index: &[u8], model_id: &str, archs: &[String]) -> Vec<Offer> {
+    // Entries of `index` for `model_id` (case-insensitive) on one of `archs`, in `archs` order, that the pinned engine can run.
     offers_where(index, archs, |repo| repo.eq_ignore_ascii_case(model_id))
 }
 
-/// Every entry of `index` on one of `archs` that the pinned engine can run, whatever the model.
 pub fn offers_any(index: &[u8], archs: &[String]) -> Vec<Offer> {
+    // Every entry of `index` on one of `archs` that the pinned engine can run, whatever the model.
     offers_where(index, archs, |_| true)
 }
 
@@ -219,8 +210,8 @@ fn safe_name(f: &str) -> bool {
     !f.is_empty() && !f.contains(['/', '\\']) && f != "." && f != ".." && !f.starts_with('.')
 }
 
-/// The distinct pack architectures (sm_XX tags) of this machine's usable GPUs, most GPUs first.
 pub fn local_archs(home: &Path) -> Vec<String> {
+    // The distinct pack architectures (sm_XX tags) of this machine's usable GPUs, most GPUs first.
     let Ok(hw) = crate::hw::profile(home) else { return Vec::new() };
     let denied = crate::db::open(home).ok().and_then(|c| crate::gpu_policy::denied_set(&c).ok()).unwrap_or_default();
     let mut count: Vec<(String, usize)> = Vec::new();
@@ -236,9 +227,8 @@ pub fn local_archs(home: &Path) -> Vec<String> {
     count.into_iter().map(|(t, _)| t).collect()
 }
 
-/// The compute capabilities whose pack architecture is `arch`: the card's supported_sm, so placement keeps the model
-/// on GPUs the pack was built for.
 pub fn arch_ccs(arch: &str) -> Vec<String> {
+    // The compute capabilities whose pack architecture is `arch`: the card's supported_sm, so placement keeps the model on GPUs the pack was built for.
     crate::gpu_arch::supported_list().into_iter().filter(|cc| crate::gpu_arch::lookup(cc).is_some_and(|a| a.tag() == arch)).collect()
 }
 
@@ -254,8 +244,8 @@ fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
-/// The longest context any bucket of the verified pack in `dir` serves (`goethe-engine pack show`): the card's ctx cap.
 pub fn max_ctx(dir: &Path, run: Runner) -> Result<u64, String> {
+    // The longest context any bucket of the verified pack in `dir` serves (`goethe-engine pack show`): the card's ctx cap.
     let (_, out) = run(&["pack".into(), "show".into(), s(&dir.join(PACK_FILE))])?;
     out.lines()
         .filter_map(|l| l.split_whitespace().skip_while(|w| *w != "maxctx").nth(1)?.parse::<u64>().ok())
@@ -288,10 +278,8 @@ fn download(mut r: Box<dyn Read>, want: &str, dest: &Path) -> Result<(), String>
     Ok(())
 }
 
-/// Index, match on the files in `dir`, download, verify. Ok(true): `dir` holds the verified pack, its signature and the
-/// verification output, and the index serial is stored. Ok(false): no pack for these files (nothing written but the index).
-/// Err: nothing usable is left in `dir`.
 pub fn pull(home: &Path, dir: &Path, arch: &str, broker: &dyn Broker, run: Runner) -> Result<bool, String> {
+    // Index, match on the files in `dir`, download, verify. Ok(true): `dir` holds the verified pack, its signature and the verification output, and the index serial is stored. Ok(false): no pack for these files (nothing written but the index). Err: nothing usable is left in `dir`.
     let work = home.join("packs");
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let (ix, sg) = (work.join("index.json"), work.join("index.sig"));
@@ -369,8 +357,8 @@ mod tests {
         }
     }
 
-    // A fake goethe-engine: exit code and stdout per subcommand ("index verify", "pack match", "pack verify").
     fn engine(codes: &[(&str, i32)]) -> impl Fn(&[String]) -> Result<(i32, String), String> {
+        // A fake goethe-engine: exit code and stdout per subcommand ("index verify", "pack match", "pack verify").
         let codes: HashMap<String, i32> = codes.iter().map(|(k, v)| (k.to_string(), *v)).collect();
         move |a| {
             let key = format!("{} {}", a[0], a[1]);
@@ -495,8 +483,8 @@ mod tests {
         }
     }
 
-    // One-shot HTTP server: replies to one request, returns the request head it saw.
     fn serve(reply: String) -> (String, std::thread::JoinHandle<String>) {
+        // One-shot HTTP server: replies to one request, returns the request head it saw.
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", l.local_addr().unwrap());
         let h = std::thread::spawn(move || {

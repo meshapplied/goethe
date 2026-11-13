@@ -68,7 +68,6 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
     let disk = disk_gb_by_model(&con);
     let reg = fetch(&registry_url()).ok();
     let view = crate::placement::load_hw(&home).map(|hw| View::capacity(&home, hw));
-    // Kernel packs the platform's index lists for this machine's GPUs: the registry view of goethe-engine.
     let packs = if installed_only {
         Vec::new()
     } else {

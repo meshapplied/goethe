@@ -78,8 +78,6 @@ install_engine() {
     echo "no goethe-engine wheel pinned: set GOETHE_ENGINE_WHEEL_URL and GOETHE_ENGINE_WHEEL_SHA256" >&2
     exit 1
   fi
-  # Next to an installed SGLang the env keeps the torch and transformers SGLang was installed with (an older py-env
-  # may pin older ones than today's engine lock); only the wheel is added.
   if [[ "${LAYER}" == all ]] || ! compgen -G "${VENV}/lib/python3*/site-packages/sglang-*.dist-info" >/dev/null; then
     install_lock "$(lock_of engine)"
   fi

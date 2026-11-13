@@ -348,6 +348,8 @@ enum Commands {
     },
     #[command(display_order = 20, about = "Unlink this node from the Mesh platform and remove its local credentials.")]
     Logout,
+    #[command(hide = true, name = "token-lifetime", about = "Limit how long this node's platform login lasts: never, or 12h, 30d, 4w.")]
+    TokenLifetime { value: String },
     #[command(display_order = 18, about = "Tab completion for bash, zsh and fish: models, keys, GPUs and interfaces complete too.")]
     Completion {
         #[arg(value_parser = ["install", "remove", "status"], help = "install, remove, or status (the default).")]
@@ -995,6 +997,7 @@ fn main() {
         Commands::Start => goethe_core::onboard::run(),
         Commands::Login { platform_url, authkey } => goethe_core::platform_cli::login(platform_url.as_deref(), authkey.as_deref()),
         Commands::Logout => goethe_core::platform_cli::logout(),
+        Commands::TokenLifetime { value } => goethe_core::platform_cli::token_lifetime(&value),
         Commands::Completion { action, shell } => complete::run(action.as_deref(), shell.as_deref()),
         Commands::Configure { cmd: ConfigureCommands::Api(a) } => {
             eprintln!("note: goethe configure api is now goethe api configure");

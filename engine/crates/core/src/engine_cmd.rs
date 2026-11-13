@@ -526,7 +526,7 @@ pub const PACK_FILE: &str = "pack.gcpack";
 pub const PACK_VERIFY: &str = "pack.verify.json";
 
 fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
-    // The pack and the weights its verification listed (in order), both next to the tokenizer in the model dir.
+    // The pack and the weights its verification listed (in order), both next to the tokenizer in the model dir; GOETHE_ENGINE_ALLOW_UNSIGNED (it disables signature checks) is never passed on.
     let dir = spec.model_path;
     let text = std::fs::read_to_string(dir.join(PACK_VERIFY)).map_err(|e| format!("{}: {e}; run goethe install again", dir.join(PACK_VERIFY).display()))?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{PACK_VERIFY}: {e}"))?;
@@ -558,7 +558,7 @@ fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
         .env("CUDA_VISIBLE_DEVICES", gpus.join(","))
         .env("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
         .env(INSTANCE_ENV, spec.instance_id)
-        .env_remove("GOETHE_ENGINE_ALLOW_UNSIGNED"); // it disables the engine's signature checks: never passed on
+        .env_remove("GOETHE_ENGINE_ALLOW_UNSIGNED");
     Ok(cmd)
 }
 
