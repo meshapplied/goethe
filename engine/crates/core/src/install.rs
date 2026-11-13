@@ -331,18 +331,52 @@ fn sglang_check(home: &Path, model_id: &str, revision: Option<&str>, entry: Opti
 }
 
 const GGUF_META: &str = r#"
-import os, sys
-from transformers import AutoConfig, AutoTokenizer
+import collections, os, sys
+from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerFast
+from transformers.modeling_gguf_pytorch_utils import load_gguf_checkpoint
+from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES as M
+from transformers.models.auto.tokenization_auto import TOKENIZER_MAPPING_NAMES, tokenizer_class_from_name
 d, f, out, cfg, tok = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1", sys.argv[5] == "1"
 if cfg:
-    c = AutoConfig.from_pretrained(d, gguf_file=f)
-    if not getattr(c, "architectures", None):
-        from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES as M
-        if c.model_type in M:
-            c.architectures = [M[c.model_type]]
+    # The header's config, with per-layer counts (e.g. KV heads of sliding and global layers) folded to the config's
+    # scalar and its num_global_* field, which strict config classes require.
+    raw = dict(load_gguf_checkpoint(os.path.join(d, f), return_tensors=False)["config"])
+    mt = raw.pop("model_type")
+    raw.pop("_model_name_or_path", None)
+    for k, v in list(raw.items()):
+        if isinstance(v, list) and k.startswith("num_") and v and all(isinstance(x, int) for x in v):
+            common = collections.Counter(v).most_common()
+            raw[k] = common[0][0]
+            if len(common) > 1:
+                raw.setdefault(k.replace("num_", "num_global_", 1), common[-1][0])
+    c = AutoConfig.for_model(mt, **raw)
+    if not getattr(c, "architectures", None) and mt in M:
+        c.architectures = [M[mt]]
     c.save_pretrained(out)
+    from transformers import GenerationConfig
+    GenerationConfig.from_model_config(c).save_pretrained(out)   # the model's stop ids (e.g. end of turn and eos)
 if tok:
-    AutoTokenizer.from_pretrained(d, gguf_file=f).save_pretrained(out)
+    try:
+        t = AutoTokenizer.from_pretrained(d, gguf_file=f)
+    except Exception:
+        name = TOKENIZER_MAPPING_NAMES.get(AutoConfig.from_pretrained(out).model_type) if cfg else None
+        cls = tokenizer_class_from_name(name if isinstance(name, str) else (name[1] or name[0])) if name else PreTrainedTokenizerFast
+        t = cls.from_pretrained(d, gguf_file=f)
+        # A generic tokenizer knows nothing of the model's specials: take them from the GGUF header (control tokens,
+        # and the bos/eos/unk/pad ids), so chat turns end where the model ends them.
+        from gguf import GGUFReader
+        h = GGUFReader(os.path.join(d, f)).fields
+        val = lambda k, i: bytes(h[k].parts[h[k].data[i]]).decode() if h[k].types[-1].name == "STRING" else int(h[k].parts[h[k].data[i]][0])
+        n = len(h["tokenizer.ggml.tokens"].data)
+        tokens = [val("tokenizer.ggml.tokens", i) for i in range(n)]
+        if "tokenizer.ggml.token_type" in h:
+            ctrl = [tokens[i] for i in range(n) if val("tokenizer.ggml.token_type", i) == 3]
+            t.add_special_tokens({"additional_special_tokens": ctrl}, replace_extra_special_tokens=False)
+        for role in ("bos", "eos", "unk", "pad"):
+            k = f"tokenizer.ggml.{role}_token_id"
+            if k in h:
+                setattr(t, f"{role}_token", tokens[val(k, 0)])
+    t.save_pretrained(out)
 "#;
 
 fn gguf_metadata(home: &Path, dir: &Path, offer: &crate::packs::Offer) -> Result<(), String> {
