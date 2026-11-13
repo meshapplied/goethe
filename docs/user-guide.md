@@ -239,7 +239,7 @@ goethe install zai-org/GLM-5.3-Flash --load     # download and load in one step
 
 The model id is the Hugging Face repo name. Any [supported model](#supported-models) on Hugging Face works, not only the catalog. Useful flags: `--load`, `--ctx`, `--max-conc`, `--trust-remote-code` (only for models you trust) and `--hf-token`.
 
-**Optimised kernels:** for some models Goethe has kernel packs compiled for your GPU, which serve the model with goethe-engine instead of SGLang. `goethe install` picks them automatically on a node that is logged in to the Goethe platform (`goethe login`): it downloads only the files the pack was built for, then the pack, and verifies both before writing the model's card. On a node that is not logged in, `goethe install` offers to log in, or continues with SGLang when SGLang serves the model. Packs never install without a login. `goethe models` lists the models that have optimised kernels for this machine. SGLang and goethe-engine are each downloaded once, the first time a model needs them.
+**Optimised kernels:** some models have kernel packs compiled for your GPU. They are available to nodes logged in to the Goethe platform (`goethe login`), and `goethe install` uses them automatically. A node that is not logged in is asked to log in, or continues with SGLang. `goethe models` marks the models that have optimised kernels for your machine.
 
 **Gated or private models:** accept the license on the model's Hugging Face page, create a read token at huggingface.co/settings/tokens, then run `goethe install <org>/<model> --hf-token` and type the token when asked. It is used for that download only and never stored. In `goethe start`, choose "A private or gated model".
 
