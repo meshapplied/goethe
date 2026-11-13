@@ -95,7 +95,7 @@ Downloads a model from Hugging Face, or registers a model folder on this machine
 | `--load` | Load the model after installing it |
 | `--no-load` | Install only |
 | `--no-wait` | With `--load`, return without waiting until it's ready |
-| `--ctx <N>` | Default context length |
+| `--ctx <N>` | Default context length (default: the model's full context window; a load uses the largest that fits in VRAM) |
 | `--max-conc <N>` | Default number of requests served at the same time |
 | `--tp <N>` | Default number of GPUs to split it across (`0`: automatic) |
 | `--gpu <gpuN>...` | GPUs to load on |
@@ -135,7 +135,7 @@ Changes the default settings a model loads with.
 
 | Option | Description |
 |---|---|
-| `--ctx <N>` | Default context length |
+| `--ctx <N>` | Default context length (default: the model's full context window; a load uses the largest that fits in VRAM) |
 | `--max-conc <N>` | Default number of requests served at the same time |
 | `--tp <N>` | Default number of GPUs |
 | `--gpu <gpuN>...` | Default GPUs |
