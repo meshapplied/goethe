@@ -557,6 +557,23 @@ fn quant_method(cfg: &Value, dir: &Path) -> Option<String> {
     Some(modelopt_name(hq.pointer("/quantization/quant_algo").and_then(|v| v.as_str())))
 }
 
+pub fn sglang_serves(info: &SglangInfo, cfg: &Value) -> Result<(), String> {
+    // From config.json alone (before any download): SGLang has a model class for an architecture and the quantization.
+    let archs = architectures(cfg);
+    let Some(arch) = archs.first() else {
+        return Err("its config.json names no architecture".to_string());
+    };
+    if !archs.iter().any(|a| info.archs.contains(a)) {
+        return Err(format!("SGLang does not serve its architecture {arch}"));
+    }
+    if let Some(q) = quant_method(cfg, Path::new("")) {
+        if !(info.quants.contains(&q) || (q == "gptq" && info.quants.contains("gptq_marlin"))) {
+            return Err(format!("SGLang does not support its quantization {q}"));
+        }
+    }
+    Ok(())
+}
+
 fn quant_format(cfg: &Value, dir: &Path) -> &'static str {
     let text = format!(
         "{}{}",
@@ -721,6 +738,24 @@ pub fn quant_methods(source: &str) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sglang_support_is_read_from_config_json_alone() {
+        let info = SglangInfo {
+            key: String::new(),
+            archs: ["LlamaForCausalLM".to_string()].into(),
+            quants: ["fp8".to_string(), "gptq_marlin".to_string()].into(),
+        };
+        let ok = serde_json::json!({"architectures": ["LlamaForCausalLM"]});
+        assert!(sglang_serves(&info, &ok).is_ok());
+        let gptq = serde_json::json!({"architectures": ["LlamaForCausalLM"], "quantization_config": {"quant_method": "gptq"}});
+        assert!(sglang_serves(&info, &gptq).is_ok());
+        let awq = serde_json::json!({"architectures": ["LlamaForCausalLM"], "quantization_config": {"quant_method": "awq"}});
+        assert!(sglang_serves(&info, &awq).unwrap_err().contains("quantization awq"));
+        let other = serde_json::json!({"architectures": ["NewForCausalLM"]});
+        assert!(sglang_serves(&info, &other).unwrap_err().contains("architecture NewForCausalLM"));
+        assert!(sglang_serves(&info, &serde_json::json!({})).is_err());
+    }
     use serde_json::json;
 
     fn machine(total: f64) -> Machine {

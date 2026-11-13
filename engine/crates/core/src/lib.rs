@@ -16,6 +16,7 @@ pub mod model_facts;
 pub mod models;
 pub mod net;
 pub mod packs;
+pub mod pyenv;
 pub mod paths;
 pub mod platform;
 pub mod platform_api;

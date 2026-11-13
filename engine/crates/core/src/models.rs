@@ -25,6 +25,8 @@ struct ModelRow {
     fit: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     custom: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine: Option<String>,
     #[serde(skip)]
     verdict: Verdict,
 }
@@ -52,6 +54,7 @@ struct Installed {
     id: String,
     input: ChooserInput,
     default_tp: i64,
+    runtime: String,
 }
 
 const LIVE: &str = "status NOT IN ('FAILED', 'CANCELLED')";
@@ -65,6 +68,14 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
     let disk = disk_gb_by_model(&con);
     let reg = fetch(&registry_url()).ok();
     let view = crate::placement::load_hw(&home).map(|hw| View::capacity(&home, hw));
+    // Kernel packs the platform's index lists for this machine's GPUs: the registry view of goethe-engine.
+    let packs = if installed_only {
+        Vec::new()
+    } else {
+        let archs = crate::packs::local_archs(&home);
+        crate::packs::catalog(&home).map(|ix| crate::packs::offers_any(&ix, &archs)).unwrap_or_default()
+    };
+    let linked = crate::platform::load_credentials(&home).ok().flatten().is_some();
     let mut rows = Vec::new();
     if !available_only {
         for m in &installed {
@@ -80,6 +91,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 gb: disk.get(&m.id).copied().unwrap_or(m.input.static_vram_gb),
                 fit,
                 custom: is_custom_model(&m.id, reg.as_ref()).then_some(true),
+                engine: Some(m.runtime.clone()),
                 verdict,
             });
         }
@@ -91,12 +103,18 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
             }
             let pinned = m.default_tp.filter(|t| *t > 0).map(|t| t as usize);
             let verdict = verdict(view.as_ref(), &m.id, &registry_input(m), pinned);
+            let engine = match packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id)) {
+                true if linked => "goethe-engine".to_string(),
+                true => format!("{} (goethe-engine after goethe login)", m.effective_runtime()),
+                false => m.effective_runtime().to_string(),
+            };
             rows.push(ModelRow {
                 id: m.id.clone(),
                 status: "available".to_string(),
                 gb: m.download_gb.unwrap_or(m.static_vram_gb),
                 fit: verdict.label(),
                 custom: None,
+                engine: Some(engine),
                 verdict,
             });
         }
@@ -109,15 +127,37 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                     gb: row.vram_per_gpu_gb * row.tp as f64,
                     fit: Verdict::Fits { per_gpu: row.vram_per_gpu_gb, total: row.vram_per_gpu_gb * row.tp as f64 }.label(),
                     custom: None,
+                    engine: Some("ninfer".to_string()),
                     verdict: Verdict::Fits { per_gpu: row.vram_per_gpu_gb, total: row.vram_per_gpu_gb * row.tp as f64 },
                 });
             }
         }
     }
+    let pack_only: Vec<&crate::packs::Offer> = packs
+        .iter()
+        .filter(|o| !rows.iter().any(|r| r.id.eq_ignore_ascii_case(&o.hf_repo)))
+        .fold(Vec::new(), |mut v, o| {
+            if !v.iter().any(|x: &&crate::packs::Offer| x.hf_repo == o.hf_repo) {
+                v.push(o);
+            }
+            v
+        });
     if json {
+        for o in &pack_only {
+            rows.push(ModelRow {
+                id: o.hf_repo.clone(),
+                status: "available".to_string(),
+                gb: 0.0,
+                fit: format!("kernel pack for {}", o.arch),
+                custom: None,
+                engine: Some(if linked { "goethe-engine".into() } else { "goethe-engine (after goethe login)".into() }),
+                verdict: Verdict::Unknown,
+            });
+        }
         println!("{}", serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?);
     } else {
         print!("{}", list_text(&rows, view.as_ref().map(View::free_text)));
+        print!("{}", packs_text(&pack_only, linked));
     }
     Ok(())
 }
@@ -199,6 +239,24 @@ fn verdict(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<u
     }
 }
 
+fn packs_text(offers: &[&crate::packs::Offer], linked: bool) -> String {
+    // Models that run on goethe-engine with optimised kernels on this machine's GPUs, and how to get them.
+    use crate::term::{paint, Color, Table};
+    if offers.is_empty() {
+        return String::new();
+    }
+    let mut table = Table::new(&["MODEL", "GPU", "ENGINE"]);
+    for o in offers {
+        table.row(vec![o.hf_repo.clone(), o.arch.clone(), "goethe-engine".to_string()]);
+    }
+    let how = if linked {
+        "goethe install MODEL downloads the model and its verified kernels".to_string()
+    } else {
+        "log in first (goethe login): kernel packs install only on logged-in nodes".to_string()
+    };
+    format!("\n{}\n{}\n{how}\n", paint("Optimised kernels for this machine", Color::Bold), table.render())
+}
+
 fn list_text(rows: &[ModelRow], free_gb: Option<String>) -> String {
     // Installed models, then available ones grouped by the VRAM they take, then those that do not fit and why.
     use crate::term::{paint, Color, Table};
@@ -206,8 +264,10 @@ fn list_text(rows: &[ModelRow], free_gb: Option<String>) -> String {
     if let Some(free) = free_gb {
         out.push_str(&format!("{free}\n\n"));
     }
-    let row = |r: &ModelRow| vec![r.id.clone(), crate::term::status(&r.status), format!("{:.1} GB", r.gb), fit_colored(&r.fit)];
-    let header = ["MODEL", "STATUS", "DISK", "FIT ON THIS MACHINE"];
+    let row = |r: &ModelRow| {
+        vec![r.id.clone(), crate::term::status(&r.status), format!("{:.1} GB", r.gb), r.engine.clone().unwrap_or_default(), fit_colored(&r.fit)]
+    };
+    let header = ["MODEL", "STATUS", "DISK", "ENGINE", "FIT ON THIS MACHINE"];
     let (installed, available): (Vec<&ModelRow>, Vec<&ModelRow>) = rows.iter().partition(|r| r.status != "available");
     if !installed.is_empty() {
         let mut table = Table::new(&header);
@@ -260,6 +320,7 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
             Ok(Installed {
                 id: r.get(0)?,
                 default_tp: r.get(5)?,
+                runtime: card.get("runtime").and_then(|v| v.as_str()).unwrap_or("sglang").to_string(),
                 input: ChooserInput {
                     static_vram_gb: r.get(1)?,
                     kv_bytes_per_token: card_kv_bytes(&card, elems, kv_bytes.max(0) as u64).max(1),
