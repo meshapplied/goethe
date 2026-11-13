@@ -26,7 +26,7 @@ struct ModelRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     custom: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    engine: Option<String>,
+    optimised: Option<bool>,
     #[serde(skip)]
     verdict: Verdict,
 }
@@ -91,7 +91,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 gb: disk.get(&m.id).copied().unwrap_or(m.input.static_vram_gb),
                 fit,
                 custom: is_custom_model(&m.id, reg.as_ref()).then_some(true),
-                engine: Some(m.runtime.clone()),
+                optimised: (m.runtime == "goethe-engine").then_some(true),
                 verdict,
             });
         }
@@ -103,18 +103,13 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
             }
             let pinned = m.default_tp.filter(|t| *t > 0).map(|t| t as usize);
             let verdict = verdict(view.as_ref(), &m.id, &registry_input(m), pinned);
-            let engine = match packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id)) {
-                true if linked => "goethe-engine".to_string(),
-                true => format!("{} (goethe-engine after goethe login)", m.effective_runtime()),
-                false => m.effective_runtime().to_string(),
-            };
             rows.push(ModelRow {
                 id: m.id.clone(),
                 status: "available".to_string(),
                 gb: m.download_gb.unwrap_or(m.static_vram_gb),
                 fit: verdict.label(),
                 custom: None,
-                engine: Some(engine),
+                optimised: packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id)).then_some(true),
                 verdict,
             });
         }
@@ -127,7 +122,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                     gb: row.vram_per_gpu_gb * row.tp as f64,
                     fit: Verdict::Fits { per_gpu: row.vram_per_gpu_gb, total: row.vram_per_gpu_gb * row.tp as f64 }.label(),
                     custom: None,
-                    engine: Some("ninfer".to_string()),
+                    optimised: None,
                     verdict: Verdict::Fits { per_gpu: row.vram_per_gpu_gb, total: row.vram_per_gpu_gb * row.tp as f64 },
                 });
             }
@@ -150,7 +145,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 gb: 0.0,
                 fit: format!("kernel pack for {}", o.arch),
                 custom: None,
-                engine: Some(if linked { "goethe-engine".into() } else { "goethe-engine (after goethe login)".into() }),
+                optimised: Some(true),
                 verdict: Verdict::Unknown,
             });
         }
@@ -239,20 +234,22 @@ fn verdict(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<u
     }
 }
 
+const OPTIMISED: &str = " (optimised kernels available)";
+
 fn packs_text(offers: &[&crate::packs::Offer], linked: bool) -> String {
     // Models that run on goethe-engine with optimised kernels on this machine's GPUs, and how to get them.
     use crate::term::{paint, Color, Table};
     if offers.is_empty() {
         return String::new();
     }
-    let mut table = Table::new(&["MODEL", "GPU", "ENGINE"]);
+    let mut table = Table::new(&["MODEL", "GPU"]);
     for o in offers {
-        table.row(vec![o.hf_repo.clone(), o.arch.clone(), "goethe-engine".to_string()]);
+        table.row(vec![format!("{}{OPTIMISED}", o.hf_repo), o.arch.clone()]);
     }
     let how = if linked {
         "goethe install MODEL downloads the model and its verified kernels".to_string()
     } else {
-        "log in first (goethe login): kernel packs install only on logged-in nodes".to_string()
+        "optimised kernels install on nodes logged in to the Goethe platform: goethe login".to_string()
     };
     format!("\n{}\n{}\n{how}\n", paint("Optimised kernels for this machine", Color::Bold), table.render())
 }
@@ -265,9 +262,10 @@ fn list_text(rows: &[ModelRow], free_gb: Option<String>) -> String {
         out.push_str(&format!("{free}\n\n"));
     }
     let row = |r: &ModelRow| {
-        vec![r.id.clone(), crate::term::status(&r.status), format!("{:.1} GB", r.gb), r.engine.clone().unwrap_or_default(), fit_colored(&r.fit)]
+        let tag = if r.optimised.is_some() { OPTIMISED } else { "" };
+        vec![format!("{}{tag}", r.id), crate::term::status(&r.status), format!("{:.1} GB", r.gb), fit_colored(&r.fit)]
     };
-    let header = ["MODEL", "STATUS", "DISK", "ENGINE", "FIT ON THIS MACHINE"];
+    let header = ["MODEL", "STATUS", "DISK", "FIT ON THIS MACHINE"];
     let (installed, available): (Vec<&ModelRow>, Vec<&ModelRow>) = rows.iter().partition(|r| r.status != "available");
     if !installed.is_empty() {
         let mut table = Table::new(&header);
