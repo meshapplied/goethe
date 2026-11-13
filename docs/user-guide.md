@@ -25,7 +25,7 @@ Goethe turns a Linux machine into your own API, compatible with OpenAI, Anthropi
 - **Easy to serve.** Every model you load is served at the same URL; a request picks its model by name.
 - **Fast.** Use the custom kernel attachments to accelerate and optimise model capability.
 - **A private API for your team.** One key per person or app; nothing reaches the API until you allow it.
-- **Home or office over a VPN.** Serve from a GPU box and use it from your laptop through Tailscale, WireGuard or ZeroTier.
+- **Home or office over a VPN.** Serve from a GPU box and use it from your laptop through your VPN.
 - **Your own apps and tools.** Point OpenAI, Anthropic or LiteLLM clients, Open WebUI, coding assistants and similar tools at hardware you control.
 - **Many models, many GPUs.** Compare models by name on the same address, split large models across GPUs, or run on cloud GPUs when you need them.
 
@@ -33,10 +33,11 @@ Goethe turns a Linux machine into your own API, compatible with OpenAI, Anthropi
 
 ```bash
 curl -fsSL https://meshapplied.com/install.sh | bash
+goethe login
 goethe start
 ```
 
-`goethe start` starts Goethe and walks you through three steps: install a model, serve it through the API, and configure who can reach it. You can stop after any step and continue later with `goethe start`. If you prefer plain commands:
+`goethe login` links the machine to the Goethe platform, which also unlocks optimised kernels; it is optional. `goethe start` starts Goethe and walks you through three steps: install a model, serve it through the API, and configure who can reach it. You can stop after any step and continue later with `goethe start`. If you prefer plain commands:
 
 ```bash
 # 1. Start Goethe and load a model
@@ -301,7 +302,7 @@ goethe api configure
 ```
 
 - **Local only:** programs on this machine.
-- **VPN or private network (recommended):** connect your VPN first, then pick it from the list. Any VPN with a network interface works (WireGuard, Tailscale, ZeroTier, OpenVPN, NetBird and others), and so does a cloud VM's private network. Goethe lists tunnels and interfaces on private addresses, leaves out container bridges and public network cards, and shows the range each one reaches, taken from the system's routes. When a VPN routes each device separately, the private block its address is in (such as `100.64.0.0/10` or `10.0.0.0/8`) is used, so devices added later can connect too; you can narrow it to specific addresses. Default routes are never allowed. The gateway follows the interface: a new address after a reconnect or a reboot is picked up within a few seconds, and while the interface is down only this machine can connect (`goethe status` says so). The allowlist itself only changes when you run `goethe api configure` again; `goethe doctor` warns if it no longer lets the network's clients in. A VPN without an interface (userspace mode) can't be listened on directly: use local mode and the VPN's own port forwarding.
+- **VPN or private network (recommended):** connect your VPN first, then pick it from the list. Any VPN with a network interface works, and so does a cloud VM's private network. Goethe lists tunnels and interfaces on private addresses, leaves out container bridges and public network cards, and shows the range each one reaches, taken from the system's routes. When a VPN routes each device separately, the private block its address is in (such as `100.64.0.0/10` or `10.0.0.0/8`) is used, so devices added later can connect too; you can narrow it to specific addresses. Default routes are never allowed. The gateway follows the interface: a new address after a reconnect or a reboot is picked up within a few seconds, and while the interface is down only this machine can connect (`goethe status` says so). The allowlist itself only changes when you run `goethe api configure` again; `goethe doctor` warns if it no longer lets the network's clients in. A VPN without an interface (userspace mode) can't be listened on directly: use local mode and the VPN's own port forwarding.
 - **Public network:** any address that can reach this machine. You open the port in your firewall yourself.
 
 It then asks whether to restrict access to specific IP addresses, and offers to create the first key. In scripts: `goethe api configure --mode vpn --yes`, or `--mode public --allow 203.0.113.7 --yes`.

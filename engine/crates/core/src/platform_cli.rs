@@ -159,7 +159,7 @@ fn relink_intro(workspace: &str, revoked: bool) -> String {
     if revoked {
         format!("The previous link (workspace {workspace}) was revoked or expired on the platform; linking again.")
     } else {
-        format!("This node is linked to workspace {workspace}; logging in again replaces that link.")
+        format!("Already logged in: this node is linked to workspace {workspace}. Run goethe logout first to link it to another workspace.")
     }
 }
 
@@ -221,7 +221,11 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
     let key = authkey.map(read_authkey).transpose()?;
     let old = existing_link(&home);
     if let Some(o) = &old {
-        println!("{}", relink_intro(&platform::clean_text(&o.workspace.name, 64), is_revoked(&home, o)));
+        let revoked = is_revoked(&home, o);
+        println!("{}", relink_intro(&platform::clean_text(&o.workspace.name, 64), revoked));
+        if !revoked {
+            return Ok(());
+        }
     }
     let client = Client::new(&url, REQUEST_TIMEOUT)?;
     let (hostname, fingerprint) = (platform::hostname(), platform::fingerprint());
@@ -236,7 +240,7 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
     }
     let started = with_retries(|| client.auth_start(&hostname, &fingerprint)).map_err(|e| format!("{e}; nothing was changed"))?;
     replace_old_link(&home, old)?;
-    println!("\nTo link this node ({hostname}), open:\n\n{}\n\nand check that the page shows the code {}.\n", command(&started.verification_uri_complete), paint(&started.user_code, Color::Bold));
+    println!("\nTo link this node ({hostname}), open:\n\n{}\n\nand enter the code {}\n", command(&started.verification_uri_complete), paint(&started.user_code, Color::Bold));
     println!("Waiting for approval (Ctrl-C cancels)...");
     let mut blips = 0u32;
     let result = wait_for_approval(
@@ -537,7 +541,7 @@ mod tests {
         };
         platform::save_credentials(home, &c).unwrap();
         assert!(!is_revoked(home, &c));
-        assert!(relink_intro("Personal", false).contains("logging in again replaces that link"));
+        assert!(relink_intro("Personal", false).starts_with("Already logged in"));
         let st = PlatformState { link: platform::link_key(&c), revoked_at: Some("t".into()), ..Default::default() };
         platform::save_state(home, &st).unwrap();
         assert!(is_revoked(home, &c));
