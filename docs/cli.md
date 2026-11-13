@@ -87,7 +87,7 @@ The catalog models that fit the GPUs Goethe may use, grouped by the memory they 
 
 ### `goethe install <model or folder>`
 
-Downloads a model from Hugging Face, or registers a model folder on this machine. When the platform has optimised kernels for the model and this machine's GPU, a logged-in node installs them and serves the model with goethe-engine; a node that is not logged in is asked to log in (on a terminal) or continues with SGLang. A model neither engine serves is refused before anything is downloaded.
+Downloads a model from Hugging Face, or registers a model folder on this machine. Models with optimised kernels for this GPU use them when the node is logged in (`goethe login`); otherwise goethe asks to log in or continues with SGLang. A model that cannot be served is refused before anything is downloaded.
 
 | Option | Description |
 |---|---|

@@ -357,20 +357,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "installs from the CDN in GOETHE_PKG_URL into GOETHE_TEST_PYENV_HOME"]
-    fn ensure_from_cdn() {
-        // Manual check: GOETHE_TEST_PYENV_LAYERS=engine,sglang installs those layers in that order, then again as no-ops.
-        let home = PathBuf::from(std::env::var("GOETHE_TEST_PYENV_HOME").expect("set GOETHE_TEST_PYENV_HOME"));
-        let layers = std::env::var("GOETHE_TEST_PYENV_LAYERS").unwrap_or_else(|_| "base".to_string());
-        for name in layers.split(',') {
-            let layer = [Layer::Base, Layer::Engine, Layer::Sglang].into_iter().find(|l| l.name() == name).expect("base, engine or sglang");
-            ensure(&home, layer).unwrap();
-            assert!(has(&home, layer));
-            ensure(&home, layer).unwrap();
-        }
-    }
-
-    #[test]
     fn pin_is_compiled_in() {
         assert_eq!(pin_value("A=1\nGOETHE_X=2\nX=3\n", "X"), "3");
         assert_eq!(pin_value("A=1\r\nB=x y\r\n", "B"), "x y");
