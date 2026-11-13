@@ -299,7 +299,7 @@ fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String
 fn ask_login(offer: &crate::packs::Offer, opts: &InstallOpts) -> Result<bool, String> {
     // Asked only on a terminal; elsewhere one note, and the install continues with SGLang.
     let what = format!("Optimised kernels for {} are available for this GPU ({})", opts.model_id, offer.arch);
-    if opts.yes || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         eprintln!("note: {what} to nodes logged in to the Goethe platform (goethe login); continuing without them");
         return Ok(false);
     }
