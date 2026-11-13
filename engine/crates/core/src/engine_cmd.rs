@@ -530,9 +530,12 @@ fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
     let dir = spec.model_path;
     let text = std::fs::read_to_string(dir.join(PACK_VERIFY)).map_err(|e| format!("{}: {e}; run goethe install again", dir.join(PACK_VERIFY).display()))?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{PACK_VERIFY}: {e}"))?;
-    let weights: Vec<PathBuf> = v["weights"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).map(|f| dir.join(f)).collect();
+    let mut weights: Vec<PathBuf> = v["weights"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).map(|f| dir.join(f)).collect();
     if weights.is_empty() || weights.iter().any(|w| !w.is_file()) {
         return Err(format!("{}: the weights the pack names are missing", dir.display()));
+    }
+    if weights.iter().all(|w| w.extension().is_some_and(|x| x == "safetensors")) {
+        weights = vec![dir.to_path_buf()];
     }
     let mut cmd = Command::new(resolve_python(spec.home));
     cmd.args(["-m", "goethe_engine", "serve", "--host", "127.0.0.1", "--port"])

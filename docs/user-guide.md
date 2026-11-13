@@ -226,7 +226,7 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 | `goethe uninstall` | Remove Goethe and its models (`--keep-models` to keep them) |
 | `goethe completion install` | Tab completion for bash, zsh or fish: commands, models, keys, GPUs |
 | `goethe` | The home screen (on a terminal) |
-| `goethe login` | Optional: link this node to the Mesh platform to see its health there (`--authkey` without a browser) |
+| `goethe login` | Optional: link this node to the Goethe platform to see its health there (`--authkey` without a browser) |
 | `goethe logout` | Unlink it again |
 
 ## Add models

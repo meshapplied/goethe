@@ -399,7 +399,7 @@ fn configure_public(opts: &ApiOpts) -> Result<String, String> {
 }
 
 fn lookup_public_ip() -> Result<IpAddr, String> {
-    // This machine's address as the internet sees it, asked of the Mesh platform; GOETHE_PUBLIC_IP overrides, GOETHE_PUBLIC_IP_LOOKUP=0 disables.
+    // This machine's address as the internet sees it, asked of the Goethe platform; GOETHE_PUBLIC_IP overrides, GOETHE_PUBLIC_IP_LOOKUP=0 disables.
     crate::platform::lookup_public_ip(&goethe_home())
 }
 

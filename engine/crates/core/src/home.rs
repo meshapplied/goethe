@@ -75,7 +75,7 @@ fn platform_info(link: crate::platform_cli::Link) -> (Vec<String>, bool) {
     // Plain lines for the Platform section and whether a link exists to log out of.
     use crate::platform_cli::Link;
     match link {
-        Link::NotLinked => (vec!["Not linked. Linking is optional: it shows this node on the Mesh platform.".into()], false),
+        Link::NotLinked => (vec!["Not linked. Linking is optional: it shows this node on the Goethe platform.".into()], false),
         Link::Unreadable(e) => (vec![format!("Credentials not usable: {e}")], true),
         Link::Linked { revoked: true, workspace, .. } => (vec![format!("Revoked (was workspace {workspace}); log in again to relink.")], true),
         Link::Linked { workspace, heartbeat, .. } => (vec![format!("Linked    workspace {workspace}"), format!("Heartbeat {heartbeat}")], true),

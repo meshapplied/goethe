@@ -339,14 +339,14 @@ enum Commands {
     Learn(LearnArgs),
     #[command(hide = true, about = "Record requests and replies as training traces: turn it on or off, per API key, and see the size.", after_help = TRACE_HELP)]
     Trace(TraceArgs),
-    #[command(display_order = 19, about = "Link this node to the Mesh platform (optional): a browser login, or --authkey for headless machines.")]
+    #[command(display_order = 19, about = "Link this node to the Goethe platform (optional): a browser login, or --authkey for headless machines.")]
     Login {
         #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::platform_urls), long = "platform-url", value_name = "URL", help = "Platform to link to (default: the GOETHE_PLATFORM_URL setting, else https://platform.meshapplied.com).")]
         platform_url: Option<String>,
         #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::authkey_stdin), long, value_name = "KEY", help = "Link without a browser using an auth key (msh_ak_...); - reads it from stdin.")]
         authkey: Option<String>,
     },
-    #[command(display_order = 20, about = "Unlink this node from the Mesh platform and remove its local credentials.")]
+    #[command(display_order = 20, about = "Unlink this node from the Goethe platform and remove its local credentials.")]
     Logout,
     #[command(hide = true, name = "token-lifetime", about = "Limit how long this node's platform login lasts: never, or 12h, 30d, 4w.")]
     TokenLifetime { value: String },
