@@ -30,7 +30,7 @@ Exit codes:
 - [Start and stop](#start-and-stop): `goethe`, `start`, `up`, `status`, `down`
 - [Models](#models): `install`, `models`, `models recommend`, `models scan`, `models config`, `models alias`, `remove`
 - [Running models](#running-models): `load`, `unload`, `ps`, `logs`
-- [API access](#api-access): `api`, `api configure`, `api manage`, `api keys`, `api allowlist`, `api gateway`, `api domain`, `api learn`, `api trace`
+- [API access](#api-access): `api`, `api configure`, `api manage`, `api keys`, `api allowlist`, `api gateway`, `api domain`, `api learn`, `api trace`, `serve --public`
 - [GPUs and system](#gpus-and-system): `gpu`, `hw`, `doctor`, `update`, `uninstall`, `completion`, `--version`
 - [Platform](#platform): `login`, `logout`
 
@@ -54,7 +54,7 @@ Starts Goethe and the API gateway, and starts them at every boot from now on. Mo
 
 ### `goethe status`
 
-Whether Goethe is running, the API address, and the names and ids of your API keys. The last lines show the [platform](#platform) link (`Linked (workspace X)`, `Not linked`, or `Revoked`) and, when linked, the last heartbeat (`OK (2 s ago)` or `failing: <reason>`).
+Whether Goethe is running, the API address, the names and ids of your API keys, and the public gateway while it is open ([`goethe serve --public`](#goethe-serve---public)). The last lines show the [platform](#platform) link (`Linked (workspace X)`, `Not linked`, or `Revoked`) and, when linked, the last heartbeat (`OK (2 s ago)` or `failing: <reason>`).
 
 ### `goethe down`
 
@@ -338,6 +338,42 @@ The DNS record that serves the API under your own domain name, with this machine
 |---|---|
 | `--check <domain>` | Check that the name points at the API and that it answers there |
 
+### `goethe serve --public`
+
+Opens the API on a public address for a limited time, for API keys you choose, so you can give someone outside your network a URL and a key. The normal API address, local or VPN, stays as it is.
+
+```
+goethe serve --public 5h --key my-app      # open for 5 hours for the key my-app
+goethe serve --public 1d                   # open again, with the keys and port of the last opening
+goethe serve --public                      # status: URL, time left, keys
+goethe serve --public shutdown             # close now
+```
+
+Opening prints the URL, each key with the models it may use, the certificate to send along, and a `curl` command to try it. The keys stay the same every time you open the gateway, so a recipient can keep using the key you sent. Running it again while it is open keeps the gateway open and starts the timer over: `goethe serve --public 5h` means 5 hours from now, not 5 hours added to the time left. Connections in progress are not interrupted. The keys, port and address limits given that time replace the old ones. `goethe status` shows the window while it is open.
+
+| Option | Description |
+|---|---|
+| `--public <duration>` | How long to stay open: minutes, hours or days, such as `30m`, `5h` or `1d`, at most `7d`. `shutdown` closes it; nothing shows the status |
+| `--key <name or id>` | API keys that may use the public address; repeatable or comma-separated. Remembered for the next opening |
+| `--allow <cidr>` | Only these client addresses or ranges may connect, such as `203.0.113.7`; repeatable. Without it anyone may connect, with a key |
+| `--port <port>` | The public port (default `8444`, or the last one used) |
+
+The recipient verifies the gateway with the certificate goethe prints, `GOETHE_HOME/nginx/certs/public.crt`. It holds no secret: `curl --cacert public.crt https://<address>:8444/v1/models -H "Authorization: Bearer <key>"`. Most OpenAI-compatible clients take it through `SSL_CERT_FILE` or their CA-bundle setting. If nobody can connect, forward the port to this machine on your router or allow it in your cloud firewall; goethe does not open ports on routers. The public listener uses IPv4.
+
+**Security precautions**
+
+- **Closed by default:** nothing listens on the public port unless a window is open. Shutdown or the end of the window removes the listener.
+- **Time limit checked twice:** goethed closes the listener when the time runs out (it checks every 2 seconds, and on start it never reopens an expired window). In addition, every request on the public address checks the end time, so a request after it is refused even if closing failed or goethed was stopped.
+- **Only chosen keys:** only the keys named with `--key` work on the public address. Every other key gets 403 there. Removing a key from the list, or shutdown, applies to the next request.
+- **No admin keys:** admin keys are refused when opening and on every request. Expired keys are refused when opening, and a key that expires during the window stops working when it expires. goethe warns about a key that may use every model; a key limited with `--models` is safer to share.
+- **Model scope unchanged:** a key reaches only the models it is limited to, as on the normal address.
+- **Separate listener:** public requests reach goethe on their own internal address, so they can never be mistaken for requests from your own network, and no header can change that.
+- **API routes only:** health, readiness, admin and metrics endpoints are not served publicly.
+- **HTTPS only:** TLS 1.2 or 1.3, with its own certificate for the public listener. Plain HTTP connections are dropped.
+- **Stricter limits than the normal address:** 10 requests per second per client address (bursts of 20) and 16 connections per address, plus the same body size limit and header and body timeouts.
+- **Optional address limit:** `--allow` admits only the given clients; all others get 403.
+- **Checks before opening:** nothing changes unless every check passes: the gateway and goethed are running, the keys are valid, and the port is free and is not the normal gateway's port. If nginx does not accept the new listener, the previous state is restored.
+
 ## GPUs and system
 
 ### `goethe gpu`
@@ -404,7 +440,7 @@ Prints the version, and the upgrade command when a newer version is available. `
 
 ## Platform
 
-Linking is optional. A node that is not linked never contacts the platform. A linked node's goethed sends a health snapshot every 10 seconds, and right after a model loads or unloads: hostname, OS, environment (bare metal, VM, container, cloud), network addresses, the gateway address, GPUs with memory use, and installed and loaded models. It never sends API keys, engine keys, prompts, traces, file paths, environment variables or command lines. Inference never depends on the platform.
+Linking is optional. A node that is not linked never contacts the platform. A linked node's goethed sends a health snapshot every 10 seconds, and right after a model loads or unloads: hostname, OS, environment (bare metal, VM, container, cloud), network addresses, the gateway address, GPUs with memory use, installed and loaded models, and the node's API keys (name, key, model scope, expiry; the platform stores keys encrypted and shows them only to members who may manage the node). It never sends engine keys, prompts, traces, file paths, environment variables or command lines. Inference never depends on the platform.
 
 ### `goethe login`
 

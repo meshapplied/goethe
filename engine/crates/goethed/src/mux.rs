@@ -10,6 +10,7 @@ use goethe_core::metrics;
 use goethe_core::nginx;
 use goethe_core::paths::goethe_home;
 use goethe_core::placement;
+use goethe_core::public_share;
 use goethe_core::security::{self, ResolvedKey};
 use goethe_core::trace::{self, Capture, Recorder};
 use goethe_core::trace_assemble::Api as TraceApi;
@@ -76,6 +77,11 @@ pub fn spawn_mux() -> Result<tokio::task::JoinHandle<()>, String> {
     })?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let listener = TcpListener::from_std(listener).map_err(|e| e.to_string())?;
+    let public = std::net::TcpListener::bind(SocketAddr::from((public_share::PUBLIC_MUX_IP, port)))
+        .and_then(|l| l.set_nonblocking(true).map(|()| l))
+        .map_err(|e| eprintln!("goethe mux: public gateway listener on {}:{port} unavailable ({e})", public_share::PUBLIC_MUX_IP))
+        .ok()
+        .and_then(|l| TcpListener::from_std(l).ok());
     let max_body = nginx::persist_max_body_mb(&home) as usize * 1024 * 1024;
     nginx::persist_gateway_limits(&home);
     let mux = MUX.get_or_init(|| Mux {
@@ -90,7 +96,10 @@ pub fn spawn_mux() -> Result<tokio::task::JoinHandle<()>, String> {
     });
     let _ = mux.cache.exact();
     curator::spawn_ticker(mux);
-    Ok(tokio::spawn(serve(mux, listener)))
+    if let Some(public) = public {
+        tokio::spawn(serve(mux, public, true));
+    }
+    Ok(tokio::spawn(serve(mux, listener, false)))
 }
 
 fn raise_nofile_limit() {
@@ -116,8 +125,8 @@ fn upstream_client() -> Upstream {
         .build(http)
 }
 
-async fn serve(m: MuxRef, listener: TcpListener) {
-    // Accept forever; transient accept errors (EMFILE, ECONNABORTED) back off 50 ms instead of ending the mux.
+async fn serve(m: MuxRef, listener: TcpListener, public: bool) {
+    // Accept forever (public: the listener behind goethe serve --public); transient accept errors back off 50 ms instead of ending the mux.
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
@@ -129,7 +138,7 @@ async fn serve(m: MuxRef, listener: TcpListener) {
         };
         let _ = stream.set_nodelay(true);
         tokio::spawn(async move {
-            let svc = service_fn(move |req| async move { Ok::<_, Infallible>(handle(m, req).await) });
+            let svc = service_fn(move |req| async move { Ok::<_, Infallible>(handle(m, req, public).await) });
             let _ = http1::Builder::new()
                 .timer(TokioTimer::new())
                 .header_read_timeout(HEADER_READ_TIMEOUT)
@@ -139,10 +148,15 @@ async fn serve(m: MuxRef, listener: TcpListener) {
     }
 }
 
-async fn handle(m: MuxRef, req: Request<Incoming>) -> Response<MuxBody> {
+async fn handle(m: MuxRef, req: Request<Incoming>, public: bool) -> Response<MuxBody> {
     let rid = request_id(req.headers());
     let anthropic = is_anthropic(req.uri().path());
-    let mut resp = dispatch(m, req, &rid).await;
+    let mut resp = if public {
+        let path = req.uri().path().to_string();
+        api(m, req, &path, &rid, true).await
+    } else {
+        dispatch(m, req, &rid).await
+    };
     if anthropic {
         resp = anthropic_error(resp);
     }
@@ -179,7 +193,7 @@ async fn dispatch(m: MuxRef, req: Request<Incoming>, rid: &str) -> Response<MuxB
         "/health/liveliness" | "/health/liveness" => json_response(StatusCode::OK, json!("I'm alive!")),
         "/health/readiness" => json_response(StatusCode::OK, json!({"status": "healthy"})),
         p if p.starts_with("/health/admin") => health_admin(m, req.headers()).await,
-        _ => api(m, req, &path, rid).await,
+        _ => api(m, req, &path, rid, false).await,
     }
 }
 
@@ -212,8 +226,8 @@ fn api_route(path: &str) -> Option<(Method, Api)> {
     }
 }
 
-async fn api(m: MuxRef, req: Request<Incoming>, path: &str, rid: &str) -> Response<MuxBody> {
-    // Method check, key auth, per-key rpm, then the model list or a proxied call.
+async fn api(m: MuxRef, req: Request<Incoming>, path: &str, rid: &str, public: bool) -> Response<MuxBody> {
+    // Method check, key auth, the public gateway's window and key list, per-key rpm, then the model list or a proxied call.
     let Some((allowed, route)) = api_route(path) else {
         return not_found();
     };
@@ -224,6 +238,17 @@ async fn api(m: MuxRef, req: Request<Incoming>, path: &str, rid: &str) -> Respon
         Ok(k) => k,
         Err((message, code)) => return error(StatusCode::UNAUTHORIZED, message, "auth_error", code),
     };
+    if public {
+        match public_share::check(&goethe_home(), &key.key_id, key.is_admin) {
+            public_share::Access::Allowed => {}
+            public_share::Access::Closed => {
+                return error(StatusCode::FORBIDDEN, "The public gateway is closed", "forbidden", "public_gateway_closed")
+            }
+            public_share::Access::KeyNotShared => {
+                return error(StatusCode::FORBIDDEN, "This key is not allowed on the public gateway", "forbidden", "key_not_public")
+            }
+        }
+    }
     if let Some(retry) = gcra_check(&mut lock(&m.rpm), &key.key_id, key.rpm_limit, Instant::now()) {
         metrics::inc_rate_limited(&key.key_id);
         return rate_limited(retry);

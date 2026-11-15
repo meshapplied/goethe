@@ -215,6 +215,7 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 | `goethe api learn` | Let a session keep what compaction would drop (`on`, `off`, `--model`); see [learn.md](learn.md) |
 | `goethe api gateway` | Where the API listens (`--bind 127.0.0.1`, `0.0.0.0` or an IP) |
 | `goethe api domain` | DNS record for your own hostname (`--check <name>`) |
+| `goethe serve --public 5h --key <name>` | Open the API on a public address for a while for chosen keys (`shutdown` closes it) |
 
 ### GPUs and system
 
@@ -240,7 +241,7 @@ goethe install zai-org/GLM-5.3-Flash --load     # download and load in one step
 
 The model id is the Hugging Face repo name. Any [supported model](#supported-models) on Hugging Face works, not only the catalog. Useful flags: `--load`, `--ctx`, `--max-conc`, `--trust-remote-code` (only for models you trust) and `--hf-token`.
 
-**Optimised kernels:** some models have kernel packs compiled for your GPU. They are available to nodes logged in to the Goethe platform (`goethe login`), and `goethe install` uses them automatically. A node that is not logged in is asked to log in, or continues with SGLang. `goethe models` marks the models that have optimised kernels for your machine.
+**Optimised kernels:** some models have a kernel pack: the optimised kernels for every supported GPU microarchitecture, with the model's quantizations and configs (NVIDIA CUDA for now; other platforms such as AMD ROCm later). Packs are available to nodes logged in to the Goethe platform (`goethe login`), and `goethe install` uses them automatically. A node that is not logged in is asked to log in, or continues with SGLang. `goethe models` marks the models that have optimised kernels for your machine.
 
 **Gated or private models:** accept the license on the model's Hugging Face page, create a read token at huggingface.co/settings/tokens, then run `goethe install <org>/<model> --hf-token` and type the token when asked. It is used for that download only and never stored. In `goethe start`, choose "A private or gated model".
 
@@ -331,6 +332,18 @@ goethe api allowlist --add 192.168.1.0/24 --description "office LAN"
 goethe api allowlist --add 203.0.113.7
 goethe api allowlist --remove 192.168.1.0/24
 ```
+
+### Share for a while on a public address
+
+To give someone outside your network access for a limited time, without changing how the API is normally reached:
+
+```bash
+goethe serve --public 5h --key my-app      # prints the URL, the key and the certificate to send
+goethe serve --public 1d                   # later: the same keys again
+goethe serve --public shutdown             # close early
+```
+
+The public address exists only while it is open, accepts only the keys you chose (never admin keys) and closes by itself when the time runs out. Keys stay the same every time. Details and the full list of security precautions: [`goethe serve --public`](cli.md#goethe-serve---public).
 
 ### Address, aliases and your own domain
 
