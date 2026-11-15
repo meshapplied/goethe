@@ -349,7 +349,7 @@ goethe serve --public                      # status: URL, time left, keys
 goethe serve --public shutdown             # close now
 ```
 
-Opening prints the URL, each key with the models it may use, the certificate to send along, and a `curl` command to try it. The keys stay the same every time you open the gateway, so a recipient can keep using the key you sent. Running it again while it is open replaces the time, keys and address limits. `goethe status` shows the window while it is open.
+Opening prints the URL, each key with the models it may use, the certificate to send along, and a `curl` command to try it. The keys stay the same every time you open the gateway, so a recipient can keep using the key you sent. Running it again while it is open keeps the gateway open and starts the timer over: `goethe serve --public 5h` means 5 hours from now, not 5 hours added to the time left. Connections in progress are not interrupted. The keys, port and address limits given that time replace the old ones. `goethe status` shows the window while it is open.
 
 | Option | Description |
 |---|---|

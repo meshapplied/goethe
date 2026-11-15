@@ -54,6 +54,7 @@ pub struct Opened {
     pub cert: PathBuf,
     pub fingerprint: Option<String>,
     pub warnings: Vec<String>,
+    pub restarted: bool,
 }
 
 pub fn now() -> i64 {
@@ -210,7 +211,7 @@ pub struct OpenArgs<'a> {
 }
 
 pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
-    // Validate everything first, then write the window and reload the gateway; any failure restores the previous state.
+    // Validate, then write the window and hot-reload nginx; an open window on the same port restarts its timer from now without closing.
     if !nginx::master_running(home) {
         return Err("the gateway is not running; start goethe with goethe up".to_string());
     }
@@ -263,7 +264,7 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
         return Err(format!("could not open the public gateway: {e}"));
     }
     let cert = cert_path(home);
-    Ok(Opened { fingerprint: fingerprint(&cert), cert, share, keys, public_ip, warnings })
+    Ok(Opened { fingerprint: fingerprint(&cert), cert, share, keys, public_ip, warnings, restarted: ours })
 }
 
 pub fn shutdown(home: &Path) -> Result<bool, String> {
