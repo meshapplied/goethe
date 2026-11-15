@@ -350,6 +350,21 @@ enum Commands {
     Logout,
     #[command(hide = true, name = "token-lifetime", about = "Limit how long this node's platform login lasts: never, or 12h, 30d, 4w.")]
     TokenLifetime { value: String },
+    #[command(
+        display_order = 12,
+        about = "Open the API on a public address for a while, for chosen API keys; shutdown closes it.",
+        after_help = "Examples:\n\n\t→ goethe serve --public 5h --key my-app\n\t→ goethe serve --public 1d          (the keys of the last opening)\n\t→ goethe serve --public             (status)\n\t→ goethe serve --public shutdown"
+    )]
+    Serve {
+        #[arg(long, value_name = "DURATION", num_args = 0..=1, default_missing_value = "status", required = true, help = "How long to stay open (30m, 5h, 1d; at most 7d), shutdown to close now, or nothing for the status.")]
+        public: Option<String>,
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::key_names), long, value_name = "NAME_OR_ID", num_args = 1.., value_delimiter = ',', help = "API keys that may use the public address (not admin keys); remembered for the next opening.")]
+        key: Vec<String>,
+        #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Only these client addresses or ranges may connect, such as 203.0.113.7.")]
+        allow: Vec<String>,
+        #[arg(long, help = "The public port (default 8444, or the last one used).")]
+        port: Option<u16>,
+    },
     #[command(display_order = 18, about = "Tab completion for bash, zsh and fish: models, keys, GPUs and interfaces complete too.")]
     Completion {
         #[arg(value_parser = ["install", "remove", "status"], help = "install, remove, or status (the default).")]
@@ -997,6 +1012,7 @@ fn main() {
         Commands::Start => goethe_core::onboard::run(),
         Commands::Login { platform_url, authkey } => goethe_core::platform_cli::login(platform_url.as_deref(), authkey.as_deref()),
         Commands::Logout => goethe_core::platform_cli::logout(),
+        Commands::Serve { public, key, allow, port } => do_serve(public.as_deref().unwrap_or("status"), &key, &allow, port),
         Commands::TokenLifetime { value } => goethe_core::platform_cli::token_lifetime(&value),
         Commands::Completion { action, shell } => complete::run(action.as_deref(), shell.as_deref()),
         Commands::Configure { cmd: ConfigureCommands::Api(a) } => {
@@ -1805,8 +1821,90 @@ fn do_status() -> Result<(), String> {
         })
         .collect();
     print!("{}", status_text(Some(&api), &keys));
+    if let Some(line) = goethe_core::public_share::status_line(&home) {
+        println!("\n{line}");
+    }
     print_platform_lines(&home, true);
     Ok(())
+}
+
+fn do_serve(public: &str, keys: &[String], allow: &[String], port: Option<u16>) -> Result<(), String> {
+    // goethe serve --public <duration> | shutdown | (status).
+    use goethe_core::public_share as share;
+    let home = goethe_home();
+    match public {
+        "shutdown" | "close" | "off" => {
+            if !keys.is_empty() || !allow.is_empty() || port.is_some() {
+                usage("goethe serve --public shutdown takes no other options");
+            }
+            match share::shutdown(&home)? {
+                true => println!("Public gateway closed. The keys stay as they are and keep working on the normal API address."),
+                false => println!("The public gateway is not open."),
+            }
+            Ok(())
+        }
+        "status" => {
+            if !keys.is_empty() || !allow.is_empty() || port.is_some() {
+                usage("give a duration to open the public gateway, such as goethe serve --public 5h --key my-app");
+            }
+            match share::active(&home) {
+                Some(s) => {
+                    let ip = goethe_core::platform::lookup_public_ip(&home).map(|i| i.to_string()).unwrap_or_else(|_| "<public IP>".into());
+                    println!("Public gateway: open until {} ({} left)", share::local_time(s.until), left(s.until - share::now()));
+                    println!("URL:  https://{}/v1", host_port(&ip, s.port));
+                    println!("Keys: {}", share::key_names(&home, &s.keys).join(", "));
+                    if !s.allow.is_empty() {
+                        println!("Only: {}", s.allow.join(", "));
+                    }
+                    println!("\nClose it with: goethe serve --public shutdown");
+                }
+                None => println!("The public gateway is closed. Open it with: goethe serve --public 5h --key <key name>"),
+            }
+            Ok(())
+        }
+        dur => {
+            let secs = share::parse_duration(dur)?;
+            let o = share::open(&home, share::OpenArgs { secs, keys, allow, port })?;
+            let ip = o.public_ip.map(|i| i.to_string()).unwrap_or_else(|| "<public IP>".into());
+            let url = format!("https://{}/v1", host_port(&ip, o.share.port));
+            println!("Public gateway open until {} ({})\n", share::local_time(o.share.until), left(secs));
+            println!("URL:  {url}");
+            for k in &o.keys {
+                let models = k.models.as_deref().filter(|m| !m.is_empty()).unwrap_or("every model");
+                let token = k.token.as_deref().unwrap_or("(shown when it was created)");
+                println!("Key:  {} {token}  models: {models}", k.name);
+            }
+            if !o.share.allow.is_empty() {
+                println!("Only: {}", o.share.allow.join(", "));
+            }
+            println!("\nTLS:  self-signed for this address. Send {} with the key (it holds no secret); the recipient", o.cert.display());
+            println!("      verifies the gateway with it, for example:");
+            let token = o.keys.first().and_then(|k| k.token.as_deref()).unwrap_or("<key>");
+            println!("      curl --cacert public.crt {url}/models -H \"Authorization: Bearer {token}\"");
+            if let Some(f) = &o.fingerprint {
+                println!("      SHA-256 fingerprint: {f}");
+            }
+            for w in &o.warnings {
+                println!("\nnote: {w}");
+            }
+            println!("\nIf nobody can connect, forward TCP port {} to this machine or allow it in the cloud firewall.", o.share.port);
+            println!("Close it early with: goethe serve --public shutdown");
+            Ok(())
+        }
+    }
+}
+
+fn host_port(ip: &str, port: u16) -> String {
+    if ip.contains(':') { format!("[{ip}]:{port}") } else { format!("{ip}:{port}") }
+}
+
+fn left(secs: i64) -> String {
+    let s = secs.max(0);
+    match (s / 86_400, s % 86_400 / 3600, s % 3600 / 60) {
+        (0, 0, m) => format!("{m}m"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
 }
 
 fn print_platform_lines(home: &std::path::Path, running: bool) {

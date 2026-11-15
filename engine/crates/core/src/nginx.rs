@@ -462,6 +462,7 @@ fn render_gateway_on(home: &Path, bin: &Path, bind: IpAddr) -> Result<String, St
         String::new()
     };
     const TMPL: &str = include_str!("../../../nginx/goethe_gateway.conf.tmpl");
+    let public = crate::public_share::nginx_block(home, mux_port, modern_http2, max_body_mb(home));
     Ok(TMPL
         .replace("{{LISTEN}}", &listen)
         .replace("{{HTTP2_LISTEN}}", http2)
@@ -474,7 +475,8 @@ fn render_gateway_on(home: &Path, bin: &Path, bind: IpAddr) -> Result<String, St
         .replace("{{RATE_PER_IP}}", &gateway_limit(home, "rate_per_ip", DEFAULT_RATE_PER_IP).to_string())
         .replace("{{BURST_PER_IP}}", &(2 * gateway_limit(home, "rate_per_ip", DEFAULT_RATE_PER_IP)).to_string())
         .replace("{{CONN_PER_IP}}", &gateway_limit(home, "conn_per_ip", DEFAULT_CONN_PER_IP).to_string())
-        .replace("{{MUX_PORT}}", &mux_port.to_string()))
+        .replace("{{MUX_PORT}}", &mux_port.to_string())
+        + &public)
 }
 
 fn write_configs(home: &Path, bin: &Path) -> Result<(), String> {

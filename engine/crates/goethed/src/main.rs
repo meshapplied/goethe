@@ -190,7 +190,10 @@ async fn main() {
             }
             _ = follow_tick.tick() => {
                 let h = home_rot.clone();
-                tokio::task::spawn_blocking(move || goethe_core::nginx::follow_interface(&h));
+                tokio::task::spawn_blocking(move || {
+                    goethe_core::nginx::follow_interface(&h);
+                    goethe_core::public_share::tick(&h);
+                });
             }
             _ = watchdog_tick.tick() => {
                 let h = home_rot.clone();
