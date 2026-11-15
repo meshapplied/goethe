@@ -72,6 +72,14 @@ pub struct Gateway {
     pub interface: Option<String>,
     pub waiting: bool,
     pub port: u16,
+    pub public: Option<PublicGateway>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct PublicGateway {
+    pub url: Option<String>,
+    pub port: u16,
+    pub until: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -162,7 +170,7 @@ impl Collector {
                     gateway_running: crate::nginx::format_gateway_line(home).is_some(),
                 },
             },
-            network: Network { gateway: gateway(home, &addresses), addresses, public_ip },
+            network: Network { gateway: gateway(home, &addresses, public_ip.as_deref()), addresses, public_ip },
             gpus: con.as_ref().map(|c| gpus(c, home)).unwrap_or_default(),
             models,
             apis: con.as_ref().map(apis).unwrap_or_default(),
@@ -266,8 +274,8 @@ fn addresses() -> Vec<Address> {
     out
 }
 
-fn gateway(home: &Path, addresses: &[Address]) -> Gateway {
-    // Where clients reach the gateway: the bound address, or for a wildcard bind the best address this host has.
+fn gateway(home: &Path, addresses: &[Address], public_ip: Option<&str>) -> Gateway {
+    // Where clients reach the gateway (the bound address, or the best one for a wildcard bind), plus the public gateway while it is open.
     let bind = crate::nginx::public_bind(home);
     let port = crate::nginx::public_port_u16(home);
     Gateway {
@@ -276,6 +284,11 @@ fn gateway(home: &Path, addresses: &[Address]) -> Gateway {
         waiting: crate::nginx::bind_waiting(home).is_some(),
         bind,
         port,
+        public: crate::public_share::active(home).map(|p| PublicGateway {
+            url: public_ip.and_then(|ip| ip.parse::<Ipv4Addr>().ok()).map(|ip| format!("https://{ip}:{}/v1", p.port)),
+            port: p.port,
+            until: chrono::DateTime::from_timestamp(p.until, 0).map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).unwrap_or_default(),
+        }),
     }
 }
 
@@ -570,7 +583,7 @@ mod tests {
         for key in ["kind", "cloud", "container", "virt"] {
             assert!(v["node"]["environment"].get(key).is_some(), "environment.{key}");
         }
-        for key in ["url", "bind", "interface", "waiting", "port"] {
+        for key in ["url", "bind", "interface", "waiting", "port", "public"] {
             assert!(v["network"]["gateway"].get(key).is_some(), "gateway.{key}");
         }
         assert!(v["network"].get("public_ip").is_some() && v["network"]["addresses"].is_array());
@@ -599,6 +612,23 @@ mod tests {
         for k in all_keys(&v) {
             assert!(!["token", "key", "api_key", "engine_key", "token_hash", "path", "local_path", "env", "pid", "args"].contains(&k.as_str()), "field {k}");
         }
+    }
+
+    #[test]
+    fn an_open_public_gateway_is_reported_with_its_end() {
+        let (_dir, home) = seeded_home();
+        let mut c = Collector::new(String::new());
+        assert_eq!(c.build(&home, "interval", None).network.gateway.public, None);
+        let until = crate::public_share::now() + 3600;
+        std::fs::create_dir_all(home.join("nginx")).unwrap();
+        let state = serde_json::json!({"open": true, "until": until, "port": 8444, "keys": ["k1"], "allow": []});
+        std::fs::write(home.join("nginx/public_share.json"), state.to_string()).unwrap();
+        let p = c.build(&home, "interval", Some("198.51.100.9")).network.gateway.public.unwrap();
+        assert_eq!(p.port, 8444);
+        assert_eq!(chrono::DateTime::parse_from_rfc3339(&p.until).unwrap().timestamp(), until);
+        let state = serde_json::json!({"open": false, "until": until, "port": 8444, "keys": ["k1"], "allow": []});
+        std::fs::write(home.join("nginx/public_share.json"), state.to_string()).unwrap();
+        assert_eq!(c.build(&home, "interval", None).network.gateway.public, None, "closed");
     }
 
     #[test]

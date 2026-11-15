@@ -281,8 +281,21 @@ pub fn shutdown(home: &Path) -> Result<bool, String> {
     Ok(was_open)
 }
 
+static SEEN: Mutex<Option<Stamp>> = Mutex::new(None);
+
 pub fn tick(home: &Path) {
-    // goethed, every 2 s: close an expired window and drop its listener.
+    // goethed, every 2 s: close an expired window and drop its listener; any change to the window sends a heartbeat soon.
+    close_expired(home);
+    let now_stamp = stamp(home);
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if seen.is_some_and(|s| s != now_stamp) {
+        crate::platform::notify(crate::platform::CHANGE_STATE);
+    }
+    seen.replace(now_stamp);
+}
+
+fn close_expired(home: &Path) {
+    // Mark an open window whose time ran out closed, under the gateway lock, and reload nginx without it.
     let Some(share) = load(home) else { return };
     if !share.open || share.active_at(now()) {
         return;
