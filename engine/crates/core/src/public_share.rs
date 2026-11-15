@@ -113,7 +113,7 @@ pub fn check(home: &Path, key_id: &str, is_admin: bool) -> Access {
             Some((st, s)) if *st == now_stamp => s.clone(),
             _ => {
                 let s = if now_stamp.is_some() { load(home) } else { None };
-                *slot = Some((now_stamp, s.clone()));
+                slot.replace((now_stamp, s.clone()));
                 s
             }
         }

@@ -36,7 +36,11 @@ def _mini_cdn(cdn: Path, pub: Path) -> None:
     """A CDN tree with real pyenv files, stub binaries and an install.sh embedding pub."""
     shutil.copytree(GOETHE_PKG / "cdn" / "v1", cdn / "v1")
     (cdn / "pyenv").mkdir()
-    for name in ("requirements.lock", "requirements.aarch64.lock", "bootstrap.sh"):
+    for layer in ("", ".base", ".engine"):
+        for arch in ("", ".aarch64"):
+            lock = f"requirements{layer}{arch}.lock"
+            shutil.copy2(GOETHE_PKG / "pyenv" / lock, cdn / "pyenv" / lock)
+    for name in ("bootstrap.sh",):
         shutil.copy2(GOETHE_PKG / "pyenv" / name, cdn / "pyenv" / name)
     bindir = cdn / "bin" / f"linux-{ARCH}"
     bindir.mkdir(parents=True)

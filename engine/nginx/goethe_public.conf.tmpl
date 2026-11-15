@@ -1,5 +1,4 @@
-
-# goethe public gateway (goethe serve --public), present only while a window is open
+# goethe public gateway nginx template (goethe serve --public), rendered only while a window is open
 limit_req_zone $binary_remote_addr zone=goethe_pub_ip:10m rate={{RATE_PER_IP}}r/s;
 limit_conn_zone $binary_remote_addr zone=goethe_pub_conn:10m;
 
