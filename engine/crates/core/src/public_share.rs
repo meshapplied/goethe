@@ -54,7 +54,6 @@ pub struct Opened {
     pub cert: PathBuf,
     pub fingerprint: Option<String>,
     pub warnings: Vec<String>,
-    pub restarted: bool,
 }
 
 pub fn now() -> i64 {
@@ -264,7 +263,7 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
         return Err(format!("could not open the public gateway: {e}"));
     }
     let cert = cert_path(home);
-    Ok(Opened { fingerprint: fingerprint(&cert), cert, share, keys, public_ip, warnings, restarted: ours })
+    Ok(Opened { fingerprint: fingerprint(&cert), cert, share, keys, public_ip, warnings })
 }
 
 pub fn shutdown(home: &Path) -> Result<bool, String> {

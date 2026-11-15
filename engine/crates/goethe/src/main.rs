@@ -1867,10 +1867,7 @@ fn do_serve(public: &str, keys: &[String], allow: &[String], port: Option<u16>) 
             let o = share::open(&home, share::OpenArgs { secs, keys, allow, port })?;
             let ip = o.public_ip.map(|i| i.to_string()).unwrap_or_else(|| "<public IP>".into());
             let url = format!("https://{}/v1", host_port(&ip, o.share.port));
-            match o.restarted {
-                true => println!("Public gateway stays open; the timer starts over: open until {} ({})\n", share::local_time(o.share.until), left(secs)),
-                false => println!("Public gateway open until {} ({})\n", share::local_time(o.share.until), left(secs)),
-            }
+            println!("Public gateway open until {} ({})\n", share::local_time(o.share.until), left(secs));
             println!("URL:  {url}");
             for k in &o.keys {
                 let models = k.models.as_deref().filter(|m| !m.is_empty()).unwrap_or("every model");
