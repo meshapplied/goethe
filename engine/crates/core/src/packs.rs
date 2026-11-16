@@ -557,10 +557,11 @@ pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Bro
     if need["manifest_sha256"].as_str() != Some(e.manifest_sha256.as_str()) {
         return Err(undo("pack need: the manifest differs from the signed index".into()));
     }
-    let ranges: Vec<(u64, u64, String)> = need["ranges"].as_array().into_iter().flatten()
-        .filter_map(|r| Some((r["off"].as_u64()?, r["len"].as_u64()?, r["sha256"].as_str()?.to_string())))
+    // A block's name is the sha256 of its raw bytes; only an uncompressed block is also named by what is stored, so a compressed one (codec xz) is checked by `pack verify` below.
+    let ranges: Vec<(u64, u64, String, bool)> = need["ranges"].as_array().into_iter().flatten()
+        .filter_map(|r| Some((r["off"].as_u64()?, r["len"].as_u64()?, r["sha256"].as_str()?.to_string(), matches!(r["codec"].as_str(), None | Some("none") | Some("raw")))))
         .collect();
-    if ranges.iter().any(|(o, l, h)| o + l > e.size || !is_sha256(h)) {
+    if ranges.iter().any(|(o, l, h, _)| o + l > e.size || !is_sha256(h)) {
         return Err(undo("pack need: a range lies outside the pack".into()));
     }
     let sig = serde_json::to_vec(&e.sig).map_err(|err| undo(err.to_string()))?;
@@ -571,9 +572,9 @@ pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Bro
         let mut f = std::fs::File::create(&pack).map_err(|err| undo(format!("{}: {err}", pack.display())))?;
         f.set_len(e.size).map_err(|err| undo(err.to_string()))?;
         f.write_all(&plan.prefix).map_err(|err| undo(err.to_string()))?;
-        for (o, l) in merged(ranges.iter().map(|(o, l, _)| (*o, *l)).collect()) {
+        for (o, l) in merged(ranges.iter().map(|(o, l, ..)| (*o, *l)).collect()) {
             let bytes = broker.range(&e.file, o, l).map_err(undo)?;
-            for (ro, rl, h) in ranges.iter().filter(|(ro, rl, _)| *ro >= o && ro + rl <= o + l) {
+            for (ro, rl, h, _) in ranges.iter().filter(|(ro, rl, _, stored)| *stored && *ro >= o && ro + rl <= o + l) {
                 let part = &bytes[(ro - o) as usize..(ro - o + rl) as usize];
                 if format!("{:x}", Sha256::digest(part)) != *h {
                     return Err(undo(format!("pack download: a block of {} does not hash to its name", e.file)));
@@ -763,6 +764,30 @@ mod tests {
         let b = fake();
         assert!(plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[("index verify", 1)])).is_err());
         assert!(b.ranges.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_compressed_block_is_named_by_its_raw_bytes_so_only_pack_verify_checks_it() {
+        // The real engine names an xz block by the sha256 of what it decompresses to (`pack need` says codec xz); hashing the stored bytes would refuse every real pack.
+        let (home, dir) = dirs();
+        let b = fake();
+        let inner = engine(&b.pack, &[]);
+        let run = move |a: &[String]| {
+            let (c, out) = inner(a)?;
+            if a[0] == "pack" && a[1] == "need" {
+                let mut v: Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+                for r in v["ranges"].as_array_mut().into_iter().flatten() {
+                    r["codec"] = "xz".into();
+                    r["sha256"] = sha(b"the raw bytes").into();
+                }
+                return Ok((c, v.to_string()));
+            }
+            Ok((c, out))
+        };
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &run).unwrap().unwrap();
+        assert_eq!(finish(home.path(), dir.path(), "sm_120a", &p, &b, &run).unwrap(), "q8");
+        let got = std::fs::read(dir.path().join(PACK_FILE)).unwrap();
+        assert_eq!(&got[b.pack.blob_off as usize..], BLOB, "the stored bytes are written as they are");
     }
 
     #[test]
