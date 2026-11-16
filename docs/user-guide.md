@@ -199,6 +199,7 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 |---|---|
 | `goethe load …` | Load and wait until ready (`--gpu`, `--tp`, `--ctx`, `--max-conc`, `--replica`) |
 | `goethe unload …` | Stop a model (`--all`, `--force`) |
+| `goethe run [MODEL] [INPUT]` | Try a loaded model by hand: text to a text model (a chat without INPUT, else one reply) or an embedding model (dims, norm, first values); an audio file (.wav, .flac, .mp3, .ogg, .m4a) to a speech model (its transcript; without INPUT it records from the microphone until Enter, with arecord, parecord or ffmpeg) |
 | `goethe ps` | Running instances, GPUs and speed |
 | `goethe logs [model]` | `--daemon`, `--gateway`, `-f`, `-n` |
 
