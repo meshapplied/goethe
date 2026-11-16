@@ -138,7 +138,7 @@ enum Commands {
         reset: bool,
         #[arg(long = "trust-remote-code", help = "Let SGLang run Python code shipped with the model (config.json auto_map).")]
         trust_remote_code: bool,
-        #[arg(long, help = "With --load, load next to processes goethe did not start without asking.")]
+        #[arg(long, help = "Do not ask: download without confirming, and with --load load next to processes goethe did not start.")]
         yes: bool,
         #[arg(long, help = "Skip sha256 verification.")]
         no_verify: bool,
