@@ -375,7 +375,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         }
     }
     hf::ensure_model(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf.clone(), ..dl })?;
-    let pack = readable(structure_offer(home, opts, &card_dir), |c| config_for_pack(home, opts, &card_dir, c, gguf.as_deref().unwrap_or_default()), fallback_allowed(opts.fallback))?;
+    let pack = readable(structure_offer(home, opts, &card_dir)?, |c| config_for_pack(home, opts, &card_dir, c, gguf.as_deref().unwrap_or_default()), fallback_allowed(opts.fallback))?;
     Ok(Target {
         model_id: opts.model_id.clone(),
         card_dir,
@@ -429,22 +429,75 @@ fn config_for_pack(home: &Path, opts: &InstallOpts, dir: &Path, c: &PackChoice, 
     }
 }
 
-fn structure_offer(home: &Path, opts: &InstallOpts, dir: &Path) -> Option<PackChoice> {
-    // Weights no pack names (a fine-tune, another repo or a folder of the same architecture) on a logged-in node with the engine installed: the pack whose structure they have, if taken. Any miss or error: None, silently.
-    let creds = crate::platform::load_credentials(home).ok().flatten()?;
+struct OfferDeps<'a> {
+    creds: Result<Option<crate::platform::Credentials>, String>,
+    archs: Vec<String>,
+    index: &'a dyn Fn() -> Option<Vec<u8>>,
+    ensure_engine: &'a dyn Fn() -> Result<(), String>,
+    by_structure: &'a dyn Fn(&crate::platform::Credentials) -> Result<Option<(String, crate::packs::Plan)>, String>,
+}
+
+fn structure_offer(home: &Path, opts: &InstallOpts, dir: &Path) -> Result<Option<PackChoice>, String> {
+    // Weights no pack names (a fine-tune, another repo or a folder of the same architecture) on a logged-in node: the pack whose structure they have, if taken. See offer_for.
     let archs = crate::packs::local_archs(home);
-    let engine = crate::pyenv::has(home, crate::pyenv::Layer::Engine) || crate::pyenv::dev_python(home);
-    crate::packs::catalog(home).filter(|ix| engine && !crate::packs::offers_any(ix, &archs).is_empty())?;
-    let login = crate::packs::Login(creds.clone());
-    let broker = crate::packs::HttpBroker::new(&creds.platform_url, &login);
-    let (_, plan) = crate::packs::by_structure(home, dir, &archs, &broker, &crate::packs::python_runner(home)).ok()??;
+    let run = crate::packs::python_runner(home);
+    let deps = OfferDeps {
+        creds: crate::platform::load_credentials(home),
+        index: &|| crate::packs::catalog(home),
+        ensure_engine: &|| crate::pyenv::ensure(home, crate::pyenv::Layer::Engine),
+        by_structure: &|creds| {
+            let login = crate::packs::Login(creds.clone());
+            let broker = crate::packs::HttpBroker::new(&creds.platform_url, &login);
+            crate::packs::by_structure(home, dir, &archs, &broker, &run)
+        },
+        archs: archs.clone(),
+    };
+    offer_for(opts, deps)
+}
+
+fn offer_for(opts: &InstallOpts, deps: OfferDeps) -> Result<Option<PackChoice>, String> {
+    // Logged out, or no pack for this machine's GPUs at all: the plain runtime, as before. Logged in with packs for these GPUs: the engine layer is installed first when missing (the pack lookup runs in it), and a lookup that fails stops with its reason and the --fallback hint (or, with --fallback, says so and goes on); weights that match no pack structure say so in one line.
+    let creds = match deps.creds {
+        Ok(Some(c)) => c,
+        Ok(None) => return Ok(None),
+        Err(e) => {
+            eprintln!("note: the platform login cannot be read ({e}), so these weights are not checked for optimised kernels");
+            return Ok(None);
+        }
+    };
+    let miss = |why: String| -> Result<Option<PackChoice>, String> {
+        if fallback_allowed(opts.fallback) {
+            eprintln!("note: {why}; using the plain runtime");
+            Ok(None)
+        } else {
+            Err(format!("{why}; {FALLBACK_HINT}"))
+        }
+    };
+    let Some(index) = (deps.index)() else {
+        eprintln!("note: the kernel pack index is not reachable, so these weights are not checked for optimised kernels");
+        return Ok(None);
+    };
+    if crate::packs::offers_any(&index, &deps.archs).is_empty() {
+        return Ok(None);
+    }
+    if let Err(e) = (deps.ensure_engine)() {
+        return miss(format!("optimised kernels exist for this GPU but goethe-engine could not be installed to look for them: {e}"));
+    }
+    let plan = match (deps.by_structure)(&creds) {
+        Ok(Some((_, plan))) => plan,
+        Ok(None) => {
+            println!("no optimised kernel pack has the structure of these weights; using the plain runtime");
+            return Ok(None);
+        }
+        Err(e) => return miss(format!("looking for optimised kernels for these weights failed: {e}")),
+    };
     let what = format!("optimised kernels available for these weights (same structure as {})", plan.entry.offer.hf_repo);
     if opts.yes || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         println!("{what}");
     } else if !crate::term::ask(&format!("{what}; install them? [Y/n]"), "y").is_ok_and(|a| a.to_ascii_lowercase().starts_with('y')) {
-        return None;
+        return Ok(None);
     }
-    Some(PackChoice { offer: plan.entry.offer.clone(), creds, plan: Some(plan) })
+    Ok(Some(PackChoice { offer: plan.entry.offer.clone(), creds, plan: Some(plan) }))
 }
 
 fn confirm(opts: &InstallOpts, plan: &str) -> Result<(), String> {
@@ -724,7 +777,8 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     } else {
         fetch(&registry_url()).ok().and_then(|r| find_model(&r, &model_id).cloned())
     };
-    let pack = readable((!has_pack).then(|| structure_offer(home, opts, &card_dir)).flatten(), |c| config_for_pack(home, opts, &card_dir, c, &gguf), fallback_allowed(opts.fallback))?;
+    let offer = if has_pack { None } else { structure_offer(home, opts, &card_dir)? };
+    let pack = readable(offer, |c| config_for_pack(home, opts, &card_dir, c, &gguf), fallback_allowed(opts.fallback))?;
     Ok(Target {
         model_id,
         card_dir,
@@ -1951,6 +2005,81 @@ mod tests {
         assert_eq!(fs::read_to_string(&victim).unwrap(), "mine");
         assert!(fs::symlink_metadata(dir.path().join(CARD_FILE)).unwrap().is_file());
         assert_eq!(read_card_table(dir.path()).unwrap()["model_id"].as_str(), Some("a/b"));
+    }
+
+    fn offer_index() -> Vec<u8> {
+        serde_json::json!({"schema": "gc-pack-index", "version": 3, "serial": 7, "entries": [{
+            "model": {"hf_repo": "org/Orca-GGUF", "revision": "abc", "format": "gguf", "structure": []},
+            "arch": "sm_120a", "abi_major": 3, "runtime": {"kind": "gc-c", "version": 1}, "min_engine": "0.2.0", "tier": "base",
+            "file": "m.gcpack", "manifest_sha256": "a".repeat(64), "size": 100, "sig": {"keyid": "k"}}]}).to_string().into_bytes()
+    }
+
+    fn login() -> crate::platform::Credentials {
+        crate::platform::Credentials {
+            platform_url: "http://127.0.0.1:1".into(),
+            node_id: "n1".into(),
+            workspace: crate::platform::Workspace::default(),
+            token: crate::platform::Secret::new("t".repeat(24)),
+            linked_at: "t".into(),
+        }
+    }
+
+    fn matched() -> Result<Option<(String, crate::packs::Plan)>, String> {
+        let entry = crate::packs::entries(&offer_index(), &["sm_120a".to_string()], |_| true).remove(0);
+        Ok(Some(("sm_120a".into(), crate::packs::Plan { entry, prefix: Vec::new(), variants: Vec::new(), serial: 7 })))
+    }
+
+    fn offered(opts: &InstallOpts, creds: Option<crate::platform::Credentials>, archs: &[&str], look: Result<Option<(String, crate::packs::Plan)>, String>, engine: Result<(), String>) -> (Result<Option<PackChoice>, String>, Vec<&'static str>) {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let got = offer_for(
+            opts,
+            OfferDeps {
+                creds: Ok(creds),
+                archs: archs.iter().map(|a| a.to_string()).collect(),
+                index: &|| Some(offer_index()),
+                ensure_engine: &|| {
+                    calls.borrow_mut().push("engine");
+                    engine.clone()
+                },
+                by_structure: &|_| {
+                    calls.borrow_mut().push("lookup");
+                    look.clone()
+                },
+            },
+        );
+        (got, calls.into_inner())
+    }
+
+    #[test]
+    fn a_logged_in_fresh_home_installs_the_engine_first_and_then_takes_the_pack() {
+        let opts = InstallOpts { yes: true, ..Default::default() };
+        let (got, calls) = offered(&opts, Some(login()), &["sm_120a"], matched(), Ok(()));
+        assert_eq!(calls, ["engine", "lookup"], "the engine layer comes before the pack lookup");
+        assert_eq!(got.unwrap().unwrap().offer.hf_repo, "org/Orca-GGUF");
+    }
+
+    #[test]
+    fn a_failed_pack_lookup_on_a_logged_in_node_stops_with_its_reason_unless_fallback_is_on() {
+        let opts = InstallOpts { yes: true, ..Default::default() };
+        let (got, _) = offered(&opts, Some(login()), &["sm_120a"], Err("the platform answered 502".into()), Ok(()));
+        let err = got.err().unwrap();
+        assert!(err.contains("failed: the platform answered 502") && err.contains("--fallback"), "{err}");
+        let (got, _) = offered(&opts, Some(login()), &["sm_120a"], matched(), Err("no space left".into()));
+        let err = got.err().unwrap();
+        assert!(err.contains("goethe-engine could not be installed") && err.contains("no space left") && err.contains("--fallback"), "{err}");
+        let opted = InstallOpts { yes: true, fallback: true, ..Default::default() };
+        assert!(offered(&opted, Some(login()), &["sm_120a"], Err("502".into()), Ok(())).0.unwrap().is_none(), "--fallback serves it plain, after saying why");
+    }
+
+    #[test]
+    fn logged_out_or_no_pack_for_these_gpus_changes_nothing_and_unmatched_weights_go_plain() {
+        let opts = InstallOpts { yes: true, ..Default::default() };
+        let (got, calls) = offered(&opts, None, &["sm_120a"], matched(), Ok(()));
+        assert!(got.unwrap().is_none() && calls.is_empty(), "logged out: nothing runs, nothing installs");
+        let (got, calls) = offered(&opts, Some(login()), &["sm_90a"], matched(), Ok(()));
+        assert!(got.unwrap().is_none() && calls.is_empty(), "no pack for this GPU: the engine is not installed for it");
+        let (got, calls) = offered(&opts, Some(login()), &["sm_120a"], Ok(None), Ok(()));
+        assert!(got.unwrap().is_none() && calls == ["engine", "lookup"], "weights no pack matches: plain runtime");
     }
 
     #[test]
