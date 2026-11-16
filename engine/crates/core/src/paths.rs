@@ -147,6 +147,21 @@ pub fn validate_model_id(model_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn private_temp_dir(prefix: &str) -> Result<PathBuf, String> {
+    // A new directory (mode 0700) under the temp dir with a name nobody can predict; one that already exists is never reused, a planted link is never followed.
+    use std::os::unix::fs::DirBuilderExt;
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    for i in 0..64 {
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nanos:x}-{i}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        }
+    }
+    Err(format!("no free {prefix} directory under {}", std::env::temp_dir().display()))
+}
+
 pub fn sanitize_model_id(model_id: &str) -> String {
     model_id.replace('/', "__")
 }
@@ -185,6 +200,16 @@ pub fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_private_temp_dir_is_new_unpredictable_and_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let (a, b) = (private_temp_dir("goethe-t").unwrap(), private_temp_dir("goethe-t").unwrap());
+        assert_ne!(a, b);
+        assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_ne!(a, std::env::temp_dir().join(format!("goethe-t-{}", std::process::id())), "no name derived from the pid alone");
+        let _ = (std::fs::remove_dir(&a), std::fs::remove_dir(&b));
+    }
 
     #[test]
     fn model_id_validation() {

@@ -27,6 +27,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let wav = record()?;
             let done = api.transcribe(&model, &wav, llama);
             let _ = std::fs::remove_file(&wav);
+            let _ = wav.parent().map(std::fs::remove_dir);
             done
         }
         (_, Some(text)) => api.chat(&model, &[json!({"role": "user", "content": text})]).map(|_| ()),
@@ -182,7 +183,7 @@ fn base64(bytes: &[u8]) -> String {
 
 fn record() -> Result<std::path::PathBuf, String> {
     // 16 kHz mono PCM16 WAV from the first recorder on PATH, to a temp file, until Enter or Ctrl-D (SIGINT: the recorder closes the WAV).
-    let wav = std::env::temp_dir().join(format!("goethe-run-{}.wav", std::process::id()));
+    let wav = crate::paths::private_temp_dir("goethe-run")?.join("in.wav");
     let f = wav.to_string_lossy().into_owned();
     let f = f.as_str();
     let recorders: [(&str, &[&str]); 3] = [
