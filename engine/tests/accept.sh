@@ -37,10 +37,13 @@ for row in json.load(sys.stdin):
         print(row["id"])' 2>/dev/null
 }
 
+card_of() {
+  echo "${GOETHE_HOME:-${HOME}/.goethe}/models/${1//\//__}/goethe_card.toml"
+}
+
 runtime_of() {
-  # The runtime named by an installed model'"'"'s card, never its path.
-  local card="${GOETHE_HOME:-${HOME}/.goethe}/models/${1//\//__}/goethe_card.toml"
-  sed -n 's/^runtime *= *"\(.*\)"$/\1/p' "${card}" 2>/dev/null | head -n 1
+  # The runtime named by an installed model'"'"'s card.
+  sed -n 's/^runtime *= *"\(.*\)"$/\1/p' "$(card_of "$1")" 2>/dev/null | head -n 1
 }
 
 clip() {
@@ -83,7 +86,7 @@ accept_one() {
   SHAPE=chat
   DETAIL=""
   REASON=""
-  g install "${spec}" --yes --load >/dev/null 2>>"${WORK}/err"
+  g install "${spec}" --yes --load >"${WORK}/inst" 2>>"${WORK}/err"
   rc=$?
   if [[ ${rc} -ne 0 ]]; then
     if grep -qE "${REFUSED}" "${WORK}/err" && ! grep -qE "${BAD}" "${WORK}/err"; then
@@ -106,15 +109,22 @@ accept_one() {
   if [[ ${rc} -ne 0 ]]; then
     VERDICT=FAIL
     REASON="run exit ${rc}"
-  elif [[ "$(runtime_of "${id}")" != goethe-engine ]]; then
-    VERDICT=FAIL
-    REASON="the kernel pack was not used: served by $(runtime_of "${id}")"
-  elif shape "${out}"; then
-    VERDICT=PASS
-    REASON="${SHAPE} ${DETAIL}"
-  else
+    return
+  fi
+  if ! shape "${out}"; then
     VERDICT=FAIL
     REASON="run output is not a ${SHAPE} (${DETAIL})"
+    return
+  fi
+  VERDICT=PASS
+  REASON="${SHAPE} ${DETAIL}"
+  if [[ "$(runtime_of "${id}")" != goethe-engine ]]; then
+    if grep -q 'does not run on' "${WORK}/inst" "${WORK}/err" "$(card_of "${id}")" 2>/dev/null; then
+      REASON="${REASON}; the pack has no variant for this GPU, served by $(runtime_of "${id}")"
+    else
+      VERDICT=FAIL
+      REASON="the kernel pack was not used ($(sed -n 's/^pack_skipped *= *"kernel pack failed to open (\([^:]*\):.*/\1/p' "$(card_of "${id}")" 2>/dev/null | head -n 1))"
+    fi
   fi
 }
 
