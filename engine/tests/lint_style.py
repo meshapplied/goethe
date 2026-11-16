@@ -27,6 +27,14 @@ RUFF_ARGS = [
     "check", "--isolated", "--no-cache", "--output-format", "concise", "--line-length", str(MAX_COLS),
     "--target-version", "py311", "--select", "E,F,W,B,UP,I", "--config", "lint.isort.known-first-party = ['lib']",
 ]
+LEAKS = [
+    ("internal box name", re.compile(r"littleboy|greengoblin", re.I)),
+    ("internal path", re.compile(r"/scratch/|/data/proj|/home/(?!(?:u|user|you|me)(?![\w-]))[A-Za-z_][\w.-]*")),
+    ("AI co-author trailer", re.compile(r"Co-Authored-By:\s*Claude", re.I)),
+]
+TAILNET = re.compile(r"(?<![\w.])100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.(\d{1,3})\.(\d{1,3})(?![\w]|\.\d)")
+LEAK_FIXTURE_SKIP = {"100.100.100.100"}
+NO_TEXT = {".dat", ".gz", ".pem", ".png", ".jpg", ".zst", ".bin"}
 problems: list[str] = []
 
 
@@ -205,8 +213,55 @@ def lint_ruff(files: list[Path]) -> None:
         problems.append(f"ruff failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
 
 
+def leaks(text: str) -> list[str]:
+    """Names of internal details in text: box names, local paths, tailnet addresses, AI co-author lines."""
+    found = [name for name, rx in LEAKS if rx.search(text)]
+    for m in TAILNET.finditer(text):
+        addr = m.group(0)
+        cidr = text[m.end() : m.end() + 3] == "/10" and (m.group(2), m.group(3)) == ("0", "0")
+        if not (addr.startswith("100.64.1.") or addr in LEAK_FIXTURE_SKIP or cidr):
+            found.append("tailnet address")
+            break
+    return found
+
+
+def leaks_selftest() -> None:
+    """The guard flags each kind of leak and passes the placeholders the tests use."""
+    bad = ["ssh little" + "boy", "cd /scratch/x", "/home/alice/bin", "/data/proj/a", "host 100.90.97.111", "100.64.2.1",
+           "Co-Authored-By: Claude <x>"]
+    good = ["/home/u/bin", "/home/user/x", "100.64.1.7", "100.64.0.0/10", "100.100.100.100", "1100.64.9.9", "10.0.0.1",
+            "100.128.0.1"]
+    for text in bad:
+        if not leaks(text):
+            problems.append(f"leak guard self-test: not flagged: {text}")
+    for text in good:
+        if leaks(text):
+            problems.append(f"leak guard self-test: wrongly flagged: {text}")
+
+
+def lint_leaks() -> None:
+    """Scan every tracked text file of the repository for internal details."""
+    top = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if top.returncode != 0:
+        return
+    repo = Path(top.stdout.strip())
+    listed = subprocess.run(["git", "-C", str(repo), "ls-files", "-z"], capture_output=True, text=True).stdout
+    for name in filter(None, listed.split("\0")):
+        path = repo / name
+        if path.suffix in NO_TEXT or path.resolve() == Path(__file__).resolve() or not path.is_file():
+            continue
+        data = path.read_bytes()
+        if b"\0" in data:
+            continue
+        for i, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), 1):
+            for kind in leaks(line):
+                problems.append(f"{name}:{i}: {kind}")
+
+
 def main() -> int:
     """Walk the package tree and print style violations."""
+    leaks_selftest()
+    lint_leaks()
     py_files: list[Path] = []
     for path in sorted(ROOT.rglob("*")):
         rel = path.relative_to(ROOT)

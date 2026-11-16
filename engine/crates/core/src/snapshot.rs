@@ -481,7 +481,7 @@ mod tests {
     fn scopes_are_classified() {
         assert_eq!(scope_of(v4("127.0.0.1"), false), "loopback");
         assert_eq!(scope_of(v4("::1"), false), "loopback");
-        assert_eq!(scope_of(v4("100.70.1.2"), false), "vpn");
+        assert_eq!(scope_of(v4("100.64.1.9"), false), "vpn");
         assert_eq!(scope_of(v4("10.8.0.2"), true), "vpn");
         assert_eq!(scope_of(v4("fd7a:115c:a1e0::1"), false), "vpn");
         assert_eq!(scope_of(v4("192.168.1.5"), false), "private");
@@ -508,8 +508,8 @@ mod tests {
     #[test]
     fn gateway_url_picks_a_reachable_address_for_a_wildcard_bind() {
         let a = |ip: &str, scope: &str| Address { ip: ip.into(), interface: "x".into(), scope: scope.into(), tunnel: false };
-        let addrs = vec![a("127.0.0.1", "loopback"), a("203.0.113.5", "public"), a("192.168.1.5", "private"), a("100.70.1.2", "vpn")];
-        assert_eq!(gateway_url("0.0.0.0", 8080, &addrs), "https://100.70.1.2:8080/v1");
+        let addrs = vec![a("127.0.0.1", "loopback"), a("203.0.113.5", "public"), a("192.168.1.5", "private"), a("100.64.1.9", "vpn")];
+        assert_eq!(gateway_url("0.0.0.0", 8080, &addrs), "https://100.64.1.9:8080/v1");
         assert_eq!(gateway_url("10.0.0.2", 8080, &addrs), "https://10.0.0.2:8080/v1");
         assert_eq!(gateway_url("0.0.0.0", 8080, &[]), "https://127.0.0.1:8080/v1");
         assert_eq!(gateway_url("::1", 8443, &[]), "https://[::1]:8443/v1");

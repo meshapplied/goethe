@@ -269,15 +269,15 @@ mod tests {
         assert!(Net::parse("10.0.0.0/8").unwrap().covers(&n));
         assert!(!n.covers(&Net::parse("10.0.0.0/8").unwrap()));
         assert!(n.overlaps(&Net::parse("10.8.0.9").unwrap()));
-        assert_eq!(private_block("100.70.1.2".parse().unwrap()).unwrap().to_string(), "100.64.0.0/10");
+        assert_eq!(private_block("100.64.1.9".parse().unwrap()).unwrap().to_string(), "100.64.0.0/10");
         assert_eq!(private_block("172.31.9.9".parse().unwrap()).unwrap().to_string(), "172.16.0.0/12");
-        assert!(private_block("185.92.117.108".parse().unwrap()).is_none());
+        assert!(private_block("203.0.113.9".parse().unwrap()).is_none());
         assert!(private_block("100.128.0.1".parse().unwrap()).is_none(), "just past 100.64.0.0/10");
     }
 
     #[test]
     fn ip_json_keeps_unicast_routes_from_every_table() {
-        let text = r#"[{"dst":"default","gateway":"185.92.117.1","dev":"eno1","protocol":"static","flags":[]},
+        let text = r#"[{"dst":"default","gateway":"203.0.113.1","dev":"eno1","protocol":"static","flags":[]},
             {"dst":"100.64.1.2","dev":"tailscale0","table":"52","flags":[]},
             {"dst":"10.8.0.0/24","dev":"wg0","protocol":"kernel","scope":"link","prefsrc":"10.8.0.2","flags":[]},
             {"type":"local","dst":"100.64.1.1","dev":"tailscale0","table":"local","flags":[]},
@@ -325,7 +325,7 @@ mod tests {
         let mut bridge = iface("docker0", "172.16.0.1", 24, false);
         bridge.virtual_bridge = true;
         let all = vec![
-            iface("eno1np0", "185.92.117.108", 24, false),
+            iface("eno1np0", "203.0.113.9", 24, false),
             iface("eth1", "10.0.0.5", 24, false),
             bridge,
             iface("tailscale0", "100.64.1.1", 32, true),
