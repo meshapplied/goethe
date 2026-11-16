@@ -47,9 +47,9 @@ fn is_model_gguf(name: &str) -> bool {
     base.ends_with(".gguf") && !base.starts_with("mmproj") && (!base.contains("-of-") || base.contains("-00001-of-"))
 }
 
-pub fn gguf_in(dir: &Path, card: &toml::Value) -> Result<PathBuf, String> {
-    // The card's gguf file, else the directory's only model GGUF.
-    if let Some(f) = card.get("gguf").and_then(|v| v.as_str()) {
+pub fn gguf_in(dir: &Path, card: &toml::Value, quant: Option<&str>) -> Result<PathBuf, String> {
+    // The card's gguf file, else the directory's only model GGUF; a quant picks its file whatever the card names.
+    if let Some(f) = card.get("gguf").and_then(|v| v.as_str()).filter(|_| quant.is_none()) {
         return Ok(dir.join(f));
     }
     let names: Vec<String> = gguf_paths(dir)
@@ -57,6 +57,9 @@ pub fn gguf_in(dir: &Path, card: &toml::Value) -> Result<PathBuf, String> {
         .filter_map(|p| Some(p.strip_prefix(dir).ok()?.to_string_lossy().into_owned()))
         .filter(|n| is_model_gguf(n))
         .collect();
+    if let Some(q) = quant {
+        return Ok(dir.join(&pick_gguf(&names.iter().map(String::as_str).collect::<Vec<_>>(), Some(q))?[0]));
+    }
     match names.as_slice() {
         [one] => Ok(dir.join(one)),
         [] => Err(format!("{}: no GGUF file for llama.cpp", dir.display())),
@@ -64,17 +67,36 @@ pub fn gguf_in(dir: &Path, card: &toml::Value) -> Result<PathBuf, String> {
     }
 }
 
-pub fn pick_gguf(names: &[&str]) -> Vec<String> {
-    // Of a GGUF-only repo: Q4_K_M, else Q8_0, else the first model GGUF by name, with every shard of a split.
+pub fn pick_gguf(names: &[&str], quant: Option<&str>) -> Result<Vec<String>, String> {
+    // Of a repo's files: the first model GGUF by name whose name holds `quant` (any case), else Q4_K_M, else Q8_0, else the first; with every shard of a split.
     let mut models: Vec<&str> = names.iter().copied().filter(|n| is_model_gguf(n)).collect();
     models.sort();
-    let Some(pick) = ["Q4_K_M", "Q8_0"].iter().find_map(|q| models.iter().find(|n| n.to_ascii_uppercase().contains(q))).or(models.first()) else {
-        return Vec::new();
+    let has = |n: &&&str, q: &str| n.to_ascii_uppercase().contains(&q.to_ascii_uppercase());
+    let pick = match quant {
+        Some(q) => models.iter().find(|n| has(n, q)).ok_or_else(|| format!("no GGUF file matches {q} (available: {})", quants(&models)))?,
+        None => match ["Q4_K_M", "Q8_0"].iter().find_map(|q| models.iter().find(|n| has(n, q))).or(models.first()) {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        },
     };
     let stem = pick.split("-00001-of-").next().unwrap_or(pick);
     let mut out: Vec<String> = names.iter().filter(|n| *n == pick || (n.starts_with(&format!("{stem}-000")) && n.ends_with(".gguf"))).map(|n| n.to_string()).collect();
     out.sort();
-    out
+    Ok(out)
+}
+
+fn quants(models: &[&str]) -> String {
+    // The quant tag of each model GGUF (the last '-' or '.' part of its name, shard suffix aside), for a refusal.
+    let mut q: Vec<&str> = models
+        .iter()
+        .map(|&n| n.rsplit('/').next().unwrap_or(n).trim_end_matches(".gguf").split("-00001-of-").next().unwrap_or(n).rsplit(['-', '.']).next().unwrap_or(n))
+        .collect();
+    q.sort();
+    q.dedup();
+    match q.is_empty() {
+        true => "none".into(),
+        false => q.join(", "),
+    }
 }
 
 pub fn facts(dir: &Path, gguf: &Path) -> Result<crate::model_facts::ModelFacts, String> {
@@ -159,7 +181,7 @@ fn llama_command(spec: &EngineSpec) -> Result<Command, String> {
     }
     let mut cmd = Command::new(server_bin(spec.home)?);
     cmd.arg("-m")
-        .arg(gguf_in(spec.model_path, spec.card)?)
+        .arg(gguf_in(spec.model_path, spec.card, None)?)
         .args(["--host", "127.0.0.1", "--port"])
         .arg(spec.port.to_string())
         .arg("--api-key")
@@ -251,7 +273,10 @@ mod tests {
         for f in ["m-00001-of-00002.gguf", "m-00002-of-00002.gguf"] {
             std::fs::write(d.path().join(f), b"x").unwrap();
         }
-        assert!(gguf_in(d.path(), &toml::Value::Table(Default::default())).unwrap().ends_with("m-00001-of-00002.gguf"));
+        assert!(gguf_in(d.path(), &toml::Value::Table(Default::default()), None).unwrap().ends_with("m-00001-of-00002.gguf"));
+        std::fs::write(d.path().join("m-Q8_0.gguf"), b"x").unwrap();
+        let card: toml::Value = toml::from_str("gguf = \"m-00001-of-00002.gguf\"").unwrap();
+        assert!(gguf_in(d.path(), &card, Some("q8_0")).unwrap().ends_with("m-Q8_0.gguf"), "a quant overrides the card's file");
     }
 
     #[test]
@@ -277,11 +302,16 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir(d.path().join("Q4_K_M")).unwrap();
         write_test_gguf(&d.path().join("Q4_K_M/m.gguf"));
-        let f = facts(d.path(), &gguf_in(d.path(), &toml::Value::Table(Default::default())).unwrap()).unwrap();
+        let f = facts(d.path(), &gguf_in(d.path(), &toml::Value::Table(Default::default()), None).unwrap()).unwrap();
         assert_eq!((f.kv_elems_per_token, f.max_ctx, f.num_attention_heads, f.num_kv_heads), ((2 + 4) * 128, 4096, 8, 4));
         assert_eq!(f.architecture, "dense");
         let names = ["m-Q8_0.gguf", "Q4_K_M/m-Q4_K_M-00002-of-00002.gguf", "Q4_K_M/m-Q4_K_M-00001-of-00002.gguf", "mmproj-m.gguf", "README.md"];
-        assert_eq!(pick_gguf(&names), ["Q4_K_M/m-Q4_K_M-00001-of-00002.gguf", "Q4_K_M/m-Q4_K_M-00002-of-00002.gguf"]);
-        assert_eq!(pick_gguf(&["b-IQ2.gguf", "a-IQ3.gguf"]), ["a-IQ3.gguf"]);
+        let split = ["Q4_K_M/m-Q4_K_M-00001-of-00002.gguf", "Q4_K_M/m-Q4_K_M-00002-of-00002.gguf"];
+        assert_eq!(pick_gguf(&names, None).unwrap(), split);
+        assert_eq!(pick_gguf(&["b-IQ2.gguf", "a-IQ3.gguf"], None).unwrap(), ["a-IQ3.gguf"]);
+        assert_eq!(pick_gguf(&names, Some("q8_0")).unwrap(), ["m-Q8_0.gguf"]);
+        assert_eq!(pick_gguf(&names, Some("Q4_K_M")).unwrap(), split, "every shard of a split");
+        assert_eq!(pick_gguf(&names, Some("IQ2_XS")).unwrap_err(), "no GGUF file matches IQ2_XS (available: Q4_K_M, Q8_0)");
+        assert_eq!(pick_gguf(&["README.md"], Some("Q8_0")).unwrap_err(), "no GGUF file matches Q8_0 (available: none)");
     }
 }
