@@ -1,6 +1,7 @@
 // Model install: Hugging Face or local trees, goethe_card.toml, and state.db registration.
 
 use crate::db;
+use crate::engines::goethe_engine::{PACK_FILE, PACK_VERIFY};
 use crate::hf::{self, DownloadOpts};
 use crate::model_facts::{self, GIB};
 use crate::paths::{contained_in_models, ensure_layout, goethe_home, model_dir, validate_model_id};
@@ -560,10 +561,11 @@ fn ternary_base_revision(pack_dir: &Path, base: &str) -> Option<String> {
 fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     // Register a local tree in place (symlink farm) or as a copy; the card always lives under models/<id>.
     let src = fs::canonicalize(&opts.model_id).map_err(|e| format!("{}: {e}", opts.model_id))?;
-    if !src.join("config.json").is_file() {
+    let has_pack = src.join(PACK_FILE).is_file();
+    if !has_pack && !src.join("config.json").is_file() {
         return Err(format!("{} has no config.json", src.display()));
     }
-    if model_facts::weight_files(&src)?.is_empty() {
+    if !has_pack && model_facts::weight_files(&src)?.is_empty() {
         return Err(format!("{} has no .safetensors weights", src.display()));
     }
     let dir_name = src
@@ -585,6 +587,12 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     } else {
         build_farm(&src, &card_dir)?;
     }
+    if has_pack {
+        // One arch: a machine with mixed GPU generations verifies the pack for its most common one.
+        let arch = crate::packs::local_archs(home).into_iter().next().ok_or("no GPU of this machine runs kernel packs")?;
+        crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
+        local_pack(home, &card_dir, &arch, &crate::packs::python_runner(home))?;
+    }
     let entry = if model_id.starts_with("local/") {
         None
     } else {
@@ -600,6 +608,29 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         source_dir: (!opts.copy_local).then_some(src),
         ternary: None,
     })
+}
+
+fn local_pack(home: &Path, dir: &Path, arch: &str, run: crate::packs::Runner) -> Result<(), String> {
+    // goethe-engine verifies the pack for this arch and names the weights it matches; a GGUF gets its config and tokenizer.
+    for f in [PACK_FILE.to_string(), format!("{PACK_FILE}.sig")] {
+        // goethe-engine opens only regular pack files: a linked one becomes a copy (the weights stay linked).
+        let p = dir.join(&f);
+        if fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
+            let from = fs::canonicalize(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            fs::remove_file(&p).and_then(|_| fs::copy(&from, &p)).map_err(|e| format!("{}: {e}", p.display()))?;
+        }
+    }
+    let s = |p: &Path| p.to_string_lossy().into_owned();
+    let out = run(&["pack".into(), "verify".into(), s(&dir.join(PACK_FILE)), "--arch".into(), arch.into(), "--partial".into(), "--model-dir".into(), s(dir)])?.1;
+    let v: Value = serde_json::from_str(&out).map_err(|e| format!("pack verify: {e}"))?;
+    let weights: Vec<String> = v["weights"].as_array().into_iter().flatten().filter_map(|w| w.as_str().map(String::from)).collect();
+    if weights.is_empty() {
+        return Err(format!("{}: the pack matches none of the weights there", dir.display()));
+    }
+    let verified = dir.join(PACK_VERIFY);
+    let _ = fs::remove_file(&verified); // never write through a link into the user's folder
+    fs::write(&verified, &out).map_err(|e| format!("{}: {e}", verified.display()))?;
+    gguf_metadata(home, dir, if weights.iter().all(|w| w.ends_with(".gguf")) { "gguf" } else { "safetensors" }, &weights)
 }
 
 fn prepare_local_target(home: &Path, card_dir: &Path, opts: &InstallOpts) -> Result<bool, String> {
@@ -760,6 +791,10 @@ fn register(home: &Path, opts: &InstallOpts, t: Target) -> Result<(), String> {
     let mut planned = plan(home, opts, &t)?;
     match &t.pack {
         Some(choice) => use_pack(home, &mut planned, choice, opts.ctx)?,
+        None if planned.dir.join(PACK_VERIFY).is_file() => {
+            let v: Value = serde_json::from_slice(&fs::read(planned.dir.join(PACK_VERIFY)).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            pack_card(home, &mut planned, v["arch"].as_str().unwrap_or_default(), "", opts.ctx)?
+        }
         None => {
             if let Some(layer) = crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?.layer {
                 crate::pyenv::ensure(home, layer)?;
@@ -777,7 +812,12 @@ fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) 
     let plan = c.plan.as_ref().ok_or("no kernel pack plan")?;
     println!("installing the optimised kernels for {} ...", c.offer.arch);
     let variant = crate::packs::finish(home, &p.dir, &c.offer.arch, plan, &broker, &run)?;
-    let max = crate::packs::max_ctx(&p.dir, &variant, &run)?;
+    pack_card(home, p, &c.offer.arch, &variant, cli_ctx)
+}
+
+fn pack_card(home: &Path, p: &mut Planned, arch: &str, variant: &str, cli_ctx: Option<u64>) -> Result<(), String> {
+    // The card of a verified pack: goethe-engine, the kernels' ctx cap, the pack arch's GPUs.
+    let max = crate::packs::max_ctx(&p.dir, variant, &crate::packs::python_runner(home))?;
     if cli_ctx.is_some_and(|x| x > max) {
         p.notes.push(format!("ctx {} is longer than the kernels support; using {max}", cli_ctx.unwrap_or(max)));
     }
@@ -791,8 +831,8 @@ fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) 
     t.insert("context_length".into(), toml::Value::Integer(p.ctx as i64));
     t.insert("extra_sglang_args".into(), toml::Value::Array(Vec::new()));
     t.insert("kv_cache_dtype".into(), toml::Value::String("auto".into()));
-    t.insert("supported_sm".into(), toml::Value::Array(crate::packs::arch_ccs(&c.offer.arch).into_iter().map(toml::Value::String).collect()));
-    p.engine = Some(format!("goethe-engine with optimised kernels for {} (verified)", c.offer.arch));
+    t.insert("supported_sm".into(), toml::Value::Array(crate::packs::arch_ccs(arch).into_iter().map(toml::Value::String).collect()));
+    p.engine = Some(format!("goethe-engine with optimised kernels for {arch} (verified)"));
     Ok(())
 }
 
@@ -916,7 +956,7 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
     if crate::engines::ninfer::ninfer_in(dir).is_some() {
         return plan_ninfer(home, opts, t);
     }
-    let pack = dir.join(crate::engines::goethe_engine::PACK_FILE).is_file();
+    let pack = dir.join(PACK_FILE).is_file();
     if !dir.join("config.json").is_file() && !pack && !crate::engines::llama_cpp::gguf_paths(dir).is_empty() {
         return plan_gguf(home, opts, t);
     }
@@ -1407,7 +1447,7 @@ mod tests {
     #[test]
     fn a_pack_dir_or_a_missing_llama_server_never_makes_a_llama_cpp_card() {
         let (home, dir) = gguf_home(true);
-        fs::write(dir.join(crate::engines::goethe_engine::PACK_FILE), b"p").unwrap();
+        fs::write(dir.join(PACK_FILE), b"p").unwrap();
         let err = plan_in_place(home.path(), "org/m-GGUF", &dir, None).map(|p| p.table).unwrap_err();
         assert!(err.contains("config.json"), "{err}");
         if std::env::var_os("LLAMA_SERVER").is_none() {
@@ -1415,6 +1455,24 @@ mod tests {
             let err = plan_in_place(home.path(), "org/m-GGUF", &dir, None).map(|p| p.table).unwrap_err();
             assert!(err.contains("llama-server not found"), "{err}");
         }
+    }
+
+    #[test]
+    fn a_local_pack_records_the_weights_it_matched_and_never_writes_into_the_users_folder() {
+        let (d, src) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        for f in [PACK_VERIFY, PACK_FILE] {
+            fs::write(src.path().join(f), b"theirs").unwrap();
+            symlink(src.path().join(f), d.path().join(f)).unwrap();
+        }
+        let ok = |_: &[String]| Ok((0, r#"{"ok": true, "arch": "sm_120a", "weights": ["m.safetensors"]}"#.to_string()));
+        local_pack(d.path(), d.path(), "sm_120a", &ok).unwrap();
+        assert!(fs::read_to_string(d.path().join(PACK_VERIFY)).unwrap().contains("m.safetensors"));
+        assert_eq!(fs::read(src.path().join(PACK_VERIFY)).unwrap(), b"theirs", "a linked file of the source is never written");
+        assert!(fs::symlink_metadata(d.path().join(PACK_FILE)).unwrap().is_file(), "the pack is a regular copy");
+        let refused = |_: &[String]| Err("goethe-engine pack verify: exit 1: pack: REFUSED: --arch differs".to_string());
+        assert!(local_pack(d.path(), d.path(), "sm_90a", &refused).unwrap_err().contains("REFUSED"));
+        let none = |_: &[String]| Ok((0, r#"{"ok": true}"#.to_string()));
+        assert!(local_pack(d.path(), d.path(), "sm_120a", &none).unwrap_err().contains("matches none"));
     }
 
     #[test]
