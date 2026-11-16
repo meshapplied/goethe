@@ -1022,7 +1022,7 @@ fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, S
 }
 
 fn plan_gguf(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> {
-    // llama.cpp serves the GGUF: shape from its header, KV in f16, the file recorded in the card; a pooling model as embeddings.
+    // llama.cpp serves the GGUF: shape from its header, KV in f16, the file recorded in the card; a pooling model as embeddings, a projector with an audio encoder as speech.
     crate::engines::llama_cpp::server_ready(home)?;
     let dir = &t.card_dir;
     let gguf = crate::engines::llama_cpp::gguf_in(dir, &toml::Value::Table(read_card_table(dir).unwrap_or_default()), opts.quant.as_deref())?;
@@ -1032,6 +1032,12 @@ fn plan_gguf(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, Str
     p.table.insert("gguf".into(), toml::Value::String(rel));
     if crate::engines::llama_cpp::is_embedding(&gguf) {
         p.table.insert("task".into(), toml::Value::String("embed".into()));
+    }
+    if let Some(proj) = crate::engines::llama_cpp::mmproj_in(dir) {
+        p.table.insert("mmproj".into(), toml::Value::String(proj.strip_prefix(dir).unwrap_or(&proj).to_string_lossy().into_owned()));
+        if crate::engines::llama_cpp::has_audio_encoder(&proj) {
+            p.table.insert("task".into(), toml::Value::String("transcribe".into()));
+        }
     }
     Ok(p)
 }
@@ -1685,6 +1691,19 @@ mod tests {
         let opts = InstallOpts { model_id: "org/m-GGUF".into(), ..Default::default() };
         assert!(matches!(pack_decision(home.path(), &opts).unwrap(), PackDecision::Declined));
         assert!(dir.join(CARD_FILE).is_file());
+    }
+
+    #[test]
+    fn a_gguf_with_an_audio_projector_is_a_transcribe_model() {
+        let (home, dir) = gguf_home(true);
+        let proj = dir.join("m.mmproj-f16.gguf");
+        crate::engines::llama_cpp::write_test_gguf_with(&proj, &[("clip.vision.image_size", 448)]);
+        let p = plan_in_place(home.path(), "org/m-GGUF", &dir, None).unwrap();
+        assert_eq!(p.table.get("mmproj").and_then(|v| v.as_str()), Some("m.mmproj-f16.gguf"));
+        assert_eq!(p.table.get("task"), None, "a vision projector alone makes no speech model");
+        crate::engines::llama_cpp::write_test_gguf_with(&proj, &[("clip.has_audio_encoder", 1)]);
+        let p = plan_in_place(home.path(), "org/m-GGUF", &dir, None).unwrap();
+        assert_eq!(p.table.get("task").and_then(|v| v.as_str()), Some("transcribe"));
     }
 
     #[test]
