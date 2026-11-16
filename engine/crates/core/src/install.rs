@@ -426,9 +426,14 @@ fn vram_preflight(home: &Path, bytes: u64) -> Result<(), String> {
     Ok(())
 }
 
+fn stale_skip(card: Option<&toml::Table>, force: bool, allow: bool) -> Option<String> {
+    // The pack_skipped note of a card, when an explicit fallback is on and the pack is not being forced.
+    card?.get(PACK_SKIPPED).and_then(|v| v.as_str()).filter(|_| allow && !force).map(String::from)
+}
+
 fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String> {
-    // A pack in the platform's index for this model and a local GPU: used when the node is logged in; otherwise the user may log in now. Without a login no pack is ever downloaded. A pack that failed to open here earlier is skipped unless --force.
-    if let Some(why) = read_card_table(&model_dir(home, &opts.model_id)).and_then(|c| c.get(PACK_SKIPPED).and_then(|v| v.as_str().map(String::from))).filter(|_| !opts.force) {
+    // A pack in the platform's index for this model and a local GPU: used when the node is logged in; otherwise the user may log in now. Without a login no pack is ever downloaded. A pack skipped earlier by an explicit fallback stays skipped while the fallback is on, unless --force; without the opt-in the pack is tried again and fails loudly.
+    if let Some(why) = stale_skip(read_card_table(&model_dir(home, &opts.model_id)).as_ref(), opts.force, fallback_allowed(opts.fallback)) {
         eprintln!("note: skipping the kernel pack: {why} (--force tries it again)");
         return Ok(PackDecision::Declined);
     }
@@ -1775,9 +1780,13 @@ mod tests {
     fn a_pack_that_failed_here_is_not_offered_again_unless_forced() {
         let (home, dir) = packed_home();
         assert!(unpack_failed(home.path(), "org/m-GGUF", "Illegal instruction").unwrap());
-        let opts = InstallOpts { model_id: "org/m-GGUF".into(), ..Default::default() };
+        let opts = InstallOpts { model_id: "org/m-GGUF".into(), fallback: true, ..Default::default() };
         assert!(matches!(pack_decision(home.path(), &opts).unwrap(), PackDecision::Declined));
         assert!(dir.join(CARD_FILE).is_file());
+        let card = read_card_table(&dir);
+        assert!(stale_skip(card.as_ref(), false, true).is_some(), "an explicit fallback keeps the pack skipped");
+        assert_eq!(stale_skip(card.as_ref(), true, true), None, "--force tries the pack again");
+        assert_eq!(stale_skip(card.as_ref(), false, false), None, "without the opt-in a stale note never hides the pack");
     }
 
     #[test]
