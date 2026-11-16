@@ -6,6 +6,8 @@ on:
     branches: [main, dev]
   workflow_call:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -78,9 +80,9 @@ jobs:
           git -C ninfer apply --check "$GITHUB_WORKSPACE/nvfp4-kernels/patches/ninfer-dn-sched.patch"
           git -C ninfer apply --check "$GITHUB_WORKSPACE/nvfp4-kernels/patches/openai-tool-name-128.patch"
 
-  engine:
+  engine-test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: engine
@@ -91,9 +93,44 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
-      - run: cargo build --release --locked
+          shared-key: engine-test
       - run: cargo test --locked
+
+  engine-clippy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          shared-key: engine-clippy
       - run: cargo clippy --locked --all-targets -- -D warnings
+
+  engine-gates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          shared-key: engine-release
+      - run: cargo build --release --locked
+      - name: The release binaries run on a stock runner
+        run: |
+          target/release/goethe --version
+          target/release/goethe --help >/dev/null
       - uses: astral-sh/setup-uv@v6
       - name: Style lint (headers, function comments, no dashes or emojis, leak guard, pinned ruff with the repo rules)
         run: python3 tests/lint_style.py
@@ -110,7 +147,7 @@ jobs:
   package-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    if: ${{ github.event_name != 'workflow_call' }}
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     steps:
       - uses: actions/checkout@v4
       - name: Patched SGLang source at the pinned commit
