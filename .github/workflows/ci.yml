@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: pipx run ruff check goethe tests
-      - run: shellcheck -S warning install.sh install-lab.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
+      - run: shellcheck -S warning install.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
 
   attribution:
     runs-on: ubuntu-24.04
@@ -89,7 +89,7 @@ jobs:
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - uses: astral-sh/setup-uv@v6
-      - name: Style lint (headers, function comments, no dashes or emojis, pinned ruff with the repo rules)
+      - name: Style lint (headers, function comments, no dashes or emojis, leak guard, pinned ruff with the repo rules)
         run: python3 tests/lint_style.py
       - name: Shell syntax of installer and packaging scripts
         run: for f in cdn/install.sh packaging/*.sh tests/gate.sh tests/*.sh; do bash -n "$f"; done

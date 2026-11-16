@@ -123,8 +123,8 @@ def main() -> int:
     """Run every step; the namespace and home are thrown away with the container."""
     HOME.mkdir(parents=True, exist_ok=True)
     tun("vpn0", "10.77.0.2/24")
-    tun("ts0", "100.88.1.2/32")
-    sh("ip route add 100.90.0.5 dev ts0 table 52")
+    tun("ts0", "100.64.1.2/32")
+    sh("ip route add 100.64.1.5 dev ts0 table 52")
     sh("ip link add lan0 type veth peer name lan0p && ip addr add 192.168.60.2/24 dev lan0")
     sh("ip link set lan0 up && ip link set lan0p up")
     proc = start_goethed()
@@ -140,7 +140,7 @@ def main() -> int:
     check(key is not None, "a first key is created")
     key = key.group(1) if key else ""
     check("allow 100.64.0.0/10" in out, "per-peer routes widen to their private block (100.64.0.0/10)")
-    check(wait_for(lambda: listening("100.88.1.2"), 5) is not None, "the gateway listens on ts0's address")
+    check(wait_for(lambda: listening("100.64.1.2"), 5) is not None, "the gateway listens on ts0's address")
     goethe("allowlist", "--remove", "100.64.0.0/10")
 
     code, out = goethe("api", "configure", "--mode", "vpn", "--interface", "vpn0", "--yes")
@@ -153,7 +153,7 @@ def main() -> int:
         f"gateway --json reports the interface: {g}",
     )
     check(listening("10.77.0.2") and listening("127.0.0.1"), "listening on vpn0 and loopback")
-    check(not listening("100.88.1.2") and not listening("192.168.60.2"), "not on other networks")
+    check(not listening("100.64.1.2") and not listening("192.168.60.2"), "not on other networks")
     check(api("10.77.0.2", key) == "200", "API answers on the VPN address")
     check(api("10.77.0.2", key, source="192.168.60.2") == "403", "a client outside the allowed range is refused")
 
