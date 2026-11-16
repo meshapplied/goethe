@@ -15,20 +15,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let (model, input) = route(&args, &snap.serving_models())?;
     let r = snap.routes(&model).iter().find(|r| !r.draining).ok_or_else(|| format!("{model} is not loaded: goethe load {model}"))?;
     let api = Api { base: format!("http://127.0.0.1:{}/v1", r.port), key: r.engine_key.clone() };
-    let card = std::fs::read_to_string(crate::paths::model_dir(&goethe_home(), &model).join(crate::install::CARD_FILE)).unwrap_or_default();
-    let task = card.parse::<toml::Table>().ok().and_then(|c| c.get("task").and_then(|t| t.as_str().map(String::from)));
-    let kind = kind_of(&api.call("GET", "/models", None)?, &model, if task.as_deref() == Some("embed") { "embedding" } else { "text" });
+    let kind = kind_of(&api.call("GET", "/models", None)?, &model, card_kind(&crate::paths::model_dir(&goethe_home(), &model)));
     if let Some(e) = mismatch(&model, &kind, input.as_deref()) {
         return Err(e);
     }
     match (kind.as_str(), input) {
-        ("embedding", Some(text)) => {
-            let v = api.call("POST", "/embeddings", Some(json!({"model": model, "input": text})))?;
-            let e: Vec<f64> = v["data"][0]["embedding"].as_array().into_iter().flatten().filter_map(Value::as_f64).collect();
-            let head: Vec<String> = e.iter().take(4).map(|x| format!("{x:.4}")).collect();
-            println!("dims={} norm={:.4} [{}, ...]", e.len(), e.iter().map(|x| x * x).sum::<f64>().sqrt(), head.join(", "));
-            Ok(())
-        }
+        ("embedding", Some(text)) => api.embed(&model, &text).map(|line| println!("{line}")),
         ("speech", Some(path)) => api.transcribe(&model, std::path::Path::new(&path)),
         ("speech", None) => {
             let wav = record()?;
@@ -88,6 +80,13 @@ pub fn mismatch(model: &str, kind: &str, input: Option<&str>) -> Option<String> 
     (!ok).then(|| format!("{model} is {a} model: give it {want}"))
 }
 
+fn card_kind(dir: &std::path::Path) -> &'static str {
+    // The kind a card says when its engine names none: llama.cpp's task embed is an embedding model, else text.
+    let card = std::fs::read_to_string(dir.join(crate::install::CARD_FILE)).unwrap_or_default();
+    let task = card.parse::<toml::Table>().ok().and_then(|c| c.get("task").and_then(|t| t.as_str().map(String::from)));
+    if task.as_deref() == Some("embed") { "embedding" } else { "text" }
+}
+
 pub fn kind_of(models: &Value, model: &str, card: &str) -> String {
     // The engine's /v1/models kind (goethe-engine: text, embedding or speech); other engines name none: the card's (llama.cpp task embed, else text).
     let data = models["data"].as_array().cloned().unwrap_or_default();
@@ -115,6 +114,14 @@ impl Api {
             Some(b) => req.set("Content-Type", "application/json").send_string(&b.to_string()),
             None => req.call(),
         })
+    }
+
+    fn embed(&self, model: &str, text: &str) -> Result<String, String> {
+        // One line: dimensions, L2 norm and the first 4 values.
+        let v = self.call("POST", "/embeddings", Some(json!({"model": model, "input": text})))?;
+        let e: Vec<f64> = v["data"][0]["embedding"].as_array().into_iter().flatten().filter_map(Value::as_f64).collect();
+        let head: Vec<String> = e.iter().take(4).map(|x| format!("{x:.4}")).collect();
+        Ok(format!("dims={} norm={:.4} [{}, ...]", e.len(), e.iter().map(|x| x * x).sum::<f64>().sqrt(), head.join(", ")))
     }
 
     fn transcribe(&self, model: &str, path: &std::path::Path) -> Result<(), String> {
@@ -215,6 +222,31 @@ mod tests {
         assert_eq!(mismatch("m", "speech", Some(wav)), None);
         assert_eq!(mismatch("m", "speech", Some("missing.wav")).unwrap(), "m is a speech model: give it an audio file");
         assert_eq!(mismatch("m", "speech", None), None, "no INPUT records from the microphone");
+    }
+
+    #[test]
+    fn a_llama_cpp_embedding_card_runs_as_an_embedding_model() {
+        // A fake llama-server: /v1/models names no kind, /v1/embeddings answers one vector; the card's task embed decides the kind.
+        let srv = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = srv.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for (stream, body) in srv.incoming().zip([r#"{"data": [{"id": "org/e"}]}"#, r#"{"data": [{"embedding": [0.6, 0.8, 0.0]}]}"#]) {
+                let mut stream = stream.unwrap();
+                let mut req = BufReader::new(stream.try_clone().unwrap());
+                let mut len = 0;
+                for line in (&mut req).lines().map_while(Result::ok).take_while(|l| !l.is_empty()) {
+                    len = line.to_ascii_lowercase().strip_prefix("content-length:").map_or(len, |n| n.trim().parse().unwrap_or(0));
+                }
+                let _ = std::io::Read::read_exact(&mut req, &mut vec![0u8; len]);
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(card_kind(dir.path()), "text");
+        std::fs::write(dir.path().join(crate::install::CARD_FILE), "runtime = \"llama.cpp\"\ntask = \"embed\"\n").unwrap();
+        let api = Api { base: format!("http://127.0.0.1:{port}/v1"), key: Some("k".into()) };
+        assert_eq!(kind_of(&api.call("GET", "/models", None).unwrap(), "org/e", card_kind(dir.path())), "embedding");
+        assert_eq!(api.embed("org/e", "hello world").unwrap(), "dims=3 norm=1.0000 [0.6000, 0.8000, 0.0000, ...]");
     }
 
     #[test]
