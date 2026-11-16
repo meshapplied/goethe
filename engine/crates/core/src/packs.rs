@@ -168,6 +168,15 @@ pub struct Offer {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Overlay {
+    pub file: String,
+    pub base: String,
+    pub size: u64,
+    pub sha256: String,
+    pub sig: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     pub offer: Offer,
     pub file: String,
@@ -177,6 +186,7 @@ pub struct Entry {
     pub aux: Value,
     pub drafter: Value,
     pub min_engine: (u64, u64, u64),
+    pub overlays: Vec<Overlay>,
 }
 
 pub fn platform_base(home: &Path) -> Result<String, String> {
@@ -249,7 +259,7 @@ fn dedup(v: Vec<Offer>) -> Vec<Offer> {
     out
 }
 
-fn runnable(e: &Entry) -> bool {
+pub fn runnable(e: &Entry) -> bool {
     // The pinned goethe-engine (the one goethe installs) is at least the pack's min_engine.
     Some(e.min_engine) <= version(crate::pyenv::ENGINE_VERSION)
 }
@@ -328,10 +338,25 @@ pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> 
                 aux: e["aux"].clone(),
                 drafter: e["drafter"].clone(),
                 min_engine,
+                overlays: overlays_of(e),
             });
         }
     }
     out
+}
+
+fn overlays_of(e: &Value) -> Vec<Overlay> {
+    // The overlays an index entry lists: a small signed file per base manifest, with its size and sha256; a malformed one is left out.
+    e["overlays"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| {
+            let (file, base, sha256) = (o["file"].as_str()?, o["base"].as_str()?, o["sha256"].as_str()?);
+            (safe_name(file) && is_sha256(base) && is_sha256(sha256) && o["size"].as_u64().is_some_and(|n| n > 0 && n < (64 << 20))).then_some(())?;
+            Some(Overlay { file: file.to_string(), base: base.to_string(), size: o["size"].as_u64()?, sha256: sha256.to_string(), sig: o["sig"].clone() })
+        })
+        .collect()
 }
 
 fn version(s: &str) -> Option<(u64, u64, u64)> {
@@ -433,6 +458,11 @@ pub fn model_gb(home: &Path, o: &Offer) -> Option<f64> {
     gb
 }
 
+pub fn store_serial(home: &Path, serial: u64) -> Result<(), String> {
+    // Remember the newest index serial installed, so an older index is refused.
+    std::fs::write(serial_path(home), format!("{serial}\n")).map_err(|e| e.to_string())
+}
+
 fn serial_path(home: &Path) -> PathBuf {
     home.join("packs").join("serial")
 }
@@ -450,7 +480,7 @@ pub struct Plan {
     pub entry: Entry,
     pub prefix: Vec<u8>,
     pub variants: Vec<Vec<String>>,
-    serial: u64,
+    pub serial: u64,
 }
 
 pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &dyn Broker, run: Runner) -> Result<Option<Plan>, String> {
@@ -545,8 +575,47 @@ fn merged(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
 
 pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Broker, run: Runner) -> Result<String, String> {
     // Match the downloaded model files, fetch only the byte ranges of the pack they need, verify, store the serial; the variant id.
+    let (variant, _) = finish_as(home, dir, arch, plan, broker, run, Next { suffix: "", donor: None })?;
+    store_serial(home, plan.serial)?;
+    Ok(variant)
+}
+
+pub struct Donor {
+    pub pack: PathBuf,
+    pub ranges: Vec<(u64, u64, String)>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Delta {
+    pub fetched: u64,
+    pub reused: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct Next<'a> {
+    pub suffix: &'a str,
+    pub donor: Option<&'a Donor>,
+}
+
+pub fn finish_as(
+    home: &Path,
+    dir: &Path,
+    arch: &str,
+    plan: &Plan,
+    broker: &dyn Broker,
+    run: Runner,
+    next: Next,
+) -> Result<(String, Delta), String> {
+    // finish into files named with `suffix` (an update builds the next pack beside the installed one); blocks the donor pack already holds by hash are copied, only the rest is fetched.
+    let Next { suffix, donor } = next;
     let e = &plan.entry;
-    let (pack, psig, pv, pre) = (dir.join(PACK_FILE), dir.join(format!("{PACK_FILE}.sig")), dir.join(PACK_VERIFY), dir.join("pack.prefix"));
+    let (pack, psig, pv, pre) = (
+        dir.join(format!("{PACK_FILE}{suffix}")),
+        dir.join(format!("{PACK_FILE}.sig{suffix}")),
+        dir.join(format!("{PACK_VERIFY}{suffix}")),
+        dir.join(format!("pack.prefix{suffix}")),
+    );
+    let mut delta = Delta::default();
     let undo = |err: String| {
         for p in [&pack, &psig, &pv, &pre] {
             let _ = std::fs::remove_file(p);
@@ -587,9 +656,30 @@ pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Bro
         let mut f = std::fs::File::create(&pack).map_err(|err| undo(format!("{}: {err}", pack.display())))?;
         f.set_len(e.size).map_err(|err| undo(err.to_string()))?;
         f.write_all(&plan.prefix).map_err(|err| undo(err.to_string()))?;
-        for (o, l) in merged(ranges.iter().map(|(o, l, ..)| (*o, *l)).collect()) {
+        let mut missing = Vec::new();
+        for r in &ranges {
+            let held = donor.and_then(|d| d.ranges.iter().find(|(_, l, h)| *l == r.1 && *h == r.2).map(|(from, ..)| (d, *from)));
+            let copied = match held {
+                Some((d, from)) if r.3 => {
+                    let mut bytes = vec![0u8; r.1 as usize];
+                    let read = std::fs::File::open(&d.pack).and_then(|mut old| old.seek(SeekFrom::Start(from)).and_then(|_| std::io::Read::read_exact(&mut old, &mut bytes)));
+                    let good = read.is_ok() && format!("{:x}", Sha256::digest(&bytes)) == r.2;
+                    if good {
+                        f.seek(SeekFrom::Start(r.0)).and_then(|_| f.write_all(&bytes)).map_err(|err| undo(err.to_string()))?;
+                        delta.reused += r.1;
+                    }
+                    good
+                }
+                _ => false,
+            };
+            if !copied {
+                missing.push(r.clone());
+            }
+        }
+        for (o, l) in merged(missing.iter().map(|(o, l, ..)| (*o, *l)).collect()) {
+            delta.fetched += l;
             let bytes = broker.range(&e.file, o, l).map_err(undo)?;
-            for (ro, rl, h, _) in ranges.iter().filter(|(ro, rl, _, stored)| *stored && *ro >= o && ro + rl <= o + l) {
+            for (ro, rl, h, _) in missing.iter().filter(|(ro, rl, _, stored)| *stored && *ro >= o && ro + rl <= o + l) {
                 let part = &bytes[(ro - o) as usize..(ro - o + rl) as usize];
                 if format!("{:x}", Sha256::digest(part)) != *h {
                     return Err(undo(format!("pack download: a block of {} does not hash to its name", e.file)));
@@ -612,8 +702,7 @@ pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Bro
     }
     std::fs::write(&pv, ok).map_err(|err| undo(err.to_string()))?;
     let _ = std::fs::remove_file(&pre);
-    std::fs::write(serial_path(home), format!("{}\n", plan.serial)).map_err(|err| undo(err.to_string()))?;
-    Ok(variant)
+    Ok((variant, delta))
 }
 
 pub fn max_ctx(dir: &Path, variant: &str, run: Runner) -> Result<u64, String> {
