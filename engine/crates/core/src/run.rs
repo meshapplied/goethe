@@ -1,36 +1,120 @@
-// goethe run: try a loaded model by hand, by input modality: text (a chat, one reply, an embedding summary) or an audio file (a transcript).
+// goethe run: try a model by hand, by input modality: text (a chat, one reply, an embedding summary) or an audio file (a transcript). It talks to the model's own engine on 127.0.0.1 with its engine key from state.db, never through the gateway, and creates no API key.
 
 use crate::gateway_cache::GatewayCache;
 use crate::paths::goethe_home;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 
-pub fn run(args: &[String]) -> Result<(), String> {
-    // The model's own engine on 127.0.0.1 with its engine key from state.db: no API key is created or shown.
-    let snap = GatewayCache::open(&goethe_home()).exact();
+pub struct Opts {
+    pub keep: bool,
+    pub plain: bool,
+    pub thinking: bool,
+}
+
+pub(crate) struct Loaded {
+    // The models this run loaded, unloaded when it ends unless --keep; a model that was already loaded is never touched.
+    models: Vec<String>,
+    keep: bool,
+    unload: Box<dyn Fn(&str)>,
+}
+
+impl Loaded {
+    fn new(keep: bool) -> Loaded {
+        Loaded { models: Vec::new(), keep, unload: Box::new(unload_model) }
+    }
+
+    pub(crate) fn add(&mut self, model: &str) {
+        self.models.push(model.to_string());
+    }
+}
+
+impl Drop for Loaded {
+    fn drop(&mut self) {
+        if !self.keep {
+            self.models.iter().for_each(|m| (self.unload)(m));
+        }
+    }
+}
+
+fn unload_model(model: &str) {
+    match crate::rpc::call("unload", json!({"model_id": model, "all": false, "force": false})) {
+        Ok(_) => eprintln!("unloaded {model}"),
+        Err(e) => eprintln!("could not unload {model}: {e}"),
+    }
+}
+
+pub fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, String> {
+    // Whether run must load the model first: no when it serves, yes when installed, else the install hint (run never installs).
+    match (loaded, installed) {
+        (true, _) => Ok(false),
+        (false, true) => Ok(true),
+        (false, false) => Err(format!("{model} is not installed: goethe install {model}")),
+    }
+}
+
+pub(crate) struct Target {
+    pub(crate) model: String,
+    pub(crate) kind: String,
+    pub(crate) runtime: String,
+    pub(crate) llama: bool,
+    pub(crate) instance: String,
+    pub(crate) api: Api,
+}
+
+pub(crate) fn target(model: &str) -> Result<Target, String> {
+    // A loaded model's engine, its kind (the engine's, else the card's) and runtime.
+    let home = goethe_home();
+    let snap = GatewayCache::open(&home).exact();
+    let r = snap.routes(model).iter().find(|r| !r.draining).ok_or_else(|| format!("{model} is not loaded: goethe load {model}"))?;
+    let api = Api { base: format!("http://127.0.0.1:{}/v1", r.port), key: r.engine_key.clone() };
+    let (card_kind, llama) = card_task(&crate::paths::model_dir(&home, model));
+    let kind = kind_of(&api.call("GET", "/models", None)?, model, card_kind);
+    let runtime = crate::engine_overhead::model_runtime(&home, model);
+    Ok(Target { model: model.to_string(), kind, runtime, llama, instance: r.instance_id.clone(), api })
+}
+
+fn interactive(input: &Option<String>, plain: bool) -> bool {
+    // The chat screen: no INPUT, a terminal on both ends, and not --plain.
+    use std::io::IsTerminal;
+    input.is_none() && !plain && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
+    // MODEL INPUT as given; an installed model that is not loaded is loaded first (and unloaded at the end unless --keep).
+    let home = goethe_home();
+    let mut snap = GatewayCache::open(&home).exact();
     let mut args = args.to_vec();
     if let Some(first) = args.first().map(|f| snap.resolve_model(f).to_string()) {
         args[0] = first;
     }
-    let (model, input) = route(&args, &snap.serving_models())?;
-    let r = snap.routes(&model).iter().find(|r| !r.draining).ok_or_else(|| format!("{model} is not loaded: goethe load {model}"))?;
-    let api = Api { base: format!("http://127.0.0.1:{}/v1", r.port), key: r.engine_key.clone() };
-    let (card_kind, llama) = card_task(&crate::paths::model_dir(&goethe_home(), &model));
-    let kind = kind_of(&api.call("GET", "/models", None)?, &model, card_kind);
-    if let Some(e) = mismatch(&model, &kind, input.as_deref()) {
+    let installed = crate::models::installed_ids(&home);
+    let (model, input) = route(&args, &snap.serving_models(), &installed.iter().map(String::as_str).collect::<Vec<_>>())?;
+    let mut loaded = Loaded::new(opts.keep);
+    if load_need(snap.routes(&model).iter().any(|r| !r.draining), installed.contains(&model), &model)? {
+        crate::install::run_load(json!({"model_id": model, "gpus": null, "ctx": null, "max_conc": null, "tp": null, "force": false, "yes": false, "extra_sglang_args": [], "async_finish": true}), false, false)?;
+        loaded.add(&model);
+        snap = GatewayCache::open(&home).exact();
+    }
+    drop(snap);
+    let t = target(&model)?;
+    if let Some(e) = mismatch(&model, &t.kind, input.as_deref()) {
         return Err(e);
     }
-    match (kind.as_str(), input) {
-        ("embedding", Some(text)) => api.embed(&model, &text).map(|line| println!("{line}")),
-        ("speech", Some(path)) => api.transcribe(&model, std::path::Path::new(&path), llama),
+    if interactive(&input, opts.plain) {
+        return crate::chat::run(t, &mut loaded, opts.thinking);
+    }
+    let (api, llama) = (&t.api, t.llama);
+    match (t.kind.as_str(), input) {
+        ("embedding", Some(text)) => api.embed(&model, &text).map(|e| println!("{}", embed_line(&e))),
+        ("speech", Some(path)) => api.transcribe(&model, std::path::Path::new(&path), llama).map(|text| println!("{text}")),
         ("speech", None) => {
             let wav = record()?;
             let done = api.transcribe(&model, &wav, llama);
             let _ = std::fs::remove_file(&wav);
             let _ = wav.parent().map(std::fs::remove_dir);
-            done
+            done.map(|text| println!("{text}"))
         }
-        (_, Some(text)) => api.chat(&model, &[json!({"role": "user", "content": text})]).map(|_| ()),
+        (_, Some(text)) => api.chat(&model, &[json!({"role": "user", "content": text})], &mut |_| true).map(|reply| println!("{}", shown(&reply, opts.thinking))),
         (_, None) => {
             let mut msgs = Vec::new();
             loop {
@@ -41,8 +125,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
                     return Ok(());
                 }
                 msgs.push(json!({"role": "user", "content": line.trim_end()}));
-                match api.chat(&model, &msgs) {
-                    Ok(reply) => msgs.push(json!({"role": "assistant", "content": reply})),
+                match api.chat(&model, &msgs, &mut |_| true) {
+                    Ok(reply) => {
+                        println!("{}", shown(&reply, opts.thinking));
+                        msgs.push(json!({"role": "assistant", "content": reply}));
+                    }
                     Err(e) => {
                         msgs.pop();
                         eprintln!("{e}");
@@ -53,8 +140,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
 }
 
-pub fn route(args: &[String], loaded: &[&str]) -> Result<(String, Option<String>), String> {
-    // MODEL and INPUT from up to two words: a first word that is a loaded model is the model; with one loaded model it may be left out.
+fn shown(reply: &str, thinking: bool) -> String {
+    use std::io::IsTerminal;
+    crate::chat::plain_text(reply, thinking, std::io::stdout().is_terminal())
+}
+
+pub fn route(args: &[String], loaded: &[&str], installed: &[&str]) -> Result<(String, Option<String>), String> {
+    // MODEL and INPUT from up to two words: a first word that is a loaded or installed model is the model; with one loaded model it may be left out.
     let only = || match loaded {
         [m] => Ok(m.to_string()),
         [] => Err("no model is loaded: goethe load MODEL".to_string()),
@@ -62,7 +154,7 @@ pub fn route(args: &[String], loaded: &[&str]) -> Result<(String, Option<String>
     };
     match args {
         [m, i] => Ok((m.clone(), Some(i.clone()))),
-        [w] if loaded.contains(&w.as_str()) => Ok((w.clone(), None)),
+        [w] if loaded.contains(&w.as_str()) || installed.contains(&w.as_str()) => Ok((w.clone(), None)),
         [w] => only().map(|m| (m, Some(w.clone()))),
         _ => only().map(|m| (m, None)),
     }
@@ -82,7 +174,7 @@ pub fn mismatch(model: &str, kind: &str, input: Option<&str>) -> Option<String> 
     (!ok).then(|| format!("{model} is {a} model: give it {want}"))
 }
 
-fn card_task(dir: &std::path::Path) -> (&'static str, bool) {
+pub(crate) fn card_task(dir: &std::path::Path) -> (&'static str, bool) {
     // The kind a card says when its engine names none (llama.cpp: task embed is an embedding model, task transcribe a speech model, else text), and whether llama.cpp serves it.
     let card = std::fs::read_to_string(dir.join(crate::install::CARD_FILE)).unwrap_or_default().parse::<toml::Table>().unwrap_or_default();
     let task = card.get("task").and_then(|t| t.as_str()).unwrap_or_default();
@@ -101,9 +193,9 @@ pub fn kind_of(models: &Value, model: &str, card: &str) -> String {
     entry.and_then(|m| m["kind"].as_str()).unwrap_or(card).to_string()
 }
 
-struct Api {
-    base: String,
-    key: Option<String>,
+pub(crate) struct Api {
+    pub(crate) base: String,
+    pub(crate) key: Option<String>,
 }
 
 impl Api {
@@ -115,7 +207,7 @@ impl Api {
         }
     }
 
-    fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
+    pub(crate) fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
         let req = self.req(method, path);
         reply(match body {
             Some(b) => req.set("Content-Type", "application/json").send_string(&b.to_string()),
@@ -123,35 +215,31 @@ impl Api {
         })
     }
 
-    fn embed(&self, model: &str, text: &str) -> Result<String, String> {
-        // One line: dimensions, L2 norm and the first 4 values.
+    pub(crate) fn embed(&self, model: &str, text: &str) -> Result<Vec<f64>, String> {
+        // The vector the engine returns for one input.
         let v = self.call("POST", "/embeddings", Some(json!({"model": model, "input": text})))?;
-        let e: Vec<f64> = v["data"][0]["embedding"].as_array().into_iter().flatten().filter_map(Value::as_f64).collect();
-        let head: Vec<String> = e.iter().take(4).map(|x| format!("{x:.4}")).collect();
-        Ok(format!("dims={} norm={:.4} [{}, ...]", e.len(), e.iter().map(|x| x * x).sum::<f64>().sqrt(), head.join(", ")))
+        Ok(v["data"][0]["embedding"].as_array().into_iter().flatten().filter_map(Value::as_f64).collect())
     }
 
-    fn transcribe(&self, model: &str, path: &std::path::Path, chat: bool) -> Result<(), String> {
+    pub(crate) fn transcribe(&self, model: &str, path: &std::path::Path, chat: bool) -> Result<String, String> {
         // goethe-engine: OpenAI's multipart upload (the model field and the file); llama.cpp: a chat turn with the audio as input_audio.
         let audio = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         if chat {
             let format = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
             let part = json!([{"type": "text", "text": "Transcribe this audio."}, {"type": "input_audio", "input_audio": {"data": base64(&audio), "format": format}}]);
             let body = json!({"model": model, "messages": [{"role": "user", "content": part}], "stream": false});
-            println!("{}", self.call("POST", "/chat/completions", Some(body))?["choices"][0]["message"]["content"].as_str().unwrap_or_default().trim());
-            return Ok(());
+            return Ok(self.call("POST", "/chat/completions", Some(body))?["choices"][0]["message"]["content"].as_str().unwrap_or_default().trim().to_string());
         }
         let (b, name) = ("goethe-run-boundary", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
         let mut body = format!("--{b}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").into_bytes();
         body.extend(audio);
         body.extend(format!("\r\n--{b}--\r\n").as_bytes());
         let req = self.req("POST", "/audio/transcriptions").set("Content-Type", &format!("multipart/form-data; boundary={b}"));
-        println!("{}", reply(req.send_bytes(&body))?["text"].as_str().unwrap_or_default());
-        Ok(())
+        Ok(reply(req.send_bytes(&body))?["text"].as_str().unwrap_or_default().to_string())
     }
 
-    fn chat(&self, model: &str, msgs: &[Value]) -> Result<String, String> {
-        // Streams the reply to stdout as it arrives and returns it whole.
+    pub(crate) fn chat(&self, model: &str, msgs: &[Value], sink: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
+        // Streams the reply piece by piece into the sink (which says false to stop) and returns it whole.
         let body = json!({"model": model, "messages": msgs, "stream": true}).to_string();
         let r = self.req("POST", "/chat/completions").set("Content-Type", "application/json").send_string(&body).map_err(fail)?;
         let mut out = String::new();
@@ -159,13 +247,19 @@ impl Api {
             let line = line.map_err(|e| e.to_string())?;
             let Some(data) = line.strip_prefix("data:").map(str::trim).filter(|d| *d != "[DONE]") else { continue };
             let piece = serde_json::from_str::<Value>(data).ok().and_then(|v| v["choices"][0]["delta"]["content"].as_str().map(String::from)).unwrap_or_default();
-            print!("{piece}");
-            let _ = std::io::stdout().flush();
             out.push_str(&piece);
+            if !sink(&piece) {
+                break;
+            }
         }
-        println!();
         Ok(out)
     }
+}
+
+pub(crate) fn embed_line(e: &[f64]) -> String {
+    // One line: dimensions, L2 norm and the first 4 values.
+    let head: Vec<String> = e.iter().take(4).map(|x| format!("{x:.4}")).collect();
+    format!("dims={} norm={:.4} [{}, ...]", e.len(), e.iter().map(|x| x * x).sum::<f64>().sqrt(), head.join(", "))
 }
 
 fn base64(bytes: &[u8]) -> String {
@@ -181,7 +275,7 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
-fn record() -> Result<std::path::PathBuf, String> {
+pub(crate) fn record() -> Result<std::path::PathBuf, String> {
     // 16 kHz mono PCM16 WAV from the first recorder on PATH, to a temp file, until Enter or Ctrl-D (SIGINT: the recorder closes the WAV).
     let wav = crate::paths::private_temp_dir("goethe-run")?.join("in.wav");
     let f = wav.to_string_lossy().into_owned();
@@ -227,12 +321,14 @@ mod tests {
     fn words_route_to_a_model_and_an_input() {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let one = ["org/m"];
-        assert_eq!(route(&s(&[]), &one), Ok(("org/m".into(), None)));
-        assert_eq!(route(&s(&["org/m"]), &one), Ok(("org/m".into(), None)));
-        assert_eq!(route(&s(&["hello there"]), &one), Ok(("org/m".into(), Some("hello there".into()))));
-        assert_eq!(route(&s(&["org/x", "hi"]), &one), Ok(("org/x".into(), Some("hi".into()))));
-        assert_eq!(route(&s(&["hi"]), &["org/a", "org/b"]).unwrap_err(), "several models are loaded (org/a, org/b): goethe run MODEL [INPUT]");
-        assert_eq!(route(&s(&[]), &[]).unwrap_err(), "no model is loaded: goethe load MODEL");
+        let off = ["org/z"];
+        assert_eq!(route(&s(&[]), &one, &off), Ok(("org/m".into(), None)));
+        assert_eq!(route(&s(&["org/m"]), &one, &off), Ok(("org/m".into(), None)));
+        assert_eq!(route(&s(&["org/z"]), &one, &off), Ok(("org/z".into(), None)), "an installed model that is not loaded is the model");
+        assert_eq!(route(&s(&["hello there"]), &one, &off), Ok(("org/m".into(), Some("hello there".into()))));
+        assert_eq!(route(&s(&["org/x", "hi"]), &one, &off), Ok(("org/x".into(), Some("hi".into()))));
+        assert_eq!(route(&s(&["hi"]), &["org/a", "org/b"], &off).unwrap_err(), "several models are loaded (org/a, org/b): goethe run MODEL [INPUT]");
+        assert_eq!(route(&s(&[]), &[], &off).unwrap_err(), "no model is loaded: goethe load MODEL");
     }
 
     #[test]
@@ -273,7 +369,7 @@ mod tests {
         std::fs::write(dir.path().join(crate::install::CARD_FILE), "runtime = \"llama.cpp\"\ntask = \"embed\"\n").unwrap();
         let api = Api { base: format!("http://127.0.0.1:{port}/v1"), key: Some("k".into()) };
         assert_eq!(kind_of(&api.call("GET", "/models", None).unwrap(), "org/e", card_task(dir.path()).0), "embedding");
-        assert_eq!(api.embed("org/e", "hello world").unwrap(), "dims=3 norm=1.0000 [0.6000, 0.8000, 0.0000, ...]");
+        assert_eq!(embed_line(&api.embed("org/e", "hello world").unwrap()), "dims=3 norm=1.0000 [0.6000, 0.8000, 0.0000, ...]");
     }
 
     #[test]
@@ -309,11 +405,34 @@ mod tests {
         std::fs::write(&wav, b"RIFFfoo").unwrap();
         assert_eq!(mismatch("m", "speech", Some("plain text")).unwrap(), "m is a speech model: give it an audio file");
         let api = Api { base: format!("http://127.0.0.1:{port}/v1"), key: Some("k".into()) };
-        api.transcribe("org/t", &wav, true).unwrap();
+        assert_eq!(api.transcribe("org/t", &wav, true).unwrap(), "and so my fellow Americans");
         let sent: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
         let audio = &sent["messages"][0]["content"][1];
         assert_eq!((sent["stream"].as_bool(), audio["type"].as_str(), audio["input_audio"]["format"].as_str()), (Some(false), Some("input_audio"), Some("wav")));
         assert_eq!(audio["input_audio"]["data"], base64(b"RIFFfoo"));
+    }
+
+    #[test]
+    fn run_loads_only_an_installed_model_that_is_not_serving_and_never_installs() {
+        assert_eq!(load_need(true, true, "org/m"), Ok(false), "serving: left alone");
+        assert_eq!(load_need(false, true, "org/m"), Ok(true), "installed, not loaded: run loads it");
+        assert_eq!(load_need(false, false, "org/m").unwrap_err(), "org/m is not installed: goethe install org/m");
+    }
+
+    #[test]
+    fn a_model_run_loaded_is_unloaded_at_the_end_unless_kept() {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let log = |keep: bool, models: &[&str]| {
+            let sink = seen.clone();
+            let mut g = Loaded { models: Vec::new(), keep, unload: Box::new(move |m| sink.borrow_mut().push(m.to_string())) };
+            models.iter().for_each(|m| g.add(m));
+        };
+        log(false, &[]);
+        assert!(seen.borrow().is_empty(), "nothing loaded by run: nothing unloaded");
+        log(true, &["org/m"]);
+        assert!(seen.borrow().is_empty(), "--keep leaves it loaded");
+        log(false, &["org/m", "org/n"]);
+        assert_eq!(*seen.borrow(), ["org/m", "org/n"]);
     }
 
     #[test]

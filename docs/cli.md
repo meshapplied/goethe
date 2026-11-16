@@ -189,6 +189,18 @@ Stops a model. Requests in progress finish first.
 | `--all` | Every loaded model |
 | `--force` | Stop right away |
 
+### `goethe run [MODEL] [INPUT]`
+
+Tries a model by hand. With text it prints one reply (a text model), an embedding summary (`dims= norm= [first 4]`) or, for an audio file, its transcript. With no INPUT on a terminal it opens an ephemeral chat screen; with no terminal, or `--plain`, a plain `> ` prompt (a speech model records from the microphone). An installed model that is not loaded is loaded first, like `goethe load`, and unloaded when run ends unless `--keep`; run never installs. It talks to the model's own engine on 127.0.0.1 with its engine key, not through the gateway, and creates no API key.
+
+| Option | Description |
+|---|---|
+| `--keep` | Leave a model loaded that run loaded |
+| `--plain` | No chat screen |
+| `--thinking` | Show the model's reasoning, dimmed, with the answer (hidden by default) |
+
+Chat screen: the model on the top line, the conversation, your line at the bottom. Typing: Enter sends, Esc opens the command keys. Commands: `m` pick or load another model (starts a new conversation), `e` export, `r` record (speech models), `i` or Enter back to typing, `q` quit (Enter confirms, `q` goes back; Ctrl-C asks the same). `/audio PATH` sends an audio file to a speech model; an embedding model shows `dims=` and `norm=` for each line. Nothing is written when you close it. `e` writes `goethe-chat-<UTC time>/` here in the [trace format](traces.md) (`0700` folder, `0600` files; embeddings as `embeddings.json`), with the model's raw text, reasoning included.
+
 ### `goethe ps`
 
 Running models with the runtime serving each (goethe-engine runs a kernel pack; llama.cpp and sglang are the plain runtimes), their GPUs, port, memory, restarts, requests in progress and speed. `goethe models --json` gives installed models the same `runtime`.

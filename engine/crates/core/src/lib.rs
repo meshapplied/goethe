@@ -26,6 +26,7 @@ pub mod heartbeat;
 pub mod placement;
 pub mod ports;
 pub mod public_share;
+pub mod chat;
 pub mod run;
 pub mod recommend;
 pub mod registry;
