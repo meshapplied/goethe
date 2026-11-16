@@ -296,14 +296,14 @@ fn announce(model: &str, engine: &str, bytes: u64) {
 
 fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String> {
     // A pack in the platform's index for this model and a local GPU: used when the node is logged in; otherwise the user may log in now. Without a login no pack is ever downloaded.
-    let archs = crate::packs::local_archs(home);
-    if archs.is_empty() {
-        return Ok(PackDecision::None);
-    }
     let Some(index) = crate::packs::catalog(home) else { return Ok(PackDecision::None) };
+    let archs = crate::packs::local_archs(home);
     let Some(offer) = crate::packs::offers(&index, &opts.model_id, &archs).into_iter().next() else {
+        let theirs = crate::packs::pack_archs(&index, &opts.model_id);
         if let Some(note) = crate::packs::engine_too_old(&index, &opts.model_id, &archs) {
             eprintln!("{note}");
+        } else if !theirs.is_empty() && !theirs.iter().any(|a| archs.contains(a)) {
+            eprintln!("note: kernel packs for {} exist for {} only, not for this machine's GPUs ({})", opts.model_id, theirs.join(", "), archs.join(", "));
         }
         return Ok(PackDecision::None);
     };

@@ -263,6 +263,16 @@ pub fn engine_too_old(index: &[u8], model_id: &str, archs: &[String]) -> Option<
     Some(format!("engine_too_old: {model_id} needs goethe-engine >= {a}.{b}.{c}, installed {}: run goethe update", crate::pyenv::ENGINE_VERSION))
 }
 
+pub fn pack_archs(index: &[u8], model_id: &str) -> Vec<String> {
+    // The archs the index has a pack of `model_id` for, whatever GPUs this machine has.
+    let ix: Value = serde_json::from_slice(index).unwrap_or_default();
+    let all: Vec<String> = ix["entries"].as_array().into_iter().flatten().filter_map(|e| e["arch"].as_str().map(String::from)).collect();
+    let mut out: Vec<String> = entries(index, &all, |r| r.eq_ignore_ascii_case(model_id)).into_iter().map(|e| e.offer.arch).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> Vec<Entry> {
     // Index entries on one of `archs` (in that order) for a model `model` accepts, in a format, ABI and runtime this goethe runs, whatever min_engine they need (`runnable` filters).
     let Ok(ix) = serde_json::from_slice::<Value>(index) else { return Vec::new() };
@@ -758,6 +768,7 @@ mod tests {
         let o = offers(ix.to_string().as_bytes(), "ORG/m-gguf", &archs);
         assert_eq!(o.iter().map(|o| o.arch.as_str()).collect::<Vec<_>>(), ["sm_120a", "sm_90a"]);
         assert_eq!(offers_any(ix.to_string().as_bytes(), &archs).len(), 2);
+        assert_eq!(pack_archs(ix.to_string().as_bytes(), "org/M-GGUF"), ["sm_100a", "sm_120a", "sm_90a"]);
         ix["version"] = 2.into();
         assert!(offers(ix.to_string().as_bytes(), "org/m-gguf", &archs).is_empty());
         assert!(offers(b"not json", "org/m-gguf", &archs).is_empty());
