@@ -84,6 +84,24 @@ fn key(gpu_name: &str, kind: Kind) -> String {
     }
 }
 
+pub const PACK_RUNTIME: &str = "goethe-engine";
+pub const MAX_LEARNED_OVERHEAD_GB: f64 = 8.0;
+
+fn runtime_key(gpu_name: &str, kind: Kind, runtime: &str) -> String {
+    // A figure learned under one serving runtime: the kernel pack, llama.cpp and SGLang hold different memory for the same model.
+    format!("{} @{runtime}", key(gpu_name, kind))
+}
+
+pub fn model_runtime(home: &Path, model_id: &str) -> String {
+    // The runtime a model's card serves with (a card without one is SGLang's).
+    let card = std::fs::read_to_string(crate::paths::model_dir(home, model_id).join(crate::install::CARD_FILE)).ok().and_then(|t| t.parse::<toml::Table>().ok()).unwrap_or_default();
+    card_runtime(&toml::Value::Table(card))
+}
+
+pub fn card_runtime(card: &toml::Value) -> String {
+    crate::engines::of_card(card).map_or_else(|_| "unknown".to_string(), |e| e.id.to_string())
+}
+
 pub fn parse_pre_load_gb(log_text: &str) -> Option<f64> {
     // Free memory SGLang sees once its CUDA context exists ("Load weight begin. avail mem=74.86 GB").
     log_text
@@ -96,27 +114,38 @@ pub fn parse_pre_load_gb(log_text: &str) -> Option<f64> {
 
 pub fn read_context(con: &Connection, gpu_name: &str, tp: u64) -> f64 {
     // What an engine's CUDA context takes on this GPU type and tp before its pools are sized; 1.4 GB until learned.
-    let learned = read(con, ANY_MODEL, &key(gpu_name, Kind::Context), tp);
+    let learned = read(con, ANY_MODEL, &key(gpu_name, Kind::Context), tp).unwrap_or(0.0);
     if learned > 0.0 { learned } else { DEFAULT_CONTEXT_GB }
 }
 
 pub fn store_context(con: &Connection, gpu_name: &str, tp: u64, gb: f64) -> rusqlite::Result<()> {
-    store_learned(con, ANY_MODEL, gpu_name, tp, Kind::Context, gb)
+    con.execute(
+        "INSERT INTO engine_overhead (model_id, gpu_name, tp, extra_gb) VALUES (?1,?2,?3,?4) ON CONFLICT(model_id, gpu_name, tp) DO UPDATE SET extra_gb = MAX(extra_gb, excluded.extra_gb)",
+        rusqlite::params![ANY_MODEL, key(gpu_name, Kind::Context), tp as i64, gb],
+    )?;
+    Ok(())
 }
 
-fn read(con: &Connection, model_id: &str, gpu_name: &str, tp: u64) -> f64 {
+fn read(con: &Connection, model_id: &str, gpu_name: &str, tp: u64) -> Option<f64> {
     con.query_row(
         "SELECT extra_gb FROM engine_overhead WHERE model_id = ?1 AND gpu_name = ?2 AND tp = ?3",
         rusqlite::params![model_id, gpu_name, tp as i64],
         |r| r.get(0),
     )
-    .unwrap_or(0.0)
+    .ok()
 }
 
-pub fn read_learned(con: &Connection, model_id: &str, gpu_name: &str, tp: u64) -> Learned {
+fn read_for(con: &Connection, model_id: &str, gpu_name: &str, tp: u64, kind: Kind, runtime: &str) -> f64 {
+    // The row learned under this runtime; rows from before runtimes were recorded count for the plain runtimes only, never for the kernel pack.
+    let own = read(con, model_id, &runtime_key(gpu_name, kind, runtime), tp);
+    let old = (runtime != PACK_RUNTIME).then(|| read(con, model_id, &key(gpu_name, kind), tp)).flatten();
+    own.or(old).unwrap_or(0.0)
+}
+
+pub fn read_learned(con: &Connection, model_id: &str, gpu_name: &str, tp: u64, runtime: &str) -> Learned {
     Learned {
-        static_gb: read(con, model_id, &key(gpu_name, Kind::Static), tp),
-        overhead_gb: read(con, model_id, &key(gpu_name, Kind::Overhead), tp),
+        static_gb: read_for(con, model_id, gpu_name, tp, Kind::Static, runtime),
+        overhead_gb: read_for(con, model_id, gpu_name, tp, Kind::Overhead, runtime).min(MAX_LEARNED_OVERHEAD_GB),
     }
 }
 
@@ -127,14 +156,14 @@ pub fn store_learned(
     tp: u64,
     kind: Kind,
     extra_gb: f64,
+    runtime: &str,
 ) -> rusqlite::Result<()> {
-    // Keep the larger of the stored and the new figure; static rows carry a " static" suffix on the GPU name.
-    con.execute(
-        "INSERT INTO engine_overhead (model_id, gpu_name, tp, extra_gb)
-         VALUES (?1,?2,?3,?4)
-         ON CONFLICT(model_id, gpu_name, tp) DO UPDATE SET extra_gb = MAX(extra_gb, excluded.extra_gb)",
-        rusqlite::params![model_id, key(gpu_name, kind), tp as i64, extra_gb],
-    )?;
+    // Static extras keep the larger figure; the overhead is the latest measurement, so a lighter load lowers it. Rows are per runtime.
+    let sql = match kind {
+        Kind::Overhead => "INSERT INTO engine_overhead (model_id, gpu_name, tp, extra_gb) VALUES (?1,?2,?3,?4) ON CONFLICT(model_id, gpu_name, tp) DO UPDATE SET extra_gb = excluded.extra_gb",
+        _ => "INSERT INTO engine_overhead (model_id, gpu_name, tp, extra_gb) VALUES (?1,?2,?3,?4) ON CONFLICT(model_id, gpu_name, tp) DO UPDATE SET extra_gb = MAX(extra_gb, excluded.extra_gb)",
+    };
+    con.execute(sql, rusqlite::params![model_id, runtime_key(gpu_name, kind, runtime), tp as i64, extra_gb.max(0.0)])?;
     Ok(())
 }
 
@@ -176,11 +205,13 @@ mod tests {
     fn static_and_overhead_are_learned_separately_and_only_grow() {
         let td = tempfile::tempdir().unwrap();
         let con = crate::db::open(td.path()).unwrap();
-        store_learned(&con, "m", "GPU", 1, Kind::Static, 4.7).unwrap();
-        store_learned(&con, "m", "GPU", 1, Kind::Overhead, 2.0).unwrap();
-        store_learned(&con, "m", "GPU", 1, Kind::Overhead, 1.0).unwrap();
-        assert_eq!(read_learned(&con, "m", "GPU", 1), Learned { static_gb: 4.7, overhead_gb: 2.0 });
-        assert_eq!(read_learned(&con, "m", "GPU", 2), Learned::default());
+        store_learned(&con, "m", "GPU", 1, Kind::Static, 4.7, "sglang").unwrap();
+        store_learned(&con, "m", "GPU", 1, Kind::Static, 3.0, "sglang").unwrap();
+        store_learned(&con, "m", "GPU", 1, Kind::Overhead, 2.0, "sglang").unwrap();
+        assert_eq!(read_learned(&con, "m", "GPU", 1, "sglang"), Learned { static_gb: 4.7, overhead_gb: 2.0 }, "a static extra only grows");
+        store_learned(&con, "m", "GPU", 1, Kind::Overhead, 1.0, "sglang").unwrap();
+        assert_eq!(read_learned(&con, "m", "GPU", 1, "sglang").overhead_gb, 1.0, "a lighter load lowers the learned overhead");
+        assert_eq!(read_learned(&con, "m", "GPU", 2, "sglang"), Learned::default());
     }
 
     #[test]
@@ -225,5 +256,51 @@ mod tests {
     fn parses_mem_fraction_hint() {
         let log = "Raise --mem-fraction-static above 0.82 to fit weights";
         assert!(parse_shortfall_gb(log).unwrap() > 0.0);
+    }
+
+    #[test]
+    fn a_figure_learned_under_a_plain_runtime_never_blocks_the_kernel_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let con = crate::db::open(dir.path()).unwrap();
+        let (m, gpu) = ("mradermacher/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF", "NVIDIA GeForce RTX 5090");
+        store_learned(&con, m, gpu, 1, Kind::Overhead, 4.791, "llama.cpp").unwrap();
+        assert_eq!(read_learned(&con, m, gpu, 1, "llama.cpp").overhead_gb, 4.791);
+        assert_eq!(read_learned(&con, m, gpu, 1, PACK_RUNTIME), Learned::default(), "the pack starts from the base overhead");
+        assert_eq!(read_learned(&con, m, gpu, 1, "sglang").overhead_gb, 0.0, "another plain runtime has its own row");
+        store_learned(&con, m, gpu, 1, Kind::Overhead, 0.5, PACK_RUNTIME).unwrap();
+        assert_eq!(read_learned(&con, m, gpu, 1, PACK_RUNTIME).overhead_gb, 0.5);
+        assert_eq!(read_learned(&con, m, gpu, 1, "llama.cpp").overhead_gb, 4.791, "and the plain runtime keeps its own");
+    }
+
+    #[test]
+    fn rows_from_before_runtimes_were_recorded_apply_to_plain_runtimes_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let con = crate::db::open(dir.path()).unwrap();
+        con.execute("INSERT INTO engine_overhead (model_id, gpu_name, tp, extra_gb) VALUES ('m','GPU',1,4.791), ('m','GPU static',1,2.0)", []).unwrap();
+        assert_eq!(read_learned(&con, "m", "GPU", 1, "llama.cpp"), Learned { static_gb: 2.0, overhead_gb: 4.791 });
+        assert_eq!(read_learned(&con, "m", "GPU", 1, "sglang").overhead_gb, 4.791);
+        assert_eq!(read_learned(&con, "m", "GPU", 1, PACK_RUNTIME), Learned::default(), "the old row says nothing about the pack");
+        store_learned(&con, "m", "GPU", 1, Kind::Overhead, 1.0, "llama.cpp").unwrap();
+        assert_eq!(read_learned(&con, "m", "GPU", 1, "llama.cpp").overhead_gb, 1.0, "a new measurement replaces the old row's figure for that runtime");
+    }
+
+    #[test]
+    fn the_transcriber_pack_fits_a_32_gb_card_despite_a_row_learned_on_llama_cpp() {
+        let dir = tempfile::tempdir().unwrap();
+        let con = crate::db::open(dir.path()).unwrap();
+        let (m, gpu) = ("mradermacher/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF", "NVIDIA GeForce RTX 5090");
+        store_learned(&con, m, gpu, 1, Kind::Overhead, 4.791, "llama.cpp").unwrap();
+        let base = crate::calc::Need { weights: 25.1, overhead: 1.8, ..Default::default() };
+        let budget = |runtime: &str| crate::chooser::with_learned(base, read_learned(&con, m, gpu, 1, runtime));
+        assert_eq!(crate::calc::shortfall(&budget(PACK_RUNTIME), 0, 31.3), None, "the pack: 26.9 GB on a card with 31.3 free");
+        assert!(crate::calc::shortfall(&budget("llama.cpp"), 0, 31.3).is_some(), "the plain runtime keeps what it learned");
+    }
+
+    #[test]
+    fn a_learned_overhead_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let con = crate::db::open(dir.path()).unwrap();
+        store_learned(&con, "m", "GPU", 1, Kind::Overhead, 40.0, "sglang").unwrap();
+        assert_eq!(read_learned(&con, "m", "GPU", 1, "sglang").overhead_gb, MAX_LEARNED_OVERHEAD_GB);
     }
 }
