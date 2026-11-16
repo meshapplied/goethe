@@ -829,13 +829,11 @@ fn refused_here(dir: &Path, run: crate::packs::Runner) -> Option<String> {
 
 pub fn unpack_refused(home: &Path, model_id: &str, log: &str) -> Result<bool, String> {
     // An engine without `pack runs` refuses such a pack only at load: drop it, write the plain card, say so; false when there is nothing to drop.
-    let Some(line) = log.lines().find(|l| l.contains("runs no variant of this pack")) else { return Ok(false) };
+    let Some(why) = load_refusal(log) else { return Ok(false) };
     let dir = model_dir(home, model_id);
     if !dir.join(PACK_FILE).is_file() {
         return Ok(false);
     }
-    let (device, skus) = line.split_once(" runs no variant of this pack").unwrap_or((line, ""));
-    let device = device.rsplit_once("device ").map_or(device, |(_, d)| d).trim();
     drop_pack(&dir);
     let source_dir = read_card_table(&dir).and_then(|c| c.get("source_dir").and_then(|v| v.as_str()).map(PathBuf::from));
     let entry = fetch(&registry_url()).ok().and_then(|r| find_model(&r, model_id).cloned());
@@ -845,9 +843,19 @@ pub fn unpack_refused(home: &Path, model_id: &str, log: &str) -> Result<bool, St
     if let Some(layer) = engine.layer {
         crate::pyenv::ensure(home, layer)?;
     }
-    println!("kernel pack for {} does not run on {device} (no variant for it); using {}", skus.trim_start_matches(':').trim(), engine.id);
+    println!("{why}; using {}", engine.id);
     commit(home, &p, "installed", &mut std::io::sink())?;
     Ok(true)
+}
+
+fn load_refusal(log: &str) -> Option<String> {
+    // The engine's "device D runs no variant of this pack: SKUS (...): WHY. Fallback: ..." line as "kernel pack for SKUS does not run on D (WHY)".
+    let line = log.lines().find(|l| l.contains("runs no variant of this pack"))?;
+    let (device, rest) = line.split_once(" runs no variant of this pack")?;
+    let device = device.rsplit_once("device ").map_or(device, |(_, d)| d).trim();
+    let rest = rest.trim_start_matches(':').trim();
+    let (skus, why) = rest.split_once("): ").map_or((rest.to_string(), "no variant for it"), |(s, w)| (format!("{s})"), w.split(". ").next().unwrap_or(w)));
+    Some(format!("kernel pack for {skus} does not run on {device} ({why})"))
 }
 
 fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) -> Result<Option<String>, String> {
@@ -927,7 +935,7 @@ fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, S
 }
 
 fn plan_gguf(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> {
-    // llama.cpp serves the GGUF: shape from its header, KV in f16, the file recorded in the card.
+    // llama.cpp serves the GGUF: shape from its header, KV in f16, the file recorded in the card; a pooling model as embeddings.
     crate::engines::llama_cpp::server_bin(home)?;
     let dir = &t.card_dir;
     let gguf = crate::engines::llama_cpp::gguf_in(dir, &toml::Value::Table(read_card_table(dir).unwrap_or_default()), opts.quant.as_deref())?;
@@ -935,6 +943,9 @@ fn plan_gguf(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, Str
     let mut p = plan_engine(home, opts, t, facts, crate::engines::llama_cpp::ENGINE.id, ("f16", 2), None)?;
     let rel = gguf.strip_prefix(dir).unwrap_or(&gguf).to_string_lossy().into_owned();
     p.table.insert("gguf".into(), toml::Value::String(rel));
+    if crate::engines::llama_cpp::is_embedding(&gguf) {
+        p.table.insert("task".into(), toml::Value::String("embed".into()));
+    }
     Ok(p)
 }
 
@@ -1360,7 +1371,10 @@ pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), Stri
             let home = goethe_home();
             let log = fs::read_to_string(home.join("logs").join(format!("{iid}.log"))).unwrap_or_default();
             return match unpack_refused(&home, &model_id, &log)? {
-                true => run_load(params, no_wait, json_out),
+                true => {
+                    let _ = crate::rpc::call("unload", json!({"model_id": model_id, "all": false, "force": true}));
+                    run_load(params, no_wait, json_out)
+                }
                 false => Err(e),
             };
         }
@@ -1499,7 +1513,9 @@ mod tests {
             fs::write(dir.join(f), b"p").unwrap();
         }
         write_card_table(&dir, &toml::from_str("model_id = \"org/m-GGUF\"\nruntime = \"goethe-engine\"").unwrap()).unwrap();
-        let log = "goethe-engine: pack REFUSED: device RTX 5090 (170 SMs) runs no variant of this pack: rtx_pro_6000_maxq (188 SMs)\n";
+        let log = "goethe-engine: pack REFUSED: device NVIDIA GeForce RTX 5090 cc 12.0 (170 SMs, smem per block 101376) runs no variant of this pack: rtx_pro_6000_maxq (sm_120a, 188 SMs): the plan's grid needs 188 SMs co-resident, the device has 170. Fallback: serve this model with llama.cpp\n";
+        let why = "kernel pack for rtx_pro_6000_maxq (sm_120a, 188 SMs) does not run on NVIDIA GeForce RTX 5090 cc 12.0 (170 SMs, smem per block 101376) (the plan's grid needs 188 SMs co-resident, the device has 170)";
+        assert_eq!(load_refusal(log).as_deref(), Some(why));
         assert!(!unpack_refused(home.path(), "org/m-GGUF", "some other failure").unwrap());
         assert!(unpack_refused(home.path(), "org/m-GGUF", log).unwrap());
         assert!(!dir.join(PACK_FILE).exists() && !dir.join(PACK_VERIFY).exists() && dir.join("m-Q4_K_M.gguf").exists());

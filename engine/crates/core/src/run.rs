@@ -15,7 +15,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let (model, input) = route(&args, &snap.serving_models())?;
     let r = snap.routes(&model).iter().find(|r| !r.draining).ok_or_else(|| format!("{model} is not loaded: goethe load {model}"))?;
     let api = Api { base: format!("http://127.0.0.1:{}/v1", r.port), key: r.engine_key.clone() };
-    let kind = kind_of(&api.call("GET", "/models", None)?, &model);
+    let card = std::fs::read_to_string(crate::paths::model_dir(&goethe_home(), &model).join(crate::install::CARD_FILE)).unwrap_or_default();
+    let task = card.parse::<toml::Table>().ok().and_then(|c| c.get("task").and_then(|t| t.as_str().map(String::from)));
+    let kind = kind_of(&api.call("GET", "/models", None)?, &model, if task.as_deref() == Some("embed") { "embedding" } else { "text" });
     if let Some(e) = mismatch(&model, &kind, input.as_deref()) {
         return Err(e);
     }
@@ -86,11 +88,11 @@ pub fn mismatch(model: &str, kind: &str, input: Option<&str>) -> Option<String> 
     (!ok).then(|| format!("{model} is {a} model: give it {want}"))
 }
 
-pub fn kind_of(models: &Value, model: &str) -> String {
-    // The engine's /v1/models kind (goethe-engine: text, embedding or speech); other engines name none: text.
+pub fn kind_of(models: &Value, model: &str, card: &str) -> String {
+    // The engine's /v1/models kind (goethe-engine: text, embedding or speech); other engines name none: the card's (llama.cpp task embed, else text).
     let data = models["data"].as_array().cloned().unwrap_or_default();
     let entry = data.iter().find(|m| m["id"] == model).or(data.first());
-    entry.and_then(|m| m["kind"].as_str()).unwrap_or("text").to_string()
+    entry.and_then(|m| m["kind"].as_str()).unwrap_or(card).to_string()
 }
 
 struct Api {
@@ -218,9 +220,10 @@ mod tests {
     #[test]
     fn the_kind_comes_from_the_engine_model_list() {
         let v = json!({"data": [{"id": "a", "kind": "embedding"}, {"id": "b", "kind": "speech"}]});
-        assert_eq!(kind_of(&v, "b"), "speech");
-        assert_eq!(kind_of(&v, "other"), "embedding", "an engine serving one model under another name");
-        assert_eq!(kind_of(&json!({"data": [{"id": "a"}]}), "a"), "text");
-        assert_eq!(kind_of(&json!({}), "a"), "text");
+        assert_eq!(kind_of(&v, "b", "text"), "speech");
+        assert_eq!(kind_of(&v, "other", "text"), "embedding", "an engine serving one model under another name");
+        assert_eq!(kind_of(&json!({"data": [{"id": "a"}]}), "a", "text"), "text");
+        assert_eq!(kind_of(&json!({}), "a", "text"), "text");
+        assert_eq!(kind_of(&json!({"data": [{"id": "a"}]}), "a", "embedding"), "embedding", "llama.cpp names no kind: the card's task decides");
     }
 }
