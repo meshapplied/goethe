@@ -196,6 +196,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         .ok()
         .and_then(|r| find_model(&r, &opts.model_id).cloned());
     let card_dir = model_dir(home, &opts.model_id);
+    dir_owner_is(&card_dir, &opts.model_id)?;
     if opts.model_id == crate::engines::ninfer::NINFER_ID {
         let file = crate::engines::ninfer::acquire_ninfer(&card_dir)?;
         fs::create_dir_all(&card_dir).map_err(|e| e.to_string())?;
@@ -682,6 +683,7 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     if src.starts_with(&models) {
         return Err(format!("{} is already inside {}", src.display(), models.display()));
     }
+    dir_owner_is(&card_dir, &model_id)?;
     let keep_copy = prepare_local_target(home, &card_dir, opts)?;
     if opts.copy_local {
         if !keep_copy {
@@ -732,6 +734,14 @@ fn local_pack(home: &Path, dir: &Path, arch: &str, run: crate::packs::Runner) ->
     let _ = fs::remove_file(&verified);
     fs::write(&verified, &out).map_err(|e| format!("{}: {e}", verified.display()))?;
     gguf_metadata(home, dir, if weights.iter().all(|w| w.ends_with(".gguf")) { "gguf" } else { "safetensors" }, &weights)
+}
+
+fn dir_owner_is(dir: &Path, model_id: &str) -> Result<(), String> {
+    // models/<id with / as __> is shared by ids that differ only there (x/y and x__y): the one that installed first keeps it.
+    match read_card_table(dir).and_then(|c| c.get("model_id").and_then(|v| v.as_str()).map(String::from)) {
+        Some(other) if other != model_id => Err(format!("{} already holds {other}, and {model_id} would share it; pick another name", dir.display())),
+        _ => Ok(()),
+    }
 }
 
 fn prepare_local_target(home: &Path, card_dir: &Path, opts: &InstallOpts) -> Result<bool, String> {
@@ -1905,6 +1915,21 @@ mod tests {
         assert!(!is_installed(home.path(), "org/m-GGUF"));
         let con = db::open(home.path()).unwrap();
         con.execute("INSERT INTO installed_models (model_id, local_path, managed) VALUES ('org/m-GGUF', 'models/org/m-GGUF', 1)", []).ok();
+    }
+
+    #[test]
+    fn ids_that_share_a_directory_do_not_take_it_over_from_each_other() {
+        let (home, _) = gguf_home(true);
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        for d in [&a, &b] {
+            crate::engines::llama_cpp::write_test_gguf(&d.path().join("m-Q8_0.gguf"));
+        }
+        let first = install_local(home.path(), &InstallOpts { model_id: a.path().display().to_string(), name: Some("x/y".into()), ..Default::default() }).unwrap();
+        fs::write(first.card_dir.join(CARD_FILE), format!("model_id = \"x/y\"\nsource_dir = \"{}\"\n", a.path().display())).unwrap();
+        let clash = InstallOpts { model_id: b.path().display().to_string(), name: Some("x__y".into()), ..Default::default() };
+        assert!(install_local(home.path(), &clash).err().unwrap().contains("would share it"));
+        assert!(fs::read_link(first.card_dir.join("m-Q8_0.gguf")).unwrap().starts_with(a.path()), "the first install still points at its own folder");
+        assert!(install_local(home.path(), &InstallOpts { name: Some("x/y".into()), ..clash }).is_ok(), "the same id reinstalls");
     }
 
     #[test]
