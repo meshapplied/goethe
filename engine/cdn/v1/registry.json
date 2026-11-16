@@ -400,6 +400,7 @@
         "modelopt_fp4"
       ],
       "runtime": "sglang",
+      "pack_only": true,
       "revision": "482ca0f3832238542f8f5295dde86b5f22711d80",
       "download_gb": 21.945,
       "description": "NVFP4 quantization of Qwen3.8-27B",

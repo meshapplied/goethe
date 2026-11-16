@@ -233,14 +233,20 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             pack: None,
         });
     }
+    let mut pack_refused = false;
     let declined = match pack_decision(home, opts)? {
-        PackDecision::Use(mut choice) => {
+        PackDecision::Use(mut choice) => 'packed: {
             // Only the files the pack was built for, at its pinned revision; the engine layer once, on first use.
             crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
             let login = crate::packs::Login(choice.creds.clone());
             let broker = crate::packs::HttpBroker::new(&choice.creds.platform_url, &login);
             let plan = crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home))?
                 .ok_or_else(|| format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch))?;
+            if let Some(why) = refused_before_download(home, &plan, &crate::packs::python_runner(home)) {
+                println!("{}", pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why)?);
+                pack_refused = true;
+                break 'packed false;
+            }
             let rev = choice.offer.revision.clone();
             let pre = hf::preflight_model(&choice.offer.hf_repo, Some(&rev))?;
             let size = |f: &String| pre.siblings.iter().find(|s| &s.rfilename == f).map(|s| s.size);
@@ -303,7 +309,11 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 None => hf::download_bytes(&pre.siblings),
             };
             let (fmt, engine) = if gguf.is_some() { ("gguf", "llama.cpp") } else { ("safetensors", "SGLang") };
-            let why = if declined { "not logged in" } else { "none for this model on this GPU" };
+            let why = match (declined, pack_refused) {
+                (true, _) => "not logged in",
+                (_, true) => "its kernel pack does not run on this GPU",
+                _ => "none for this model on this GPU",
+            };
             confirm(opts, &format!("{} ({fmt}, {:.1} GB) with {engine} (no kernel pack: {why})", opts.model_id, bytes as f64 / GIB))?;
         }
     }
@@ -834,17 +844,46 @@ fn drop_pack(dir: &Path) {
 }
 
 fn refused_here(dir: &Path, run: crate::packs::Runner) -> Option<String> {
-    // goethe-engine `pack runs` (exit 3: this device runs no variant): why, in one line; None when it runs one or the engine cannot say (older engine).
-    let (code, out) = run(&["pack".into(), "runs".into(), dir.join(PACK_FILE).to_string_lossy().into_owned()]).ok()?;
+    // goethe-engine `pack runs` on the installed pack: why this device runs no variant of it, in one line; None when it runs one or the engine cannot say (older engine).
+    pack_runs(&dir.join(PACK_FILE), None, run)
+}
+
+fn pack_runs(file: &Path, sig: Option<&Path>, run: crate::packs::Runner) -> Option<String> {
+    // `pack runs` (exit 3: this device runs no variant) on a pack or on its header and manifest prefix; the SKUs come from the engine's own text when it names none.
+    let mut args = vec!["pack".to_string(), "runs".into(), file.to_string_lossy().into_owned()];
+    if let Some(s) = sig {
+        args.extend(["--sig".into(), s.to_string_lossy().into_owned()]);
+    }
+    let (code, out) = run(&args).ok()?;
     if code != 3 {
         return None;
     }
     let v: Value = serde_json::from_str(&out).unwrap_or_default();
-    let skus = match &v["sku"] {
-        Value::Array(a) => a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "),
-        s => s.as_str().unwrap_or("its GPUs").to_string(),
-    };
-    Some(format!("kernel pack for {skus} does not run on {} ({})", v["device"].as_str().unwrap_or("this GPU"), v["why"].as_str().unwrap_or("no variant for it")))
+    if let Value::Array(a) = &v["sku"] {
+        let skus = a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ");
+        return Some(format!("kernel pack for {skus} does not run on {} ({})", v["device"].as_str().unwrap_or("this GPU"), v["why"].as_str().unwrap_or("no variant for it")));
+    }
+    Some(load_refusal(v["why"].as_str().unwrap_or_default()).unwrap_or_else(|| format!("kernel pack for its GPUs does not run on {}", v["device"].as_str().unwrap_or("this GPU"))))
+}
+
+fn refused_before_download(home: &Path, plan: &crate::packs::Plan, run: crate::packs::Runner) -> Option<String> {
+    // The pack's header and manifest are already fetched: ask the engine whether this GPU runs any variant before a single weight byte is downloaded.
+    let work = home.join("packs");
+    let (prefix, sig) = (work.join("check.prefix"), work.join("check.sig"));
+    fs::write(&prefix, &plan.prefix).ok()?;
+    fs::write(&sig, serde_json::to_vec(&plan.entry.sig).ok()?).ok()?;
+    let why = pack_runs(&prefix, Some(&sig), run);
+    let _ = fs::remove_file(&prefix);
+    let _ = fs::remove_file(&sig);
+    why
+}
+
+fn pack_only_refusal(model_id: &str, pack_only: bool, why: &str) -> Result<String, String> {
+    // A pack that cannot run here before any download: a pack-only model is refused with the cards its pack is built for; any other falls to its plain runtime.
+    if pack_only {
+        return Err(format!("{model_id} runs only with its kernel pack, and {why}; nothing was downloaded"));
+    }
+    Ok(format!("{why}; using its plain runtime"))
 }
 
 pub fn unpack_failed(home: &Path, model_id: &str, log: &str) -> Result<bool, String> {
@@ -1577,6 +1616,38 @@ mod tests {
         assert_eq!(card.get("runtime").and_then(|v| v.as_str()), Some("llama.cpp"));
         assert_eq!(card.get(PACK_SKIPPED).and_then(|v| v.as_str()), Some(why));
         assert!(!unpack_failed(home.path(), "org/m-GGUF", log).unwrap(), "no pack left: no second retry");
+    }
+
+    #[test]
+    fn a_pack_that_runs_no_variant_here_is_known_before_any_download() {
+        let home = tempfile::tempdir().unwrap();
+        let reply = r#"{"runs": false, "sku": null, "device": "NVIDIA GeForce RTX 5090", "sms": 170, "why": "device NVIDIA GeForce RTX 5090 cc 12.0 (170 SMs, smem per block 101376) runs no variant of this pack: rtx_pro_6000_maxq (sm_120a, 188 SMs): the plan's grid needs 188 SMs co-resident, the device has 170. Fallback: serve this model with llama.cpp"}"#;
+        let no = |args: &[String]| {
+            assert!(args.contains(&"--sig".to_string()), "a prefix is checked against its signature");
+            Ok((3, reply.to_string()))
+        };
+        let why = pack_runs(&home.path().join("p.prefix"), Some(&home.path().join("p.sig")), &no).unwrap();
+        assert!(why.starts_with("kernel pack for rtx_pro_6000_maxq (sm_120a, 188 SMs) does not run on NVIDIA GeForce RTX 5090"), "{why}");
+        let yes = |_: &[String]| Ok((0, r#"{"runs": true}"#.to_string()));
+        assert_eq!(pack_runs(&home.path().join("p.prefix"), None, &yes), None);
+        let old = |_: &[String]| Err("exit 2: invalid choice: 'runs'".to_string());
+        assert_eq!(pack_runs(&home.path().join("p.prefix"), None, &old), None, "an engine without pack runs: load decides");
+    }
+
+    #[test]
+    fn a_pack_only_model_is_refused_before_download_and_any_other_uses_its_plain_runtime() {
+        let why = "kernel pack for rtx_pro_6000_maxq (sm_120a, 188 SMs) does not run on NVIDIA GeForce RTX 5090 (no fit)";
+        let err = pack_only_refusal("nvidia/Qwen3.8-27B-NVFP4", true, why).unwrap_err();
+        assert!(err.contains("runs only with its kernel pack") && err.contains("rtx_pro_6000_maxq (sm_120a") && err.ends_with("nothing was downloaded"), "{err}");
+        let note = pack_only_refusal("org/m-GGUF", false, why).unwrap();
+        assert!(note.ends_with("using its plain runtime"), "{note}");
+    }
+
+    #[test]
+    fn the_catalog_marks_the_pack_only_models() {
+        let reg = crate::registry::bundled().unwrap();
+        assert!(reg.models.iter().find(|m| m.id == "nvidia/Qwen3.8-27B-NVFP4").is_some_and(|m| m.pack_only == Some(true)));
+        assert!(reg.models.iter().filter(|m| m.pack_only == Some(true)).count() >= 1);
     }
 
     #[test]

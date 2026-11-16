@@ -66,6 +66,8 @@ pub struct RegistryModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_download: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_gb: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -784,6 +786,7 @@ pub fn infer_one_entry(
         revision: Some(sha),
         gated: pre.gated.then_some(true),
         manual_download: None,
+        pack_only: None,
         download_gb: Some(download_gb),
         description: None,
         family: None,
@@ -856,6 +859,7 @@ mod validate_tests {
             revision: None,
             gated: None,
             manual_download: None,
+        pack_only: None,
             download_gb: None,
             description: None,
             family: None,
