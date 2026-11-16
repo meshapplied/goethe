@@ -249,6 +249,9 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             announce(&opts.model_id, &format!("optimised kernels ({})", choice.offer.arch), files.iter().filter_map(size).sum());
             let pack_dl = DownloadOpts { revision: Some(rev), force: opts.force, no_verify: opts.no_verify, only: Some(files.clone()) };
             hf::ensure_model(home, &choice.offer.hf_repo, &card_dir, &pack_dl)?;
+            if let Some((repo, revision, only)) = crate::packs::aux(&plan.entry) {
+                hf::ensure_model(home, &repo, &card_dir, &DownloadOpts { revision, force: opts.force, no_verify: opts.no_verify, only: Some(only) })?;
+            }
             gguf_metadata(home, &card_dir, &choice.offer.format, &files)?;
             choice.plan = Some(plan);
             return Ok(Target {
