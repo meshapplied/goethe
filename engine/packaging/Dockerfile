@@ -9,7 +9,7 @@ ARG GOETHE_VERSION=0.1.7
 ENV GOETHE_HOME=/opt/goethe \
     GOETHE_NO_AUTOSTART=1 \
     UV_PYTHON_INSTALL_DIR=/opt/goethe/uv-python
-RUN curl -fsSL https://goethe.sh/install.sh \
+RUN curl -fsSL https://pkg.goethe.sh/install.sh \
       | GOETHE_HOME=/opt/goethe GOETHE_NO_AUTOSTART=1 GOETHE_REQUIRE_GPU=0 bash \
     && useradd -u 1000 -m goethe \
     && chown -R goethe:goethe /opt/goethe \
