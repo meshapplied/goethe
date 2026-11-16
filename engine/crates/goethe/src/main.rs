@@ -235,6 +235,11 @@ enum Commands {
         #[arg(long, help = "Skip connection draining and tear down immediately.")]
         force: bool,
     },
+    #[command(display_order = 5, about = "Try a loaded model by hand: give text (a chat without INPUT, else one reply or an embedding summary) or an audio file (its transcript; a speech model without INPUT records from the microphone).")]
+    Run {
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", num_args = 0..=2, help = "[MODEL] [INPUT]: MODEL may be left out when one model is loaded.")]
+        args: Vec<String>,
+    },
     #[command(display_order = 5, about = "Running models: GPUs, port, memory, requests and speed.")]
     Ps {
         #[arg(long, help = "JSON rows with instance_id, slot_key, status, restarts.")]
@@ -1015,6 +1020,7 @@ fn main() {
                 _ => each(models, |id| do_unload(Some(&installed_id(&id, false)), force)),
             }
         }
+        Commands::Run { args } => goethe_core::run::run(&args),
         Commands::Ps { json } => do_ps(json),
         Commands::Up { no_boot } => do_up(!no_boot),
         Commands::Status => do_status(),
