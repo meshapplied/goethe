@@ -237,10 +237,16 @@ enum Commands {
         #[arg(long, help = "Skip connection draining and tear down immediately.")]
         force: bool,
     },
-    #[command(display_order = 5, about = "Try a loaded model by hand: give text (a chat without INPUT, else one reply or an embedding summary) or an audio file (its transcript; a speech model without INPUT records from the microphone).")]
+    #[command(display_order = 5, about = "Try a model by hand: a chat screen on a terminal without INPUT, else one reply, an embedding summary or an audio file's transcript. Loads an installed model that is not loaded and unloads it again.")]
     Run {
         #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", num_args = 0..=2, help = "[MODEL] [INPUT]: MODEL may be left out when one model is loaded.")]
         args: Vec<String>,
+        #[arg(long, help = "Leave a model loaded that this command loaded (it is unloaded when run ends otherwise).")]
+        keep: bool,
+        #[arg(long, help = "No chat screen: the plain prompt, as when input or output is not a terminal.")]
+        plain: bool,
+        #[arg(long, help = "Show the model's reasoning (dimmed) with the answer.")]
+        thinking: bool,
     },
     #[command(display_order = 5, about = "Running models: GPUs, port, memory, requests and speed.")]
     Ps {
@@ -1039,7 +1045,7 @@ fn main() {
                 _ => each(models, |id| do_unload(Some(&installed_id(&id, false)), force)),
             }
         }
-        Commands::Run { args } => goethe_core::run::run(&args),
+        Commands::Run { args, keep, plain, thinking } => goethe_core::run::run(&args, goethe_core::run::Opts { keep, plain, thinking }),
         Commands::Ps { json } => do_ps(json),
         Commands::Up { no_boot } => do_up(!no_boot),
         Commands::Status => do_status(),

@@ -327,6 +327,20 @@ pub fn human_bytes(n: u64) -> String {
     }
 }
 
+pub fn export(home: &Path, dir: &Path, turns: Vec<Capture>) -> Result<(), String> {
+    // A finished conversation in the trace folder layout, in a directory that must not exist yet: no daemon, no trace setting, no size or disk gate.
+    if dir.exists() {
+        return Err(format!("{} exists already; nothing was overwritten", dir.display()));
+    }
+    let mut w = Writer::new(home, Arc::new(AtomicU64::new(0)));
+    w.open_dir(dir);
+    for c in turns {
+        w.record(c)?;
+    }
+    w.write_manifest();
+    Ok(())
+}
+
 pub fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }

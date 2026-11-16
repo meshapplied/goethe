@@ -443,7 +443,9 @@ dependencies = [
  "clap",
  "clap_complete",
  "goethe-core",
+ "libc",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

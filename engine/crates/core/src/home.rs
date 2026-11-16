@@ -367,7 +367,7 @@ impl App {
     }
 }
 
-fn run_child(command: &[String]) {
+pub(crate) fn run_child(command: &[String]) {
     // A goethe command in the normal terminal, as if typed, then back on Enter.
     let exe = std::env::current_exe().unwrap_or_else(|_| "goethe".into());
     println!("\n$ goethe {}\n", command.join(" "));
@@ -391,6 +391,11 @@ fn draw(app: &App, last: &mut Vec<String>) {
     }
     last.clear();
     last.extend(next);
+}
+
+pub(crate) fn models() -> Vec<(String, bool)> {
+    // The installed models and whether each is loaded, as the home screen lists them.
+    snapshot().models.into_iter().map(|m| (m.id, m.loaded)).collect()
 }
 
 pub fn run() -> Result<(), String> {
