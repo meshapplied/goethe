@@ -134,7 +134,7 @@ pub struct ValidateOpts {
     pub check_sglang: bool,
 }
 
-pub const DEFAULT_REGISTRY_URL: &str = "https://pkg.meshapplied.com/v1/registry.json";
+pub const DEFAULT_REGISTRY_URL: &str = "https://pkg.goethe.sh/v1/registry.json";
 
 const BUNDLED_REGISTRY: &str = include_str!("../../../cdn/v1/registry.json");
 

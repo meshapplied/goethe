@@ -8,9 +8,9 @@ name: release
 #   secret   GOETHE_SIGN_KEY          contents of release.key (P-256 PEM private key)
 #   variable GOETHE_RELEASE_PUB_FPR   sha256 of the DER public key (printed by packaging/keygen.sh)
 #   environment "release"             add required reviewers so publishing waits for an approval
-# The package is served by GitHub Pages at https://pkg.meshapplied.com:
-#   Settings > Pages > Source: GitHub Actions, Custom domain: pkg.meshapplied.com, Enforce HTTPS
-#   DNS: CNAME pkg.meshapplied.com -> meshapplied.github.io
+# The package is served by GitHub Pages at https://pkg.goethe.sh:
+#   Settings > Pages > Source: GitHub Actions, Custom domain: pkg.goethe.sh, Enforce HTTPS
+#   DNS: CNAME pkg.goethe.sh -> meshapplied.github.io
 # Every release is also kept as GitHub Release files.
 # If publish succeeded but pages failed, serve the release with the pages workflow (pages.yml) instead of a rerun.
 
@@ -285,7 +285,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: goethe-cdn
-      - name: Unpack the package tree served at pkg.meshapplied.com
+      - name: Unpack the package tree served at pkg.goethe.sh
         run: |
           mkdir site && zstd -dc goethe-cdn-*.tar.zst | tar -C site --strip-components=1 -xf -
           test -f site/install.sh && test -f site/SHA256SUMS.sig && test -f site/v1/registry.json

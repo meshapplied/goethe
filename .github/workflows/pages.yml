@@ -1,6 +1,6 @@
 name: pages
 
-# Serve an already published release at pkg.meshapplied.com again, from its GitHub Release files, without rebuilding.
+# Serve an already published release at pkg.goethe.sh again, from its GitHub Release files, without rebuilding.
 # Use it when the release workflow published the GitHub Release but its pages job failed: Pages names a deployment
 # after the commit, so once a deployment for a commit is cancelled, reruns of that release run are cancelled too.
 # Run it from the Actions tab on main with the tag, for example v0.1.9.
@@ -38,7 +38,7 @@ jobs:
         run: |
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$TAG is not a tag like v0.1.9"; exit 1; }
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "goethe-cdn-${TAG#v}.tar.zst"
-      - name: Unpack the package tree served at pkg.meshapplied.com
+      - name: Unpack the package tree served at pkg.goethe.sh
         env:
           TAG: ${{ inputs.tag }}
         run: |
