@@ -358,14 +358,20 @@ fn header(t: &Target) -> String {
     format!("{}  ({}, {})", t.model, t.runtime, t.kind)
 }
 
+fn read_bytes(buf: &mut [u8]) -> usize {
+    // What is waiting on the terminal, read from the descriptor itself: std's buffered stdin would hold typed-ahead keys where poll cannot see them.
+    usize::try_from(unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) }).unwrap_or(0)
+}
+
 fn stop_asked() -> bool {
     // Ctrl-C or Esc pressed while a reply streams: stop it, keep what arrived.
     let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
     if unsafe { libc::poll(&mut fds, 1, 0) } <= 0 {
         return false;
     }
-    let mut buf = [0u8; 16];
-    crate::term::read_keys(&mut buf).map(|n| parse_input(&buf[..n]).iter().any(|k| matches!(k, Input::Interrupt | Input::Esc))).unwrap_or(false)
+    let mut buf = [0u8; 256];
+    let n = read_bytes(&mut buf);
+    parse_input(&buf[..n]).iter().any(|k| matches!(k, Input::Interrupt | Input::Esc))
 }
 
 struct State {
@@ -477,7 +483,7 @@ pub(crate) fn run(t: Target, loaded: &mut Loaded, thinking: bool) -> Result<(), 
     let mut _screen = Some(Screen::open());
     let mut st = State { ui: Ui::new(header(&t), thinking), t, msgs: Vec::new(), turns: Vec::new(), vectors: Vec::new(), last: Vec::new() };
     let mut size = screen_size();
-    let mut buf = [0u8; 16];
+    let mut buf = [0u8; 256];
     loop {
         draw(&st.ui, &mut st.last);
         let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
@@ -488,10 +494,10 @@ pub(crate) fn run(t: Target, loaded: &mut Loaded, thinking: bool) -> Result<(), 
             }
             continue;
         }
-        let n = match crate::term::read_keys(&mut buf) {
-            Ok(0) | Err(_) => return Ok(()),
-            Ok(n) => n,
-        };
+        let n = read_bytes(&mut buf);
+        if n == 0 {
+            return Ok(());
+        }
         for input in parse_input(&buf[..n]) {
             match st.ui.key(input) {
                 Act::None => {}
