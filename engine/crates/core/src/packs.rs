@@ -274,13 +274,18 @@ pub fn pack_archs(index: &[u8], model_id: &str) -> Vec<String> {
     out
 }
 
+pub fn built_for(index: &[u8], model_id: &str) -> String {
+    // The GPU architectures (with their families) the index has a pack of `model_id` for.
+    pack_archs(index, model_id).iter().map(|a| crate::gpu_arch::SUPPORTED.iter().find(|x| &x.tag() == a).map_or(a.clone(), |x| format!("{a}, {}", x.family))).collect::<Vec<_>>().join("; ")
+}
+
 pub fn unsupported_here(index: &[u8], model_id: &str, archs: &[String], local: &str) -> Option<String> {
     // One line when the index has packs of `model_id` but none for this machine's GPUs: which GPUs the packs are built for, and that this one is not among them.
     let theirs = pack_archs(index, model_id);
     if theirs.is_empty() || theirs.iter().any(|a| archs.contains(a)) {
         return None;
     }
-    let built = theirs.iter().map(|a| crate::gpu_arch::SUPPORTED.iter().find(|x| &x.tag() == a).map_or(a.clone(), |x| format!("{a}, {}", x.family))).collect::<Vec<_>>().join("; ");
+    let built = built_for(index, model_id);
     let here = if local.is_empty() { archs.join(", ") } else { format!("{local} ({})", archs.join(", ")) };
     Some(format!("It runs only with a kernel pack, built for {built}; this machine has {here}, so it is not supported here and nothing was downloaded"))
 }

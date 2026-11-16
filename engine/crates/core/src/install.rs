@@ -313,6 +313,8 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     };
     let local = crate::hw::profile(home).map(|h| h.gpus.iter().map(|g| g.name.clone()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
     let no_pack_gpu = crate::packs::catalog(home).and_then(|ix| crate::packs::unsupported_here(&ix, &opts.model_id, &crate::packs::local_archs(home), &local));
+    let built = crate::packs::catalog(home).map(|ix| crate::packs::built_for(&ix, &opts.model_id)).unwrap_or_default();
+    pack_only_gate(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)) && opts.quant.is_none(), declined, no_pack_gpu.as_deref(), &built)?;
     let gguf = engine_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), (declined, no_pack_gpu.as_deref()), opts.quant.as_deref())?;
     if !hf::offline_mode() {
         if let Ok(pre) = hf::preflight_model(&opts.model_id, dl.revision.as_deref()) {
@@ -940,6 +942,21 @@ fn refused_before_download(home: &Path, plan: &crate::packs::Plan, run: crate::p
     let _ = fs::remove_file(&prefix);
     let _ = fs::remove_file(&sig);
     why
+}
+
+fn pack_only_gate(model_id: &str, pack_only: bool, declined: bool, no_pack_gpu: Option<&str>, built: &str) -> Result<(), String> {
+    // A pack-only model has no plain route: a node that is not logged in, or whose GPUs the packs are not built for, is refused before any download.
+    if !pack_only {
+        return Ok(());
+    }
+    if declined {
+        let cards = if built.is_empty() { String::new() } else { format!(" (packs are built for {built})") };
+        return Err(format!("{model_id} runs only on its kernel pack: run goethe login first{cards}; nothing was downloaded"));
+    }
+    match no_pack_gpu {
+        Some(why) => Err(format!("{model_id}: {why}")),
+        None => Ok(()),
+    }
 }
 
 fn pack_only_refusal(model_id: &str, pack_only: bool, why: &str, allow: bool) -> Result<String, String> {
@@ -1718,6 +1735,19 @@ mod tests {
         assert_eq!(pack_runs(&home.path().join("p.prefix"), None, &yes), None);
         let old = |_: &[String]| Err("exit 2: invalid choice: 'runs'".to_string());
         assert_eq!(pack_runs(&home.path().join("p.prefix"), None, &old), None, "an engine without pack runs: load decides");
+    }
+
+    #[test]
+    fn a_pack_only_model_needs_a_login_and_a_card_its_pack_is_built_for() {
+        let built = "sm_120a, Blackwell (RTX 5090, RTX PRO 6000)";
+        let out = pack_only_gate("nvidia/Qwen3.8-27B-NVFP4", true, true, None, built).unwrap_err();
+        assert!(out.contains("goethe login first") && out.contains("sm_120a") && out.ends_with("nothing was downloaded"), "{out}");
+        let card = pack_only_gate("nvidia/Qwen3.8-27B-NVFP4", true, false, Some("It runs only with a kernel pack, built for sm_120a; this machine has sm_89"), built).unwrap_err();
+        assert!(card.starts_with("nvidia/Qwen3.8-27B-NVFP4: It runs only with a kernel pack") && card.contains("sm_89"), "{card}");
+        assert_eq!(pack_only_gate("nvidia/Qwen3.8-27B-NVFP4", true, false, None, built), Ok(()), "logged in with a pack for the card: on to the download plan");
+        for gguf in [(true, None), (false, Some("no variant"))] {
+            assert_eq!(pack_only_gate("ggml-org/embeddinggemma-2-GGUF", false, gguf.0, gguf.1, built), Ok(()), "a plain GGUF route keeps its own not-logged-in note");
+        }
     }
 
     #[test]
