@@ -69,6 +69,7 @@ The API is at `https://<address>:<port>/v1`. It speaks three schemas at once, so
 | `POST /v1/messages/count_tokens` | Anthropic token count |
 | `POST /v1/embeddings` | Embeddings, for embedding models |
 | `POST /v1/rerank` | Reranking, for reranker models |
+| `POST /v1/audio/transcriptions` | Speech to text (OpenAI multipart upload), for transcription models; the body limit is `GOETHE_MAX_BODY_MB` (default 10 MB, about 5 minutes of 16 kHz WAV) |
 | `GET /v1/models`, `GET /v1/models/{id}` | Models your key can use |
 | `GET /model/info`, `GET /model_group/info` | Models in LiteLLM's format |
 | `GET /health` | Up check, no key needed |

@@ -219,7 +219,7 @@ fn api_route(path: &str) -> Option<(Method, Api)> {
     let tail = api_tail(path);
     match tail {
         "/chat/completions" | "/completions" | "/embeddings" | "/responses" | "/rerank" | "/messages"
-        | "/messages/count_tokens" => Some((Method::POST, Api::Proxy(format!("/v1{tail}")))),
+        | "/messages/count_tokens" | "/audio/transcriptions" => Some((Method::POST, Api::Proxy(format!("/v1{tail}")))),
         "/models" => Some((Method::GET, Api::Models)),
         "/model/info" => Some((Method::GET, Api::ModelInfo { group: false })),
         "/model_group/info" => Some((Method::GET, Api::ModelInfo { group: true })),
@@ -418,6 +418,8 @@ async fn route_post(
     let started = Instant::now();
     let wall = SystemTime::now();
     let hint = session_hint(req.headers());
+    let audio = api_tail(path) == "/audio/transcriptions";
+    let content_type = req.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let declared = req
         .headers()
         .get(CONTENT_LENGTH)
@@ -431,9 +433,17 @@ async fn route_post(
         Err(e) if e.downcast_ref::<LengthLimitError>().is_some() => return too_large(),
         Err(_) => return bad_request("could not read the request body"),
     };
-    let head: RequestHead = match serde_json::from_slice(&body) {
-        Ok(h) => h,
-        Err(e) => return bad_request(&format!("request body is not valid JSON: {e}")),
+    let head: RequestHead = if audio {
+        // OpenAI's transcription upload: multipart/form-data, forwarded unchanged; only its model field is read here
+        match form_field(&content_type, &body, "model") {
+            Some(model) => RequestHead { model: Some(model), stream: None },
+            None => return bad_request("a multipart/form-data body with a model field is required"),
+        }
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(h) => h,
+            Err(e) => return bad_request(&format!("request body is not valid JSON: {e}")),
+        }
     };
     let Some(raw_model) = head.model.filter(|s| !s.is_empty()) else {
         return bad_request("model is required");
@@ -466,10 +476,15 @@ async fn route_post(
     }
     let ids: Vec<&str> = live.iter().map(|r| r.instance_id.as_str()).collect();
     let route = live[guard.pick(&ids).unwrap_or(0)].clone();
-    let openai = matches!(api_tail(path), "/chat/completions" | "/completions" | "/embeddings");
-    if let Some((e, Err(param))) = snap.engine(&model).filter(|_| openai).map(|e| (e, engines::check_params(e, &body))) {
+    let engine = snap.engine(&model);
+    if let Some(e) = engine.filter(|e| audio && e.id != engines::goethe_engine::ENGINE.id) {
         drop(guard);
-        return finish.now(unsupported(&param, e.id));
+        return finish.now(unsupported("unsupported_task", None, format!("{path} is not served by {}", e.id)));
+    }
+    let openai = matches!(api_tail(path), "/chat/completions" | "/completions" | "/embeddings");
+    if let Some((e, Err(param))) = engine.filter(|_| openai).map(|e| (e, engines::check_params(e, &body))) {
+        drop(guard);
+        return finish.now(unsupported("unsupported_parameter", Some(&param), format!("{param} is not supported by {}", e.id)));
     }
     let stream = matches!(head.stream, Some(Value::Bool(true)));
     let body = prepare_body(path, body);
@@ -497,7 +512,18 @@ async fn route_post(
             truncated: false,
         })
     });
-    proxy(m, path, &route, sent, retry, rid, stream, guard, finish, tap).await
+    let ctype = if audio { content_type.as_str() } else { "application/json" };
+    proxy(m, path, &route, sent, retry, rid, stream, guard, finish, tap, ctype).await
+}
+
+fn form_field(content_type: &str, body: &[u8], name: &str) -> Option<String> {
+    // The text value of one multipart/form-data field (RFC 7578), found in the body's bytes by its name.
+    content_type.to_ascii_lowercase().starts_with("multipart/form-data").then_some(())?;
+    let boundary = content_type.split(';').find_map(|p| p.trim().strip_prefix("boundary="))?.trim_matches('"');
+    let find = |needle: &[u8], from: usize| body.get(from..)?.windows(needle.len()).position(|w| w == needle).map(|i| i + from);
+    let start = find(b"\r\n\r\n", find(format!("name=\"{name}\"").as_bytes(), 0)?)? + 4;
+    let end = find(format!("\r\n--{boundary}").as_bytes(), start)?;
+    std::str::from_utf8(&body[start..end]).ok().map(|v| v.trim().to_string())
 }
 
 struct NoteRetry {
@@ -583,13 +609,14 @@ async fn proxy(
     guard: inflight::InflightGuard,
     finish: Finish,
     mut tap: Option<Box<Capture>>,
+    content_type: &str,
 ) -> Response<MuxBody> {
     // Forward with the engine's own key (never the client's), meter and maybe trace the reply; a 400 with a note resends the client's own request once.
     let send = |payload: Bytes| {
         let mut builder = Request::builder()
             .method(Method::POST)
             .uri(format!("http://127.0.0.1:{}{path}", route.port))
-            .header(CONTENT_TYPE, "application/json")
+            .header(CONTENT_TYPE, content_type)
             .header(X_REQUEST_ID, rid);
         if let Some(k) = &route.engine_key {
             builder = builder.header(AUTHORIZATION, format!("Bearer {k}"));
@@ -1129,10 +1156,9 @@ fn error(status: StatusCode, message: &str, kind: &str, code: &str) -> Response<
     resp
 }
 
-fn unsupported(param: &str, engine: &str) -> Response<MuxBody> {
-    // One refusal shape for every engine: the parameter by name, code unsupported_parameter.
-    let message = format!("{param} is not supported by {engine}");
-    let body = json!({"error": {"message": message, "type": "invalid_request_error", "param": param, "code": "unsupported_parameter"}});
+fn unsupported(code: &str, param: Option<&str>, message: String) -> Response<MuxBody> {
+    // One refusal shape for every engine: 400, the code, the parameter when one is at fault, a message naming the engine.
+    let body = json!({"error": {"message": message, "type": "invalid_request_error", "param": param, "code": code}});
     let mut resp = json_response(StatusCode::BAD_REQUEST, body);
     resp.extensions_mut().insert(GoetheError(message));
     resp
@@ -1215,6 +1241,16 @@ mod tests {
         assert_eq!(parse_bearer("Bearerabc"), None);
     }
 
+    #[test]
+    fn the_model_of_a_transcription_upload_is_its_form_field() {
+        let body = b"--XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"model.wav\"\r\nContent-Type: audio/wav\r\n\r\nRIFF..model..\r\n\
+--XyZ\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\norg/asr\r\n--XyZ\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\nen\r\n--XyZ--\r\n";
+        assert_eq!(form_field("multipart/form-data; boundary=XyZ", body, "model").as_deref(), Some("org/asr"));
+        assert_eq!(form_field("Multipart/Form-Data; boundary=\"XyZ\"", body, "language").as_deref(), Some("en"));
+        assert_eq!(form_field("multipart/form-data; boundary=XyZ", body, "prompt"), None);
+        assert_eq!(form_field("application/json", br#"{"model": "org/asr"}"#, "model"), None);
+    }
+
     fn meter_feed(sse: bool, parts: &[&[u8]]) -> UsageMeter {
         let mut m = UsageMeter::new(sse, Instant::now());
         for p in parts {
@@ -1262,6 +1298,7 @@ mod tests {
         assert_eq!(m.ttft(), None);
         let mut bad = meter_feed(false, &[b"not json"]);
         assert_eq!(bad.totals(), (0, 0));
+        assert_eq!(meter_feed(false, &[b"And so, my fellow Americans"]).totals(), (0, 0), "a plain text transcript meters nothing");
     }
 
     #[test]
@@ -1298,6 +1335,7 @@ mod tests {
         assert_eq!(proxied("/v1/chat/completions").as_deref(), Some("/v1/chat/completions"));
         assert_eq!(proxied("/v1/messages").as_deref(), Some("/v1/messages"));
         assert_eq!(proxied("/responses").as_deref(), Some("/v1/responses"));
+        assert_eq!(proxied("/v1/audio/transcriptions").as_deref(), Some("/v1/audio/transcriptions"));
         assert!(matches!(api_route("/models"), Some((Method::GET, Api::Models))));
         assert!(matches!(api_route("/v1/models/org%2Fm"), Some((_, Api::Model(id))) if id == "org/m"));
         assert!(matches!(api_route("/model/info"), Some((_, Api::ModelInfo { group: false }))));
@@ -1434,7 +1472,7 @@ mod tests {
         assert_eq!(body.as_ref(), &raw[..]);
         let guard = inflight::track("m");
         let finish = Finish { m: mux, label: "m".into(), key_id: "k".into(), started: Instant::now() };
-        let resp = proxy(mux, "/v1/chat/completions", &route, body, None, "req-1", false, guard, finish, None).await;
+        let resp = proxy(mux, "/v1/chat/completions", &route, body, None, "req-1", false, guard, finish, None, "application/json").await;
         let _ = resp.into_body().collect().await.unwrap();
         let recorded = seen.lock().unwrap().clone();
         let v: Value = serde_json::from_slice(&recorded).unwrap();
