@@ -557,7 +557,6 @@ pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Bro
     if need["manifest_sha256"].as_str() != Some(e.manifest_sha256.as_str()) {
         return Err(undo("pack need: the manifest differs from the signed index".into()));
     }
-    // A block's name is the sha256 of its raw bytes; only an uncompressed block is also named by what is stored, so a compressed one (codec xz) is checked by `pack verify` below.
     let ranges: Vec<(u64, u64, String, bool)> = need["ranges"].as_array().into_iter().flatten()
         .filter_map(|r| Some((r["off"].as_u64()?, r["len"].as_u64()?, r["sha256"].as_str()?.to_string(), matches!(r["codec"].as_str(), None | Some("none") | Some("raw")))))
         .collect();
@@ -585,7 +584,6 @@ pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Bro
         f.sync_all().map_err(|err| undo(err.to_string()))?;
     }
     let mut ok = verify().map_err(undo)?.1;
-    // The drafter goethe downloaded into drafter/, listed only when every file has its signed sha256: it can only add speed.
     if let Some(d) = drafter(e).filter(|d| dir.join("drafter").join(&d.files[0].0).is_file()) {
         match d.files.iter().all(|(n, _, h)| sha256_file(&dir.join("drafter").join(n)).as_deref() == Some(h.as_str())) {
             true => {

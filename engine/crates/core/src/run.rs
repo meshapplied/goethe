@@ -9,8 +9,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // The model's own engine on 127.0.0.1 with its engine key from state.db: no API key is created or shown.
     let snap = GatewayCache::open(&goethe_home()).exact();
     let mut args = args.to_vec();
-    if let Some(first) = args.first_mut() {
-        *first = snap.resolve_model(first).to_string();
+    if let Some(first) = args.first().map(|f| snap.resolve_model(f).to_string()) {
+        args[0] = first;
     }
     let (model, input) = route(&args, &snap.serving_models())?;
     let r = snap.routes(&model).iter().find(|r| !r.draining).ok_or_else(|| format!("{model} is not loaded: goethe load {model}"))?;

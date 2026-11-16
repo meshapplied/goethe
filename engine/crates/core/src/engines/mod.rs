@@ -12,14 +12,12 @@ use std::process::Command;
 pub struct Engine {
     pub id: &'static str,
     pub layer: Option<crate::pyenv::Layer>,
-    // OpenAI body fields the engine honours; None: the engine refuses what it does not serve itself.
     pub params: Option<&'static [&'static str]>,
     pub command: fn(&EngineSpec) -> Result<Command, String>,
 }
 
 pub const ENGINES: &[&Engine] = &[&goethe_engine::ENGINE, &ninfer::ENGINE, &sglang::SGLANG, &sglang::TERNARY, &llama_cpp::ENGINE];
 
-// Request body fields that are the call itself, not parameters.
 const ENVELOPE: &[&str] = &["model", "messages", "prompt", "input", "stream", "stream_options", "user"];
 
 pub fn by_id(id: &str) -> Result<&'static Engine, String> {

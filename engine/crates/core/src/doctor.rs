@@ -426,7 +426,6 @@ fn check_pyenv(home: &Path) -> Check {
     // The hermetic py-env's python and base layer, then SGLang and goethe-engine when installed, read from disk.
     let env = home.join("py-env");
     if !env.join("bin/python").is_file() {
-        // A release install made it (gone: broken); a source install makes it on first use.
         let release = std::env::current_exe().ok().and_then(|e| crate::paths::home_of_binary(&e)).is_some();
         return match release {
             true => check("py-env", "FAIL", "run the installer"),

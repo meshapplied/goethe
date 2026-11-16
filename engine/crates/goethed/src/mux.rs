@@ -434,7 +434,6 @@ async fn route_post(
         Err(_) => return bad_request("could not read the request body"),
     };
     let head: RequestHead = if audio {
-        // OpenAI's transcription upload: multipart/form-data, forwarded unchanged; only its model field is read here
         match form_field(&content_type, &body, "model") {
             Some(model) => RequestHead { model: Some(model), stream: None },
             None => return bad_request("a multipart/form-data body with a model field is required"),
