@@ -287,7 +287,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             let pack_dl = DownloadOpts { revision: Some(rev), force: opts.force, no_verify: opts.no_verify, only: Some(files.clone()) };
             hf::ensure_model(home, &choice.offer.hf_repo, &card_dir, &pack_dl)?;
             if let Some((repo, revision, only)) = crate::packs::aux(&plan.entry) {
-                hf::ensure_model(home, &repo, &card_dir, &DownloadOpts { revision, force: opts.force, no_verify: opts.no_verify, only: Some(only) })?;
+                fetch_aux(home, &repo, &card_dir, DownloadOpts { revision, force: opts.force, no_verify: opts.no_verify, only: Some(only) })?;
             }
             if let Some(d) = draft.filter(|_| short.is_none()) {
                 let only = Some(d.files.iter().map(|f| f.0.clone()).collect());
@@ -355,10 +355,27 @@ fn readable<T>(choice: Option<T>, meta: impl FnOnce(&T) -> Result<(), String>, a
     }
 }
 
+fn fetch_aux(home: &Path, repo: &str, dir: &Path, dl: DownloadOpts) -> Result<(), String> {
+    // The model's own config and tokenizer files beside GGUF weights.
+    hf::ensure_model(home, repo, dir, &dl)?;
+    drop_orphan_index(dir);
+    Ok(())
+}
+
+fn drop_orphan_index(dir: &Path) {
+    // The repo's safetensors index comes along with its config files and names shards that are not here: without any .safetensors file it goes, or the weights look incomplete.
+    let names: Vec<(PathBuf, String)> = fs::read_dir(dir).into_iter().flatten().flatten().map(|e| (e.path(), e.file_name().to_string_lossy().into_owned())).collect();
+    if !names.iter().any(|(_, n)| n.ends_with(".safetensors")) {
+        for (p, _) in names.iter().filter(|(_, n)| n.ends_with(".safetensors.index.json")) {
+            let _ = fs::remove_file(p);
+        }
+    }
+}
+
 fn config_for_pack(home: &Path, opts: &InstallOpts, dir: &Path, c: &PackChoice, gguf: &[String]) -> Result<(), String> {
     // The pack's signed entry names the model's own config and tokenizer files: fetch those beside the weights; only without them are they made from the GGUF header (which needs a transformers that knows the architecture).
     if let Some((repo, revision, only)) = c.plan.as_ref().and_then(|p| crate::packs::aux(&p.entry)) {
-        hf::ensure_model(home, &repo, dir, &DownloadOpts { revision, force: opts.force, no_verify: opts.no_verify, only: Some(only) })?;
+        fetch_aux(home, &repo, dir, DownloadOpts { revision, force: opts.force, no_verify: opts.no_verify, only: Some(only) })?;
     }
     if gguf.is_empty() {
         Ok(())
@@ -1774,6 +1791,19 @@ mod tests {
         crate::engines::llama_cpp::write_test_gguf_with(&proj, &[("clip.has_audio_encoder", 1)]);
         let p = plan_in_place(home.path(), "org/m-GGUF", &dir, None).unwrap();
         assert_eq!(p.table.get("task").and_then(|v| v.as_str()), Some("transcribe"));
+    }
+
+    #[test]
+    fn a_safetensors_index_without_its_shards_is_dropped_but_not_beside_real_ones() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("model.safetensors.index.json"), "{}").unwrap();
+        fs::write(d.path().join("config.json"), "{}").unwrap();
+        drop_orphan_index(d.path());
+        assert!(!d.path().join("model.safetensors.index.json").exists() && d.path().join("config.json").exists());
+        fs::write(d.path().join("model.safetensors.index.json"), "{}").unwrap();
+        fs::write(d.path().join("model-00001-of-00001.safetensors"), "x").unwrap();
+        drop_orphan_index(d.path());
+        assert!(d.path().join("model.safetensors.index.json").exists(), "real shards: the index stays");
     }
 
     #[test]
