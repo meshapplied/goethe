@@ -1,3 +1,3 @@
-GOETHE_ENGINE_VERSION=0.2.0
-GOETHE_ENGINE_WHEEL_URL=https://github.com/meshapplied/goethe-engine/releases/download/v0.2.0/goethe_engine-0.2.0-py3-none-any.whl
-GOETHE_ENGINE_WHEEL_SHA256=9bb9fd24004d10faae180ef5b25ef99990045e5fea1738f04fd973d1ce43d01d
+GOETHE_ENGINE_VERSION=0.3.0
+GOETHE_ENGINE_WHEEL_URL=https://github.com/meshapplied/goethe-engine/releases/download/v0.3.0/goethe_engine-0.3.0-py3-none-any.whl
+GOETHE_ENGINE_WHEEL_SHA256=b221e4854e2c1e886d784acbc593da149af74b636bfed2595aa333a9cafaf8b0
