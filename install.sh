@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Goethe from source (default: the dev branch): curl -fsSL https://raw.githubusercontent.com/meshapplied/goethe/dev/install.sh | bash
-# GOETHE_REF picks a branch; CARGO_HOME and CARGO_INSTALL_ROOT are cargo's own. The pinned engine and its Python env install on first use.
+# GOETHE_REF picks a branch; CARGO_INSTALL_ROOT (default ~/.local) is where goethe and goethed go. The pinned engine and its Python env install on first use.
 set -euo pipefail
 REF="${GOETHE_REF:-dev}"
 die() { echo "error: $*" >&2; exit 1; }
@@ -13,8 +13,9 @@ if ! command -v cargo >/dev/null; then
   curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
 fi
 echo "building goethe and goethed from $REF ..."
-cargo install --quiet --locked --force --git https://github.com/meshapplied/goethe --branch "$REF" goethe goethed
-BIN="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin"
+ROOT="${CARGO_INSTALL_ROOT:-$HOME/.local}"   # ~/.local/bin is on the default PATH of most distros
+cargo install --quiet --locked --force --root "$ROOT" --git https://github.com/meshapplied/goethe --branch "$REF" goethe goethed
+BIN="$ROOT/bin"
 echo "installed $BIN/goethe and $BIN/goethed"
 case ":$ORIG_PATH:" in *":$BIN:"*) ;; *) echo "add $BIN to your PATH: export PATH=\"$BIN:\$PATH\"" ;; esac
 "$BIN/goethe" --version
