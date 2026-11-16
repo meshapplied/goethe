@@ -187,8 +187,12 @@ fn registry_pubkey(scratch: &Path) -> Result<PathBuf, String> {
 }
 
 fn verify_registry(body: &[u8], sig: &[u8]) -> Result<(), String> {
+    verify_registry_in(&std::env::temp_dir(), body, sig)
+}
+
+fn verify_registry_in(tmp: &Path, body: &[u8], sig: &[u8]) -> Result<(), String> {
     // Same openssl check as the package SHA256SUMS. A bad signature never becomes engine flags.
-    let dir = crate::paths::private_temp_dir("goethe-reg")?;
+    let dir = crate::paths::private_dir_in(tmp, "goethe-reg")?;
     let status = (|| {
         let data = dir.join("body");
         let sigp = dir.join("body.sig");
@@ -911,13 +915,7 @@ mod validate_tests {
         let planted = tmp.path().join(format!("goethe-reg-{}-{}", std::process::id(), body.len()));
         std::fs::create_dir(&planted).unwrap();
         std::os::unix::fs::symlink(&file, planted.join("body")).unwrap();
-        let prev = std::env::var_os("TMPDIR");
-        std::env::set_var("TMPDIR", tmp.path());
-        let _ = verify_registry(body, b"sig");
-        match prev {
-            Some(v) => std::env::set_var("TMPDIR", v),
-            None => std::env::remove_var("TMPDIR"),
-        }
+        let _ = verify_registry_in(tmp.path(), body, b"sig");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "mine");
     }
 

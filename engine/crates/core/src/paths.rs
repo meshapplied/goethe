@@ -148,18 +148,22 @@ pub fn validate_model_id(model_id: &str) -> Result<(), String> {
 }
 
 pub fn private_temp_dir(prefix: &str) -> Result<PathBuf, String> {
-    // A new directory (mode 0700) under the temp dir with a name nobody can predict; one that already exists is never reused, a planted link is never followed.
+    private_dir_in(&std::env::temp_dir(), prefix)
+}
+
+pub fn private_dir_in(base: &Path, prefix: &str) -> Result<PathBuf, String> {
+    // A new directory (mode 0700) under `base` with a name nobody can predict; one that already exists is never reused, a planted link is never followed.
     use std::os::unix::fs::DirBuilderExt;
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     for i in 0..64 {
-        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nanos:x}-{i}", std::process::id()));
+        let dir = base.join(format!("{prefix}-{}-{nanos:x}-{i}", std::process::id()));
         match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
             Ok(()) => return Ok(dir),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(format!("{}: {e}", dir.display())),
         }
     }
-    Err(format!("no free {prefix} directory under {}", std::env::temp_dir().display()))
+    Err(format!("no free {prefix} directory under {}", base.display()))
 }
 
 pub fn sanitize_model_id(model_id: &str) -> String {
