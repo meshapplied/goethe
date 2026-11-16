@@ -101,7 +101,7 @@ fn the_chat_screen_streams_a_reply_and_leaves_cleanly_without_writing_a_file() {
     let mut seen = String::new();
     read_until(&master, &mut seen, "[Esc] commands  [Enter] send");
     assert!(seen.contains("org/m"), "the model is on the top line: {seen:?}");
-    type_keys(&master, "hello\r");
+    type_keys(&master, "hello, this line is longer than sixteen bytes\r");
     read_until(&master, &mut seen, "hi there");
     type_keys(&master, "\x1b");
     read_until(&master, &mut seen, "[q] quit");
