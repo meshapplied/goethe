@@ -231,7 +231,7 @@ def responses_conversation(gw: Gateway, key: str) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default="https://100.70.155.114:8080")
+    ap.add_argument("--url", default="https://100.64.1.1:8080")
     ap.add_argument("--model", required=True)
     ap.add_argument("--dir", default=str(Path(__file__).resolve().parent / ".work" / "traces"))
     ap.add_argument("--parallel", type=int, default=12)

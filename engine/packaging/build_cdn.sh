@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="$(cd "${ROOT}/.." && pwd)"
 DIST="${ROOT}/dist/cdn"
-FORK="${SGLANG_FORK_SRC:-/home/admin/proj/ternary-flash/ternary-kernels/serve/repos/sglang}"
+FORK="${SGLANG_FORK_SRC:?set SGLANG_FORK_SRC to the SGLang fork checkout}"
 UV="${UV:-uv}"
 UV_VERSION="0.13.1"
 declare -A UV_SHA256=(
