@@ -120,15 +120,18 @@ impl View {
     }
 
     pub fn fit(&self, model_id: &str, input: &ChooserInput, pinned_tp: Option<usize>) -> Result<Fit, String> {
-        // The plan goethe load would pick (shrinking ctx, then concurrency) and its budget with learned figures.
+        // The plan goethe load would pick (shrinking ctx, then concurrency) and its budget with learned figures of the runtime the card names.
+        self.fit_as(model_id, input, pinned_tp, &crate::engine_overhead::model_runtime(&self.home, model_id))
+    }
+
+    pub fn fit_as(&self, model_id: &str, input: &ChooserInput, pinned_tp: Option<usize>, runtime: &str) -> Result<Fit, String> {
+        // The same plan for a model not installed yet: the learned figures are those of `runtime`, never another runtime's rows.
         let plan = chooser::pick_load_plan(input, &self.gpus, Some(&self.hw), pinned_tp, None).map_err(|e| e.message)?;
         let mut trial = input.clone();
         trial.ctx = plan.ctx;
         trial.max_conc = plan.max_conc;
         let base = chooser::need(&trial, plan.tp, &plan.cc);
-        let learned = self.con.as_ref().map(|c| {
-            crate::engine_overhead::read_learned(c, model_id, &self.gpu_name(plan.gpus[0]), plan.tp as u64, &crate::engine_overhead::model_runtime(&self.home, model_id))
-        });
+        let learned = self.con.as_ref().map(|c| crate::engine_overhead::read_learned(c, model_id, &self.gpu_name(plan.gpus[0]), plan.tp as u64, runtime));
         let learned = learned.unwrap_or_default();
         let need = chooser::with_learned(base, learned);
         for g in &plan.gpus {
