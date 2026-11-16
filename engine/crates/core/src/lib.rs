@@ -15,6 +15,7 @@ pub mod memory_spec;
 pub mod model_facts;
 pub mod models;
 pub mod net;
+pub mod pack_update;
 pub mod packs;
 pub mod pyenv;
 pub mod paths;

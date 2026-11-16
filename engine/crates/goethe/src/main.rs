@@ -328,6 +328,8 @@ enum Commands {
         yes: bool,
         #[arg(long = "allow-downgrade", help = "Install the published version even if it is older.")]
         allow_downgrade: bool,
+        #[arg(long, help = "Put the previous kernel pack of every model that has one back (an update keeps it for one rollback).")]
+        rollback: bool,
     },
     #[command(display_order = 17, about = "Remove Goethe and the models it installed (folders of your own stay).")]
     Uninstall {
@@ -1097,13 +1099,18 @@ fn main() {
             ternary,
             yes,
             allow_downgrade,
-        } => goethe_core::update::run(goethe_core::update::UpdateOpts {
-            check_only: check,
-            engine,
-            ternary,
-            yes,
-            allow_downgrade,
-        }),
+            rollback,
+        } => match rollback {
+            true => goethe_core::pack_update::run_rollback(),
+            false => goethe_core::update::run(goethe_core::update::UpdateOpts {
+                check_only: check,
+                engine,
+                ternary,
+                yes,
+                allow_downgrade,
+            })
+            .and_then(|()| goethe_core::pack_update::run_all(check)),
+        },
         Commands::Uninstall {
             keep_models,
             purge_models: _,

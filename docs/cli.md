@@ -404,7 +404,7 @@ Checks the machine and the setup: GPU and driver, compiler, Python environment, 
 
 ### `goethe update`
 
-Installs the latest Goethe. Loaded models keep serving.
+Installs the latest Goethe. Loaded models keep serving. It then checks the kernel pack of each installed model against the signed index: when the pack changed, only the blocks the installed pack lacks are downloaded, the new pack is verified and swapped in, and the previous one is kept for one rollback. A loaded model keeps its old pack until reloaded. `goethe load` says once a day when a newer pack exists.
 
 | Option | Description |
 |---|---|
@@ -412,6 +412,7 @@ Installs the latest Goethe. Loaded models keep serving.
 | `--engine` | Also update the inference engine |
 | `--yes` | Don't ask |
 | `--allow-downgrade` | Install the published version even if it's older |
+| `--rollback` | Put the previous kernel pack of every model that has one back |
 
 ### `goethe uninstall`
 

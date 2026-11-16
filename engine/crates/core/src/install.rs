@@ -1563,6 +1563,7 @@ pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), Stri
     // Send the load, show the plan, wait for this instance, and end with one RUNNING or STARTING line (or JSON).
     let started = std::time::Instant::now();
     let model_id = params.get("model_id").and_then(Value::as_str).unwrap_or_default().to_string();
+    crate::pack_update::note_if_newer(&goethe_home(), &model_id);
     let reply = send_load(params.clone())?;
     let message = reply_message(&reply);
     if is_already_loaded(&reply) {

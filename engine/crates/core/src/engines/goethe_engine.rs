@@ -46,6 +46,9 @@ fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
         .args(&weights)
         .arg("--tokenizer")
         .arg(dir);
+    for o in crate::pack_update::installed_overlays(dir) {
+        cmd.arg("--overlay").arg(dir.join("overlays").join(o));
+    }
     cmd.env_clear()
         .envs(kept_env())
         .envs(card_env(spec))
