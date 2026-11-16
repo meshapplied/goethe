@@ -199,7 +199,7 @@ pub fn run(json_out: bool) -> Result<(), String> {
         return Ok(());
     }
     println!("{}\n", view.free_text());
-    if let Some(item) = out.recommended.iter().find(|m| m.model_id == crate::engine_cmd::NINFER_ID) {
+    if let Some(item) = out.recommended.iter().find(|m| m.model_id == crate::engines::ninfer::NINFER_ID) {
         println!("{}  ctx {}  concurrency {}", item.model_id, item.ctx, item.max_conc);
         println!();
     }
@@ -279,7 +279,7 @@ pub fn recommend(home: &Path, view: &View, reg: &Registry) -> RecommendOutput {
             Err(why) => out.excluded.push(excluded(format!("does not fit the allowed GPUs: {why}"))),
         }
     }
-    if !out.recommended.iter().any(|m| m.model_id == crate::engine_cmd::NINFER_ID) {
+    if !out.recommended.iter().any(|m| m.model_id == crate::engines::ninfer::NINFER_ID) {
         if let Some(row) = ninfer_row(view) {
             out.recommended.insert(0, row);
         }
@@ -289,13 +289,13 @@ pub fn recommend(home: &Path, view: &View, reg: &Registry) -> RecommendOutput {
 
 pub fn ninfer_profile() -> RegistryModel {
     serde_json::from_value(serde_json::json!({
-        "id": crate::engine_cmd::NINFER_ID,
+        "id": crate::engines::ninfer::NINFER_ID,
         "static_vram_gb": 23.566,
         "kv_elems_per_token": 32768,
         "supported_sm": ["12.0", "12.1"],
-        "default_ctx": crate::engine_cmd::NINFER_CTX,
-        "max_ctx": crate::engine_cmd::NINFER_CTX,
-        "default_max_conc": crate::engine_cmd::NINFER_MAX_CONC,
+        "default_ctx": crate::engines::ninfer::NINFER_CTX,
+        "max_ctx": crate::engines::ninfer::NINFER_CTX,
+        "default_max_conc": crate::engines::ninfer::NINFER_MAX_CONC,
         "default_tp": 1,
         "num_attention_heads": 24,
         "num_kv_heads": 4,
@@ -437,7 +437,7 @@ mod tests {
         };
         let out = recommend(std::path::Path::new("/none"), &v, &reg);
         let ids: Vec<&str> = out.recommended.iter().map(|r| r.model_id.as_str()).collect();
-        assert_eq!(ids, vec![crate::engine_cmd::NINFER_ID, "meshapplied/open"]);
+        assert_eq!(ids, vec![crate::engines::ninfer::NINFER_ID, "meshapplied/open"]);
         assert!(out.excluded.iter().all(|e| !e.model_id.ends_with("manual") && !e.model_id.ends_with("gated")));
         assert!(out.excluded.iter().any(|e| e.model_id == "meshapplied/huge" && e.reason.contains("missing")));
     }
@@ -534,9 +534,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let reg = crate::registry::bundled().unwrap();
         let first = &recommend(home.path(), &single_gpu("12.0"), &reg).recommended[0];
-        assert_eq!(first.model_id, crate::engine_cmd::NINFER_ID);
+        assert_eq!(first.model_id, crate::engines::ninfer::NINFER_ID);
         assert_eq!((first.ctx, first.max_conc), (100_000, 4));
         let out = recommend(home.path(), &single_gpu("8.6"), &reg);
-        assert!(out.recommended.iter().all(|m| m.model_id != crate::engine_cmd::NINFER_ID));
+        assert!(out.recommended.iter().all(|m| m.model_id != crate::engines::ninfer::NINFER_ID));
     }
 }

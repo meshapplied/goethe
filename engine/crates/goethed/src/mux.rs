@@ -2,6 +2,7 @@
 
 use crate::curator::{self, Gates};
 use goethe_core::db;
+use goethe_core::engines;
 use goethe_core::gateway_cache::{GatewayCache, Route, Snapshot};
 use goethe_core::hw;
 use goethe_core::inflight;
@@ -465,6 +466,11 @@ async fn route_post(
     }
     let ids: Vec<&str> = live.iter().map(|r| r.instance_id.as_str()).collect();
     let route = live[guard.pick(&ids).unwrap_or(0)].clone();
+    let openai = matches!(api_tail(path), "/chat/completions" | "/completions" | "/embeddings");
+    if let Some((e, Err(param))) = snap.engine(&model).filter(|_| openai).map(|e| (e, engines::check_params(e, &body))) {
+        drop(guard);
+        return finish.now(unsupported(&param, e.id));
+    }
     let stream = matches!(head.stream, Some(Value::Bool(true)));
     let body = prepare_body(path, body);
     let (sent, retry, learn_note) = apply_note(m, &snap, path, &model, key, hint.as_deref(), &body);
@@ -1120,6 +1126,15 @@ fn error(status: StatusCode, message: &str, kind: &str, code: &str) -> Response<
         json!({"error": {"message": message, "type": kind, "param": null, "code": code}}),
     );
     resp.extensions_mut().insert(GoetheError(message.to_string()));
+    resp
+}
+
+fn unsupported(param: &str, engine: &str) -> Response<MuxBody> {
+    // One refusal shape for every engine: the parameter by name, code unsupported_parameter.
+    let message = format!("{param} is not supported by {engine}");
+    let body = json!({"error": {"message": message, "type": "invalid_request_error", "param": param, "code": "unsupported_parameter"}});
+    let mut resp = json_response(StatusCode::BAD_REQUEST, body);
+    resp.extensions_mut().insert(GoetheError(message));
     resp
 }
 

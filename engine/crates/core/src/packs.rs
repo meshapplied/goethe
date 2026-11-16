@@ -1,6 +1,6 @@
 // Gated kernel-pack pull. goethe does network and auth; goethe-engine decides trust (signature, rollback, identity, arch).
 
-use crate::engine_cmd::{resolve_python, PACK_FILE, PACK_VERIFY};
+use crate::engines::{goethe_engine::{PACK_FILE, PACK_VERIFY}, resolve_python};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;

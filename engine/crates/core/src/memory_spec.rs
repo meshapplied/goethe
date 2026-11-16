@@ -102,7 +102,7 @@ pub fn installed(dir: &std::path::Path, card: &toml::Value, load_extra: &[String
     let facts = model_facts::facts_from_config(&cfg, 0.0, None, "installed").ok()?;
     let elem = crate::install::kv_element_bytes(kv_dtype.unwrap_or("auto"), &cfg);
     spec.static_state_bytes = (facts.swa_kv_elems_per_request * elem + facts.linear_state_bytes_per_request) * 4;
-    let mut args = crate::engine_cmd::card_extra_args(card);
+    let mut args = crate::engines::sglang::card_extra_args(card);
     args.extend_from_slice(load_extra);
     apply_engine_args(&mut spec, Some(&cfg), &args);
     Some(spec)

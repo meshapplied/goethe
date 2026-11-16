@@ -160,10 +160,10 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         .ok()
         .and_then(|r| find_model(&r, &opts.model_id).cloned());
     let card_dir = model_dir(home, &opts.model_id);
-    if opts.model_id == crate::engine_cmd::NINFER_ID {
-        let file = crate::engine_cmd::acquire_ninfer(&card_dir)?;
+    if opts.model_id == crate::engines::ninfer::NINFER_ID {
+        let file = crate::engines::ninfer::acquire_ninfer(&card_dir)?;
         fs::create_dir_all(&card_dir).map_err(|e| e.to_string())?;
-        let dest = card_dir.join(crate::engine_cmd::NINFER_FILE);
+        let dest = card_dir.join(crate::engines::ninfer::NINFER_FILE);
         if fs::canonicalize(&dest).ok().as_deref() != Some(file.as_path()) {
             if dest.symlink_metadata().is_ok() {
                 fs::remove_file(&dest).map_err(|e| e.to_string())?;
@@ -412,7 +412,7 @@ fn gguf_metadata(home: &Path, dir: &Path, format: &str, files: &[String]) -> Res
     let out = dir.join(".goethe-meta.tmp");
     let _ = fs::remove_dir_all(&out);
     fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
-    let run = std::process::Command::new(crate::engine_cmd::resolve_python(home))
+    let run = std::process::Command::new(crate::engines::resolve_python(home))
         .arg("-I")
         .arg("-c")
         .arg(GGUF_META)
@@ -668,7 +668,7 @@ fn register(home: &Path, opts: &InstallOpts, t: Target) -> Result<(), String> {
     let mut planned = plan(home, opts, &t)?;
     match &t.pack {
         Some(choice) => use_pack(home, &mut planned, choice, opts.ctx)?,
-        None if crate::engine_cmd::ninfer_in(&t.card_dir).is_none() => crate::pyenv::ensure(home, crate::pyenv::Layer::Sglang)?,
+        None if crate::engines::ninfer::ninfer_in(&t.card_dir).is_none() => crate::pyenv::ensure(home, crate::pyenv::Layer::Sglang)?,
         None => {}
     }
     commit(home, &planned, "installed", &mut std::io::stdout())
@@ -722,9 +722,9 @@ pub fn plan_in_place(home: &Path, model_id: &str, dir: &Path, entry: Option<Regi
 fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> {
     // The pinned artifact is the model. The card says runtime ninfer so load does not start SGLang.
     let dir = &t.card_dir;
-    let path = crate::engine_cmd::ninfer_in(dir).ok_or_else(crate::engine_cmd::ninfer_reject)?;
-    if fs::metadata(&path).map_err(|e| e.to_string())?.len() != crate::engine_cmd::NINFER_BYTES {
-        return Err(crate::engine_cmd::ninfer_reject());
+    let path = crate::engines::ninfer::ninfer_in(dir).ok_or_else(crate::engines::ninfer::ninfer_reject)?;
+    if fs::metadata(&path).map_err(|e| e.to_string())?.len() != crate::engines::ninfer::NINFER_BYTES {
+        return Err(crate::engines::ninfer::ninfer_reject());
     }
     let entry = t.entry.as_ref();
     let facts = model_facts::ModelFacts {
@@ -791,7 +791,7 @@ fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, S
 fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> {
     // Compute the card (merged with an existing one unless --reset), facts and VRAM; write nothing.
     let dir = &t.card_dir;
-    if crate::engine_cmd::ninfer_in(dir).is_some() {
+    if crate::engines::ninfer::ninfer_in(dir).is_some() {
         return plan_ninfer(home, opts, t);
     }
     let cfg = model_facts::read_config(dir)?;

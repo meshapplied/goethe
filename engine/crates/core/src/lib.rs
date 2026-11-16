@@ -67,7 +67,7 @@ pub mod gateway_cache;
 pub mod run_registry;
 pub mod load_slot;
 pub mod coordinator;
-pub mod engine_cmd;
+pub mod engines;
 pub mod foreign;
 pub mod host;
 pub mod listener;
