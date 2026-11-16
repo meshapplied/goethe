@@ -114,9 +114,9 @@ pub fn gguf_paths(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn is_model_gguf(name: &str) -> bool {
-    // A model file or the first shard of a split one; mmproj files are vision projectors.
+    // A model file or the first shard of a split one; mmproj files (named mmproj-X or X.mmproj-f16) are vision projectors.
     let base = name.rsplit('/').next().unwrap_or(name);
-    base.ends_with(".gguf") && !base.starts_with("mmproj") && (!base.contains("-of-") || base.contains("-00001-of-"))
+    base.ends_with(".gguf") && !base.to_ascii_lowercase().contains("mmproj") && (!base.contains("-of-") || base.contains("-00001-of-"))
 }
 
 pub fn gguf_in(dir: &Path, card: &toml::Value, quant: Option<&str>) -> Result<PathBuf, String> {
@@ -188,7 +188,7 @@ pub fn facts(dir: &Path, gguf: &Path) -> Result<crate::model_facts::ModelFacts, 
         kv = vec![kv.first().copied().unwrap_or(heads); layers as usize];
     }
     let dim = |k: &str| Some(max(k)).filter(|d| *d > 0).unwrap_or(max("embedding_length") / heads.max(1));
-    let weights = gguf_paths(dir).into_iter().filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("mmproj")));
+    let weights = gguf_paths(dir).into_iter().filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("mmproj")));
     let bytes: u64 = weights.filter_map(|p| p.metadata().ok()).map(|m| m.len()).sum();
     Ok(crate::model_facts::ModelFacts {
         architecture: if max("expert_count") > 0 { "moe" } else { "dense" }.into(),
@@ -466,7 +466,7 @@ mod tests {
         let f = facts(d.path(), &gguf_in(d.path(), &toml::Value::Table(Default::default()), None).unwrap()).unwrap();
         assert_eq!((f.kv_elems_per_token, f.max_ctx, f.num_attention_heads, f.num_kv_heads), ((2 + 4) * 128, 4096, 8, 4));
         assert_eq!(f.architecture, "dense");
-        let names = ["m-Q8_0.gguf", "Q4_K_M/m-Q4_K_M-00002-of-00002.gguf", "Q4_K_M/m-Q4_K_M-00001-of-00002.gguf", "mmproj-m.gguf", "README.md"];
+        let names = ["m-Q8_0.gguf", "Q4_K_M/m-Q4_K_M-00002-of-00002.gguf", "Q4_K_M/m-Q4_K_M-00001-of-00002.gguf", "mmproj-m.gguf", "m.mmproj-f16.gguf", "README.md"];
         let split = ["Q4_K_M/m-Q4_K_M-00001-of-00002.gguf", "Q4_K_M/m-Q4_K_M-00002-of-00002.gguf"];
         assert_eq!(pick_gguf(&names, None).unwrap(), split);
         assert_eq!(pick_gguf(&["b-IQ2.gguf", "a-IQ3.gguf"], None).unwrap(), ["a-IQ3.gguf"]);
