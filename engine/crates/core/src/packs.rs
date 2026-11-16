@@ -274,6 +274,17 @@ pub fn pack_archs(index: &[u8], model_id: &str) -> Vec<String> {
     out
 }
 
+pub fn unsupported_here(index: &[u8], model_id: &str, archs: &[String], local: &str) -> Option<String> {
+    // One line when the index has packs of `model_id` but none for this machine's GPUs: which GPUs the packs are built for, and that this one is not among them.
+    let theirs = pack_archs(index, model_id);
+    if theirs.is_empty() || theirs.iter().any(|a| archs.contains(a)) {
+        return None;
+    }
+    let built = theirs.iter().map(|a| crate::gpu_arch::SUPPORTED.iter().find(|x| &x.tag() == a).map_or(a.clone(), |x| format!("{a}, {}", x.family))).collect::<Vec<_>>().join("; ");
+    let here = if local.is_empty() { archs.join(", ") } else { format!("{local} ({})", archs.join(", ")) };
+    Some(format!("It runs only with a kernel pack, built for {built}; this machine has {here}, so it is not supported here and nothing was downloaded"))
+}
+
 pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> Vec<Entry> {
     // Index entries on one of `archs` (in that order) for a model `model` accepts, in a format, ABI and runtime this goethe runs, whatever min_engine they need (`runnable` filters).
     let Ok(ix) = serde_json::from_slice::<Value>(index) else { return Vec::new() };
@@ -862,6 +873,19 @@ mod tests {
         let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap().unwrap();
         assert!(finish(home.path(), dir.path(), "sm_120a", &p, &b, &engine(&b.pack, &[("pack verify", 1)])).is_err());
         nothing_left(dir.path());
+    }
+
+    #[test]
+    fn a_pack_only_model_on_an_unbuilt_gpu_is_named_before_any_download() {
+        let p = container();
+        let ix = index_of(&p, &sha(&p.manifest));
+        let here = |a: &str| vec![a.to_string()];
+        let line = unsupported_here(&ix, "org/M-GGUF", &here("sm_89"), "NVIDIA GeForce RTX 4090").unwrap();
+        for part in ["sm_120a", "Blackwell", "NVIDIA GeForce RTX 4090 (sm_89)", "not supported here", "nothing was downloaded"] {
+            assert!(line.contains(part), "{part} in {line}");
+        }
+        assert_eq!(unsupported_here(&ix, "org/M-GGUF", &here("sm_120a"), "RTX 5090"), None, "a pack for this GPU");
+        assert_eq!(unsupported_here(&ix, "org/other", &here("sm_89"), "RTX 4090"), None, "a model with no pack");
     }
 
     #[test]
