@@ -10,7 +10,7 @@
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
   <a href="https://github.com/meshapplied/goethe/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/meshapplied/goethe/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <br>
-  <a href="docs/user-guide.md"><img alt="User guide" src="https://img.shields.io/badge/docs-user%20guide-87D7FF?logo=readthedocs&logoColor=white"></a>
+  <a href="https://goethe.sh/docs"><img alt="Documentation at goethe.sh/docs" src="https://img.shields.io/badge/docs-goethe.sh%2Fdocs-87D7FF?logo=readthedocs&logoColor=white"></a>
   <a href="https://discord.gg/fadnuFrm4"><img alt="Join us on Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
 </p>
 
@@ -101,7 +101,7 @@ Supported [model families and quantization formats](docs/user-guide.md#supported
 - **[User guide](docs/user-guide.md):** install, add models, share the API, and troubleshooting.
 - **[Command reference](docs/cli.md):** every `goethe` command and option.
 - **[Our models](docs/research-models.md):** the models we publish, and how fast they run.
-- **Full documentation:** the [user guide](docs/user-guide.md) and the [CLI reference](docs/cli.md).
+- **Full documentation:** [goethe.sh/docs](https://goethe.sh/docs).
 
 ## Repository layout
 
@@ -111,7 +111,7 @@ Supported [model families and quantization formats](docs/user-guide.md#supported
 | [`nvfp4-kernels/`](nvfp4-kernels/), [`ternary-kernels/`](ternary-kernels/) | GPU kernels behind our models |
 | [`docs/`](docs/) | User guide, command reference and model notes |
 
-Our models on [Hugging Face](https://huggingface.co/meshapplied).
+Our models on [Hugging Face](https://huggingface.co/meshapplied) and at [goethe.sh/models](https://goethe.sh/models).
 
 ## License
 

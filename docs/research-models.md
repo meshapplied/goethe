@@ -2,7 +2,7 @@
 
 The ternary and NVFP4 models we publish on Hugging Face. Each one is in Goethe's catalog: install and serve it like any other model.
 
-🤗 [View our models](https://huggingface.co/meshapplied)
+🤗 [View our models](https://goethe.sh/models)
 
 ```bash
 goethe install meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest --load
