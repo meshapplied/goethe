@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2 (2026-11-16)
+
+- Packages are served from https://pkg.goethe.sh and the installer from `curl -fsSL https://goethe.sh/install.sh | bash` (0.3.1's installer still pointed at pkg.meshapplied.com, which no longer serves).
+- GGUF models: a GGUF-only repo or a local folder of GGUF files installs and runs with llama.cpp, which goethe fetches as a pinned, checked prebuilt `llama-server` on first use. `goethe install <model>:<quant>` picks one GGUF file or one kernel pack variant. GGUF embedding models serve embeddings, and a llama.cpp model with an audio projector is a speech model.
+- Engines are one table with one module each (goethe-engine, NInfer, SGLang, ternary, llama.cpp).
+- Kernel packs: offered to weights of the same structure (fine-tunes, other repos, local folders); a pack's speculative-decoding drafter comes with it when both fit; a pack this GPU cannot run is known before any download; a pack that fails to open falls back to the plain runtime. Pack downloads check xz-compressed blocks correctly (0.3.1 refused them).
+- `goethe install` shows one plan line before any download, after a disk and VRAM check, and asks on a terminal.
+- `goethe run [MODEL] [INPUT]` tries a loaded model by hand, by input modality; the gateway serves `/v1/audio/transcriptions` to goethe-engine models.
+- tokio 1.54.1 (fixes a race in `tokio::time::Interval`).
+
 ## 0.3.1 (2026-11-16)
 
 - The Goethe platform moved to https://goethe.sh: `goethe login` links there by default (0.3.0 pointed at platform.meshapplied.com, where login no longer works). Nodes that need another platform still use `--platform-url` or `GOETHE_PLATFORM_URL`. When a platform's domain redirects to its `www.` form (or back), goethe follows that one redirect on the same path and keeps using the new address; any other redirect is still refused, so a node token never goes to another site.
