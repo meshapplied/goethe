@@ -789,25 +789,75 @@ impl Planned {
     }
 }
 
-fn register(home: &Path, opts: &InstallOpts, t: Target) -> Result<(), String> {
+fn register(home: &Path, opts: &InstallOpts, mut t: Target) -> Result<(), String> {
     // The card is written last: any failure before it (pack refused, SGLang setup failed) leaves no card behind.
     let mut planned = plan(home, opts, &t)?;
-    match &t.pack {
+    let refused = match &t.pack {
         Some(choice) => use_pack(home, &mut planned, choice, opts.ctx)?,
         None if planned.dir.join(PACK_VERIFY).is_file() => {
             let v: Value = serde_json::from_slice(&fs::read(planned.dir.join(PACK_VERIFY)).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
             pack_card(home, &mut planned, v["arch"].as_str().unwrap_or_default(), "", opts.ctx)?
         }
-        None => {
-            if let Some(layer) = crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?.layer {
-                crate::pyenv::ensure(home, layer)?;
-            }
-        }
+        None => None,
+    };
+    if let Some(why) = refused {
+        // This device runs no variant of the pack: the weights stay, the plain runtime serves them.
+        drop_pack(&planned.dir);
+        t.pack = None;
+        planned = plan(home, opts, &t)?;
+        println!("{why}; using {}", crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?.id);
+    }
+    if let Some(layer) = crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?.layer {
+        crate::pyenv::ensure(home, layer)?;
     }
     commit(home, &planned, "installed", &mut std::io::stdout())
 }
 
-fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) -> Result<(), String> {
+fn drop_pack(dir: &Path) {
+    // The pack files goethe placed in the model dir (copies or links; never the user's own files behind a link).
+    for f in [PACK_FILE.to_string(), format!("{PACK_FILE}.sig"), PACK_VERIFY.to_string(), "pack.prefix".to_string()] {
+        let _ = fs::remove_file(dir.join(f));
+    }
+}
+
+fn refused_here(dir: &Path, run: crate::packs::Runner) -> Option<String> {
+    // goethe-engine `pack runs` (exit 3: this device runs no variant): why, in one line; None when it runs one or the engine cannot say (older engine).
+    let (code, out) = run(&["pack".into(), "runs".into(), dir.join(PACK_FILE).to_string_lossy().into_owned()]).ok()?;
+    if code != 3 {
+        return None;
+    }
+    let v: Value = serde_json::from_str(&out).unwrap_or_default();
+    let skus = match &v["sku"] {
+        Value::Array(a) => a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "),
+        s => s.as_str().unwrap_or("its GPUs").to_string(),
+    };
+    Some(format!("kernel pack for {skus} does not run on {} ({})", v["device"].as_str().unwrap_or("this GPU"), v["why"].as_str().unwrap_or("no variant for it")))
+}
+
+pub fn unpack_refused(home: &Path, model_id: &str, log: &str) -> Result<bool, String> {
+    // An engine without `pack runs` refuses such a pack only at load: drop it, write the plain card, say so; false when there is nothing to drop.
+    let Some(line) = log.lines().find(|l| l.contains("runs no variant of this pack")) else { return Ok(false) };
+    let dir = model_dir(home, model_id);
+    if !dir.join(PACK_FILE).is_file() {
+        return Ok(false);
+    }
+    let (device, skus) = line.split_once(" runs no variant of this pack").unwrap_or((line, ""));
+    let device = device.rsplit_once("device ").map_or(device, |(_, d)| d).trim();
+    drop_pack(&dir);
+    let source_dir = read_card_table(&dir).and_then(|c| c.get("source_dir").and_then(|v| v.as_str()).map(PathBuf::from));
+    let entry = fetch(&registry_url()).ok().and_then(|r| find_model(&r, model_id).cloned());
+    let t = Target { model_id: model_id.to_string(), card_dir: dir, entry, managed: source_dir.is_none(), source_dir, ternary: None, pack: None };
+    let p = plan(home, &InstallOpts { model_id: model_id.to_string(), ..InstallOpts::default() }, &t)?;
+    let engine = crate::engines::of_card(&toml::Value::Table(p.table.clone()))?;
+    if let Some(layer) = engine.layer {
+        crate::pyenv::ensure(home, layer)?;
+    }
+    println!("kernel pack for {} does not run on {device} (no variant for it); using {}", skus.trim_start_matches(':').trim(), engine.id);
+    commit(home, &p, "installed", &mut std::io::sink())?;
+    Ok(true)
+}
+
+fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) -> Result<Option<String>, String> {
     // Pull with this node's login (goethe-engine verifies index, identity, pack and arch), then point the card at it.
     let login = crate::packs::Login(c.creds.clone());
     let broker = crate::packs::HttpBroker::new(&c.creds.platform_url, &login);
@@ -818,9 +868,13 @@ fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) 
     pack_card(home, p, &c.offer.arch, &variant, cli_ctx)
 }
 
-fn pack_card(home: &Path, p: &mut Planned, arch: &str, variant: &str, cli_ctx: Option<u64>) -> Result<(), String> {
-    // The card of a verified pack: goethe-engine, the kernels' ctx cap, the pack arch's GPUs.
-    let max = crate::packs::max_ctx(&p.dir, variant, &crate::packs::python_runner(home))?;
+fn pack_card(home: &Path, p: &mut Planned, arch: &str, variant: &str, cli_ctx: Option<u64>) -> Result<Option<String>, String> {
+    // The card of a verified pack: goethe-engine, the kernels' ctx cap, the pack arch's GPUs; Some(why) when this device runs no variant of it.
+    let run = crate::packs::python_runner(home);
+    if let Some(why) = refused_here(&p.dir, &run) {
+        return Ok(Some(why));
+    }
+    let max = crate::packs::max_ctx(&p.dir, variant, &run)?;
     if cli_ctx.is_some_and(|x| x > max) {
         p.notes.push(format!("ctx {} is longer than the kernels support; using {max}", cli_ctx.unwrap_or(max)));
     }
@@ -836,7 +890,7 @@ fn pack_card(home: &Path, p: &mut Planned, arch: &str, variant: &str, cli_ctx: O
     t.insert("kv_cache_dtype".into(), toml::Value::String("auto".into()));
     t.insert("supported_sm".into(), toml::Value::Array(crate::packs::arch_ccs(arch).into_iter().map(toml::Value::String).collect()));
     p.engine = Some(format!("goethe-engine with optimised kernels for {arch} (verified)"));
-    Ok(())
+    Ok(None)
 }
 
 pub fn plan_in_place(home: &Path, model_id: &str, dir: &Path, entry: Option<RegistryModel>) -> Result<Planned, String> {
@@ -1289,7 +1343,7 @@ pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), Stri
     // Send the load, show the plan, wait for this instance, and end with one RUNNING or STARTING line (or JSON).
     let started = std::time::Instant::now();
     let model_id = params.get("model_id").and_then(Value::as_str).unwrap_or_default().to_string();
-    let reply = send_load(params)?;
+    let reply = send_load(params.clone())?;
     let message = reply_message(&reply);
     if is_already_loaded(&reply) {
         let fallback = format!("{model_id} is already loaded; add --replica to start another instance");
@@ -1310,7 +1364,15 @@ pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), Stri
         .ok_or_else(|| "load did not return instance_id".to_string())?
         .to_string();
     if !no_wait {
-        crate::load_wait::wait_for_instance(&iid, crate::load_wait::DEFAULT_LOAD_WAIT)?;
+        if let Err(e) = crate::load_wait::wait_for_instance(&iid, crate::load_wait::DEFAULT_LOAD_WAIT) {
+            // A pack this device runs no variant of, refused at load: the plain runtime and one more load (the pack is gone, so never twice).
+            let home = goethe_home();
+            let log = fs::read_to_string(home.join("logs").join(format!("{iid}.log"))).unwrap_or_default();
+            return match unpack_refused(&home, &model_id, &log)? {
+                true => run_load(params, no_wait, json_out),
+                false => Err(e),
+            };
+        }
     }
     let row = instance_row(&iid);
     if json_out {
@@ -1421,6 +1483,37 @@ mod tests {
             fs::write(bin.join("llama-server"), b"").unwrap();
         }
         (home, dir)
+    }
+
+    #[test]
+    fn a_pack_this_device_runs_no_variant_of_is_named_or_left_to_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let no = |_: &[String]| Ok((3, r#"{"runs": false, "sku": ["rtx_pro_6000_maxq"], "device": "RTX 5090", "sms": 170, "why": "188 SMs needed"}"#.to_string()));
+        let why = refused_here(dir.path(), &no).unwrap();
+        assert_eq!(why, "kernel pack for rtx_pro_6000_maxq does not run on RTX 5090 (188 SMs needed)");
+        let yes = |_: &[String]| Ok((0, r#"{"runs": true}"#.to_string()));
+        assert_eq!(refused_here(dir.path(), &yes), None);
+        let old = |_: &[String]| Err("goethe-engine pack runs: exit 2: invalid choice: 'runs'".to_string());
+        assert_eq!(refused_here(dir.path(), &old), None, "an engine without pack runs: as before, load decides");
+    }
+
+    #[test]
+    fn a_pack_refused_at_load_leaves_a_plain_card_once() {
+        let (home, _) = gguf_home(true);
+        let dir = model_dir(home.path(), "org/m-GGUF");
+        fs::create_dir_all(&dir).unwrap();
+        crate::engines::llama_cpp::write_test_gguf(&dir.join("m-Q4_K_M.gguf"));
+        fs::write(dir.join("config.json"), "{}").unwrap();
+        for f in [PACK_FILE, PACK_VERIFY, "pack.gcpack.sig"] {
+            fs::write(dir.join(f), b"p").unwrap();
+        }
+        write_card_table(&dir, &toml::from_str("model_id = \"org/m-GGUF\"\nruntime = \"goethe-engine\"").unwrap()).unwrap();
+        let log = "goethe-engine: pack REFUSED: device RTX 5090 (170 SMs) runs no variant of this pack: rtx_pro_6000_maxq (188 SMs)\n";
+        assert!(!unpack_refused(home.path(), "org/m-GGUF", "some other failure").unwrap());
+        assert!(unpack_refused(home.path(), "org/m-GGUF", log).unwrap());
+        assert!(!dir.join(PACK_FILE).exists() && !dir.join(PACK_VERIFY).exists() && dir.join("m-Q4_K_M.gguf").exists());
+        assert_eq!(read_card_table(&dir).unwrap().get("runtime").and_then(|v| v.as_str()), Some("llama.cpp"));
+        assert!(!unpack_refused(home.path(), "org/m-GGUF", log).unwrap(), "no pack left: no second retry");
     }
 
     #[test]
