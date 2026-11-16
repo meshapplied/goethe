@@ -57,7 +57,7 @@ pub struct Credentials {
 
 pub fn platform_url() -> Result<String, String> {
     // The GOETHE_PLATFORM_URL setting, else the default, after the URL policy.
-    check_url(&moved_platform(&crate::paths::setting(URL_SETTING).unwrap_or_else(|| DEFAULT_PLATFORM_URL.to_string())))
+    check_url(&crate::paths::setting(URL_SETTING).unwrap_or_else(|| DEFAULT_PLATFORM_URL.to_string()))
 }
 
 pub fn check_url(raw: &str) -> Result<String, String> {
@@ -313,21 +313,10 @@ pub fn load_credentials(home: &Path) -> Result<Option<Credentials>, String> {
     let Some(text) = read_private(&path, MAX_CREDENTIALS_BYTES, !old_only)? else {
         return Ok(None);
     };
-    let mut creds: Credentials = serde_json::from_str(&text)
+    let creds: Credentials = serde_json::from_str(&text)
         .map_err(|_| format!("{} is damaged; remove it and run goethe login again", path.display()))?;
-    creds.platform_url = moved_platform(&creds.platform_url);
     validate_credentials(&creds).map_err(|e| format!("{}: {e}; remove it and run goethe login again", path.display()))?;
     Ok(Some(creds))
-}
-
-const MOVED_PLATFORMS: [&str; 2] = ["https://platform.meshapplied.com", "https://meshapplied.com"];
-
-pub fn moved_platform(url: &str) -> String {
-    // The platform moved to goethe.sh; a link saved with an old address uses the new one.
-    match MOVED_PLATFORMS.contains(&url.trim_end_matches('/')) {
-        true => DEFAULT_PLATFORM_URL.to_string(),
-        false => url.to_string(),
-    }
 }
 
 pub fn validate_credentials(c: &Credentials) -> Result<(), String> {
@@ -560,14 +549,6 @@ mod tests {
             token: Secret::new("mesh_node_0123456789abcdef0123456789abcdef"),
             linked_at: "2026-11-11T10:00:00Z".into(),
         }
-    }
-
-    #[test]
-    fn a_link_saved_with_the_old_platform_address_uses_goethe_sh() {
-        assert_eq!(moved_platform("https://platform.meshapplied.com"), "https://goethe.sh");
-        assert_eq!(moved_platform("https://meshapplied.com/"), "https://goethe.sh");
-        assert_eq!(moved_platform("https://goethe.sh"), "https://goethe.sh");
-        assert_eq!(moved_platform("http://127.0.0.1:3000"), "http://127.0.0.1:3000", "a dev platform stays");
     }
 
     #[test]
