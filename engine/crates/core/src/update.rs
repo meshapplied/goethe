@@ -298,20 +298,33 @@ pub(crate) fn normalize_arch() -> String {
     }
 }
 
+const MAX_PKG_FILE: u64 = 32 << 30;
+const MAX_PKG_TEXT: u64 = 16 << 20;
+
 fn fetch_pkg_file(base: &str, rel: &str, dest: &Path) -> Result<(), String> {
-    // GET one CDN file, with GOETHE_PKG_TOKEN as a bearer token when set.
+    // Package lists, versions and lock files are small text; only binaries, wheels and archives may be large.
+    let text = matches!(rel, "SHA256SUMS" | "SHA256SUMS.sig" | "VERSION" | "BUILDINFO" | "wheels/LATEST") || rel.ends_with(".lock") || rel.ends_with(".sh");
+    fetch_pkg_file_max(base, rel, dest, if text { MAX_PKG_TEXT } else { MAX_PKG_FILE })
+}
+
+fn fetch_pkg_file_max(base: &str, rel: &str, dest: &Path, max: u64) -> Result<(), String> {
+    // GET one CDN file into dest, streamed (never held in memory) and refused past `max` bytes, with GOETHE_PKG_TOKEN as a bearer token when set.
     let url = format!("{base}/{rel}");
     let mut req = crate::net::agent().get(&url).timeout(std::time::Duration::from_secs(60));
     if let Some(tok) = crate::paths::setting("GOETHE_PKG_TOKEN") {
         req = req.set("Authorization", &format!("Bearer {}", tok.trim()));
     }
     let resp = req.call().map_err(|e| format!("fetch {rel}: {e}"))?;
-    let mut buf = Vec::new();
-    resp.into_reader().read_to_end(&mut buf).map_err(|e| e.to_string())?;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    fs::write(dest, buf).map_err(|e| e.to_string())
+    let mut f = fs::File::create(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    let got = std::io::copy(&mut resp.into_reader().take(max + 1), &mut f).map_err(|e| format!("fetch {rel}: {e}"))?;
+    if got > max {
+        let _ = fs::remove_file(dest);
+        return Err(format!("fetch {rel}: the response is longer than {max} bytes; refused"));
+    }
+    Ok(())
 }
 
 const PROPAGATING: &str = "a new release may still be propagating through the package host's cache (up to 10 minutes): run goethe update again in a few minutes, nothing was changed";
@@ -500,6 +513,28 @@ fn upgrade_summary(before: usize, kept: usize, running: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_response_past_the_cap_is_refused_and_not_kept() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut s = stream.unwrap();
+                let _ = s.read(&mut [0u8; 2048]);
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3000000\r\nConnection: close\r\n\r\n");
+                let _ = s.write_all(&vec![b'A'; 3_000_000]);
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("f");
+        let err = fetch_pkg_file_max(&url, "f", &dest, 1 << 20).unwrap_err();
+        assert!(err.contains("longer than"), "{err}");
+        assert!(!dest.exists());
+        fetch_pkg_file_max(&url, "f", &dest, 4 << 20).unwrap();
+        assert_eq!(fs::metadata(&dest).unwrap().len(), 3_000_000);
+    }
 
     #[test]
     fn sha256_lookup_and_file() {
