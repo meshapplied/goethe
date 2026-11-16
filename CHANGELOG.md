@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-11-16)
 
 - `goethe serve --public 5h --key my-app` opens the API on a public address for a limited time (up to 7 days), for chosen existing API keys, which stay the same every time it opens; `goethe serve --public shutdown` closes it early. The public listener exists only while a window is open, accepts only the chosen non-admin keys and only API routes, checks the end time on every request, and has its own certificate and stricter rate limits. A linked node reports the public URL and its end time to the platform within seconds of opening or closing. See `goethe serve --public` in `docs/cli.md`.
 - Optimised kernel packs: `goethe install` uses them on nodes logged in to the Goethe platform, asks a node that is not logged in to log in or continue with SGLang, and refuses a model neither can serve before downloading anything. `goethe models` marks models with optimised kernels for this machine.
