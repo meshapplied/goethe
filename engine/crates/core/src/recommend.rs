@@ -62,6 +62,7 @@ pub struct View {
     pub hw: HardwareState,
     pub gpus: Vec<GpuPlacementInput>,
     con: Option<Connection>,
+    home: std::path::PathBuf,
 }
 
 impl View {
@@ -94,7 +95,7 @@ impl View {
                 }
             })
             .collect();
-        View { hw, gpus, con }
+        View { hw, gpus, con, home: home.to_path_buf() }
     }
 
     pub fn capacity(home: &Path, hw: HardwareState) -> View {
@@ -126,7 +127,7 @@ impl View {
         trial.max_conc = plan.max_conc;
         let base = chooser::need(&trial, plan.tp, &plan.cc);
         let learned = self.con.as_ref().map(|c| {
-            crate::engine_overhead::read_learned(c, model_id, &self.gpu_name(plan.gpus[0]), plan.tp as u64)
+            crate::engine_overhead::read_learned(c, model_id, &self.gpu_name(plan.gpus[0]), plan.tp as u64, &crate::engine_overhead::model_runtime(&self.home, model_id))
         });
         let learned = learned.unwrap_or_default();
         let need = chooser::with_learned(base, learned);
