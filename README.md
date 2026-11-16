@@ -10,7 +10,7 @@
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
   <a href="https://github.com/meshapplied/goethe/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/meshapplied/goethe/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <br>
-  <a href="https://meshapplied.com/docs"><img alt="Documentation at meshapplied.com/docs" src="https://img.shields.io/badge/docs-meshapplied.com%2Fdocs-87D7FF?logo=readthedocs&logoColor=white"></a>
+  <a href="https://goethe.sh/docs"><img alt="Documentation at goethe.sh/docs" src="https://img.shields.io/badge/docs-goethe.sh%2Fdocs-87D7FF?logo=readthedocs&logoColor=white"></a>
   <a href="https://discord.gg/fadnuFrm4"><img alt="Join us on Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
 </p>
 
@@ -94,14 +94,20 @@ Goethe ships its own CUDA 13 runtime and compiler, so no CUDA toolkit is needed 
 
 GeForce and TITAN cards need driver 580 or newer. Enough GPU memory for the model is the only other requirement; `goethe models recommend` lists the models that fit.
 
-Supported [model families and quantization formats](docs/user-guide.md#supported-models) are in the user guide.
+Supported [model families and quantization formats](docs/user-guide.md#supported-models) are in the user guide. GGUF models (single GPU) and GGUF embedding models are served through llama.cpp.
+
+## Known limits
+
+- Gated models need the license accepted on Hugging Face and a read token (install with `--hf-token`). This includes `orcarouter/Qwen3.8-Flash-Next-Uncensored-NVFP4`.
+- Optimised kernel packs (the 27B NVFP4 model, the ternary models and others) need `goethe login` on the node. A model that has only a pack and none for your GPU is refused before anything is downloaded.
+- If a pack fails to open for any reason, Goethe says why and serves the model with the plain runtime when it has one.
 
 ## Documentation
 
 - **[User guide](docs/user-guide.md):** install, add models, share the API, and troubleshooting.
 - **[Command reference](docs/cli.md):** every `goethe` command and option.
 - **[Our models](docs/research-models.md):** the models we publish, and how fast they run.
-- **Full documentation:** [meshapplied.com/docs](https://meshapplied.com/docs).
+- **Full documentation:** [goethe.sh/docs](https://goethe.sh/docs).
 
 ## Repository layout
 
@@ -111,7 +117,7 @@ Supported [model families and quantization formats](docs/user-guide.md#supported
 | [`nvfp4-kernels/`](nvfp4-kernels/), [`ternary-kernels/`](ternary-kernels/) | GPU kernels behind our models |
 | [`docs/`](docs/) | User guide, command reference and model notes |
 
-Our models on [Hugging Face](https://huggingface.co/meshapplied) and at [meshapplied.com/models](https://meshapplied.com/models).
+Our models on [Hugging Face](https://huggingface.co/meshapplied) and at [goethe.sh/models](https://goethe.sh/models).
 
 ## License
 
