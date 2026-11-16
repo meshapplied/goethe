@@ -425,7 +425,7 @@ fn engine_check(
         let files = crate::engines::llama_cpp::pick_gguf(&names, quant).map_err(|e| format!("{model_id}: {e}"))?;
         let none = if declined { "" } else { ", and no optimised kernel pack exists for it on this machine's GPUs" };
         let only = if config { "" } else { " only" };
-        return match crate::engines::llama_cpp::server_bin(home) {
+        return match crate::engines::llama_cpp::server_ready(home) {
             Ok(_) => Ok(Some(files)),
             Err(why) => Err(format!("{model_id} is not supported: it ships GGUF files{only}, which SGLang does not serve{none}; {why}.{hint}")),
         };
@@ -800,10 +800,19 @@ fn register(home: &Path, opts: &InstallOpts, mut t: Target) -> Result<(), String
         planned = plan(home, opts, &t)?;
         println!("{why}; using {}", crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?.id);
     }
-    if let Some(layer) = crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?.layer {
+    ensure_runtime(home, crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?)?;
+    commit(home, &planned, "installed", &mut std::io::stdout())
+}
+
+fn ensure_runtime(home: &Path, engine: &crate::engines::Engine) -> Result<(), String> {
+    // The card's engine, set up once on first use: its py-env layer, or the pinned prebuilt llama-server.
+    if let Some(layer) = engine.layer {
         crate::pyenv::ensure(home, layer)?;
     }
-    commit(home, &planned, "installed", &mut std::io::stdout())
+    if engine.id == crate::engines::llama_cpp::ENGINE.id {
+        crate::engines::llama_cpp::ensure_server(home)?;
+    }
+    Ok(())
 }
 
 fn drop_pack(dir: &Path) {
@@ -840,9 +849,7 @@ pub fn unpack_refused(home: &Path, model_id: &str, log: &str) -> Result<bool, St
     let t = Target { model_id: model_id.to_string(), card_dir: dir, entry, managed: source_dir.is_none(), source_dir, ternary: None, pack: None };
     let p = plan(home, &InstallOpts { model_id: model_id.to_string(), ..InstallOpts::default() }, &t)?;
     let engine = crate::engines::of_card(&toml::Value::Table(p.table.clone()))?;
-    if let Some(layer) = engine.layer {
-        crate::pyenv::ensure(home, layer)?;
-    }
+    ensure_runtime(home, engine)?;
     println!("{why}; using {}", engine.id);
     commit(home, &p, "installed", &mut std::io::sink())?;
     Ok(true)
@@ -936,7 +943,7 @@ fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, S
 
 fn plan_gguf(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> {
     // llama.cpp serves the GGUF: shape from its header, KV in f16, the file recorded in the card; a pooling model as embeddings.
-    crate::engines::llama_cpp::server_bin(home)?;
+    crate::engines::llama_cpp::server_ready(home)?;
     let dir = &t.card_dir;
     let gguf = crate::engines::llama_cpp::gguf_in(dir, &toml::Value::Table(read_card_table(dir).unwrap_or_default()), opts.quant.as_deref())?;
     let facts = crate::engines::llama_cpp::facts(dir, &gguf)?;
@@ -1572,8 +1579,11 @@ mod tests {
         assert!(err.contains("config.json"), "{err}");
         if std::env::var_os("LLAMA_SERVER").is_none() {
             let (home, dir) = gguf_home(false);
-            let err = plan_in_place(home.path(), "org/m-GGUF", &dir, None).map(|p| p.table).unwrap_err();
-            assert!(err.contains("llama-server not found"), "{err}");
+            let planned = plan_in_place(home.path(), "org/m-GGUF", &dir, None).map(|p| p.table);
+            match crate::engines::llama_cpp::server_ready(home.path()) {
+                Err(_) => assert!(planned.unwrap_err().contains("llama-server not found")),
+                Ok(()) => assert!(planned.is_ok(), "a pinned prebuilt server is fetched at install, never at plan"),
+            }
         }
     }
 

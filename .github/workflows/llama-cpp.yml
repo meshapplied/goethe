@@ -1,0 +1,73 @@
+# Builds llama-server at the commit in engine/llama-cpp/PIN (CUDA, static ggml) and attaches it to a goethe release; the summary holds the PIN lines.
+name: llama-cpp
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing goethe release (a draft is fine) to attach the archive to"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    container: nvidia/cuda:12.8.1-devel-ubuntu22.04
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tools
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl patchelf python3-pip >/dev/null
+          pip3 install --quiet cmake==3.31.6 ninja==1.11.1.4
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" >/etc/apt/sources.list.d/github-cli.list
+          apt-get update -qq && apt-get install -y -qq gh >/dev/null
+      - name: llama.cpp at the pinned commit
+        run: |
+          rev="$(sed -n 's/^LLAMA_CPP_COMMIT=//p' engine/llama-cpp/PIN)"
+          [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || { echo "engine/llama-cpp/PIN has no LLAMA_CPP_COMMIT"; exit 1; }
+          git init -q llama.cpp
+          git -C llama.cpp fetch -q --depth 1 https://github.com/ggml-org/llama.cpp "$rev"
+          git -C llama.cpp checkout -q FETCH_HEAD
+          echo "REV=$rev" >>"$GITHUB_ENV"
+      - name: llama-server, CUDA sm_80 86 89 90 120, static ggml
+        working-directory: llama.cpp
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="80-real;86-real;89-real;90-real;120-real" \
+            -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON \
+            -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
+          cmake --build build --target llama-server -j "$(nproc)"
+      - name: Archive with the CUDA runtime libraries it links
+        run: |
+          out="llama-server-${REV:0:12}-linux-x86_64-cuda12.tar.gz"
+          mkdir -p pkg/bin pkg/lib
+          cp llama.cpp/build/bin/llama-server pkg/bin/
+          for l in libcudart.so.12 libcublas.so.12 libcublasLt.so.12; do cp -L "/usr/local/cuda/lib64/$l" pkg/lib/; done
+          patchelf --set-rpath '$ORIGIN/../lib' pkg/bin/llama-server
+          cp llama.cpp/LICENSE pkg/LICENSE.llama.cpp
+          ldd pkg/bin/llama-server | grep -v libcuda.so.1 | grep 'not found' && exit 1
+          pkg/bin/llama-server --version || true
+          tar -C pkg -czf "$out" .
+          echo "OUT=$out" >>"$GITHUB_ENV"
+      - name: Attach to the release and print the PIN lines
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" "$OUT" --clobber -R "$GITHUB_REPOSITORY"
+          sha="$(sha256sum "$OUT" | cut -d' ' -f1)"
+          {
+            echo "engine/llama-cpp/PIN for $TAG:"
+            echo '```'
+            echo "LLAMA_CPP_COMMIT=$REV"
+            echo "LLAMA_CPP_ASSET_URL=https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$OUT"
+            echo "LLAMA_CPP_ASSET_SHA256=$sha"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
