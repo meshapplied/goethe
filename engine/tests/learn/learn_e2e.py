@@ -527,7 +527,7 @@ def test_restart(gw: Any, key: str, failures: list[str], folder: Path) -> None:
 def main() -> int:
     """Run every check; keys and test folders are removed and the trace folder is put back at the end."""
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default="https://100.70.155.114:8080")
+    ap.add_argument("--url", default="https://100.64.1.1:8080")
     ap.add_argument("--model", required=True, action="append", help="Loaded model; give a second to test the scope.")
     args = ap.parse_args()
     gw = Gateway(args.url, args.model[0])

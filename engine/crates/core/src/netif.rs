@@ -278,12 +278,12 @@ mod tests {
     #[test]
     fn ip_json_keeps_unicast_routes_from_every_table() {
         let text = r#"[{"dst":"default","gateway":"185.92.117.1","dev":"eno1","protocol":"static","flags":[]},
-            {"dst":"100.65.66.52","dev":"tailscale0","table":"52","flags":[]},
+            {"dst":"100.64.1.2","dev":"tailscale0","table":"52","flags":[]},
             {"dst":"10.8.0.0/24","dev":"wg0","protocol":"kernel","scope":"link","prefsrc":"10.8.0.2","flags":[]},
-            {"type":"local","dst":"100.70.155.114","dev":"tailscale0","table":"local","flags":[]},
+            {"type":"local","dst":"100.64.1.1","dev":"tailscale0","table":"local","flags":[]},
             {"type":"broadcast","dst":"10.8.0.255","dev":"wg0","table":"local","flags":[]}]"#;
         let r = parse_ip_json(text).unwrap();
-        assert_eq!(r, vec![route("eno1", "default"), route("tailscale0", "100.65.66.52"), route("wg0", "10.8.0.0/24")]);
+        assert_eq!(r, vec![route("eno1", "default"), route("tailscale0", "100.64.1.2"), route("wg0", "10.8.0.0/24")]);
         assert!(parse_ip_json("not json").is_none());
     }
 
@@ -304,8 +304,8 @@ mod tests {
 
     #[test]
     fn per_peer_routes_widen_to_the_private_block() {
-        let ts = iface("tailscale0", "100.70.155.114", 32, true);
-        let routes = vec![route("tailscale0", "100.65.66.52"), route("tailscale0", "100.100.100.100"), route("tailscale0", "100.70.155.114")];
+        let ts = iface("tailscale0", "100.64.1.1", 32, true);
+        let routes = vec![route("tailscale0", "100.64.1.2"), route("tailscale0", "100.100.100.100"), route("tailscale0", "100.64.1.1")];
         assert_eq!(shown(&reach(&ts, &routes)), vec!["100.64.0.0/10"]);
         let wg = iface("wg1", "10.9.0.5", 32, true);
         assert_eq!(shown(&reach(&wg, &[route("wg1", "10.9.0.1")])), vec!["10.0.0.0/8"]);
@@ -328,7 +328,7 @@ mod tests {
             iface("eno1np0", "185.92.117.108", 24, false),
             iface("eth1", "10.0.0.5", 24, false),
             bridge,
-            iface("tailscale0", "100.70.155.114", 32, true),
+            iface("tailscale0", "100.64.1.1", 32, true),
             iface("wg0", "10.8.0.2", 24, true),
             iface("tun9", "203.0.113.9", 32, true),
         ];

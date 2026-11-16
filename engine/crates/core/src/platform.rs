@@ -532,13 +532,13 @@ mod tests {
 
     #[test]
     fn a_local_dev_platform_may_link_over_http_to_private_addresses_only() {
-        assert!(check_dev_link("http://100.70.155.114:3000/device?code=ABCD-1234").is_ok(), "Tailscale address");
+        assert!(check_dev_link("http://100.64.1.1:3000/device?code=ABCD-1234").is_ok(), "Tailscale address");
         assert!(check_dev_link("http://192.168.1.5:3000/device").is_ok() && check_dev_link("http://127.0.0.1:3000/x").is_ok());
         assert!(check_dev_link("https://goethe.sh/device?code=A").is_ok());
         assert!(check_dev_link("http://evil.example.com/device").is_err(), "a public host still needs https");
         assert!(check_dev_link("http://8.8.8.8/device").is_err());
         assert!(check_dev_link("http://user@10.0.0.1/x").is_err() && check_dev_link("ftp://10.0.0.1/x").is_err());
-        assert!(check_link("http://100.70.155.114:3000/device").is_err(), "the production check is unchanged");
+        assert!(check_link("http://100.64.1.1:3000/device").is_err(), "the production check is unchanged");
     }
 
     fn creds() -> Credentials {

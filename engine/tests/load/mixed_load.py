@@ -132,7 +132,7 @@ def summarize(name, results, out_dir: Path):
 
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default="https://100.70.155.114:8080/v1")
+    ap.add_argument("--url", default="https://100.64.1.1:8080/v1")
     ap.add_argument("--key", default=os.environ.get("GOETHE_API_KEY"))
     ap.add_argument("--model", required=True)
     ap.add_argument("--scenario", required=True,
