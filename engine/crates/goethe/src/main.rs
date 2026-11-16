@@ -341,7 +341,7 @@ enum Commands {
     Trace(TraceArgs),
     #[command(display_order = 19, about = "Link this node to the Goethe platform (optional): a browser login, or --authkey for headless machines.")]
     Login {
-        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::platform_urls), long = "platform-url", value_name = "URL", help = "Platform to link to (default: the GOETHE_PLATFORM_URL setting, else https://platform.meshapplied.com).")]
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::platform_urls), long = "platform-url", value_name = "URL", help = "Platform to link to (default: the GOETHE_PLATFORM_URL setting, else https://goethe.sh).")]
         platform_url: Option<String>,
         #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::authkey_stdin), long, value_name = "KEY", help = "Link without a browser using an auth key (msh_ak_...); - reads it from stdin.")]
         authkey: Option<String>,

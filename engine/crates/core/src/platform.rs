@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
-pub const DEFAULT_PLATFORM_URL: &str = "https://platform.meshapplied.com";
+pub const DEFAULT_PLATFORM_URL: &str = "https://goethe.sh";
 pub const URL_SETTING: &str = "GOETHE_PLATFORM_URL";
 const MAX_CREDENTIALS_BYTES: u64 = 16 * 1024;
 const MAX_STATE_BYTES: u64 = 64 * 1024;
@@ -57,7 +57,7 @@ pub struct Credentials {
 
 pub fn platform_url() -> Result<String, String> {
     // The GOETHE_PLATFORM_URL setting, else the default, after the URL policy.
-    check_url(&crate::paths::setting(URL_SETTING).unwrap_or_else(|| DEFAULT_PLATFORM_URL.to_string()))
+    check_url(&moved_platform(&crate::paths::setting(URL_SETTING).unwrap_or_else(|| DEFAULT_PLATFORM_URL.to_string())))
 }
 
 pub fn check_url(raw: &str) -> Result<String, String> {
@@ -313,10 +313,21 @@ pub fn load_credentials(home: &Path) -> Result<Option<Credentials>, String> {
     let Some(text) = read_private(&path, MAX_CREDENTIALS_BYTES, !old_only)? else {
         return Ok(None);
     };
-    let creds: Credentials = serde_json::from_str(&text)
+    let mut creds: Credentials = serde_json::from_str(&text)
         .map_err(|_| format!("{} is damaged; remove it and run goethe login again", path.display()))?;
+    creds.platform_url = moved_platform(&creds.platform_url);
     validate_credentials(&creds).map_err(|e| format!("{}: {e}; remove it and run goethe login again", path.display()))?;
     Ok(Some(creds))
+}
+
+const MOVED_PLATFORMS: [&str; 2] = ["https://platform.meshapplied.com", "https://meshapplied.com"];
+
+pub fn moved_platform(url: &str) -> String {
+    // The platform moved to goethe.sh; a link saved with an old address uses the new one.
+    match MOVED_PLATFORMS.contains(&url.trim_end_matches('/')) {
+        true => DEFAULT_PLATFORM_URL.to_string(),
+        false => url.to_string(),
+    }
 }
 
 pub fn validate_credentials(c: &Credentials) -> Result<(), String> {
@@ -534,7 +545,7 @@ mod tests {
     fn a_local_dev_platform_may_link_over_http_to_private_addresses_only() {
         assert!(check_dev_link("http://100.70.155.114:3000/device?code=ABCD-1234").is_ok(), "Tailscale address");
         assert!(check_dev_link("http://192.168.1.5:3000/device").is_ok() && check_dev_link("http://127.0.0.1:3000/x").is_ok());
-        assert!(check_dev_link("https://platform.meshapplied.com/device?code=A").is_ok());
+        assert!(check_dev_link("https://goethe.sh/device?code=A").is_ok());
         assert!(check_dev_link("http://evil.example.com/device").is_err(), "a public host still needs https");
         assert!(check_dev_link("http://8.8.8.8/device").is_err());
         assert!(check_dev_link("http://user@10.0.0.1/x").is_err() && check_dev_link("ftp://10.0.0.1/x").is_err());
@@ -552,18 +563,26 @@ mod tests {
     }
 
     #[test]
+    fn a_link_saved_with_the_old_platform_address_uses_goethe_sh() {
+        assert_eq!(moved_platform("https://platform.meshapplied.com"), "https://goethe.sh");
+        assert_eq!(moved_platform("https://meshapplied.com/"), "https://goethe.sh");
+        assert_eq!(moved_platform("https://goethe.sh"), "https://goethe.sh");
+        assert_eq!(moved_platform("http://127.0.0.1:3000"), "http://127.0.0.1:3000", "a dev platform stays");
+    }
+
+    #[test]
     fn url_policy_wants_https_except_on_loopback() {
-        assert_eq!(check_url("https://platform.meshapplied.com/").unwrap(), "https://platform.meshapplied.com");
+        assert_eq!(check_url("https://goethe.sh/").unwrap(), "https://goethe.sh");
         assert_eq!(check_url("HTTPS://p.example.com:8443").unwrap(), "https://p.example.com:8443");
         for ok in ["http://localhost:3000", "http://platform.localhost:3000", "http://127.0.0.1:9", "http://[::1]:80", "https://[2001:db8::1]"] {
             assert!(check_url(ok).is_ok(), "{ok}");
         }
         for bad in [
-            "http://platform.meshapplied.com",
+            "http://goethe.sh",
             "http://10.0.0.1",
             "http://localhost.evil.com",
             "ftp://x.example.com",
-            "platform.meshapplied.com",
+            "goethe.sh",
             "https://user:pw@x.example.com",
             "https://x.example.com/?a=1",
             "https://x.example.com/#f",

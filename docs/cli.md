@@ -449,7 +449,7 @@ Links this node to a workspace. Prints a link and a code, then waits until the l
 | Option | Description |
 |---|---|
 | `--authkey <msh_ak_...>` | Link without a browser, with an auth key from the platform; `--authkey -` reads it from stdin so it stays out of the process list |
-| `--platform-url <url>` | Another platform (default: `GOETHE_PLATFORM_URL`, else `https://platform.meshapplied.com`). Must be HTTPS; plain HTTP only for `localhost` and `*.localhost` |
+| `--platform-url <url>` | Another platform (default: `GOETHE_PLATFORM_URL`, else `https://goethe.sh`). Must be HTTPS; plain HTTP only for `localhost` and `*.localhost` |
 
 The installer takes the same flags: `curl -fsSL .../install.sh | bash -s -- --authkey msh_ak_...` (or `GOETHE_AUTHKEY=...`).
 
