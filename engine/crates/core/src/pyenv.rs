@@ -211,12 +211,17 @@ pub struct Lock(#[allow(dead_code)] fs::File);
 
 pub fn lock(home: &Path) -> Result<Lock, String> {
     // Exclusive flock on GOETHE_HOME/run/pyenv.lock for the whole install; a second goethe waits its turn.
-    let dir = home.join("run");
-    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let path = dir.join("pyenv.lock");
-    let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    lock_file(&home.join("run").join("pyenv.lock"), "Another goethe is installing into the Python environment; waiting for it to finish")
+}
+
+pub fn lock_file(path: &Path, waiting: &str) -> Result<Lock, String> {
+    // Exclusive flock on a file in run/, created when missing; says `waiting` once when another goethe holds it, then waits.
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        println!("Another goethe is installing into the Python environment; waiting for it to finish");
+        println!("{waiting}");
         if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
             return Err(format!("{}: {}", path.display(), std::io::Error::last_os_error()));
         }
