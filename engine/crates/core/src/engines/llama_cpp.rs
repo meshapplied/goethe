@@ -9,7 +9,9 @@ use std::process::Command;
 const PIN_FILE: &str = include_str!("../../../../llama-cpp/PIN");
 
 pub const PIN: &str = crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_COMMIT");
-const ASSET: (&str, &str) = (crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_ASSET_URL"), crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_ASSET_SHA256"));
+pub const TAG: &str = crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_TAG");
+const MAIN: (&str, &str) = (crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_URL"), crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_SHA256"));
+const CUDART: (&str, &str) = (crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_CUDART_URL"), crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_CUDART_SHA256"));
 
 type Get<'a> = &'a dyn Fn(&str) -> Result<Box<dyn Read>, String>;
 
@@ -26,17 +28,20 @@ pub const ENGINE: super::Engine = super::Engine {
 };
 
 pub fn server_bin(home: &Path) -> Result<PathBuf, String> {
-    // $LLAMA_SERVER, else the one under GOETHE_HOME; no PATH lookup, so the build is the one installed for goethe.
-    let p = std::env::var_os("LLAMA_SERVER").map(PathBuf::from).unwrap_or_else(|| home.join("engines/llama.cpp/bin/llama-server"));
+    // $LLAMA_SERVER, else the one under GOETHE_HOME (the flat upstream layout, or bin/ for a hand-installed build); no PATH lookup.
+    let dir = home.join("engines/llama.cpp");
+    let p = std::env::var_os("LLAMA_SERVER").map(PathBuf::from).unwrap_or_else(|| {
+        [dir.join("llama-server"), dir.join("bin/llama-server")].into_iter().find(|p| p.is_file()).unwrap_or_else(|| dir.join("llama-server"))
+    });
     if p.is_file() {
         Ok(p)
     } else {
-        Err(format!("llama-server not found at {}: build llama.cpp {PIN} there or set LLAMA_SERVER", p.display()))
+        Err(format!("llama-server not found at {}: install llama.cpp {TAG} ({PIN}) there or set LLAMA_SERVER", p.display()))
     }
 }
 
 pub fn pinned<'a>(asset: (&'a str, &'a str), arch: &str) -> Option<(&'a str, &'a str)> {
-    // The prebuilt llama-server archive of the pin: Linux x86_64 only, and only once a release carries it.
+    // The upstream release archive of the pin: Linux x86_64 only, with an https URL and a sha256.
     let (url, sha) = asset;
     (arch == "x86_64" && url.starts_with("https://") && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())).then_some(asset)
 }
@@ -46,18 +51,18 @@ pub fn server_ready(home: &Path) -> Result<(), String> {
     match server_bin(home) {
         Ok(_) => Ok(()),
         Err(why) if std::env::var_os("LLAMA_SERVER").is_some() => Err(why),
-        Err(why) => pinned(ASSET, &crate::update::normalize_arch()).map(|_| ()).ok_or(why),
+        Err(why) => pinned(MAIN, &crate::update::normalize_arch()).map(|_| ()).ok_or(why),
     }
 }
 
 pub fn ensure_server(home: &Path) -> Result<PathBuf, String> {
-    // The installed llama-server, else the pinned prebuilt one downloaded once; a set LLAMA_SERVER is never replaced.
+    // The installed llama-server, else the pinned upstream release downloaded once; a set LLAMA_SERVER is never replaced.
     match server_bin(home) {
         Ok(p) => Ok(p),
         Err(why) if std::env::var_os("LLAMA_SERVER").is_some() => Err(why),
-        Err(why) => match pinned(ASSET, &crate::update::normalize_arch()) {
-            Some(asset) => provision(home, asset, &http_get),
-            None => Err(why),
+        Err(why) => match (pinned(MAIN, &crate::update::normalize_arch()), pinned(CUDART, &crate::update::normalize_arch())) {
+            (Some(main), Some(cudart)) => provision(home, main, cudart, &http_get, &cuda_libs_missing),
+            _ => Err(why),
         },
     }
 }
@@ -68,33 +73,53 @@ fn http_get(url: &str) -> Result<Box<dyn Read>, String> {
     Ok(Box::new(r.into_reader()))
 }
 
-fn provision(home: &Path, (url, sha): (&str, &str), get: Get) -> Result<PathBuf, String> {
-    // One line, then the archive at its pinned sha256, unpacked aside and moved into engines/llama.cpp: a failure leaves nothing.
-    let dest = home.join("engines/llama.cpp");
-    let part = home.join("engines/.llama.cpp.part");
-    println!("llama-server is not installed: downloading llama.cpp {} (CUDA, once) from {url}", &PIN[..12]);
-    let _ = std::fs::remove_dir_all(&part);
-    let done = unpack(&part, &dest, url, sha, get);
-    let _ = std::fs::remove_dir_all(&part);
-    done.map(|()| dest.join("bin/llama-server"))
+fn cuda_libs_missing(dir: &Path) -> bool {
+    // ldd of the CUDA backend as unpacked (RUNPATH $ORIGIN included): one of the three CUDA 12 runtime libraries it needs is not found on this host.
+    let Ok(out) = Command::new("ldd").arg(dir.join("libggml-cuda.so")).output() else { return false };
+    let text = String::from_utf8_lossy(&out.stdout);
+    ["libcudart.so.12", "libcublas.so.12", "libcublasLt.so.12"].iter().any(|lib| text.lines().any(|l| l.contains(lib) && l.contains("not found")))
 }
 
-fn unpack(part: &Path, dest: &Path, url: &str, sha: &str, get: Get) -> Result<(), String> {
-    let (tgz, x) = (part.join("llama.cpp.tar.gz"), part.join("x"));
-    std::fs::create_dir_all(&x).map_err(|e| format!("{}: {e}", x.display()))?;
-    let offline = |e: String| {
-        format!("cannot download llama-server from {url}: {e}; nothing was installed. Build llama.cpp {PIN} into {}/bin or set LLAMA_SERVER", dest.display())
-    };
+fn provision(home: &Path, main: (&str, &str), cudart: (&str, &str), get: Get, missing: &dyn Fn(&Path) -> bool) -> Result<PathBuf, String> {
+    // The release archive at its pinned sha256, plus the CUDA runtime archive only when this host lacks the libraries, unpacked aside and moved flat into engines/llama.cpp: a failure leaves nothing.
+    let dest = home.join("engines/llama.cpp");
+    let part = home.join("engines/.llama.cpp.part");
+    println!("llama-server is not installed: downloading llama.cpp {TAG} (CUDA build, once) from {}", main.0);
+    let _ = std::fs::remove_dir_all(&part);
+    let done = unpack(&part, &dest, main, cudart, get, missing);
+    let _ = std::fs::remove_dir_all(&part);
+    done.map(|()| dest.join("llama-server"))
+}
+
+fn fetch_into(part: &Path, x: &Path, (url, sha): (&str, &str), get: Get, name: &str) -> Result<(), String> {
+    // One archive downloaded, checked against its pinned sha256 and unpacked into x without its top folder.
+    let offline = |e: String| format!("cannot download {name} from {url}: {e}; nothing was installed. Install llama.cpp {TAG} into engines/llama.cpp or set LLAMA_SERVER");
+    let tgz = part.join(format!("{name}.tar.gz"));
     let mut src = get(url).map_err(offline)?;
     let mut f = std::fs::File::create(&tgz).map_err(|e| format!("{}: {e}", tgz.display()))?;
     std::io::copy(&mut src, &mut f).map_err(|e| offline(e.to_string()))?;
     let got = crate::update::sha256_file(&tgz)?;
     if !got.eq_ignore_ascii_case(sha) {
-        return Err(format!("llama-server download from {url} has sha256 {got}, the pin says {sha}: refused, nothing was installed"));
+        return Err(format!("{name} download from {url} has sha256 {got}, the pin says {sha}: refused, nothing was installed"));
     }
-    let ok = Command::new("tar").arg("-xzf").arg(&tgz).arg("-C").arg(&x).arg("--no-same-owner").status().map_err(|e| format!("tar: {e}"))?.success();
-    if !ok || !x.join("bin/llama-server").is_file() {
-        return Err(format!("{url}: not a llama-server archive (no bin/llama-server): refused, nothing was installed"));
+    let ok = Command::new("tar").arg("-xzf").arg(&tgz).arg("-C").arg(x).arg("--strip-components=1").arg("--no-same-owner").status().map_err(|e| format!("tar: {e}"))?.success();
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("{url}: not a tar archive: refused, nothing was installed"))
+    }
+}
+
+fn unpack(part: &Path, dest: &Path, main: (&str, &str), cudart: (&str, &str), get: Get, missing: &dyn Fn(&Path) -> bool) -> Result<(), String> {
+    let x = part.join("x");
+    std::fs::create_dir_all(&x).map_err(|e| format!("{}: {e}", x.display()))?;
+    fetch_into(part, &x, main, get, "llama-server")?;
+    if !x.join("llama-server").is_file() {
+        return Err(format!("{}: not a llama-server archive (no llama-server): refused, nothing was installed", main.0));
+    }
+    if missing(&x) {
+        println!("the CUDA 12 runtime libraries are not on this host: downloading them beside llama-server (once) from {}", cudart.0);
+        fetch_into(part, &x, cudart, get, "cudart")?;
     }
     std::fs::create_dir_all(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
     for e in std::fs::read_dir(&x).map_err(|e| e.to_string())?.flatten() {
@@ -351,22 +376,25 @@ mod tests {
         }
     }
 
-    fn archive(files: &[&str]) -> Vec<u8> {
-        // A tar.gz holding the given files (bin/llama-server executable), as the release workflow packs it.
+    fn archive(top: &str, files: &[&str]) -> Vec<u8> {
+        // A tar.gz holding the given files (executable scripts) under one top folder, as upstream's release archives are.
         let d = tempfile::tempdir().unwrap();
         for f in files {
-            let p = d.path().join("in").join(f);
+            let p = d.path().join("in").join(top).join(f);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(&p, b"#!/bin/sh\n").unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let out = d.path().join("a.tar.gz");
-        assert!(Command::new("tar").arg("-czf").arg(&out).arg("-C").arg(d.path().join("in")).arg(".").status().unwrap().success());
+        assert!(Command::new("tar").arg("-czf").arg(&out).arg("-C").arg(d.path().join("in")).arg(top).status().unwrap().success());
         std::fs::read(out).unwrap()
     }
 
-    fn serve(bytes: Vec<u8>) -> impl Fn(&str) -> Result<Box<dyn Read>, String> {
-        move |_: &str| Ok(Box::new(std::io::Cursor::new(bytes.clone())) as Box<dyn Read>)
+    fn serve(parts: Vec<(&'static str, Vec<u8>)>) -> impl Fn(&str) -> Result<Box<dyn Read>, String> {
+        move |url: &str| match parts.iter().find(|(u, _)| *u == url) {
+            Some((_, bytes)) => Ok(Box::new(std::io::Cursor::new(bytes.clone())) as Box<dyn Read>),
+            None => Err(format!("unexpected download {url}")),
+        }
     }
 
     fn sha(bytes: &[u8]) -> String {
@@ -374,46 +402,78 @@ mod tests {
         format!("{:x}", sha2::Sha256::digest(bytes))
     }
 
-    const URL: &str = "https://example.invalid/llama-server.tar.gz";
+    const URL: &str = "https://example.invalid/llama-b1-bin.tar.gz";
+    const CUDA_URL: &str = "https://example.invalid/cudart-llama-b1-bin.tar.gz";
 
     #[test]
-    fn the_pinned_archive_is_verified_unpacked_and_moved_in_whole() {
+    fn the_release_archive_is_verified_and_unpacked_flat_without_cuda_libraries_when_the_host_has_them() {
         let home = tempfile::tempdir().unwrap();
-        let a = archive(&["bin/llama-server", "lib/libcudart.so.12"]);
-        let p = provision(home.path(), (URL, &sha(&a)), &serve(a.clone())).unwrap();
-        assert_eq!(p, home.path().join("engines/llama.cpp/bin/llama-server"));
-        assert!(p.is_file() && home.path().join("engines/llama.cpp/lib/libcudart.so.12").is_file());
+        let a = archive("llama-b1", &["llama-server", "libggml-cuda.so"]);
+        let get = serve(vec![(URL, a.clone())]);
+        let p = provision(home.path(), (URL, &sha(&a)), (CUDA_URL, &"0".repeat(64)), &get, &|_| false).unwrap();
+        assert_eq!(p, home.path().join("engines/llama.cpp/llama-server"));
+        assert!(home.path().join("engines/llama.cpp/libggml-cuda.so").is_file() && !home.path().join("engines/llama.cpp/llama-b1").exists());
         assert!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o111 != 0, "the server stays executable");
         assert!(!home.path().join("engines/.llama.cpp.part").exists());
         if std::env::var_os("LLAMA_SERVER").is_none() {
-            assert_eq!(ensure_server(home.path()).unwrap(), p, "installed: never downloaded again");
+            assert_eq!(server_bin(home.path()).unwrap(), p, "installed: found without a download");
+            assert_eq!(ensure_server(home.path()).unwrap(), p);
         }
+    }
+
+    #[test]
+    fn the_cuda_runtime_archive_is_fetched_only_when_the_host_lacks_the_libraries() {
+        let home = tempfile::tempdir().unwrap();
+        let a = archive("llama-b1", &["llama-server", "libggml-cuda.so"]);
+        let c = archive("cudart-llama-b1", &["libcudart.so.12", "libcublas.so.12", "libcublasLt.so.12"]);
+        let get = serve(vec![(URL, a.clone()), (CUDA_URL, c.clone())]);
+        let p = provision(home.path(), (URL, &sha(&a)), (CUDA_URL, &sha(&c)), &get, &|_| true).unwrap();
+        let dir = home.path().join("engines/llama.cpp");
+        assert!(p.is_file() && ["libcudart.so.12", "libcublas.so.12", "libcublasLt.so.12"].iter().all(|l| dir.join(l).is_file()), "beside llama-server");
+        let other = tempfile::tempdir().unwrap();
+        let bad = provision(other.path(), (URL, &sha(&a)), (CUDA_URL, &"0".repeat(64)), &get, &|_| true).unwrap_err();
+        assert!(bad.contains("cudart download") && bad.contains("refused"), "{bad}");
+        assert!(!other.path().join("engines/llama.cpp").exists(), "a bad runtime archive installs nothing, not even the server");
     }
 
     #[test]
     fn a_wrong_hash_a_refused_download_or_a_foreign_archive_install_nothing() {
         let home = tempfile::tempdir().unwrap();
-        let a = archive(&["bin/llama-server"]);
-        let err = provision(home.path(), (URL, &"0".repeat(64)), &serve(a)).unwrap_err();
+        let a = archive("llama-b1", &["llama-server"]);
+        let get = serve(vec![(URL, a)]);
+        let err = provision(home.path(), (URL, &"0".repeat(64)), (CUDA_URL, ""), &get, &|_| false).unwrap_err();
         assert!(err.contains("sha256") && err.contains("refused"), "{err}");
         let offline = |_: &str| -> Result<Box<dyn Read>, String> { Err("connection refused".into()) };
-        let err = provision(home.path(), (URL, &"0".repeat(64)), &offline).unwrap_err();
+        let err = provision(home.path(), (URL, &"0".repeat(64)), (CUDA_URL, ""), &offline, &|_| false).unwrap_err();
         assert!(err.contains("cannot download llama-server") && err.contains("connection refused") && err.contains("LLAMA_SERVER"), "{err}");
-        let other = archive(&["bin/something-else"]);
-        let err = provision(home.path(), (URL, &sha(&other)), &serve(other)).unwrap_err();
-        assert!(err.contains("no bin/llama-server"), "{err}");
+        let other = archive("llama-b1", &["something-else"]);
+        let get = serve(vec![(URL, other.clone())]);
+        let err = provision(home.path(), (URL, &sha(&other)), (CUDA_URL, ""), &get, &|_| false).unwrap_err();
+        assert!(err.contains("no llama-server"), "{err}");
         assert!(!home.path().join("engines/llama.cpp").exists() && !home.path().join("engines/.llama.cpp.part").exists());
     }
 
     #[test]
-    fn only_a_released_x86_64_archive_is_pinned() {
+    fn a_hand_installed_build_under_bin_is_still_found() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("engines/llama.cpp/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("llama-server"), b"").unwrap();
+        if std::env::var_os("LLAMA_SERVER").is_none() {
+            assert_eq!(server_bin(home.path()).unwrap(), bin.join("llama-server"));
+        }
+    }
+
+    #[test]
+    fn only_a_https_x86_64_archive_with_a_sha256_is_pinned_and_the_pin_names_the_release() {
         let sha = "ab".repeat(32);
         assert_eq!(pinned((URL, &sha), "x86_64"), Some((URL, sha.as_str())));
-        assert_eq!(pinned(("", ""), "x86_64"), None, "no asset yet: the clear error and LLAMA_SERVER stay");
+        assert_eq!(pinned(("", ""), "x86_64"), None, "no asset: the clear error and LLAMA_SERVER stay");
         assert_eq!(pinned((URL, &sha), "aarch64"), None);
         assert_eq!(pinned((URL, "abc"), "x86_64"), None);
         assert_eq!(pinned(("http://plain.invalid/a.tar.gz", &sha), "x86_64"), None);
         assert_eq!(PIN.len(), 40, "the commit comes from llama-cpp/PIN");
+        assert!(pinned(MAIN, "x86_64").is_some() && pinned(CUDART, "x86_64").is_some() && MAIN.0.contains(TAG) && CUDART.0.contains(TAG));
     }
 
     #[test]
