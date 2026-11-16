@@ -29,6 +29,7 @@ permissions:
 jobs:
   guard:
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     permissions:
       contents: read
       actions: read
@@ -83,6 +84,7 @@ jobs:
     needs: [guard, ci]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - name: Patched SGLang source at the pinned commit
@@ -132,6 +134,7 @@ jobs:
     needs: [guard, ci]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - name: Portable aarch64 binaries and uv
@@ -163,6 +166,7 @@ jobs:
     needs: [guard, build, build-aarch64]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -225,6 +229,7 @@ jobs:
     needs: merge
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -247,6 +252,7 @@ jobs:
     needs: [guard, merge, install-smoke]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     environment: release
     steps:
       - uses: actions/download-artifact@v4
@@ -268,6 +274,7 @@ jobs:
     needs: [guard, merge, publish]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}

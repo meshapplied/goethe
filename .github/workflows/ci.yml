@@ -1,9 +1,9 @@
 name: ci
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   workflow_call:
   workflow_dispatch:
 
@@ -14,7 +14,9 @@ concurrency:
 jobs:
   python:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.11", "3.13"]
     steps:
@@ -26,13 +28,15 @@ jobs:
 
   lint:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - run: pipx run ruff check goethe tests
-      - run: shellcheck -S warning install.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
+      - run: shellcheck -S warning install.sh engine/tests/accept.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
 
   attribution:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,6 +67,7 @@ jobs:
 
   ninfer-patch:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: patch applies to the pinned NInfer commit
@@ -75,6 +80,7 @@ jobs:
 
   engine:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: engine
@@ -103,7 +109,7 @@ jobs:
 
   package-smoke:
     runs-on: ubuntu-24.04
-    needs: engine
+    timeout-minutes: 30
     if: ${{ github.event_name != 'workflow_call' }}
     steps:
       - uses: actions/checkout@v4
