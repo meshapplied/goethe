@@ -15,16 +15,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let (model, input) = route(&args, &snap.serving_models())?;
     let r = snap.routes(&model).iter().find(|r| !r.draining).ok_or_else(|| format!("{model} is not loaded: goethe load {model}"))?;
     let api = Api { base: format!("http://127.0.0.1:{}/v1", r.port), key: r.engine_key.clone() };
-    let kind = kind_of(&api.call("GET", "/models", None)?, &model, card_kind(&crate::paths::model_dir(&goethe_home(), &model)));
+    let (card_kind, llama) = card_task(&crate::paths::model_dir(&goethe_home(), &model));
+    let kind = kind_of(&api.call("GET", "/models", None)?, &model, card_kind);
     if let Some(e) = mismatch(&model, &kind, input.as_deref()) {
         return Err(e);
     }
     match (kind.as_str(), input) {
         ("embedding", Some(text)) => api.embed(&model, &text).map(|line| println!("{line}")),
-        ("speech", Some(path)) => api.transcribe(&model, std::path::Path::new(&path)),
+        ("speech", Some(path)) => api.transcribe(&model, std::path::Path::new(&path), llama),
         ("speech", None) => {
             let wav = record()?;
-            let done = api.transcribe(&model, &wav);
+            let done = api.transcribe(&model, &wav, llama);
             let _ = std::fs::remove_file(&wav);
             done
         }
@@ -80,11 +81,16 @@ pub fn mismatch(model: &str, kind: &str, input: Option<&str>) -> Option<String> 
     (!ok).then(|| format!("{model} is {a} model: give it {want}"))
 }
 
-fn card_kind(dir: &std::path::Path) -> &'static str {
-    // The kind a card says when its engine names none: llama.cpp's task embed is an embedding model, else text.
-    let card = std::fs::read_to_string(dir.join(crate::install::CARD_FILE)).unwrap_or_default();
-    let task = card.parse::<toml::Table>().ok().and_then(|c| c.get("task").and_then(|t| t.as_str().map(String::from)));
-    if task.as_deref() == Some("embed") { "embedding" } else { "text" }
+fn card_task(dir: &std::path::Path) -> (&'static str, bool) {
+    // The kind a card says when its engine names none (llama.cpp: task embed is an embedding model, task transcribe a speech model, else text), and whether llama.cpp serves it.
+    let card = std::fs::read_to_string(dir.join(crate::install::CARD_FILE)).unwrap_or_default().parse::<toml::Table>().unwrap_or_default();
+    let task = card.get("task").and_then(|t| t.as_str()).unwrap_or_default();
+    let kind = match task {
+        "embed" => "embedding",
+        "transcribe" => "speech",
+        _ => "text",
+    };
+    (kind, card.get("runtime").and_then(|r| r.as_str()) == Some("llama.cpp"))
 }
 
 pub fn kind_of(models: &Value, model: &str, card: &str) -> String {
@@ -124,9 +130,16 @@ impl Api {
         Ok(format!("dims={} norm={:.4} [{}, ...]", e.len(), e.iter().map(|x| x * x).sum::<f64>().sqrt(), head.join(", ")))
     }
 
-    fn transcribe(&self, model: &str, path: &std::path::Path) -> Result<(), String> {
-        // OpenAI's multipart upload: the model field and the file.
+    fn transcribe(&self, model: &str, path: &std::path::Path, chat: bool) -> Result<(), String> {
+        // goethe-engine: OpenAI's multipart upload (the model field and the file); llama.cpp: a chat turn with the audio as input_audio.
         let audio = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if chat {
+            let format = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            let part = json!([{"type": "text", "text": "Transcribe this audio."}, {"type": "input_audio", "input_audio": {"data": base64(&audio), "format": format}}]);
+            let body = json!({"model": model, "messages": [{"role": "user", "content": part}], "stream": false});
+            println!("{}", self.call("POST", "/chat/completions", Some(body))?["choices"][0]["message"]["content"].as_str().unwrap_or_default().trim());
+            return Ok(());
+        }
         let (b, name) = ("goethe-run-boundary", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
         let mut body = format!("--{b}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").into_bytes();
         body.extend(audio);
@@ -152,6 +165,19 @@ impl Api {
         println!();
         Ok(out)
     }
+}
+
+fn base64(bytes: &[u8]) -> String {
+    // Standard base64 with padding.
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            out.push(if i <= c.len() { T[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
 }
 
 fn record() -> Result<std::path::PathBuf, String> {
@@ -242,11 +268,51 @@ mod tests {
             }
         });
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(card_kind(dir.path()), "text");
+        assert_eq!(card_task(dir.path()), ("text", false));
         std::fs::write(dir.path().join(crate::install::CARD_FILE), "runtime = \"llama.cpp\"\ntask = \"embed\"\n").unwrap();
         let api = Api { base: format!("http://127.0.0.1:{port}/v1"), key: Some("k".into()) };
-        assert_eq!(kind_of(&api.call("GET", "/models", None).unwrap(), "org/e", card_kind(dir.path())), "embedding");
+        assert_eq!(kind_of(&api.call("GET", "/models", None).unwrap(), "org/e", card_task(dir.path()).0), "embedding");
         assert_eq!(api.embed("org/e", "hello world").unwrap(), "dims=3 norm=1.0000 [0.6000, 0.8000, 0.0000, ...]");
+    }
+
+    #[test]
+    fn base64_matches_the_standard_vectors() {
+        for (raw, enc) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")] {
+            assert_eq!(base64(raw.as_bytes()), enc);
+        }
+    }
+
+    #[test]
+    fn a_llama_cpp_transcribe_card_is_a_speech_model_that_takes_audio_as_a_chat_turn() {
+        // A fake llama-server: the request must be a non-streaming chat turn holding the clip as base64 input_audio.
+        let srv = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = srv.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut stream = srv.accept().unwrap().0;
+            let mut req = BufReader::new(stream.try_clone().unwrap());
+            let mut len = 0;
+            for line in (&mut req).lines().map_while(Result::ok).take_while(|l| !l.is_empty()) {
+                len = line.to_ascii_lowercase().strip_prefix("content-length:").map_or(len, |n| n.trim().parse().unwrap_or(0));
+            }
+            let mut body = vec![0u8; len];
+            std::io::Read::read_exact(&mut req, &mut body).unwrap();
+            tx.send(String::from_utf8(body).unwrap()).unwrap();
+            let out = r#"{"choices": [{"message": {"content": " and so my fellow Americans "}}]}"#;
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}", out.len());
+        });
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(crate::install::CARD_FILE), "runtime = \"llama.cpp\"\ntask = \"transcribe\"\n").unwrap();
+        assert_eq!(card_task(dir.path()), ("speech", true));
+        let wav = dir.path().join("a.wav");
+        std::fs::write(&wav, b"RIFFfoo").unwrap();
+        assert_eq!(mismatch("m", "speech", Some("plain text")).unwrap(), "m is a speech model: give it an audio file");
+        let api = Api { base: format!("http://127.0.0.1:{port}/v1"), key: Some("k".into()) };
+        api.transcribe("org/t", &wav, true).unwrap();
+        let sent: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        let audio = &sent["messages"][0]["content"][1];
+        assert_eq!((sent["stream"].as_bool(), audio["type"].as_str(), audio["input_audio"]["format"].as_str()), (Some(false), Some("input_audio"), Some("wav")));
+        assert_eq!(audio["input_audio"]["data"], base64(b"RIFFfoo"));
     }
 
     #[test]

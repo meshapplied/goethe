@@ -201,6 +201,16 @@ pub fn is_embedding(gguf: &Path) -> bool {
     header(gguf).is_ok_and(|m| m.iter().any(|(k, v)| k.ends_with(".pooling_type") && v.0.first().is_some_and(|p| (1..=3).contains(p))))
 }
 
+pub fn mmproj_in(dir: &Path) -> Option<PathBuf> {
+    // The multimodal projector GGUF beside the model (named mmproj-X or X.mmproj-f16), the first by name.
+    gguf_paths(dir).into_iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("mmproj")))
+}
+
+pub fn has_audio_encoder(mmproj: &Path) -> bool {
+    // A projector whose header says it carries an audio encoder (clip.has_audio_encoder, or any clip.audio.* key): the model transcribes speech.
+    header(mmproj).is_ok_and(|m| m.iter().any(|(k, v)| (k == "clip.has_audio_encoder" && v.0.first() == Some(&1)) || k.starts_with("clip.audio.")))
+}
+
 pub fn facts(dir: &Path, gguf: &Path) -> Result<crate::model_facts::ModelFacts, String> {
     // Shape from the GGUF header; every layer's KV counted at full context (sliding windows overcounted, never under).
     let m = header(gguf).map_err(|e| format!("{}: {e}", gguf.display()))?;
@@ -300,6 +310,9 @@ fn llama_command(spec: &EngineSpec) -> Result<Command, String> {
         .args(["-ngl", "all", "--no-webui"]);
     if spec.card.get("task").and_then(|v| v.as_str()) == Some("embed") {
         cmd.arg("--embeddings");
+    }
+    if let Some(m) = spec.card.get("mmproj").and_then(|v| v.as_str()) {
+        cmd.arg("--mmproj").arg(spec.model_path.join(m));
     }
     cmd.env_clear()
         .envs(kept_env())
@@ -486,6 +499,29 @@ mod tests {
         };
         assert!(!is_embedding(&d.path().join("g.gguf")));
         assert_eq!([0, 1, 2, 3, 4].map(|p| is(&format!("p{p}.gguf"), &[("llama.pooling_type", p)])), [false, true, true, true, false]);
+    }
+
+    #[test]
+    fn a_projector_with_an_audio_encoder_marks_a_speech_model() {
+        let d = tempfile::tempdir().unwrap();
+        write_test_gguf(&d.path().join("m.Q4_K_M.gguf"));
+        assert_eq!(mmproj_in(d.path()), None);
+        write_test_gguf_with(&d.path().join("m.mmproj-f16.gguf"), &[("clip.vision.image_size", 448)]);
+        let vision = mmproj_in(d.path()).unwrap();
+        assert!(vision.ends_with("m.mmproj-f16.gguf") && !has_audio_encoder(&vision));
+        write_test_gguf_with(&vision, &[("clip.has_audio_encoder", 1)]);
+        assert!(has_audio_encoder(&vision));
+        write_test_gguf_with(&vision, &[("clip.has_audio_encoder", 0)]);
+        assert!(!has_audio_encoder(&vision));
+        write_test_gguf_with(&vision, &[("clip.audio.num_mel_bins", 128)]);
+        assert!(has_audio_encoder(&vision));
+        std::fs::create_dir_all(d.path().join("engines/llama.cpp")).unwrap();
+        std::fs::write(d.path().join("engines/llama.cpp/llama-server"), b"").unwrap();
+        let card: toml::Value = toml::from_str("runtime = \"llama.cpp\"\ngguf = \"m.Q4_K_M.gguf\"\nmmproj = \"m.mmproj-f16.gguf\"").unwrap();
+        let c = command(&test_spec(d.path(), &card, &[0])).unwrap();
+        let a: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let at = a.iter().position(|x| x == "--mmproj").expect("--mmproj");
+        assert!(a[at + 1].ends_with("m.mmproj-f16.gguf"));
     }
 
     #[test]
