@@ -175,6 +175,7 @@ pub struct Entry {
     pub size: u64,
     pub sig: Value,
     pub aux: Value,
+    pub drafter: Value,
     pub min_engine: (u64, u64, u64),
 }
 
@@ -309,6 +310,7 @@ pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> 
                 size: e["size"].as_u64().unwrap_or(0),
                 sig: e["sig"].clone(),
                 aux: e["aux"].clone(),
+                drafter: e["drafter"].clone(),
                 min_engine,
             });
         }
@@ -340,6 +342,28 @@ pub fn aux(e: &Entry) -> Option<(String, Option<String>, Vec<String>)> {
     let repo = e.aux["repo"].as_str().filter(|r| crate::paths::validate_model_id(r).is_ok())?;
     let files: Vec<String> = e.aux["files"].as_array()?.iter().filter_map(|f| f.as_str()).filter(|f| safe_name(f)).map(String::from).collect();
     (!files.is_empty()).then(|| (repo.to_string(), e.aux["revision"].as_str().map(String::from), files))
+}
+
+pub struct Drafter {
+    pub name: String,
+    pub repo: String,
+    pub revision: Option<String>,
+    pub files: Vec<(String, u64, String)>,
+}
+
+pub fn drafter(e: &Entry) -> Option<Drafter> {
+    // The speculative-decoding drafter the signed entry names: aux's rules, plus each file's bytes and sha256; any bad field drops it whole.
+    let d = &e.drafter;
+    let repo = d["repo"].as_str().filter(|r| crate::paths::validate_model_id(r).is_ok())?.to_string();
+    let files = d["files"].as_array()?.iter().map(|f| Some((f["name"].as_str().filter(|n| safe_name(n))?.to_string(), f["bytes"].as_u64()?, f["sha256"].as_str().filter(|h| is_sha256(h))?.to_string())));
+    let files: Vec<(String, u64, String)> = files.collect::<Option<_>>().filter(|f: &Vec<_>| !f.is_empty())?;
+    Some(Drafter { name: d["name"].as_str().unwrap_or("drafter").to_string(), repo, revision: d["revision"].as_str().map(String::from), files })
+}
+
+fn sha256_file(p: &Path) -> Option<String> {
+    let mut h = Sha256::new();
+    std::io::copy(&mut std::fs::File::open(p).ok()?, &mut h).ok()?;
+    Some(format!("{:x}", h.finalize()))
 }
 
 pub fn safe_name(f: &str) -> bool {
@@ -559,7 +583,18 @@ pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Bro
         }
         f.sync_all().map_err(|err| undo(err.to_string()))?;
     }
-    let ok = verify().map_err(undo)?.1;
+    let mut ok = verify().map_err(undo)?.1;
+    // The drafter goethe downloaded into drafter/, listed only when every file has its signed sha256: it can only add speed.
+    if let Some(d) = drafter(e).filter(|d| dir.join("drafter").join(&d.files[0].0).is_file()) {
+        match d.files.iter().all(|(n, _, h)| sha256_file(&dir.join("drafter").join(n)).as_deref() == Some(h.as_str())) {
+            true => {
+                let mut v: Value = serde_json::from_str(&ok).map_err(|err| undo(format!("pack verify: {err}")))?;
+                v["drafter"] = d.files.iter().map(|(n, ..)| format!("drafter/{n}")).collect();
+                ok = v.to_string();
+            }
+            false => eprintln!("note: the {} drafter files differ from the signed index; speculative decoding off", d.name),
+        }
+    }
     std::fs::write(&pv, ok).map_err(|err| undo(err.to_string()))?;
     let _ = std::fs::remove_file(&pre);
     std::fs::write(serial_path(home), format!("{}\n", plan.serial)).map_err(|err| undo(err.to_string()))?;
@@ -614,7 +649,8 @@ mod tests {
             "model": {"hf_repo": "org/M-GGUF", "revision": "abc", "format": "gguf", "structure": []},
             "arch": "sm_120a", "abi_major": 3, "runtime": {"kind": "gc-c", "version": 1}, "min_engine": "0.2.0", "tier": "base",
             "file": "m.gcpack", "manifest_sha256": manifest_sha, "size": p.bytes.len(), "sig": {"keyid": "k"},
-            "aux": {"repo": "org/M", "revision": "def", "files": ["config.json", "tokenizer.json", "../x"]}}]})
+            "aux": {"repo": "org/M", "revision": "def", "files": ["config.json", "tokenizer.json", "../x"]},
+            "drafter": {"name": "DFlash2", "repo": "org/D", "revision": "r", "files": [{"name": "d.gguf", "bytes": 3, "sha256": sha(b"abc")}]}}]})
         .to_string()
         .into_bytes()
     }
@@ -735,8 +771,18 @@ mod tests {
         let b = fake();
         let run = engine(&b.pack, &[]);
         let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &run).unwrap().unwrap();
+        let d = drafter(&p.entry).unwrap();
+        assert_eq!((d.name.as_str(), d.repo.as_str(), d.files[0].1), ("DFlash2", "org/D", 3));
+        std::fs::create_dir(dir.path().join("drafter")).unwrap();
+        std::fs::write(dir.path().join("drafter/d.gguf"), b"abc").unwrap();
         b.ranges.borrow_mut().clear();
         assert_eq!(finish(home.path(), dir.path(), "sm_120a", &p, &b, &run).unwrap(), "q8");
+        let v: Value = serde_json::from_slice(&std::fs::read(dir.path().join(PACK_VERIFY)).unwrap()).unwrap();
+        assert_eq!(v["drafter"], serde_json::json!(["drafter/d.gguf"]), "a drafter with its signed sha256 is listed");
+        std::fs::write(dir.path().join("drafter/d.gguf"), b"abd").unwrap();
+        finish(home.path(), dir.path(), "sm_120a", &p, &b, &run).unwrap();
+        let v: Value = serde_json::from_slice(&std::fs::read(dir.path().join(PACK_VERIFY)).unwrap()).unwrap();
+        assert!(v["drafter"].is_null(), "a drafter that differs from the index is not listed");
         assert_eq!(*b.ranges.borrow(), vec![(b.pack.blob_off, BLOB.len() as u64)]);
         let got = std::fs::read(dir.path().join(PACK_FILE)).unwrap();
         assert_eq!(got.len(), b.pack.bytes.len());

@@ -250,11 +250,32 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 None => return Err(format!("{}: the model files its kernel pack was built for are not in the repository", choice.offer.hf_repo)),
             };
             fits(&files)?;
-            confirm(opts, &format!("{} ({}, {:.1} GB) with optimised kernels for {}", opts.model_id, choice.offer.format, bytes(&files) as f64 / GIB, choice.offer.arch))?;
+            // A drafter the entry names comes along when target and drafter fit together; else the plan line says what it lacks.
+            let draft = crate::packs::drafter(&plan.entry);
+            let dgb = draft.as_ref().map_or(0, |d| d.files.iter().map(|f| f.1).sum::<u64>());
+            let both = bytes(&files) + dgb;
+            let short = match (hf::disk_preflight(home, both), vram_preflight(home, both)) {
+                (Err(_), _) => Some("disk"),
+                (_, Err(_)) => Some("VRAM"),
+                _ => None,
+            };
+            let spec = match (&draft, short) {
+                (None, _) => String::new(),
+                (Some(d), None) => format!(", speculative decoding {} (+{:.1} GB)", d.name, dgb as f64 / GIB),
+                (Some(d), Some(what)) => format!(", speculative decoding off: {} needs {:.1} GB more {what}", d.name, dgb as f64 / GIB),
+            };
+            confirm(opts, &format!("{} ({}, {:.1} GB) with optimised kernels for {}{spec}", opts.model_id, choice.offer.format, bytes(&files) as f64 / GIB, choice.offer.arch))?;
             let pack_dl = DownloadOpts { revision: Some(rev), force: opts.force, no_verify: opts.no_verify, only: Some(files.clone()) };
             hf::ensure_model(home, &choice.offer.hf_repo, &card_dir, &pack_dl)?;
             if let Some((repo, revision, only)) = crate::packs::aux(&plan.entry) {
                 hf::ensure_model(home, &repo, &card_dir, &DownloadOpts { revision, force: opts.force, no_verify: opts.no_verify, only: Some(only) })?;
+            }
+            if let Some(d) = draft.filter(|_| short.is_none()) {
+                let only = Some(d.files.iter().map(|f| f.0.clone()).collect());
+                let dl = DownloadOpts { revision: d.revision, force: opts.force, no_verify: opts.no_verify, only };
+                if let Err(e) = hf::ensure_model(home, &d.repo, &card_dir.join("drafter"), &dl) {
+                    eprintln!("note: speculative decoding off: {e}");
+                }
             }
             gguf_metadata(home, &card_dir, &choice.offer.format, &files)?;
             choice.plan = Some(plan);
