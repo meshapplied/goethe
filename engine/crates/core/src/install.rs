@@ -429,12 +429,14 @@ fn config_for_pack(home: &Path, opts: &InstallOpts, dir: &Path, c: &PackChoice, 
     }
 }
 
+type Looked = Result<Option<(String, crate::packs::Plan)>, String>;
+
 struct OfferDeps<'a> {
     creds: Result<Option<crate::platform::Credentials>, String>,
     archs: Vec<String>,
     index: &'a dyn Fn() -> Option<Vec<u8>>,
     ensure_engine: &'a dyn Fn() -> Result<(), String>,
-    by_structure: &'a dyn Fn(&crate::platform::Credentials) -> Result<Option<(String, crate::packs::Plan)>, String>,
+    by_structure: &'a dyn Fn(&crate::platform::Credentials) -> Looked,
 }
 
 fn structure_offer(home: &Path, opts: &InstallOpts, dir: &Path) -> Result<Option<PackChoice>, String> {
@@ -2024,12 +2026,12 @@ mod tests {
         }
     }
 
-    fn matched() -> Result<Option<(String, crate::packs::Plan)>, String> {
+    fn matched() -> Looked {
         let entry = crate::packs::entries(&offer_index(), &["sm_120a".to_string()], |_| true).remove(0);
         Ok(Some(("sm_120a".into(), crate::packs::Plan { entry, prefix: Vec::new(), variants: Vec::new(), serial: 7 })))
     }
 
-    fn offered(opts: &InstallOpts, creds: Option<crate::platform::Credentials>, archs: &[&str], look: Result<Option<(String, crate::packs::Plan)>, String>, engine: Result<(), String>) -> (Result<Option<PackChoice>, String>, Vec<&'static str>) {
+    fn offered(opts: &InstallOpts, creds: Option<crate::platform::Credentials>, archs: &[&str], look: Looked, engine: Result<(), String>) -> (Result<Option<PackChoice>, String>, Vec<&'static str>) {
         let calls = std::cell::RefCell::new(Vec::new());
         let got = offer_for(
             opts,
