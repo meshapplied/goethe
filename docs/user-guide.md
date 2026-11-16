@@ -245,6 +245,8 @@ The model id is the Hugging Face repo name. Any [supported model](#supported-mod
 
 **Optimised kernels:** some models have a kernel pack: the optimised kernels for every supported GPU microarchitecture, with the model's quantizations and configs (NVIDIA CUDA for now; other platforms such as AMD ROCm later). Packs are available to nodes logged in to the Goethe platform (`goethe login`), and `goethe install` uses them automatically. A node that is not logged in is asked to log in, or continues with SGLang. `goethe models` marks the models that have optimised kernels for your machine.
 
+**GGUF models:** a Hugging Face GGUF repo (`org/model-GGUF`, or `org/model-GGUF:Q8_0` for one quant) is served by llama.cpp on one GPU; a GGUF with a mean, cls or last pooling type is served as an embedding model (`goethe run <model> "text"`). If a kernel pack cannot open on a machine for any reason, goethe prints the reason, drops the pack and serves the GGUF with llama.cpp. A model that has only a pack, and none for your GPU, is refused before anything is downloaded.
+
 **Gated or private models:** accept the license on the model's Hugging Face page, create a read token at huggingface.co/settings/tokens, then run `goethe install <org>/<model> --hf-token` and type the token when asked. It is used for that download only and never stored. In `goethe start`, choose "A private or gated model".
 
 **Models you already have:** move the folder into Goethe's `models` folder and run `goethe models scan`; it checks each folder and asks before adding it. A folder named `<org>__<model>` gets the id `<org>/<model>`. To register a folder where it is:
