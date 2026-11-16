@@ -214,7 +214,7 @@ def main() -> int:
     if os.environ.get("GOETHE_TEST_REAL", "") != "1":
         return _skip("set GOETHE_TEST_REAL=1 to run real-model gate")
 
-    goethe_home = Path(os.environ.get("GOETHE_HOME", "/scratch/ternary-flash/goethe-home"))
+    goethe_home = Path(os.environ.get("GOETHE_HOME", "/var/tmp/goethe-dev-home"))
     py = goethe_home / "py-env/bin/python"
     if not py.is_file():
         print("missing py-env", file=sys.stderr)
@@ -223,7 +223,7 @@ def main() -> int:
     model = Path(
         os.environ.get(
             "GOETHE_TEST_REAL_MODELS",
-            "/scratch/models/staged/Qwen3.8-27B-NVFP4-NInfer",
+            "/path/to/Qwen3.8-27B-NVFP4",
         )
     )
     if not model.is_dir():

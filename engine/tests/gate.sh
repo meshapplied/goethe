@@ -24,7 +24,7 @@ esac
 
 GOETHE_PKG="$(cd "${GOETHE_PKG:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
 export GOETHE_PKG
-export GOETHE_DEV_HOME="${GOETHE_DEV_HOME:-${GOETHE_HOME:-/scratch/ternary-flash/goethe-home}}"
+export GOETHE_DEV_HOME="${GOETHE_DEV_HOME:-${GOETHE_HOME:-/var/tmp/goethe-dev-home}}"
 export GOETHE_DEV_PY="${GOETHE_DEV_PY:-${GOETHE_DEV_HOME}/py-env/bin/python}"
 PY="${GOETHE_PYTHON:-}"
 if [[ -z "${PY}" ]]; then

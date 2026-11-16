@@ -13,7 +13,7 @@ case "$SM" in
   *) echo "unknown sm: $SM" >&2; exit 1 ;;
 esac
 
-export GOETHE_HOME="${GOETHE_HOME:-/scratch/ternary-flash/goethe-home}"
+export GOETHE_HOME="${GOETHE_HOME:-/var/tmp/goethe-dev-home}"
 export PYTHON="${PYTHON:-$GOETHE_HOME/py-env/bin/python}"
 export CUDA_HOME=/usr/local/cuda
 unset TORCH_CUDA_ARCH_LIST

@@ -31,7 +31,7 @@ LIB_DIR = Path(__file__).resolve().parent
 TESTS_DIR = LIB_DIR.parent
 GOETHE_PKG = Path(os.environ.get("GOETHE_PKG", str(TESTS_DIR.parent)))
 STUB_ENGINE = LIB_DIR / "stub_engine.py"
-DEFAULT_DEV_HOME = Path("/scratch/ternary-flash/goethe-home")
+DEFAULT_DEV_HOME = Path("/var/tmp/goethe-dev-home")
 
 _gpu_pid_query: Callable[[int], list[tuple[int, int]]] | None = None
 _spawned_pids: set[int] = set()

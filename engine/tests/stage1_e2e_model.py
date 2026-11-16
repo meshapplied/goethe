@@ -233,7 +233,7 @@ def main() -> None:
     model = Path(
         os.environ.get(
             "GOETHE_TEST_REAL_MODELS",
-            "/scratch/models/staged/Qwen3.8-27B-NVFP4-NInfer",
+            "/path/to/Qwen3.8-27B-NVFP4",
         )
     )
     if not model.is_dir():

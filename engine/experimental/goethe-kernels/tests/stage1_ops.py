@@ -9,7 +9,7 @@ import time
 
 import torch
 
-GOETHE_HOME = os.environ.get("GOETHE_HOME", "/scratch/ternary-flash/goethe-home")
+GOETHE_HOME = os.environ.get("GOETHE_HOME", "/var/tmp/goethe-dev-home")
 MAG = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
 TARGET_GBS = {1: 1000.0, 2: 1000.0, 3: 1000.0, 4: 1000.0, 8: 1000.0, 16: 900.0, 32: 700.0}
 TC_EXACT_B = {3, 4, 5, 8, 9, 16, 17, 32}

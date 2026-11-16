@@ -248,7 +248,7 @@ def main() -> int:
         print("CUDA required", file=sys.stderr)
         return 1
 
-    goethe_home = os.environ.get("GOETHE_HOME", "/scratch/ternary-flash/goethe-home")
+    goethe_home = os.environ.get("GOETHE_HOME", "/var/tmp/goethe-dev-home")
     os.environ["GOETHE_KERNEL_DIR"] = os.environ.get("GOETHE_KERNEL_DIR", f"{goethe_home}/kernels/sm120")
 
     from sglang.srt.goethe_plugin import load_goethe_kernels

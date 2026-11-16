@@ -6,7 +6,7 @@ set -euo pipefail
 GOETHE_HOME="${GOETHE_HOME:?GOETHE_HOME must be set}"
 cd "${GOETHE_HOME}"
 PY="${GOETHE_HOME}/py-env/bin/python"
-GOETHE_PKG="/scratch/ternary-flash/goethe-release/engine"
+GOETHE_PKG="${GOETHE_PKG:?set GOETHE_PKG to the goethe-kernels directory}"
 KERNEL_DIR="${GOETHE_KERNEL_DIR:-${GOETHE_HOME}/kernels/sm120}"
 export GOETHE_HOME
 GPU="${CUDA_VISIBLE_DEVICES:-2}"
