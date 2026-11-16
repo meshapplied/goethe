@@ -100,7 +100,7 @@ Supported [model families and quantization formats](docs/user-guide.md#supported
 
 - Gated models need the license accepted on Hugging Face and a read token (install with `--hf-token`). This includes `orcarouter/Qwen3.8-Flash-Next-Uncensored-NVFP4`.
 - Optimised kernel packs (the 27B NVFP4 model, the ternary models and others) need `goethe login` on the node. A model that has only a pack and none for your GPU is refused before anything is downloaded.
-- If a pack fails to open for any reason, Goethe says why and serves the model with the plain runtime when it has one.
+- If a model's kernel pack cannot run on your GPU, install or load stops with the reason. Add `--fallback` (or set `GOETHE_ALLOW_FALLBACK=1`) to serve it with the plain runtime instead.
 
 ## Documentation
 

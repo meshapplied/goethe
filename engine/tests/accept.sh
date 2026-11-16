@@ -12,7 +12,8 @@ PACKED=(
 )
 PROMPT="Say hello in one short sentence."
 BAD='Illegal instruction|cannot open shared object|Traceback'
-REFUSED='is not supported|larger than the allowed GPUs|not supported here|nothing was downloaded|gated or private|no placement fits'
+REFUSED='is not supported|larger than the allowed GPUs|not supported here|gated or private|no placement fits'
+PACKFAIL='does not run on|a host library is missing|crashed at open|does not fit this GPU|failed to open|runs only with its kernel pack'
 GOETHE="${GOETHE_BIN:-goethe}"
 LIMIT="${ACCEPT_TIMEOUT:-3600}"
 WORK="$(mktemp -d)"
@@ -89,7 +90,10 @@ accept_one() {
   g install "${spec}" --yes --load >"${WORK}/inst" 2>>"${WORK}/err"
   rc=$?
   if [[ ${rc} -ne 0 ]]; then
-    if grep -qE "${REFUSED}" "${WORK}/err" && ! grep -qE "${BAD}" "${WORK}/err"; then
+    if grep -qE "${PACKFAIL}" "${WORK}/inst" "${WORK}/err"; then
+      VERDICT=FAIL
+      REASON="the kernel pack does not work here ($(grep -ohE "${PACKFAIL}" "${WORK}/inst" "${WORK}/err" | head -n 1))"
+    elif grep -qE "${REFUSED}" "${WORK}/err" && ! grep -qE "${BAD}" "${WORK}/err"; then
       VERDICT=SKIP
       REASON="refused on this machine (not supported, or no GPU memory free)"
     else
@@ -117,14 +121,10 @@ accept_one() {
     return
   fi
   VERDICT=PASS
-  REASON="${SHAPE} ${DETAIL}"
+  REASON="${SHAPE} ${DETAIL}, runtime $(runtime_of "${id}")"
   if [[ "$(runtime_of "${id}")" != goethe-engine ]]; then
-    if grep -q 'does not run on' "${WORK}/inst" "${WORK}/err" "$(card_of "${id}")" 2>/dev/null; then
-      REASON="${REASON}; the pack has no variant for this GPU, served by $(runtime_of "${id}")"
-    else
-      VERDICT=FAIL
-      REASON="the kernel pack was not used ($(sed -n 's/^pack_skipped *= *"kernel pack failed to open (\([^:]*\):.*/\1/p' "$(card_of "${id}")" 2>/dev/null | head -n 1))"
-    fi
+    VERDICT=FAIL
+    REASON="served by $(runtime_of "${id}"), not by its kernel pack (${SHAPE} ${DETAIL})"
   fi
 }
 
