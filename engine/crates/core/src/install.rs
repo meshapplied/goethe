@@ -302,6 +302,9 @@ fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String
     }
     let Some(index) = crate::packs::catalog(home) else { return Ok(PackDecision::None) };
     let Some(offer) = crate::packs::offers(&index, &opts.model_id, &archs).into_iter().next() else {
+        if let Some(note) = crate::packs::engine_too_old(&index, &opts.model_id, &archs) {
+            eprintln!("{note}");
+        }
         return Ok(PackDecision::None);
     };
     let linked = || crate::platform::load_credentials(home).ok().flatten();

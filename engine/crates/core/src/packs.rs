@@ -175,6 +175,7 @@ pub struct Entry {
     pub size: u64,
     pub sig: Value,
     pub aux: Value,
+    pub min_engine: (u64, u64, u64),
 }
 
 pub fn platform_base(home: &Path) -> Result<String, String> {
@@ -229,12 +230,12 @@ pub fn catalog(home: &Path) -> Option<Vec<u8>> {
 
 pub fn offers(index: &[u8], model_id: &str, archs: &[String]) -> Vec<Offer> {
     // Packs of `index` for `model_id` (case-insensitive) on one of `archs`, in `archs` order, that the pinned engine can run.
-    dedup(entries(index, archs, |repo| repo.eq_ignore_ascii_case(model_id)).into_iter().map(|e| e.offer).collect())
+    dedup(entries(index, archs, |repo| repo.eq_ignore_ascii_case(model_id)).into_iter().filter(runnable).map(|e| e.offer).collect())
 }
 
 pub fn offers_any(index: &[u8], archs: &[String]) -> Vec<Offer> {
     // Every pack of `index` on one of `archs` that the pinned engine can run, whatever the model.
-    dedup(entries(index, archs, |_| true).into_iter().map(|e| e.offer).collect())
+    dedup(entries(index, archs, |_| true).into_iter().filter(runnable).map(|e| e.offer).collect())
 }
 
 fn dedup(v: Vec<Offer>) -> Vec<Offer> {
@@ -247,13 +248,27 @@ fn dedup(v: Vec<Offer>) -> Vec<Offer> {
     out
 }
 
+fn runnable(e: &Entry) -> bool {
+    // The pinned goethe-engine (the one goethe installs) is at least the pack's min_engine.
+    Some(e.min_engine) <= version(crate::pyenv::ENGINE_VERSION)
+}
+
+pub fn engine_too_old(index: &[u8], model_id: &str, archs: &[String]) -> Option<String> {
+    // A note when the index has packs for `model_id` on `archs` but each needs a newer goethe-engine than the pinned one.
+    let es = entries(index, archs, |r| r.eq_ignore_ascii_case(model_id));
+    if es.iter().any(runnable) {
+        return None;
+    }
+    let (a, b, c) = es.iter().map(|e| e.min_engine).min()?;
+    Some(format!("engine_too_old: {model_id} needs goethe-engine >= {a}.{b}.{c}, installed {}: run goethe update", crate::pyenv::ENGINE_VERSION))
+}
+
 pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> Vec<Entry> {
-    // Index entries on one of `archs` (in that order) for a model `model` accepts, in a format, ABI, runtime and engine version this goethe runs.
+    // Index entries on one of `archs` (in that order) for a model `model` accepts, in a format, ABI and runtime this goethe runs, whatever min_engine they need (`runnable` filters).
     let Ok(ix) = serde_json::from_slice::<Value>(index) else { return Vec::new() };
     if ix["schema"] != "gc-pack-index" || ix["version"] != INDEX_VERSION {
         return Vec::new();
     }
-    let engine = version(crate::pyenv::ENGINE_VERSION);
     let mut out = Vec::new();
     for arch in archs {
         for e in ix["entries"].as_array().into_iter().flatten() {
@@ -261,10 +276,10 @@ pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> 
             let runs = ENGINE_RUNTIMES.iter().any(|(k, v)| e["runtime"]["kind"] == *k && e["runtime"]["version"] == *v);
             let file = e["file"].as_str().unwrap_or_default();
             let manifest = e["manifest_sha256"].as_str().unwrap_or_default();
+            let Some(min_engine) = e["min_engine"].as_str().and_then(version) else { continue };
             let fits = e["arch"].as_str() == Some(arch.as_str())
                 && e["abi_major"].as_u64() == Some(ENGINE_ABI_MAJOR)
                 && runs
-                && e["min_engine"].as_str().and_then(version).is_some_and(|v| Some(v) <= engine)
                 && m["hf_repo"].as_str().is_some_and(&model)
                 && pack_file_name(file)
                 && is_sha256(manifest)
@@ -284,6 +299,7 @@ pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> 
                 size: e["size"].as_u64().unwrap_or(0),
                 sig: e["sig"].clone(),
                 aux: e["aux"].clone(),
+                min_engine,
             });
         }
     }
@@ -398,7 +414,7 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, broker: &dyn Broker, run: R
     let v = |x: &str| x.to_string();
     let verified = run(&[v("index"), v("verify"), v("--index"), s(&ix), v("--sig"), s(&sg), v("--last-serial"), last_serial(home).to_string()])?.1;
     let serial = serde_json::from_str::<Value>(&verified).map_err(|e| format!("index verify: {e}"))?["serial"].as_u64().ok_or("index verify: no serial")?;
-    let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().next() else { return Ok(None) };
+    let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().find(runnable) else { return Ok(None) };
     let head = broker.range(&entry.file, 0, 16)?;
     if &head[..8] != b"GCPACK3\n" {
         return Err(format!("{}: not a pack of ABI 3", entry.file));
@@ -745,6 +761,17 @@ mod tests {
         ix["version"] = 2.into();
         assert!(offers(ix.to_string().as_bytes(), "org/m-gguf", &archs).is_empty());
         assert!(offers(b"not json", "org/m-gguf", &archs).is_empty());
+    }
+
+    #[test]
+    fn a_pack_only_a_newer_engine_runs_is_named() {
+        let archs = vec!["sm_120a".to_string()];
+        let p = container();
+        let mut ix: Value = serde_json::from_slice(&index_of(&p, &sha(&p.manifest))).unwrap();
+        assert_eq!(engine_too_old(ix.to_string().as_bytes(), "org/m-gguf", &archs), None);
+        ix["entries"][0]["min_engine"] = "9.0.0".into();
+        let e = engine_too_old(ix.to_string().as_bytes(), "org/m-gguf", &archs).unwrap();
+        assert!(e.starts_with("engine_too_old: org/m-gguf needs goethe-engine >= 9.0.0, installed "), "{e}");
     }
 
     #[test]
