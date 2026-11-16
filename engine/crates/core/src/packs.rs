@@ -36,6 +36,7 @@ pub struct HttpBroker<'a> {
 const LINK_REUSE: Duration = Duration::from_secs(240);
 const MAX_HEADER: u64 = 64 << 20;
 const MAX_MANIFEST: u64 = 16 << 20;
+const MAX_INDEX: u64 = 64 << 20;
 const MERGE_GAP: u64 = 1 << 20;
 
 impl<'a> HttpBroker<'a> {
@@ -127,9 +128,17 @@ impl Broker for HttpBroker<'_> {
     }
 }
 
-fn read_all(mut r: impl Read) -> Result<Vec<u8>, String> {
+fn read_all(r: impl Read) -> Result<Vec<u8>, String> {
+    read_capped(r, MAX_INDEX)
+}
+
+fn read_capped(r: impl Read, max: u64) -> Result<Vec<u8>, String> {
+    // A platform response (index, signature) read whole, refused past `max` bytes.
     let mut v = Vec::new();
-    r.read_to_end(&mut v).map_err(|e| e.to_string())?;
+    r.take(max + 1).read_to_end(&mut v).map_err(|e| e.to_string())?;
+    if v.len() as u64 > max {
+        return Err(format!("the platform's response is longer than {max} bytes; refused"));
+    }
     Ok(v)
 }
 
@@ -827,6 +836,12 @@ mod tests {
         for f in [PACK_FILE.to_string(), format!("{PACK_FILE}.sig"), PACK_VERIFY.to_string(), "pack.prefix".to_string()] {
             assert!(!dir.join(&f).exists(), "{f} left behind");
         }
+    }
+
+    #[test]
+    fn a_platform_response_past_the_cap_is_refused() {
+        assert_eq!(read_capped(std::io::repeat(b'x').take(10), 10).unwrap().len(), 10);
+        assert!(read_capped(std::io::repeat(b'x'), 1 << 20).unwrap_err().contains("longer than"));
     }
 
     #[test]
