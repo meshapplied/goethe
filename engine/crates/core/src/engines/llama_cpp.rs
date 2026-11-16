@@ -97,6 +97,11 @@ fn quants(models: &[&str]) -> String {
     }
 }
 
+pub fn is_embedding(gguf: &Path) -> bool {
+    // An embedding model: its header names pooling 1 (mean), 2 (cls) or 3 (last); 0 (none) and 4 (rank) are not served as embeddings.
+    header(gguf).is_ok_and(|m| m.iter().any(|(k, v)| k.ends_with(".pooling_type") && v.0.first().is_some_and(|p| (1..=3).contains(p))))
+}
+
 pub fn facts(dir: &Path, gguf: &Path) -> Result<crate::model_facts::ModelFacts, String> {
     // Shape from the GGUF header; every layer's KV counted at full context (sliding windows overcounted, never under).
     let m = header(gguf).map_err(|e| format!("{}: {e}", gguf.display()))?;
@@ -206,7 +211,12 @@ fn llama_command(spec: &EngineSpec) -> Result<Command, String> {
 
 #[cfg(test)]
 pub fn write_test_gguf(path: &Path) {
-    // A llama header: 2 layers, 8 heads of 64, per-layer KV heads 2 and 4, context 4096, and a token list to skip.
+    write_test_gguf_with(path, &[]);
+}
+
+#[cfg(test)]
+pub fn write_test_gguf_with(path: &Path, extra: &[(&str, u32)]) {
+    // A llama header: 2 layers, 8 heads of 64, per-layer KV heads 2 and 4, context 4096, a token list to skip, and extra u32 keys.
     let s = |v: &str| [(v.len() as u64).to_le_bytes().to_vec(), v.as_bytes().to_vec()].concat();
     let arr = |t: u32, items: Vec<Vec<u8>>| [t.to_le_bytes().to_vec(), (items.len() as u64).to_le_bytes().to_vec(), items.concat()].concat();
     let mut kvs = vec![("general.architecture".to_string(), 8u32, s("llama")), ("tokenizer.ggml.tokens".into(), 9, arr(8, vec![s("a"), s("bc")]))];
@@ -214,6 +224,7 @@ pub fn write_test_gguf(path: &Path) {
         kvs.push((format!("llama.{k}"), 4, v.to_le_bytes().to_vec()));
     }
     kvs.push(("llama.attention.head_count_kv".into(), 9, arr(4, vec![2u32.to_le_bytes().to_vec(), 4u32.to_le_bytes().to_vec()])));
+    kvs.extend(extra.iter().map(|(k, v)| (k.to_string(), 4u32, v.to_le_bytes().to_vec())));
     let mut g = [b"GGUF".to_vec(), 3u32.to_le_bytes().to_vec(), 0u64.to_le_bytes().to_vec(), (kvs.len() as u64).to_le_bytes().to_vec()].concat();
     for (k, t, v) in kvs {
         g.extend([s(&k), t.to_le_bytes().to_vec(), v].concat());
@@ -263,6 +274,18 @@ mod tests {
         if std::env::var_os("LLAMA_SERVER").is_none() {
             assert!(command(&test_spec(d.path(), &card, &[0])).unwrap_err().contains(PIN));
         }
+    }
+
+    #[test]
+    fn a_gguf_with_a_pooling_type_is_an_embedding_model() {
+        let d = tempfile::tempdir().unwrap();
+        write_test_gguf(&d.path().join("g.gguf"));
+        let is = |name: &str, pooling: &[(&str, u32)]| {
+            write_test_gguf_with(&d.path().join(name), pooling);
+            is_embedding(&d.path().join(name))
+        };
+        assert!(!is_embedding(&d.path().join("g.gguf")));
+        assert_eq!([0, 1, 2, 3, 4].map(|p| is(&format!("p{p}.gguf"), &[("llama.pooling_type", p)])), [false, true, true, true, false]);
     }
 
     #[test]
