@@ -155,7 +155,17 @@ pub fn run(opts: InstallOpts) -> Result<(), String> {
     let target = if Path::new(&opts.model_id).is_dir() {
         install_local(&home, &opts)?
     } else {
-        install_hub(&home, &opts)?
+        match install_hub(&home, &opts) {
+            Ok(t) => t,
+            Err(e) if gated_but_installed(&e, is_installed(&home, &opts.model_id), opts.force) => {
+                println!("{} is already installed; --force downloads it again", opts.model_id);
+                if opts.load {
+                    load_installed(&opts.model_id, &opts)?;
+                }
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
     };
     let model_id = target.model_id.clone();
     register(&home, &opts, target)?;
@@ -163,6 +173,16 @@ pub fn run(opts: InstallOpts) -> Result<(), String> {
         load_installed(&model_id, &opts)?;
     }
     Ok(())
+}
+
+fn is_installed(home: &Path, model_id: &str) -> bool {
+    // The model has a row in the installed registry.
+    db::open(home).ok().is_some_and(|c| c.query_row("SELECT 1 FROM installed_models WHERE model_id = ?1", [model_id], |_| Ok(())).is_ok())
+}
+
+fn gated_but_installed(err: &str, installed: bool, force: bool) -> bool {
+    // Hugging Face answers a gated or private repo without a token as not found: for a model already installed that is no failure, unless --force asks for the download.
+    installed && !force && (err.contains("is gated or private on Hugging Face") || err.contains("not found on Hugging Face, or private"))
 }
 
 fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
@@ -730,6 +750,10 @@ fn prepare_local_target(home: &Path, card_dir: &Path, opts: &InstallOpts) -> Res
     if !farm && opts.copy_local && !opts.force {
         return Ok(true);
     }
+    if !farm && !opts.copy_local && is_goethe_local_install(card_dir) {
+        clear_dir_except_card(home, card_dir)?;
+        return Ok(false);
+    }
     if !opts.force {
         return Err(format!(
             "{} exists as a {}; re-run with --force to replace it",
@@ -739,6 +763,11 @@ fn prepare_local_target(home: &Path, card_dir: &Path, opts: &InstallOpts) -> Res
     }
     clear_dir_except_card(home, card_dir)?;
     Ok(false)
+}
+
+pub fn is_goethe_local_install(dir: &Path) -> bool {
+    // A directory goethe made for a local folder install: its card names the source folder (the links and copied pack files in it are goethe's).
+    read_card_table(dir).is_some_and(|c| c.get("source_dir").and_then(|v| v.as_str()).is_some())
 }
 
 pub fn is_farm(dir: &Path) -> bool {
@@ -1861,6 +1890,39 @@ mod tests {
         assert!(t.pack.is_none(), "no login: no offer");
         let names: Vec<String> = crate::engines::llama_cpp::gguf_paths(src.path()).iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).filter(|n| crate::engines::llama_cpp::is_model_gguf(n)).collect();
         assert_eq!(names, ["OrcaCyber-Q4_K_M.gguf"], "the metadata is made from the model file, never the projector");
+    }
+
+    #[test]
+    fn a_gated_answer_for_an_installed_model_is_already_installed() {
+        let gated = "org/m is gated or private on Hugging Face, so it needs your Hugging Face token.";
+        assert!(gated_but_installed(gated, true, false));
+        assert!(gated_but_installed("org/m: not found on Hugging Face, or private (check the id)", true, false));
+        assert!(!gated_but_installed(gated, true, true), "--force asks for the download");
+        assert!(!gated_but_installed(gated, false, false), "not installed: the gated guidance stands");
+        assert!(!gated_but_installed("disk full", true, false));
+        let (home, _) = gguf_home(false);
+        assert!(!is_installed(home.path(), "org/m-GGUF"));
+        let con = db::open(home.path()).unwrap();
+        con.execute("INSERT INTO installed_models (model_id, local_path, managed) VALUES ('org/m-GGUF', 'models/org/m-GGUF', 1)", []).ok();
+    }
+
+    #[test]
+    fn an_install_over_the_leftovers_of_a_removed_local_install_replaces_them() {
+        let (home, _) = gguf_home(true);
+        let src = tempfile::tempdir().unwrap();
+        crate::engines::llama_cpp::write_test_gguf(&src.path().join("m-Q8_0.gguf"));
+        let opts = InstallOpts { model_id: src.path().display().to_string(), name: Some("me/m".into()), ..Default::default() };
+        let t = install_local(home.path(), &opts).unwrap();
+        fs::write(t.card_dir.join("pack.gcpack"), b"a copied pack").unwrap();
+        fs::write(t.card_dir.join(CARD_FILE), format!("model_id = \"me/m\"\nsource_dir = \"{}\"\n", src.path().display())).unwrap();
+        let again = install_local(home.path(), &opts).unwrap();
+        assert!(!again.card_dir.join("pack.gcpack").exists(), "the old copy is replaced without --force");
+        assert!(again.card_dir.join("m-Q8_0.gguf").exists() && src.path().join("m-Q8_0.gguf").is_file());
+        let own = model_dir(home.path(), "me/own");
+        fs::create_dir_all(&own).unwrap();
+        fs::write(own.join("w.gguf"), b"mine").unwrap();
+        let o = InstallOpts { name: Some("me/own".into()), ..opts };
+        assert!(install_local(home.path(), &o).err().unwrap().contains("--force"), "a folder of the user's own files is never replaced silently");
     }
 
     #[test]

@@ -537,7 +537,7 @@ fn removal_plan(home: &Path, con: &Connection, model_id: &str, local_path: &str,
         }
         if c == primary && !managed {
             plan.source = Some(source_of(&primary).unwrap_or_else(|| primary.display().to_string()));
-            if !is_link_or_farm(&primary) {
+            if !is_link_or_farm(&primary) && !install::is_goethe_local_install(&primary) {
                 plan.keep.push((c, "it holds files, not links; delete it yourself".to_string()));
                 continue;
             }
@@ -839,6 +839,25 @@ mod tests {
         assert!(src.path().join("config.json").is_file());
         assert!(removal_plan(h, &con, "x", "models/..", true).is_err());
         assert!(removal_plan(h, &con, "x", "models", true).is_err());
+        let copied = h.join("models/local__c");
+        let src2 = tempfile::tempdir().unwrap();
+        fs::write(src2.path().join("config.json"), "{}").unwrap();
+        fs::write(src2.path().join("w.gguf"), b"weights").unwrap();
+        install::build_farm(src2.path(), &copied).unwrap();
+        fs::write(copied.join("pack.gcpack"), b"copied pack").unwrap();
+        fs::write(copied.join(install::CARD_FILE), format!("model_id = \"local/c\"\nsource_dir = \"{}\"\n", src2.path().display())).unwrap();
+        insert(&con, "local/c", "models/local__c", 0);
+        let plan = removal_plan(h, &con, "local/c", "models/local__c", false).unwrap();
+        assert_eq!((plan.delete.len(), plan.keep.len()), (1, 0), "links plus the pack goethe copied: all goethe's");
+        remove_owned(h, &plan.delete[0]).unwrap();
+        assert!(!copied.exists(), "the managed dir goes entirely");
+        assert!(src2.path().join("w.gguf").is_file() && src2.path().join("config.json").is_file(), "the user's folder behind the links stays");
+        let own = h.join("models/org__own");
+        fs::create_dir_all(&own).unwrap();
+        fs::write(own.join("w.safetensors"), b"mine").unwrap();
+        insert(&con, "org/own", "models/org__own", 0);
+        let plan = removal_plan(h, &con, "org/own", "models/org__own", false).unwrap();
+        assert_eq!((plan.delete.len(), plan.keep.len()), (0, 1), "a folder with the user's own files and no source_dir is kept");
     }
 
     #[test]
