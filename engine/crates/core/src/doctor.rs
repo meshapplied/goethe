@@ -234,6 +234,12 @@ fn check_hardware(home: &Path) -> Check {
             g.vram_total_mb as f64 / 1024.0
         ));
     }
+    let busy: Vec<(u32, usize, u64, u64)> = hw
+        .gpus
+        .iter()
+        .map(|g| (g.index, g.running_processes.iter().filter(|p| !managed.contains(&(p.pid as i32))).count(), g.vram_free_mb, g.vram_total_mb))
+        .collect();
+    lines.extend(deny_hint(&busy));
     let ccs: Vec<(u32, &str)> = hw.gpus.iter().map(|g| (g.index, g.compute_capability.as_str())).collect();
     lines.extend(mixed_arch_note(&ccs));
     lines.extend(hw.unavailable.iter().map(|u| format!("{u} (not answering; skipped)")));
@@ -252,6 +258,12 @@ fn check_hardware(home: &Path) -> Check {
         "OK"
     };
     check("hardware", status, lines.join("\n"))
+}
+
+fn deny_hint(gpus: &[(u32, usize, u64, u64)]) -> Option<String> {
+    // One line when a GPU has foreign processes or under a fifth of its memory free: how to keep a card for other workloads. (index, foreign processes, free MB, total MB)
+    let (index, ..) = gpus.iter().find(|(_, foreign, free, total)| *foreign > 0 || *free * 5 < *total)?;
+    Some(format!("goethe gpu --deny gpu{index} keeps a card free for other workloads"))
 }
 
 fn mixed_arch_note(gpus: &[(u32, &str)]) -> Option<String> {
@@ -610,7 +622,7 @@ fn check_hf(_home: &Path) -> Check {
     }
     let url = format!("{}/api/models?limit=1", hf::hf_endpoint());
     match crate::net::agent().get(&url).timeout(Duration::from_secs(3)).call() {
-        Ok(_) | Err(ureq::Error::Status(..)) => check("huggingface", "OK", "reachable (anonymous; gated repos need a manual download)"),
+        Ok(_) | Err(ureq::Error::Status(..)) => check("huggingface", "OK", format!("reachable (anonymous; gated repos: {})", hf::GATED_WAYS)),
         Err(e) => check("huggingface", "WARN", format!("unreachable: {e}")),
     }
 }
@@ -684,6 +696,19 @@ fn available_gb(path: &Path) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_busy_gpu_gets_one_hint_how_to_keep_it_free() {
+        assert_eq!(deny_hint(&[(0, 0, 90_000, 96_000), (1, 0, 90_000, 96_000)]), None, "idle cards need no hint");
+        assert_eq!(deny_hint(&[(0, 0, 90_000, 96_000), (1, 2, 90_000, 96_000)]).unwrap(), "goethe gpu --deny gpu1 keeps a card free for other workloads");
+        assert_eq!(deny_hint(&[(0, 0, 10_000, 96_000), (3, 1, 1, 96_000)]).unwrap(), "goethe gpu --deny gpu0 keeps a card free for other workloads", "little free memory counts, one line");
+    }
+
+    #[test]
+    fn the_hugging_face_check_uses_the_gated_wording_of_install() {
+        assert!(hf::GATED_WAYS.contains("goethe install DIR --name ID"));
+        assert!(hf::gated_guidance("org/m").contains(&hf::GATED_WAYS.replace("ID", "org/m")));
+    }
 
     #[test]
     fn mixed_architecture_hosts_get_one_note() {

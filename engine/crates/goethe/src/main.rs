@@ -81,9 +81,7 @@ goethe api trace alone shows what is recorded and how much space it takes. The f
 #[command(
     name = "goethe",
     disable_version_flag = true,
-    about = "Goethe: serve LLMs on your NVIDIA GPUs behind one OpenAI-compatible gateway",
-    after_help = "Examples:\n\n\t→ goethe up\n\t→ goethe install deepseek-ai/DeepSeek-V4.1-Flash-1017 --load\n\t→ goethe load deepseek-ai/DeepSeek-V4.1-Flash-1017 --gpu gpu0 gpu1 gpu2 gpu3 --ctx 65536\n\t→ goethe api keys --create my-app\n\t→ goethe api\n\t→ goethe down\n\n\
-                  goethe down stops goethed but keeps loaded models for the next goethe up; goethe unload stops a model for good."
+    about = "Goethe: serve LLMs on your NVIDIA GPUs behind one OpenAI-compatible gateway"
 )]
 struct Cli {
     #[arg(short = 'V', long = "version", help = "Print the version, and how to upgrade when a newer one is out (--build-info adds commit and build date).")]
@@ -809,6 +807,15 @@ fn print_version() {
     }
 }
 
+fn top_help_footer() -> String {
+    // The examples under `goethe --help` name the model this machine would be recommended, never a fixed id.
+    let id = goethe_core::onboard::suggested(true);
+    format!(
+        "Examples:\n\n\t→ goethe up\n\t→ goethe install {id} --load\n\t→ goethe load {id} --gpu gpu0 gpu1 gpu2 gpu3 --ctx 65536\n\t→ goethe api keys --create my-app\n\t→ goethe api\n\t→ goethe down\n\n\
+         goethe down stops goethed but keeps loaded models for the next goethe up; goethe unload stops a model for good."
+    )
+}
+
 fn main() {
     clap_complete::CompleteEnv::with_factory(Cli::command).bin("goethe").complete();
     let args: Vec<String> = std::env::args().collect();
@@ -827,7 +834,9 @@ fn main() {
         }
         return;
     }
-    let cli = Cli::try_parse().unwrap_or_else(|e| {
+    let top_help = args.len() == 1 || (args.len() == 2 && matches!(args[1].as_str(), "-h" | "--help" | "help"));
+    let command = if top_help { Cli::command().after_help(top_help_footer()) } else { Cli::command() };
+    let cli = command.try_get_matches_from(&args).and_then(|m| <Cli as clap::FromArgMatches>::from_arg_matches(&m)).unwrap_or_else(|e| {
         let stray = e.get(clap::error::ContextKind::InvalidArg).map(|v| v.to_string());
         if let Some(fixed) = stray.and_then(|v| corrected_command(&args, &v)) {
             eprintln!("error: values go after a flag. Did you mean:\n\n{}\n", goethe_core::term::command(&fixed));
