@@ -472,14 +472,18 @@ pub fn model_gb(home: &Path, o: &Offer) -> Option<f64> {
 
 pub fn store_serial(home: &Path, serial: u64) -> Result<(), String> {
     // Remember the newest index serial installed, so an older index is refused.
-    std::fs::write(serial_path(home), format!("{serial}\n")).map_err(|e| e.to_string())
+    let path = serial_path(home);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, format!("{serial}\n")).map_err(|e| e.to_string())
 }
 
 fn serial_path(home: &Path) -> PathBuf {
     home.join("packs").join("serial")
 }
 
-fn last_serial(home: &Path) -> u64 {
+pub fn last_serial(home: &Path) -> u64 {
     std::fs::read_to_string(serial_path(home)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
 }
 

@@ -103,11 +103,32 @@ fn drop_new(dir: &Path) {
     let _ = std::fs::remove_file(dir.join(format!("pack.prefix{NEW}")));
 }
 
+fn verified_index(home: &Path, broker: &dyn Broker, run: Runner) -> Result<(Vec<u8>, u64), String> {
+    // The platform's index, checked by the engine against the pinned keys and refused when older than the last one installed; nothing of it is kept unless it passes.
+    let dir = crate::paths::private_temp_dir("goethe-idx")?;
+    let checked = (|| {
+        let (raw, sig) = (broker.index()?, broker.index_sig()?);
+        let (ix, sg) = (dir.join("index.json"), dir.join("index.sig"));
+        std::fs::write(&ix, &raw).map_err(|e| e.to_string())?;
+        std::fs::write(&sg, sig).map_err(|e| e.to_string())?;
+        let s = |p: &Path| p.to_string_lossy().into_owned();
+        let args = ["index".to_string(), "verify".into(), "--index".into(), s(&ix), "--sig".into(), s(&sg), "--last-serial".into(), crate::packs::last_serial(home).to_string()];
+        let (code, out) = run(&args).map_err(|e| format!("the pack index did not verify: {e}"))?;
+        let serial = serde_json::from_str::<Value>(&out).ok().and_then(|v| v["serial"].as_u64());
+        match (code, serial) {
+            (0, Some(serial)) => Ok((raw, serial)),
+            _ => Err("the pack index did not verify: the engine gave no serial".to_string()),
+        }
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    checked
+}
+
 pub fn refresh(home: &Path, model_id: &str, dir: &Path, arch: &str, broker: &dyn Broker, run: Runner) -> Result<Outcome, String> {
     // Bring an installed model's pack to the index's: nothing when it already is, the changed blocks only when it is not, loud when it cannot.
     let Some(installed) = installed_manifest(dir) else { return Err(format!("{model_id}: no installed kernel pack to update")) };
     let have = installed_overlays(dir);
-    let index = broker.index()?;
+    let (index, serial) = verified_index(home, broker, run).map_err(|e| format!("{model_id}: {e}; the installed pack is kept"))?;
     let Some(entry) = pending(&index, model_id, arch, &installed, &have) else { return Ok(Outcome::Unchanged) };
     if !crate::packs::runnable(&entry) {
         return Ok(Outcome::Skipped(format!(
@@ -116,7 +137,9 @@ pub fn refresh(home: &Path, model_id: &str, dir: &Path, arch: &str, broker: &dyn
         )));
     }
     if entry.manifest_sha256 == installed {
-        return overlay_only(home, dir, &entry, &installed, broker, run).map(Outcome::Overlaid);
+        let fetched = overlay_only(home, dir, &entry, &installed, broker, run)?;
+        crate::packs::store_serial(home, serial)?;
+        return Ok(Outcome::Overlaid(fetched));
     }
     let plan = crate::packs::plan(home, model_id, arch, None, broker, run)?.ok_or_else(|| format!("the signed index has no pack for {model_id} on {arch}"))?;
     let donor = donor_of(dir, arch, run)?;
@@ -226,7 +249,7 @@ pub fn run_all(check_only: bool) -> Result<(), String> {
     let mut failed = Vec::new();
     for (id, dir, arch) in packs {
         if check_only {
-            let index = broker.index()?;
+            let (index, _) = verified_index(&home, &broker, &run)?;
             let installed = installed_manifest(&dir).unwrap_or_default();
             match pending(&index, &id, &arch, &installed, &installed_overlays(&dir)) {
                 Some(e) => println!("{id}: a newer kernel pack is available ({} bytes); goethe update installs it", e.size),
@@ -499,6 +522,81 @@ mod tests {
         bad.files.insert("fix2.gcoverlay".into(), b"evil".to_vec());
         let err = refresh(home.path(), "org/m-gguf", dir.path(), "sm_120a", &broker(&bad), &engine(&bad, &v1, false)).unwrap_err();
         assert!(err.contains("does not hash") && !dir.path().join("overlays/fix2.gcoverlay").exists(), "{err}");
+    }
+
+    fn index_refused<'a>(inner: impl Fn(&[String]) -> Result<(i32, String), String> + 'a, why: &'a str) -> impl Fn(&[String]) -> Result<(i32, String), String> + 'a {
+        // The engine as it answers an index it cannot verify: an error exit for `index verify`.
+        move |a| if a[0] == "index" { Err(format!("goethe-engine index verify: exit 1: {why}")) } else { inner(a) }
+    }
+
+    fn untouched(home: &Path, dir: &Path, v1: &PackV, b: &Broker2) {
+        assert_eq!(b.fetched.get(), 0, "no pack or overlay byte fetched");
+        assert_eq!(std::fs::read(dir.join(PACK_FILE)).unwrap(), v1.bytes);
+        assert!(!dir.join("overlays").exists() && installed_overlays(dir).is_empty());
+        assert!(!dir.join(format!("{PACK_FILE}.prev")).exists());
+        no_leftovers(dir);
+        assert!(!home.join("packs/index.json").exists(), "an unverified index is not kept");
+    }
+
+    #[test]
+    fn an_unsigned_index_that_lists_an_overlay_or_a_new_pack_changes_nothing() {
+        let v1 = pack_v("1", &[blob(1), blob(2)]);
+        let overlay = b"overlay manifest and blocks".to_vec();
+        let ov = serde_json::json!([{"file": "fix1.gcoverlay", "base": v1.manifest_sha, "size": overlay.len(), "sha256": sha(&overlay), "sig": {"keyid": "evil"}}]);
+        let mut w = world(&v1, "0.2.0", ov);
+        w.files.insert("fix1.gcoverlay".into(), overlay);
+        let (home, dir) = install(&v1);
+        let b = broker(&w);
+        let err = refresh(home.path(), "org/m-gguf", dir.path(), "sm_120a", &b, &index_refused(engine(&w, &v1, false), "no signature")).unwrap_err();
+        assert!(err.contains("did not verify") && err.contains("installed pack is kept"), "{err}");
+        untouched(home.path(), dir.path(), &v1, &b);
+        assert!(!home.path().join("packs/serial").exists());
+        let v2 = pack_v("2", &[blob(1), blob(7)]);
+        let mut w2 = world(&v2, "0.2.0", Value::Null);
+        w2.needs.insert(v2.manifest_sha.clone(), v2.ranges.clone());
+        let b2 = broker(&w2);
+        assert!(refresh(home.path(), "org/m-gguf", dir.path(), "sm_120a", &b2, &index_refused(engine(&w2, &v1, false), "no signature")).is_err());
+        untouched(home.path(), dir.path(), &v1, &b2);
+        assert!(run_all_check_refuses(home.path(), &b2, &index_refused(engine(&w2, &v1, false), "no signature")), "update --check does not announce an unverified pack either");
+    }
+
+    fn run_all_check_refuses(home: &Path, b: &Broker2, run: Runner) -> bool {
+        verified_index(home, b, run).is_err()
+    }
+
+    #[test]
+    fn an_index_older_than_the_last_installed_one_is_refused() {
+        let v1 = pack_v("1", &[blob(1), blob(2)]);
+        let overlay = b"overlay manifest and blocks".to_vec();
+        let ov = serde_json::json!([{"file": "fix1.gcoverlay", "base": v1.manifest_sha, "size": overlay.len(), "sha256": sha(&overlay), "sig": {"keyid": "k"}}]);
+        let mut w = world(&v1, "0.2.0", ov);
+        w.files.insert("fix1.gcoverlay".into(), overlay);
+        let (home, dir) = install(&v1);
+        crate::packs::store_serial(home.path(), 12).unwrap();
+        let inner = engine(&w, &v1, false);
+        let old_serial = move |a: &[String]| {
+            let last: u64 = a.iter().position(|x| x == "--last-serial").and_then(|i| a.get(i + 1)).and_then(|n| n.parse().ok()).unwrap_or(0);
+            if a[0] == "index" && last > 9 { Err("goethe-engine index verify: exit 1: serial 9 is older than 12".to_string()) } else { inner(a) }
+        };
+        let b = broker(&w);
+        let err = refresh(home.path(), "org/m-gguf", dir.path(), "sm_120a", &b, &old_serial).unwrap_err();
+        assert!(err.contains("did not verify"), "{err}");
+        untouched(home.path(), dir.path(), &v1, &b);
+        assert_eq!(std::fs::read_to_string(home.path().join("packs/serial")).unwrap().trim(), "12");
+    }
+
+    #[test]
+    fn a_verified_index_stacks_its_overlay_and_records_the_serial() {
+        let v1 = pack_v("1", &[blob(1), blob(2)]);
+        let overlay = b"overlay manifest and blocks".to_vec();
+        let ov = serde_json::json!([{"file": "fix1.gcoverlay", "base": v1.manifest_sha, "size": overlay.len(), "sha256": sha(&overlay), "sig": {"keyid": "k"}}]);
+        let mut w = world(&v1, "0.2.0", ov);
+        w.files.insert("fix1.gcoverlay".into(), overlay.clone());
+        let (home, dir) = install(&v1);
+        let out = refresh(home.path(), "org/m-gguf", dir.path(), "sm_120a", &broker(&w), &engine(&w, &v1, false)).unwrap();
+        assert_eq!(out, Outcome::Overlaid(overlay.len() as u64));
+        assert_eq!(std::fs::read_to_string(home.path().join("packs/serial")).unwrap().trim(), "9");
+        assert!(!home.path().join("packs/index.json").exists());
     }
 
     #[test]
