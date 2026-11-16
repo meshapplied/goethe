@@ -1,6 +1,7 @@
 // goethe run with no input on a terminal: an ephemeral chat screen. The conversation lives in memory; only e (export) writes files, in the trace format.
 
 use crate::keys_menu::{fit, frame_update, paint, parse_input, screen_size, Input, Screen, Style};
+use crate::term::visible_width;
 use crate::run::{embed_line, Loaded, Target};
 use crate::trace::Capture;
 use serde_json::{json, Value};
@@ -50,6 +51,39 @@ pub fn plain_text(raw: &str, thinking: bool, color: bool) -> String {
     }
 }
 
+pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
+    // The lines of text cut to the display width, a line break kept; a character wider than the width gets its own line.
+    let mut out = Vec::new();
+    for l in text.split('\n') {
+        let mut line = String::new();
+        for c in l.chars() {
+            let w = visible_width(&c.to_string());
+            if !line.is_empty() && visible_width(&line) + w > width.max(1) {
+                out.push(std::mem::take(&mut line));
+            }
+            line.push(c);
+        }
+        out.push(line);
+    }
+    out
+}
+
+fn clean(text: &str) -> String {
+    // What a model sent, safe to draw: control characters (escape sequences included) are dropped, a tab is a space.
+    text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).map(|c| if c == '\t' { ' ' } else { c }).collect()
+}
+
+pub(crate) fn top(total: usize, rows: usize, scroll: usize, follow: bool) -> usize {
+    // The first line shown: text starts at the top and, once longer than the window, the window follows the end unless it was scrolled up.
+    let last = total.saturating_sub(rows);
+    if follow { last } else { scroll.min(last) }
+}
+
+pub(crate) fn moved(from: usize, total: usize, rows: usize, delta: isize) -> usize {
+    // The first line after scrolling by delta lines, kept inside the text.
+    from.saturating_add_signed(delta).min(total.saturating_sub(rows))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
     Typing,
@@ -90,11 +124,14 @@ pub(crate) struct Ui {
     pick: usize,
     streaming: bool,
     thinking: bool,
+    scroll: usize,
+    follow: bool,
+    size: (usize, usize),
 }
 
 impl Ui {
     pub(crate) fn new(header: String, thinking: bool) -> Ui {
-        Ui { mode: Mode::Typing, back: Mode::Typing, input: Vec::new(), at: 0, entries: Vec::new(), header, picks: Vec::new(), pick: 0, streaming: false, thinking }
+        Ui { mode: Mode::Typing, back: Mode::Typing, input: Vec::new(), at: 0, entries: Vec::new(), header, picks: Vec::new(), pick: 0, streaming: false, thinking, scroll: 0, follow: true, size: (80, 24) }
     }
 
     pub(crate) fn key(&mut self, key: Input) -> Act {
@@ -110,6 +147,12 @@ impl Ui {
                 self.mode = Mode::Confirm;
                 Act::None
             }
+            (Mode::Typing | Mode::Command, Input::PageUp) => self.scroll_by(-self.page()),
+            (Mode::Typing | Mode::Command, Input::PageDown) => self.scroll_by(self.page()),
+            (Mode::Command, Input::Up | Input::Char('k')) => self.scroll_by(-1),
+            (Mode::Command, Input::Down | Input::Char('j')) => self.scroll_by(1),
+            (Mode::Command, Input::Char('g')) => self.scroll_by(isize::MIN / 2),
+            (Mode::Command, Input::Char('G')) => self.scroll_by(isize::MAX / 2),
             (Mode::Typing, Input::Esc) => {
                 self.mode = Mode::Command;
                 Act::None
@@ -164,6 +207,27 @@ impl Ui {
         }
     }
 
+    fn rows(&self) -> usize {
+        self.size.1.saturating_sub(3)
+    }
+
+    fn page(&self) -> isize {
+        self.rows().saturating_sub(1).max(1) as isize
+    }
+
+    fn scroll_by(&mut self, delta: isize) -> Act {
+        // Scrolling up leaves the stream; reaching the end follows it again.
+        let total = self.lines(self.size.0).len();
+        let at = top(total, self.rows(), self.scroll, self.follow);
+        self.scroll = moved(at, total, self.rows(), delta);
+        self.follow = self.scroll >= total.saturating_sub(self.rows());
+        Act::None
+    }
+
+    pub(crate) fn resize(&mut self, width: usize, height: usize) {
+        self.size = (width, height);
+    }
+
     fn insert(&mut self, c: char) -> Act {
         self.input.insert(self.at, c);
         self.at += 1;
@@ -175,6 +239,9 @@ impl Ui {
         let text: String = self.input.drain(..).collect();
         self.at = 0;
         let text = text.trim().to_string();
+        if !text.is_empty() {
+            self.follow = true;
+        }
         match text.strip_prefix("/audio ") {
             _ if text.is_empty() => Act::None,
             Some(path) => Act::Audio(path.trim().to_string()),
@@ -198,15 +265,7 @@ impl Ui {
     fn lines(&self, width: usize) -> Vec<(String, Style)> {
         // The scrollback wrapped to the width.
         let mut out = Vec::new();
-        let wrap = |text: &str, style: Style, out: &mut Vec<(String, Style)>| {
-            for l in text.split('\n') {
-                let chars: Vec<char> = l.chars().collect();
-                if chars.is_empty() {
-                    out.push((String::new(), style));
-                }
-                out.extend(chars.chunks(width.max(1)).map(|c| (c.iter().collect::<String>(), style)));
-            }
-        };
+        let wrap = |text: &str, style: Style, out: &mut Vec<(String, Style)>| out.extend(wrap(&clean(text), width).into_iter().map(|l| (l, style)));
         for e in &self.entries {
             match e {
                 Entry::User(t) => wrap(&format!("> {t}"), Style::Bold, &mut out),
@@ -254,12 +313,15 @@ impl Ui {
                 .collect()
         } else {
             let lines = self.lines(width);
-            lines.iter().skip(lines.len().saturating_sub(body_h)).map(|(t, s)| paint(&fit(t, width), *s)).collect()
+            let first = top(lines.len(), body_h, self.scroll, self.follow);
+            lines.iter().skip(first).take(body_h).map(|(t, s)| paint(&fit(t, width), *s)).collect()
         };
         body.truncate(body_h);
-        let mut out = vec![paint(&fit(&self.header, width), Style::Bold)];
-        out.extend(std::iter::repeat_n(String::new(), body_h - body.len()));
+        let scrolled = if self.follow { "" } else { "  (scrolled: G follows)" };
+        let mut out = vec![paint(&fit(&format!("{}{scrolled}", self.header), width), Style::Bold)];
+        let blank = body_h - body.len();
         out.extend(body);
+        out.extend(std::iter::repeat_n(String::new(), blank));
         let typed: String = self.input.iter().collect();
         let line = match self.mode {
             Mode::Typing => {
@@ -342,8 +404,9 @@ fn export(model: &str, instance: &str, turns: &[Turn], vectors: &[(String, Vec<f
     Ok(dir)
 }
 
-fn draw(ui: &Ui, last: &mut Vec<String>) {
+fn draw(ui: &mut Ui, last: &mut Vec<String>) {
     let (w, h) = screen_size();
+    ui.resize(w, h);
     let next = ui.render(w, h);
     let update = frame_update(last, &next);
     if !update.is_empty() {
@@ -485,7 +548,7 @@ pub(crate) fn run(t: Target, loaded: &mut Loaded, thinking: bool) -> Result<(), 
     let mut size = screen_size();
     let mut buf = [0u8; 256];
     loop {
-        draw(&st.ui, &mut st.last);
+        draw(&mut st.ui, &mut st.last);
         let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
         if unsafe { libc::poll(&mut fds, 1, Duration::from_millis(250).as_millis() as i32) } <= 0 {
             if screen_size() != size {
@@ -645,6 +708,75 @@ mod tests {
         let text = shown.render(40, 8).join("\n");
         assert!(text.contains("thinking") && text.contains("a long thought") && text.contains("done"), "{text}");
         assert_eq!(ui.render(10, 3).len(), 3, "a tiny terminal gets a one-line message");
+    }
+
+    #[test]
+    fn wrap_cuts_by_display_width_and_keeps_line_breaks_and_utf8() {
+        assert_eq!(wrap("abcdefgh", 3), ["abc", "def", "gh"]);
+        assert_eq!(wrap("ab\n\ncd", 5), ["ab", "", "cd"], "blank lines stay");
+        assert_eq!(wrap("h\u{e9}llo w\u{f6}rld", 6), ["h\u{e9}llo ", "w\u{f6}rld"], "a two-byte character is one column");
+        assert_eq!(wrap("x", 0), ["x"], "a zero width still makes progress");
+        assert_eq!(clean("a\x1b[31mred\x07\tz\nb"), "a[31mred z\nb", "a model cannot send the terminal an escape sequence");
+    }
+
+    #[test]
+    fn the_window_starts_at_the_top_and_follows_the_end_unless_scrolled() {
+        assert_eq!(top(5, 10, 0, true), 0, "short text sits at the top");
+        assert_eq!(top(30, 10, 0, true), 20, "long text follows the stream");
+        assert_eq!(top(30, 10, 4, false), 4, "scrolled up it stays");
+        assert_eq!(top(30, 10, 99, false), 20, "never past the end");
+        assert_eq!(moved(4, 30, 10, -9), 0);
+        assert_eq!(moved(18, 30, 10, 9), 20);
+        assert_eq!(moved(0, 5, 10, 3), 0, "nothing to scroll");
+    }
+
+    fn long_chat(ui: &mut Ui) {
+        ui.resize(40, 13);
+        ui.entries = vec![Entry::User("first".into()), Entry::Reply((1..=40).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n"))];
+    }
+
+    #[test]
+    fn text_flows_from_the_top_and_scrolling_in_command_mode_leaves_and_rejoins_the_stream() {
+        let mut ui = Ui::new("m".into(), false);
+        ui.resize(40, 13);
+        ui.entries = vec![Entry::User("first".into()), Entry::Reply("short".into())];
+        let screen = ui.render(40, 13);
+        assert!(screen[1].contains("> first") && screen[2].contains("short"), "the first line is on the first body row: {screen:?}");
+        long_chat(&mut ui);
+        let body = |ui: &Ui| ui.render(40, 13)[1..=10].join("|");
+        assert!(body(&ui).contains("line 40") && !body(&ui).contains("> first"), "following: the end is shown, the start scrolled off");
+        ui.key(Input::Esc);
+        assert_eq!(ui.key(Input::Char('g')), Act::None);
+        assert!(body(&ui).contains("> first") && ui.render(40, 13)[0].contains("scrolled: G follows"), "g goes to the top and leaves the stream");
+        ui.key(Input::Down);
+        ui.key(Input::Char('j'));
+        assert!(!body(&ui).contains("> first") && body(&ui).contains("line 1"), "j and Down scroll one line");
+        ui.key(Input::PageDown);
+        assert!(body(&ui).contains("line 11") && !body(&ui).contains("line 10"), "a page is the window minus one line: {}", body(&ui));
+        ui.key(Input::Char('k'));
+        ui.key(Input::PageUp);
+        assert!(body(&ui).starts_with("line 1 "), "{}", body(&ui));
+        ui.key(Input::PageUp);
+        assert!(body(&ui).contains("> first"), "{}", body(&ui));
+        ui.key(Input::Char('G'));
+        assert!(body(&ui).contains("line 40") && ui.follow && !ui.render(40, 13)[0].contains("scrolled"), "G jumps to the end and follows again");
+        ui.key(Input::Char('g'));
+        ui.key(Input::Char('i'));
+        typed(&mut ui, "more");
+        assert_eq!(ui.key(Input::Enter), Act::Send("more".into()));
+        assert!(ui.follow, "a new send re-enables follow");
+    }
+
+    #[test]
+    fn page_keys_scroll_while_typing_too_and_resize_rewraps() {
+        let mut ui = Ui::new("m".into(), false);
+        long_chat(&mut ui);
+        ui.key(Input::PageUp);
+        assert!(!ui.follow);
+        let wide = ui.lines(40).len();
+        assert!(ui.lines(10).len() >= wide, "a narrower terminal wraps into more lines");
+        assert_eq!(wrap("a long enough line to wrap", 10).len(), 3);
+        assert_eq!(parse_input(b"\x1b[5~\x1b[6~\x15\x04"), [Input::PageUp, Input::PageDown, Input::PageUp, Input::PageDown]);
     }
 
     #[test]
