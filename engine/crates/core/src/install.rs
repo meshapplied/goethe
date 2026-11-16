@@ -318,8 +318,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         }
     }
     hf::ensure_model(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf.clone(), ..dl })?;
-    let pack = structure_offer(home, opts, &card_dir)
-        .filter(|c| gguf.as_ref().is_none_or(|f| gguf_metadata(home, &card_dir, &c.offer.format, f).is_ok()));
+    let pack = readable(structure_offer(home, opts, &card_dir), || gguf.as_ref().map_or(Ok(()), |f| gguf_metadata(home, &card_dir, "gguf", f)));
     Ok(Target {
         model_id: opts.model_id.clone(),
         card_dir,
@@ -329,6 +328,18 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         ternary: None,
         pack,
     })
+}
+
+fn readable<T>(choice: Option<T>, meta: impl FnOnce() -> Result<(), String>) -> Option<T> {
+    // A pack offered for GGUF weights is used only when their config and tokenizer can be made; otherwise the plain runtime takes them, and the install says why instead of dropping the offer silently.
+    let c = choice?;
+    match meta() {
+        Ok(()) => Some(c),
+        Err(e) => {
+            eprintln!("note: the optimised kernels were not used, serving with the plain runtime: {e}");
+            None
+        }
+    }
 }
 
 fn structure_offer(home: &Path, opts: &InstallOpts, dir: &Path) -> Option<PackChoice> {
@@ -580,7 +591,11 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     // Register a local tree in place (symlink farm) or as a copy; the card always lives under models/<id>.
     let src = fs::canonicalize(&opts.model_id).map_err(|e| format!("{}: {e}", opts.model_id))?;
     let has_pack = src.join(PACK_FILE).is_file();
-    let gguf: Vec<String> = crate::engines::llama_cpp::gguf_paths(&src).iter().filter_map(|p| Some(p.strip_prefix(&src).ok()?.to_string_lossy().into_owned())).collect();
+    let gguf: Vec<String> = crate::engines::llama_cpp::gguf_paths(&src)
+        .iter()
+        .filter_map(|p| Some(p.strip_prefix(&src).ok()?.to_string_lossy().into_owned()))
+        .filter(|n| crate::engines::llama_cpp::is_model_gguf(n))
+        .collect();
     if !has_pack && gguf.is_empty() && !src.join("config.json").is_file() {
         return Err(format!("{} has no config.json", src.display()));
     }
@@ -616,8 +631,7 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     } else {
         fetch(&registry_url()).ok().and_then(|r| find_model(&r, &model_id).cloned())
     };
-    let pack = (!has_pack).then(|| structure_offer(home, opts, &card_dir)).flatten()
-        .filter(|c| gguf.is_empty() || gguf_metadata(home, &card_dir, &c.offer.format, &gguf).is_ok());
+    let pack = readable((!has_pack).then(|| structure_offer(home, opts, &card_dir)).flatten(), || if gguf.is_empty() { Ok(()) } else { gguf_metadata(home, &card_dir, "gguf", &gguf) });
     Ok(Target {
         model_id,
         card_dir,
@@ -1704,6 +1718,22 @@ mod tests {
         crate::engines::llama_cpp::write_test_gguf_with(&proj, &[("clip.has_audio_encoder", 1)]);
         let p = plan_in_place(home.path(), "org/m-GGUF", &dir, None).unwrap();
         assert_eq!(p.table.get("task").and_then(|v| v.as_str()), Some("transcribe"));
+    }
+
+    #[test]
+    fn an_offered_pack_is_dropped_only_with_a_reason_and_a_projector_is_not_the_model() {
+        assert_eq!(readable(Some(1), || Ok(())), Some(1));
+        assert_eq!(readable(Some(1), || Err("no config".into())), None, "dropped, with a note on stderr");
+        assert_eq!(readable::<u8>(None, || panic!("no offer: nothing to read")), None);
+        let src = tempfile::tempdir().unwrap();
+        crate::engines::llama_cpp::write_test_gguf(&src.path().join("OrcaCyber-Q4_K_M.gguf"));
+        crate::engines::llama_cpp::write_test_gguf_with(&src.path().join("OrcaCyber-mmproj-F16.gguf"), &[("clip.vision.image_size", 448)]);
+        let (home, _) = gguf_home(true);
+        let opts = InstallOpts { model_id: src.path().display().to_string(), name: Some("me/orca".into()), ..Default::default() };
+        let t = install_local(home.path(), &opts).unwrap();
+        assert!(t.pack.is_none(), "no login: no offer");
+        let names: Vec<String> = crate::engines::llama_cpp::gguf_paths(src.path()).iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).filter(|n| crate::engines::llama_cpp::is_model_gguf(n)).collect();
+        assert_eq!(names, ["OrcaCyber-Q4_K_M.gguf"], "the metadata is made from the model file, never the projector");
     }
 
     #[test]
