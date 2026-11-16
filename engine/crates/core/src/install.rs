@@ -240,13 +240,16 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             let rev = choice.offer.revision.clone();
             let pre = hf::preflight_model(&choice.offer.hf_repo, Some(&rev))?;
             let size = |f: &String| pre.siblings.iter().find(|s| &s.rfilename == f).map(|s| s.size);
-            let files = plan
-                .variants
-                .iter()
-                .find(|v| v.iter().all(|f| size(f).is_some()))
-                .cloned()
-                .ok_or_else(|| format!("{}: the model files its kernel pack was built for are not in the repository", choice.offer.hf_repo))?;
-            announce(&opts.model_id, &format!("optimised kernels ({})", choice.offer.arch), files.iter().filter_map(size).sum());
+            let bytes = |v: &Vec<String>| v.iter().filter_map(size).sum::<u64>();
+            let fits = |v: &Vec<String>| hf::disk_preflight(home, bytes(v)).and_then(|_| vram_preflight(home, bytes(v)));
+            let present: Vec<&Vec<String>> = plan.variants.iter().filter(|v| v.iter().all(|f| size(f).is_some())).collect();
+            // The first variant of the manifest that is in the repo and fits this disk and these GPUs; else the first one's named refusal.
+            let files = match present.iter().find(|v| fits(v).is_ok()).or(present.first()) {
+                Some(v) => (*v).clone(),
+                None => return Err(format!("{}: the model files its kernel pack was built for are not in the repository", choice.offer.hf_repo)),
+            };
+            fits(&files)?;
+            confirm(opts, &format!("{} ({}, {:.1} GB) with optimised kernels for {}", opts.model_id, choice.offer.format, bytes(&files) as f64 / GIB, choice.offer.arch))?;
             let pack_dl = DownloadOpts { revision: Some(rev), force: opts.force, no_verify: opts.no_verify, only: Some(files.clone()) };
             hf::ensure_model(home, &choice.offer.hf_repo, &card_dir, &pack_dl)?;
             if let Some((repo, revision, only)) = crate::packs::aux(&plan.entry) {
@@ -274,7 +277,9 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 Some(files) => pre.siblings.iter().filter(|s| files.contains(&s.rfilename)).map(|s| s.size).sum(),
                 None => hf::download_bytes(&pre.siblings),
             };
-            announce(&opts.model_id, if gguf.is_some() { "llama.cpp" } else { "SGLang" }, bytes);
+            let (fmt, engine) = if gguf.is_some() { ("gguf", "llama.cpp") } else { ("safetensors", "SGLang") };
+            let why = if declined { "not logged in" } else { "none for this model on this GPU" };
+            confirm(opts, &format!("{} ({fmt}, {:.1} GB) with {engine} (no kernel pack: {why})", opts.model_id, bytes as f64 / GIB))?;
         }
     }
     hf::ensure_model(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf, ..dl })?;
@@ -289,9 +294,28 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     })
 }
 
-fn announce(model: &str, engine: &str, bytes: u64) {
-    // One line before the download: what is installed, with which engine, and how much it fetches.
-    println!("{model} · {engine} · {:.1} GB", bytes as f64 / GIB);
+fn confirm(opts: &InstallOpts, plan: &str) -> Result<(), String> {
+    // One line before any download: what, how big, which engine; a terminal confirms it unless --yes.
+    if opts.yes || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        println!("{plan}");
+        return Ok(());
+    }
+    match crate::term::ask(&format!("{plan}: download? [Y/n]"), "y")?.to_ascii_lowercase().starts_with('y') {
+        true => Ok(()),
+        false => Err("nothing was downloaded".into()),
+    }
+}
+
+fn vram_preflight(home: &Path, bytes: u64) -> Result<(), String> {
+    // Weights larger than all allowed GPUs together never load: refused before they are downloaded.
+    let Ok(hw) = crate::hw::profile(home) else { return Ok(()) };
+    let denied = db::open(home).ok().and_then(|c| crate::gpu_policy::denied_set(&c).ok()).unwrap_or_default();
+    let total = hw.gpus.iter().filter(|g| !denied.contains(&g.index)).map(|g| g.vram_total_mb as f64 / 1024.0).sum::<f64>();
+    let gb = bytes as f64 / GIB;
+    if total > 0.0 && gb > total {
+        return Err(format!("the weights ({gb:.1} GB) are larger than the allowed GPUs together ({total:.1} GB); nothing was downloaded"));
+    }
+    Ok(())
 }
 
 fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String> {
