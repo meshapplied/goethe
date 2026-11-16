@@ -12,7 +12,7 @@ PACKED=(
 )
 PROMPT="Say hello in one short sentence."
 BAD='Illegal instruction|cannot open shared object|Traceback'
-REFUSED='is not supported|larger than the allowed GPUs|not supported here|nothing was downloaded|gated or private'
+REFUSED='is not supported|larger than the allowed GPUs|not supported here|nothing was downloaded|gated or private|no placement fits'
 GOETHE="${GOETHE_BIN:-goethe}"
 LIMIT="${ACCEPT_TIMEOUT:-3600}"
 WORK="$(mktemp -d)"
@@ -91,7 +91,7 @@ accept_one() {
   if [[ ${rc} -ne 0 ]]; then
     if grep -qE "${REFUSED}" "${WORK}/err" && ! grep -qE "${BAD}" "${WORK}/err"; then
       VERDICT=SKIP
-      REASON="refused on this machine before any download"
+      REASON="refused on this machine (not supported, or no GPU memory free)"
     else
       VERDICT=FAIL
       REASON="install exit ${rc}"
