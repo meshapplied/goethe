@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
@@ -88,10 +90,10 @@ pub fn preflight_model(model_id: &str, revision: Option<&str>) -> Result<ModelPr
     preflight_model_opts(model_id, revision, false)
 }
 
+pub const GATED_WAYS: &str = "accept the license, then goethe install ID --hf-token, or goethe install DIR --name ID for weights you already have";
+
 pub fn gated_guidance(model_id: &str) -> String {
-    format!(
-        "{model_id} is gated or private on Hugging Face, so it needs your Hugging Face token. After accepting its license on huggingface.co, run: goethe install {model_id} --hf-token"
-    )
+    format!("{model_id} is gated or private on Hugging Face: {}", GATED_WAYS.replace("ID", model_id))
 }
 
 fn status_refusal(model_id: &str, status: u16, has_token: bool) -> Option<String> {
@@ -271,8 +273,12 @@ pub fn ensure_model(home: &Path, model_id: &str, local_dir: &Path, opts: &Downlo
     };
     let files = wanted(&pre.siblings, &excludes);
     disk_preflight(home, bytes_needed(&files, local_dir))?;
+    let existed = local_dir.exists();
     fs::create_dir_all(local_dir).map_err(|e| format!("{}: {e}", local_dir.display()))?;
-    download_with_retries(home, model_id, local_dir, &revision, &excludes)?;
+    if let Err(e) = download_with_retries(home, model_id, local_dir, &revision, &excludes) {
+        drop_empty_new_dir(local_dir, existed);
+        return Err(e);
+    }
     check_present(local_dir, &files)?;
     if opts.no_verify {
         return write_revision(local_dir, &revision);
@@ -401,12 +407,127 @@ pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: 
         Some(t) => cmd.env("HF_TOKEN", t),
         None => cmd.env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1"),
     };
-    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    let status = cmd.status().map_err(|e| format!("hf download failed to start: {e}"))?;
+    let (status, tail) = run_guarded(&mut cmd).map_err(|e| format!("hf download failed to start: {e}"))?;
     if !status.success() {
-        return Err(format!("hf download exited with {status}"));
+        return Err(download_failure(&status, &tail));
     }
     Ok(())
+}
+
+static DOWNLOAD_PGID: AtomicI32 = AtomicI32::new(0);
+const INTERRUPTED: &[u8] = b"\ninterrupted; partial files kept, run the same command to resume\n";
+const TRACEBACK: &[u8] = b"Traceback (most recent call last)";
+const TAIL_BYTES: usize = 64 * 1024;
+
+extern "C" fn on_interrupt(sig: libc::c_int) {
+    // Async-signal-safe only: stop the downloader's whole process group, say so, leave with the shell's code for the signal.
+    let group = DOWNLOAD_PGID.load(Ordering::SeqCst);
+    unsafe {
+        if group > 0 {
+            libc::kill(-group, libc::SIGTERM);
+            libc::write(2, INTERRUPTED.as_ptr().cast(), INTERRUPTED.len());
+            libc::_exit(128 + sig);
+        }
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+struct Reaper(i32);
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        // Every way out of the download but a finished one (an error, a panic) takes the downloader's group with it.
+        if self.0 > 0 {
+            unsafe { libc::kill(-self.0, libc::SIGTERM) };
+        }
+    }
+}
+
+fn run_guarded(cmd: &mut Command) -> std::io::Result<(ExitStatus, Vec<u8>)> {
+    // The downloader in its own process group, killed with goethe: SIGINT and SIGTERM stop the group, a SIGKILL of goethe stops the child (parent-death signal). Its stderr is shown live up to a Python traceback, which is kept for one line instead.
+    cmd.stderr(Stdio::piped()).stdin(Stdio::null());
+    cmd.process_group(0);
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
+    let handler = on_interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    let (old_int, old_term) = unsafe { (libc::signal(libc::SIGINT, handler), libc::signal(libc::SIGTERM, handler)) };
+    let result = cmd.spawn().and_then(|mut child| {
+        let mut reaper = Reaper(child.id() as i32);
+        DOWNLOAD_PGID.store(reaper.0, Ordering::SeqCst);
+        let err = child.stderr.take();
+        let shown = thread::spawn(move || err.map(tee_stderr).unwrap_or_default());
+        let status = child.wait()?;
+        reaper.0 = 0;
+        DOWNLOAD_PGID.store(0, Ordering::SeqCst);
+        Ok((status, shown.join().unwrap_or_default()))
+    });
+    unsafe {
+        libc::signal(libc::SIGINT, old_int);
+        libc::signal(libc::SIGTERM, old_term);
+    }
+    result
+}
+
+fn tee_stderr(mut r: std::process::ChildStderr) -> Vec<u8> {
+    // Pass the downloader's stderr (progress) through until a Python traceback starts; return the last bytes of everything.
+    let (mut tail, mut buf, mut live) = (Vec::new(), [0u8; 4096], true);
+    let mut err = std::io::stderr();
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let before = tail.len().min(TRACEBACK.len());
+        tail.extend_from_slice(&buf[..n]);
+        if live {
+            let from = tail.len() - n - before;
+            let cut = tail[from..].windows(TRACEBACK.len()).position(|w| w == TRACEBACK).map(|p| (from + p).saturating_sub(tail.len() - n));
+            let _ = err.write_all(&buf[..cut.unwrap_or(n)]);
+            let _ = err.flush();
+            live = cut.is_none();
+        }
+        if tail.len() > TAIL_BYTES {
+            tail.drain(..tail.len() - TAIL_BYTES);
+        }
+    }
+    tail
+}
+
+fn download_failure(status: &ExitStatus, tail: &[u8]) -> String {
+    // One line for a failed download: the network case named, then the downloader's own last line.
+    let text = String::from_utf8_lossy(tail);
+    let drawn = |l: &&str| l.contains(['\u{2502}', '\u{256d}', '\u{2570}', '\u{2500}', '\u{256e}', '\u{256f}']);
+    let lines: Vec<&str> = text.split(['\n', '\r']).map(str::trim).filter(|l| !l.is_empty() && !drawn(l)).collect();
+    let last = lines.iter().rev().find(|l| l.contains("Error") || l.contains("Exception")).or(lines.last()).copied().unwrap_or("");
+    let low = text.to_lowercase();
+    let network = ["connecterror", "connectionerror", "proxyerror", "name or service not known", "temporary failure in name resolution", "max retries exceeded", "network is unreachable", "connection refused", "timed out", "readtimeout", "connecttimeout", "offline"];
+    if network.iter().any(|n| low.contains(n)) {
+        let host = hf_endpoint();
+        let host = host.split("://").last().unwrap_or(&host).trim_end_matches('/').to_string();
+        return format!("cannot reach {host} (network or proxy): {last}");
+    }
+    match last {
+        "" => format!("hf download exited with {status}"),
+        l if l.contains("gated") || l.contains("401") || l.contains("403") => l.to_string(),
+        l => format!("hf download exited with {status}: {l}"),
+    }
+}
+
+fn has_file(dir: &Path) -> bool {
+    // True when any regular file lives under dir (a resumable partial download counts).
+    fs::read_dir(dir).map(|rd| rd.flatten().any(|e| e.file_type().map(|t| if t.is_dir() { has_file(&e.path()) } else { true }).unwrap_or(true))).unwrap_or(true)
+}
+
+fn drop_empty_new_dir(dir: &Path, existed: bool) {
+    // A failed first download leaves no empty model folder behind; one that held anything, or that was there before, stays.
+    if !existed && !has_file(dir) {
+        let _ = fs::remove_dir_all(dir);
+    }
 }
 
 const HF_QUIET: &str = "import logging, runpy, sys
@@ -712,6 +833,54 @@ mod tests {
         let body = serde_json::json!({"siblings": [{"rfilename": "a.json"}, {"rfilename": "../../x"}, {"rfilename": "/etc/x"}, {"rfilename": "d/../../x"}, {"rfilename": "d//x"}, {"rfilename": "d/ok.json"}]});
         let names: Vec<String> = parse_siblings(&body).into_iter().map(|f| f.rfilename).collect();
         assert_eq!(names, ["a.json", "d/ok.json"]);
+    }
+
+    fn sh(script: &str) -> Command {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(script);
+        c
+    }
+
+    #[test]
+    fn the_downloader_runs_in_its_own_group_and_its_traceback_becomes_one_line() {
+        let (status, tail) = run_guarded(&mut sh("ps -o pid=,pgid= -p $$ >&2; echo Traceback \\(most recent call last\\): >&2; echo '  File \"x.py\", line 1' >&2; echo 'httpx.ConnectError: [Errno -3] Temporary failure in name resolution' >&2; exit 1")).unwrap();
+        assert!(!status.success());
+        let text = String::from_utf8_lossy(&tail).to_string();
+        let ids: Vec<i64> = text.lines().next().unwrap().split_whitespace().filter_map(|n| n.parse().ok()).collect();
+        assert_eq!(ids[0], ids[1], "the child leads its own process group: {text}");
+        assert_ne!(ids[1], unsafe { libc::getpgrp() } as i64);
+        let line = download_failure(&status, &tail);
+        assert_eq!(line, "cannot reach huggingface.co (network or proxy): httpx.ConnectError: [Errno -3] Temporary failure in name resolution");
+        assert!(!line.contains('\n') && !line.contains("Traceback"));
+        assert_eq!(download_failure(&status, b"401 Client Error: Unauthorized"), "401 Client Error: Unauthorized");
+    }
+
+    #[test]
+    fn leaving_the_download_early_stops_its_whole_group() {
+        let mut child = sh("sleep 30 & sleep 30").process_group(0).spawn().unwrap();
+        let group = child.id() as i32;
+        std::thread::sleep(Duration::from_millis(200));
+        drop(Reaper(group));
+        let status = child.wait().unwrap();
+        assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(libc::SIGTERM));
+        std::thread::sleep(Duration::from_millis(200));
+        assert_ne!(unsafe { libc::kill(-group, 0) }, 0, "the sleeping members of the group are gone too");
+    }
+
+    #[test]
+    fn a_failed_first_download_leaves_no_empty_folder_but_keeps_what_it_got() {
+        let home = tempfile::tempdir().unwrap();
+        let (fresh, kept, theirs) = (home.path().join("fresh"), home.path().join("kept"), home.path().join("theirs"));
+        for d in [&fresh, &kept, &theirs] {
+            fs::create_dir_all(d.join(".cache/huggingface/download")).unwrap();
+        }
+        fs::write(kept.join(".cache/huggingface/download/m.incomplete"), b"half").unwrap();
+        drop_empty_new_dir(&fresh, false);
+        drop_empty_new_dir(&kept, false);
+        drop_empty_new_dir(&theirs, true);
+        assert!(!fresh.exists(), "an empty folder this run made is removed");
+        assert!(kept.exists(), "a partial file is what a rerun resumes");
+        assert!(theirs.exists(), "a folder that was already there stays");
     }
 
     #[test]

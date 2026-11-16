@@ -7,7 +7,6 @@ use crate::term::{self, paint, Color};
 use std::io::IsTerminal;
 
 const STEPS: usize = 3;
-const EXAMPLE_ID: &str = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
 
 enum Next {
     Serve(String),
@@ -17,7 +16,7 @@ enum Next {
 pub fn run() -> Result<(), String> {
     // Start Goethe, then let the user pick the guided track (recommended) or the advanced one.
     if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
-        print!("{}", no_terminal_text());
+        print!("{}", no_terminal_text(&suggested(false)));
         return Ok(());
     }
     let (blocking, notes) = readiness();
@@ -202,7 +201,7 @@ fn install_from_catalog() -> Result<Option<String>, String> {
 }
 
 fn ask_model_id() -> Result<Option<String>, String> {
-    let id = term::ask(&format!("Hugging Face model id, for example {EXAMPLE_ID} (empty to go back):"), "")?;
+    let id = term::ask(&format!("Hugging Face model id, for example {} (empty to go back):", suggested(false)), "")?;
     Ok(Some(id).filter(|i| !i.is_empty()))
 }
 
@@ -428,12 +427,21 @@ fn later_text(model: Option<&str>) -> String {
     format!("\n{}", term::commands("Continue whenever you like:", &lines))
 }
 
-fn no_terminal_text() -> String {
+pub fn suggested(offline: bool) -> String {
+    // The model examples name: the top of goethe models recommend for this machine (the bundled catalog when offline or unreachable).
+    let reg = if offline { crate::registry::bundled() } else { crate::registry::fetch(&crate::registry::registry_url()).or_else(|_| crate::registry::bundled()) };
+    match reg {
+        Ok(r) => crate::recommend::suggested_model(&goethe_home(), &r),
+        Err(_) => "nvidia/Llama-3.1-8B-Instruct-NVFP4".to_string(),
+    }
+}
+
+fn no_terminal_text(example: &str) -> String {
     // The same three steps as commands, for scripts and terminals without arrow keys.
     format!(
         "goethe start needs an interactive terminal. The same steps as commands:\n\n{}\n{}\n{}",
-        term::commands("Step 1/3  Install a model:", &["goethe up", "goethe models recommend", &format!("goethe install {EXAMPLE_ID}")]),
-        term::commands("Step 2/3  Serve through an API:", &[&format!("goethe load {EXAMPLE_ID}")]),
+        term::commands("Step 1/3  Install a model:", &["goethe up", "goethe models recommend", &format!("goethe install {example}")]),
+        term::commands("Step 2/3  Serve through an API:", &[&format!("goethe load {example}")]),
         term::commands("Step 3/3  Configure API access:", &["goethe api configure", "goethe api manage"])
     )
 }
@@ -462,11 +470,11 @@ mod tests {
 
     #[test]
     fn without_a_terminal_the_three_steps_are_printed_as_commands() {
-        let text = no_terminal_text();
+        let text = no_terminal_text("org/small");
         for step in ["Step 1/3  Install a model", "Step 2/3  Serve through an API", "Step 3/3  Configure API access"] {
             assert!(text.contains(step), "{text}");
         }
-        assert!(text.contains(&format!("goethe install {EXAMPLE_ID}")));
+        assert!(text.contains("goethe install org/small") && text.contains("goethe load org/small") && !text.contains("DeepSeek"));
         assert_eq!(later_text(Some("org/m")).matches("\u{2192}").count(), 2);
     }
 }

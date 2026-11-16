@@ -19,7 +19,7 @@ from lib.goethe_test import (
     temp_home,
 )
 
-GATED = "is gated or private on hugging face, so it needs your hugging face token"
+GATED = "is gated or private on hugging face: accept the license, then goethe install"
 
 
 def _registry_for(model: str) -> str:

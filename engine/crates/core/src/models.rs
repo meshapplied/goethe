@@ -99,17 +99,18 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
         }
     }
     if let (false, Some(r)) = (installed_only, &reg) {
-        for m in r.models.iter().filter(|m| m.manual_download_reason().is_none()) {
+        for m in r.models.iter().filter(|m| !m.manual_download.unwrap_or(false)) {
             if installed.iter().any(|i| i.id == m.id) {
                 continue;
             }
             let pinned = m.default_tp.filter(|t| *t > 0).map(|t| t as usize);
             let verdict = verdict(view.as_ref(), &m.id, &registry_input(m), pinned);
+            let gated = if m.gated.unwrap_or(false) { GATED_FIT } else { "" };
             rows.push(ModelRow {
                 id: m.id.clone(),
                 status: "available".to_string(),
                 gb: m.download_gb.unwrap_or(m.static_vram_gb),
-                fit: verdict.label(),
+                fit: format!("{}{gated}", verdict.label()),
                 custom: None,
                 optimised: packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id)).then_some(true),
                 runtime: None,
@@ -241,6 +242,7 @@ fn verdict(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<u
 }
 
 const OPTIMISED: &str = " (optimised kernels available)";
+const GATED_FIT: &str = " (gated: needs your Hugging Face token or access)";
 
 fn packs_text(offers: &[(&crate::packs::Offer, Option<f64>)], linked: bool) -> String {
     // Models that run on goethe-engine with optimised kernels on this machine's GPUs, and how to get them.
@@ -294,6 +296,9 @@ fn list_text(rows: &[ModelRow], free_gb: Option<String>) -> String {
         if !table.is_empty() {
             out.push_str(&format!("{}\n{}\n", paint(title, Color::Bold), table.render()));
         }
+    }
+    if rows.iter().any(|r| r.fit.contains(GATED_FIT)) {
+        out.push_str(&format!("\ngated models: {}\n", crate::hf::GATED_WAYS));
     }
     out.trim_end().to_string() + "\n"
 }
@@ -739,6 +744,16 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_gated_catalog_model_is_marked_and_explained() {
+        let row = |id: &str, fit: String| ModelRow { id: id.into(), status: "available".into(), gb: 5.0, fit, custom: None, optimised: None, runtime: None, verdict: Verdict::Fits { per_gpu: 5.0, total: 5.0 } };
+        let text = list_text(&[row("org/open", "fits: 5.0 GB per GPU".into()), row("org/closed", format!("fits: 5.0 GB per GPU{GATED_FIT}"))], None);
+        assert!(text.contains("org/closed") && text.contains("gated: needs your Hugging Face token or access"), "{text}");
+        assert!(text.contains(&format!("gated models: {}", crate::hf::GATED_WAYS)), "{text}");
+        let plain = list_text(&[row("org/open", "fits: 5.0 GB per GPU".into())], None);
+        assert!(!plain.contains("gated"), "{plain}");
+    }
 
     #[test]
     fn an_installed_row_names_its_runtime_in_json() {
