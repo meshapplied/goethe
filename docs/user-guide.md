@@ -32,7 +32,7 @@ Goethe turns a Linux machine into your own API, compatible with OpenAI, Anthropi
 ## Quick install
 
 ```bash
-curl -fsSL https://pkg.goethe.sh/install.sh | bash
+curl -fsSL https://goethe.sh/install.sh | bash
 goethe login
 goethe start
 ```

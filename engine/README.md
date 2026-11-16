@@ -6,7 +6,7 @@ This README is for building and releasing Goethe. To install and use it, see the
 
 ## Install
 
-    curl -fsSL https://pkg.goethe.sh/install.sh | bash
+    curl -fsSL https://goethe.sh/install.sh | bash
 
 The installer verifies a signed manifest, creates a Python environment with SGLang, installs `goethe` and `goethed` and links `goethe` into `/usr/local/bin` (or `~/.local/bin`), then ends with `goethe start`. It does not start goethed or turn on start at boot; `goethe start` or `goethe up` does. Re-running it over a running goethed applies the new binaries to it and keeps engines serving. No root needed. State lives in `$GOETHE_HOME`, else in the home whose `bin/` holds the running binary (links are followed, so the linked `goethe` finds a custom home), else `/workspace/.goethe`, else `/var/lib/goethe`, else `~/.goethe`.
 
@@ -158,7 +158,7 @@ Releases come from GitHub, never from a laptop:
 - Every pull request to `main` and every merge runs `.github/workflows/ci.yml`: Rust build, tests and clippy, the style lint, the CPU gates (`gate.sh 0`, `stage6_integrity`) and an unsigned x86_64 package build.
 - To release: `engine/packaging/release.sh prepare X.Y.Z` opens the version bump PR from `main` (the three crates, `Cargo.lock`, and the `## Unreleased` changelog section dated); after it is merged, `engine/packaging/release.sh tag X.Y.Z` tags that `main` commit and starts the release workflow. Approve `publish` when it waits. By hand: set the version in `crates/*/Cargo.toml` through a pull request, then push a tag `vX.Y.Z` on that `main` commit (or run the release workflow by hand on `main`).
 - `.github/workflows/release.yml` then checks the commit is on `main` and the tag matches the version, reruns CI, and builds both architectures with `--release` using the `GOETHE_SIGN_KEY` secret. It verifies the checksums, signature, embedded key fingerprint and BUILDINFO, and installs the package in a clean Ubuntu 22.04 container.
-- After an approval on the `release` environment, it publishes the GitHub release and deploys the package tree to GitHub Pages, which serves it at `https://pkg.goethe.sh/` (DNS: `CNAME pkg -> meshapplied.github.io`). `https://pkg.goethe.sh/install.sh` redirects there from the website.
+- After an approval on the `release` environment, it publishes the GitHub release and deploys the package tree to GitHub Pages, which serves it at `https://pkg.goethe.sh/` (DNS: `CNAME pkg -> meshapplied.github.io`). `https://goethe.sh/install.sh` redirects there from the website.
 - Existing installs then pick the release up with `goethe update`.
 
 ## Tests
