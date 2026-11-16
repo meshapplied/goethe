@@ -1629,11 +1629,12 @@ fn print_ps_table(rows: &[Value]) {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
     let mut table = goethe_core::term::Table::new(&[
-        "INSTANCE", "MODEL", "SLOT", "STATUS", "GPUS", "PORT", "VRAM_GB", "RESTARTS", "IN_FLIGHT", "TOK_PER_S", "PREFIX",
+        "INSTANCE", "MODEL", "RUNTIME", "SLOT", "STATUS", "GPUS", "PORT", "VRAM_GB", "RESTARTS", "IN_FLIGHT", "TOK_PER_S", "PREFIX",
     ]);
     for row in rows {
         let inst = row.get("instance_id").and_then(|v| v.as_str()).unwrap_or("");
         let model = row.get("model_id").and_then(|v| v.as_str()).unwrap_or("");
+        let runtime = row.get("runtime").and_then(|v| v.as_str()).unwrap_or("-");
         let slot = row.get("slot_key").and_then(|v| v.as_str()).unwrap_or("");
         let status = ps_status(row, now);
         let gpus = ps_gpus_csv(row);
@@ -1658,6 +1659,7 @@ fn print_ps_table(rows: &[Value]) {
         table.row(vec![
             inst.to_string(),
             model.to_string(),
+            runtime.to_string(),
             slot.to_string(),
             goethe_core::term::status(&status),
             gpus,
