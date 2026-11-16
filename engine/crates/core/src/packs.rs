@@ -174,6 +174,7 @@ pub struct Entry {
     pub manifest_sha256: String,
     pub size: u64,
     pub sig: Value,
+    pub aux: Value,
 }
 
 pub fn platform_base(home: &Path) -> Result<String, String> {
@@ -282,6 +283,7 @@ pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> 
                 manifest_sha256: manifest.to_string(),
                 size: e["size"].as_u64().unwrap_or(0),
                 sig: e["sig"].clone(),
+                aux: e["aux"].clone(),
             });
         }
     }
@@ -305,6 +307,13 @@ fn pack_file_name(f: &str) -> bool {
         && f.len() > ".gcpack".len()
         && f.as_bytes()[0].is_ascii_alphanumeric()
         && f.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+pub fn aux(e: &Entry) -> Option<(String, Option<String>, Vec<String>)> {
+    // The model's own config and tokenizer files the signed entry names (repo, revision, files): a GGUF repo ships none.
+    let repo = e.aux["repo"].as_str().filter(|r| crate::paths::validate_model_id(r).is_ok())?;
+    let files: Vec<String> = e.aux["files"].as_array()?.iter().filter_map(|f| f.as_str()).filter(|f| safe_name(f)).map(String::from).collect();
+    (!files.is_empty()).then(|| (repo.to_string(), e.aux["revision"].as_str().map(String::from), files))
 }
 
 pub fn safe_name(f: &str) -> bool {
@@ -548,7 +557,8 @@ mod tests {
         serde_json::json!({"schema": "gc-pack-index", "version": 3, "serial": 7, "entries": [{
             "model": {"hf_repo": "org/M-GGUF", "revision": "abc", "format": "gguf", "structure": []},
             "arch": "sm_120a", "abi_major": 3, "runtime": {"kind": "gc-c", "version": 1}, "min_engine": "0.2.0", "tier": "base",
-            "file": "m.gcpack", "manifest_sha256": manifest_sha, "size": p.bytes.len(), "sig": {"keyid": "k"}}]})
+            "file": "m.gcpack", "manifest_sha256": manifest_sha, "size": p.bytes.len(), "sig": {"keyid": "k"},
+            "aux": {"repo": "org/M", "revision": "def", "files": ["config.json", "tokenizer.json", "../x"]}}]})
         .to_string()
         .into_bytes()
     }
@@ -626,6 +636,8 @@ mod tests {
         let p = plan(home.path(), "org/m-gguf", "sm_120a", &b, &engine(&b.pack, &[])).unwrap().unwrap();
         assert_eq!(p.variants, vec![vec!["m-Q4_0.gguf".to_string()], vec!["m-Q8_0.gguf".to_string()]]);
         assert_eq!(p.prefix, b.pack.bytes[..p.prefix.len()]);
+        let files = vec!["config.json".to_string(), "tokenizer.json".to_string()];
+        assert_eq!(aux(&p.entry), Some(("org/M".to_string(), Some("def".to_string()), files)), "a path in aux files is dropped");
         assert!(plan(home.path(), "org/other", "sm_120a", &b, &engine(&b.pack, &[])).unwrap().is_none());
         assert!(plan(home.path(), "org/m-gguf", "sm_90a", &b, &engine(&b.pack, &[])).unwrap().is_none());
     }
