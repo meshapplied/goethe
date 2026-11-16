@@ -2,7 +2,7 @@
 
 ## 0.3.1 (2026-11-16)
 
-- The Goethe platform moved to https://goethe.sh: `goethe login` links there by default (0.3.0 pointed at platform.meshapplied.com, where login no longer works). Nodes that need another platform still use `--platform-url` or `GOETHE_PLATFORM_URL`.
+- The Goethe platform moved to https://goethe.sh: `goethe login` links there by default (0.3.0 pointed at platform.meshapplied.com, where login no longer works). Nodes that need another platform still use `--platform-url` or `GOETHE_PLATFORM_URL`. When a platform's domain redirects to its `www.` form (or back), goethe follows that one redirect on the same path and keeps using the new address; any other redirect is still refused, so a node token never goes to another site.
 
 ## 0.3.0 (2026-11-16)
 

@@ -43,7 +43,7 @@ impl std::fmt::Display for ApiError {
 }
 
 pub struct Client {
-    base: String,
+    base: std::sync::Mutex<String>,
     agent: ureq::Agent,
 }
 
@@ -58,26 +58,28 @@ impl Client {
             .timeout(timeout)
             .user_agent(&format!("goethe/{}", env!("CARGO_PKG_VERSION")))
             .build();
-        Ok(Client { base, agent })
+        Ok(Client { base: std::sync::Mutex::new(base), agent })
     }
 
-    pub fn base(&self) -> &str {
-        &self.base
+    pub fn base(&self) -> String {
+        self.base.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn post(&self, path: &str, body: &[u8], bearer: Option<&Secret>) -> Result<Value, ApiError> {
-        // One JSON POST; the reply is read up to the size cap and must be a JSON object.
-        let mut req = self.agent.post(&format!("{}{path}", self.base)).set("Content-Type", "application/json").set("Accept", "application/json");
-        if let Some(t) = bearer {
-            req = req.set("Authorization", &format!("Bearer {}", t.expose()));
-        }
-        let resp = match req.send_bytes(body) {
-            Ok(r) => r,
-            Err(ureq::Error::Status(401, _)) => return Err(ApiError::Unauthorized),
-            Err(ureq::Error::Status(429, r)) => return Err(ApiError::RateLimited(retry_after(r.header("Retry-After")))),
-            Err(ureq::Error::Status(code, r)) => return Err(ApiError::Status(code, error_code(&read_capped(r).unwrap_or_default()))),
-            Err(ureq::Error::Transport(t)) => return Err(ApiError::Network(transport_text(&t))),
+        // One JSON POST; a redirect between a domain and its www. form is followed once and kept, any other is refused.
+        let base = self.base();
+        let resp = self.send(&base, path, body, bearer)?;
+        let resp = match same_site_move(&base, path, resp.status(), resp.header("Location")) {
+            Some(moved) => {
+                let again = self.send(&moved, path, body, bearer)?;
+                self.base.lock().unwrap_or_else(|e| e.into_inner()).clone_from(&moved);
+                again
+            }
+            None => resp,
         };
+        if (300..400).contains(&resp.status()) {
+            return Err(ApiError::Malformed(format!("{path} answered with a redirect to another site ({})", resp.status())));
+        }
         let text = read_capped(resp)?;
         match serde_json::from_str::<Value>(&text) {
             Ok(v) if v.is_object() => Ok(v),
@@ -85,9 +87,24 @@ impl Client {
         }
     }
 
+    fn send(&self, base: &str, path: &str, body: &[u8], bearer: Option<&Secret>) -> Result<ureq::Response, ApiError> {
+        // One request to base + path; 401, 429, other errors and transport failures become ApiError.
+        let mut req = self.agent.post(&format!("{base}{path}")).set("Content-Type", "application/json").set("Accept", "application/json");
+        if let Some(t) = bearer {
+            req = req.set("Authorization", &format!("Bearer {}", t.expose()));
+        }
+        match req.send_bytes(body) {
+            Ok(r) => Ok(r),
+            Err(ureq::Error::Status(401, _)) => Err(ApiError::Unauthorized),
+            Err(ureq::Error::Status(429, r)) => Err(ApiError::RateLimited(retry_after(r.header("Retry-After")))),
+            Err(ureq::Error::Status(code, r)) => Err(ApiError::Status(code, error_code(&read_capped(r).unwrap_or_default()))),
+            Err(ureq::Error::Transport(t)) => Err(ApiError::Network(transport_text(&t))),
+        }
+    }
+
     pub fn auth_start(&self, hostname: &str, fingerprint: &str) -> Result<Started, ApiError> {
         let body = json!({"action": "start", "hostname": hostname, "version": env!("CARGO_PKG_VERSION"), "fingerprint": fingerprint});
-        parse_started(&self.post("/api/device/auth", body.to_string().as_bytes(), None)?, self.base.starts_with("http://"))
+        parse_started(&self.post("/api/device/auth", body.to_string().as_bytes(), None)?, self.base().starts_with("http://"))
     }
 
     pub fn auth_poll(&self, device_code: &Secret) -> Result<Poll, ApiError> {
@@ -125,6 +142,20 @@ impl Client {
             Err(e) => Err(e),
         }
     }
+}
+
+pub fn same_site_move(base: &str, path: &str, status: u16, location: Option<&str>) -> Option<String> {
+    // The new origin when an HTTPS platform redirects path to the same path on its www. twin (or back); None for anything else.
+    if !matches!(status, 301 | 307 | 308) || !base.starts_with("https://") {
+        return None;
+    }
+    let rest = location?.strip_prefix("https://")?;
+    let (host, tail) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let tail = if tail.is_empty() { "/" } else { tail };
+    let old = base.strip_prefix("https://")?;
+    let bare = |h: &str| h.to_ascii_lowercase().strip_prefix("www.").map(str::to_string).unwrap_or_else(|| h.to_ascii_lowercase());
+    let twins = !host.eq_ignore_ascii_case(old) && bare(host) == bare(old) && !bare(host).is_empty();
+    (twins && tail == path).then(|| format!("https://{host}")).and_then(|u| crate::platform::check_url(&u).ok())
 }
 
 pub fn retry_after(header: Option<&str>) -> Duration {
@@ -363,6 +394,26 @@ pub mod mock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_same_path_move_between_a_domain_and_its_www_twin_is_followed() {
+        let p = "/api/device/auth";
+        let m = |base: &str, status: u16, loc: &str| same_site_move(base, p, status, Some(loc));
+        assert_eq!(m("https://goethe.sh", 308, "https://www.goethe.sh/api/device/auth").as_deref(), Some("https://www.goethe.sh"));
+        assert_eq!(m("https://www.goethe.sh", 308, "https://goethe.sh/api/device/auth").as_deref(), Some("https://goethe.sh"));
+        assert_eq!(m("https://goethe.sh", 307, "https://WWW.goethe.sh/api/device/auth").as_deref(), Some("https://WWW.goethe.sh"));
+        assert_eq!(m("https://goethe.sh", 308, "https://evil.sh/api/device/auth"), None, "another site");
+        assert_eq!(m("https://goethe.sh", 308, "https://www.goethe.sh.evil.com/api/device/auth"), None);
+        assert_eq!(m("https://goethe.sh", 308, "https://wwwgoethe.sh/api/device/auth"), None);
+        assert_eq!(m("https://goethe.sh", 308, "http://www.goethe.sh/api/device/auth"), None, "never down to http");
+        assert_eq!(m("https://goethe.sh", 308, "https://www.goethe.sh/other"), None, "another path");
+        assert_eq!(m("https://goethe.sh", 308, "/api/device/auth"), None, "relative");
+        assert_eq!(m("https://goethe.sh", 302, "https://www.goethe.sh/api/device/auth"), None, "302 turns POST into GET");
+        assert_eq!(m("https://goethe.sh", 308, "https://goethe.sh/api/device/auth"), None, "the same origin");
+        assert_eq!(m("http://localhost:3000", 308, "https://www.localhost:3000/api/device/auth"), None, "dev platforms stay");
+        assert_eq!(m("https://goethe.sh", 308, "https://user@www.goethe.sh/api/device/auth"), None, "credentials in the URL");
+        assert_eq!(same_site_move("https://goethe.sh", p, 308, None), None);
+    }
 
     const TOKEN: &str = "mesh_node_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 

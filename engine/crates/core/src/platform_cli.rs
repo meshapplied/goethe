@@ -236,7 +236,7 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
             ApiError::Unauthorized => "the platform did not accept the auth key (wrong, used or expired)".to_string(),
             e => format!("{e}; nothing was linked"),
         })?;
-        return finish(&home, approved, &url);
+        return finish(&home, approved, &client.base());
     }
     let started = with_retries(|| client.auth_start(&hostname, &fingerprint)).map_err(|e| format!("{e}; nothing was changed"))?;
     replace_old_link(&home, old)?;
@@ -255,7 +255,7 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
         },
     );
     match result {
-        Ok(approved) => finish(&home, approved, &url),
+        Ok(approved) => finish(&home, approved, &client.base()),
         Err(WaitError::Cancelled) => Err("login cancelled; this node is not linked".into()),
         Err(WaitError::Failed(e)) => Err(e),
     }

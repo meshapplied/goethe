@@ -32,7 +32,7 @@ pub enum Outcome {
 pub struct Worker {
     home: PathBuf,
     collector: Collector,
-    client: Option<Client>,
+    client: Option<(String, Client)>,
     failures: u32,
     last_loaded: Option<usize>,
     server_interval: Option<u64>,
@@ -69,9 +69,9 @@ impl Worker {
             self.client = None;
             return (Outcome::Revoked, INTERVAL);
         }
-        if self.client.as_ref().map(|c| c.base()) != Some(creds.platform_url.as_str()) {
+        if self.client.as_ref().map(|(url, _)| url.as_str()) != Some(creds.platform_url.as_str()) {
             match Client::new(&creds.platform_url, SEND_TIMEOUT) {
-                Ok(c) => self.client = Some(c),
+                Ok(c) => self.client = Some((creds.platform_url.clone(), c)),
                 Err(e) => return (self.failed(&mut state, e), self.backoff()),
             }
         }
@@ -81,7 +81,7 @@ impl Worker {
             Ok(d) => d,
             Err(e) => return (self.failed(&mut state, e), self.backoff()),
         };
-        let Some(client) = self.client.as_ref() else {
+        let Some((_, client)) = self.client.as_ref() else {
             return (Outcome::Failed("no client".into()), self.backoff());
         };
         match client.heartbeat(&creds.token, &data) {
