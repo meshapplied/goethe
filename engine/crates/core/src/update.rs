@@ -304,13 +304,13 @@ const MAX_PKG_TEXT: u64 = 16 << 20;
 fn fetch_pkg_file(base: &str, rel: &str, dest: &Path) -> Result<(), String> {
     // Package lists, versions and lock files are small text; only binaries, wheels and archives may be large.
     let text = matches!(rel, "SHA256SUMS" | "SHA256SUMS.sig" | "VERSION" | "BUILDINFO" | "wheels/LATEST") || rel.ends_with(".lock") || rel.ends_with(".sh");
-    fetch_pkg_file_max(base, rel, dest, if text { MAX_PKG_TEXT } else { MAX_PKG_FILE })
+    fetch_pkg_file_max(base, rel, dest, if text { MAX_PKG_TEXT } else { MAX_PKG_FILE }, Duration::from_secs(60))
 }
 
-fn fetch_pkg_file_max(base: &str, rel: &str, dest: &Path, max: u64) -> Result<(), String> {
-    // GET one CDN file into dest, streamed (never held in memory) and refused past `max` bytes, with GOETHE_PKG_TOKEN as a bearer token when set.
+fn fetch_pkg_file_max(base: &str, rel: &str, dest: &Path, max: u64, idle: Duration) -> Result<(), String> {
+    // GET one CDN file into dest, streamed (never held in memory) and refused past `max` bytes; it fails when the host goes quiet for `idle`, never for being slow. GOETHE_PKG_TOKEN goes as a bearer token when set.
     let url = format!("{base}/{rel}");
-    let mut req = crate::net::agent().get(&url).timeout(std::time::Duration::from_secs(60));
+    let mut req = crate::net::agent_builder().timeout_read(idle).build().get(&url);
     if let Some(tok) = crate::paths::setting("GOETHE_PKG_TOKEN") {
         req = req.set("Authorization", &format!("Bearer {}", tok.trim()));
     }
@@ -529,11 +529,35 @@ mod tests {
         });
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("f");
-        let err = fetch_pkg_file_max(&url, "f", &dest, 1 << 20).unwrap_err();
+        let err = fetch_pkg_file_max(&url, "f", &dest, 1 << 20, Duration::from_secs(5)).unwrap_err();
         assert!(err.contains("longer than"), "{err}");
         assert!(!dest.exists());
-        fetch_pkg_file_max(&url, "f", &dest, 4 << 20).unwrap();
+        fetch_pkg_file_max(&url, "f", &dest, 4 << 20, Duration::from_secs(5)).unwrap();
         assert_eq!(fs::metadata(&dest).unwrap().len(), 3_000_000);
+    }
+
+    #[test]
+    fn a_slow_download_that_keeps_arriving_is_not_cut_off_but_a_silent_host_is() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for (i, stream) in listener.incoming().take(2).enumerate() {
+                let mut s = stream.unwrap();
+                let _ = s.read(&mut [0u8; 2048]);
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 40\r\nConnection: close\r\n\r\n");
+                for _ in 0..4 {
+                    let _ = s.write_all(&[b'A'; 10]);
+                    let _ = s.flush();
+                    std::thread::sleep(Duration::from_millis(if i == 0 { 600 } else { 3000 }));
+                }
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("f");
+        fetch_pkg_file_max(&url, "f", &dest, 1 << 20, Duration::from_secs(1)).unwrap();
+        assert_eq!(fs::metadata(&dest).unwrap().len(), 40, "1.8 s in total with a 1 s idle limit");
+        assert!(fetch_pkg_file_max(&url, "f", &dest, 1 << 20, Duration::from_secs(1)).is_err(), "3 s of silence");
     }
 
     #[test]
