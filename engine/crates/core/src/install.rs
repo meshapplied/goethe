@@ -245,13 +245,11 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             let bytes = |v: &Vec<String>| v.iter().filter_map(size).sum::<u64>();
             let fits = |v: &Vec<String>| hf::disk_preflight(home, bytes(v)).and_then(|_| vram_preflight(home, bytes(v)));
             let present: Vec<&Vec<String>> = plan.variants.iter().filter(|v| v.iter().all(|f| size(f).is_some())).collect();
-            // The first variant of the manifest that is in the repo and fits this disk and these GPUs; else the first one's named refusal.
             let files = match present.iter().find(|v| fits(v).is_ok()).or(present.first()) {
                 Some(v) => (*v).clone(),
                 None => return Err(format!("{}: the model files its kernel pack was built for are not in the repository", choice.offer.hf_repo)),
             };
             fits(&files)?;
-            // A drafter the entry names comes along when target and drafter fit together; else the plan line says what it lacks.
             let draft = crate::packs::drafter(&plan.entry);
             let dgb = draft.as_ref().map_or(0, |d| d.files.iter().map(|f| f.1).sum::<u64>());
             let both = bytes(&files) + dgb;
@@ -306,7 +304,6 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         }
     }
     hf::ensure_model(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf.clone(), ..dl })?;
-    // A GGUF repo ships no config or tokenizer: written from the header for goethe-engine, else the plain path.
     let pack = structure_offer(home, opts, &card_dir)
         .filter(|c| gguf.as_ref().is_none_or(|f| gguf_metadata(home, &card_dir, &c.offer.format, f).is_ok()));
     Ok(Target {
@@ -589,7 +586,6 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         build_farm(&src, &card_dir)?;
     }
     if has_pack {
-        // One arch: a machine with mixed GPU generations verifies the pack for its most common one.
         let arch = crate::packs::local_archs(home).into_iter().next().ok_or("no GPU of this machine runs kernel packs")?;
         crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
         local_pack(home, &card_dir, &arch, &crate::packs::python_runner(home))?;
@@ -599,7 +595,6 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     } else {
         fetch(&registry_url()).ok().and_then(|r| find_model(&r, &model_id).cloned())
     };
-    // A pack of the folder's own is verified above; GGUF weights get their config and tokenizer from the header first.
     let pack = (!has_pack).then(|| structure_offer(home, opts, &card_dir)).flatten()
         .filter(|c| gguf.is_empty() || gguf_metadata(home, &card_dir, &c.offer.format, &gguf).is_ok());
     Ok(Target {
@@ -616,7 +611,6 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
 fn local_pack(home: &Path, dir: &Path, arch: &str, run: crate::packs::Runner) -> Result<(), String> {
     // goethe-engine verifies the pack for this arch and names the weights it matches; a GGUF gets its config and tokenizer.
     for f in [PACK_FILE.to_string(), format!("{PACK_FILE}.sig")] {
-        // goethe-engine opens only regular pack files: a linked one becomes a copy (the weights stay linked).
         let p = dir.join(&f);
         if fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
             let from = fs::canonicalize(&p).map_err(|e| format!("{}: {e}", p.display()))?;
@@ -631,7 +625,7 @@ fn local_pack(home: &Path, dir: &Path, arch: &str, run: crate::packs::Runner) ->
         return Err(format!("{}: the pack matches none of the weights there", dir.display()));
     }
     let verified = dir.join(PACK_VERIFY);
-    let _ = fs::remove_file(&verified); // never write through a link into the user's folder
+    let _ = fs::remove_file(&verified);
     fs::write(&verified, &out).map_err(|e| format!("{}: {e}", verified.display()))?;
     gguf_metadata(home, dir, if weights.iter().all(|w| w.ends_with(".gguf")) { "gguf" } else { "safetensors" }, &weights)
 }
@@ -801,7 +795,6 @@ fn register(home: &Path, opts: &InstallOpts, mut t: Target) -> Result<(), String
         None => None,
     };
     if let Some(why) = refused {
-        // This device runs no variant of the pack: the weights stay, the plain runtime serves them.
         drop_pack(&planned.dir);
         t.pack = None;
         planned = plan(home, opts, &t)?;
@@ -1013,7 +1006,6 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
     if crate::engines::ninfer::ninfer_in(dir).is_some() {
         return plan_ninfer(home, opts, t);
     }
-    // GGUF weights with no safetensors and no kernel pack (here or coming) run on llama.cpp, with or without a config.json.
     let pack = dir.join(PACK_FILE).is_file() || t.pack.is_some();
     if !pack && !model_facts::weight_files(dir).is_ok_and(|w| !w.is_empty()) && !crate::engines::llama_cpp::gguf_paths(dir).is_empty() {
         return plan_gguf(home, opts, t);
@@ -1365,7 +1357,6 @@ pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), Stri
         .to_string();
     if !no_wait {
         if let Err(e) = crate::load_wait::wait_for_instance(&iid, crate::load_wait::DEFAULT_LOAD_WAIT) {
-            // A pack this device runs no variant of, refused at load: the plain runtime and one more load (the pack is gone, so never twice).
             let home = goethe_home();
             let log = fs::read_to_string(home.join("logs").join(format!("{iid}.log"))).unwrap_or_default();
             return match unpack_refused(&home, &model_id, &log)? {

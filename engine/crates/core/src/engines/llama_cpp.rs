@@ -6,13 +6,11 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// The llama.cpp commit goethe runs and is compared against.
 pub const PIN: &str = "61dbf49228c8a96b72e40c89d93cb7c003411f8c";
 
 pub const ENGINE: super::Engine = super::Engine {
     id: "llama.cpp",
     layer: None,
-    // Body fields llama-server parses at PIN (tools/server/server-schema.cpp, server-common.cpp).
     params: Some(&[
         "temperature", "top_p", "top_k", "min_p", "max_tokens", "max_completion_tokens", "n", "stop", "seed",
         "presence_penalty", "frequency_penalty", "repeat_penalty", "logit_bias", "logprobs", "top_logprobs",

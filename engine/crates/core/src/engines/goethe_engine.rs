@@ -26,7 +26,6 @@ fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
     if weights.iter().all(|w| w.extension().is_some_and(|x| x == "safetensors")) {
         weights = vec![dir.to_path_buf()];
     }
-    // The drafter verification listed (drafter/), after the target; the engine tells the roles apart by structure.
     let drafter: Vec<PathBuf> = v["drafter"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).map(|f| dir.join(f)).filter(|f| f.is_file()).collect();
     let shards = !drafter.is_empty() && drafter.iter().all(|w| w.extension().is_some_and(|x| x == "safetensors"));
     weights.extend(if shards { vec![dir.join("drafter")] } else { drafter });
