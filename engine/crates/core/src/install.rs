@@ -562,11 +562,12 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     // Register a local tree in place (symlink farm) or as a copy; the card always lives under models/<id>.
     let src = fs::canonicalize(&opts.model_id).map_err(|e| format!("{}: {e}", opts.model_id))?;
     let has_pack = src.join(PACK_FILE).is_file();
-    if !has_pack && !src.join("config.json").is_file() {
+    let gguf: Vec<String> = crate::engines::llama_cpp::gguf_paths(&src).iter().filter_map(|p| Some(p.strip_prefix(&src).ok()?.to_string_lossy().into_owned())).collect();
+    if !has_pack && gguf.is_empty() && !src.join("config.json").is_file() {
         return Err(format!("{} has no config.json", src.display()));
     }
-    if !has_pack && model_facts::weight_files(&src)?.is_empty() {
-        return Err(format!("{} has no .safetensors weights", src.display()));
+    if !has_pack && gguf.is_empty() && model_facts::weight_files(&src)?.is_empty() {
+        return Err(format!("{} has no .safetensors or .gguf weights", src.display()));
     }
     let dir_name = src
         .file_name()
@@ -598,7 +599,9 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     } else {
         fetch(&registry_url()).ok().and_then(|r| find_model(&r, &model_id).cloned())
     };
-    let pack = structure_offer(home, opts, &card_dir);
+    // A pack of the folder's own is verified above; GGUF weights get their config and tokenizer from the header first.
+    let pack = (!has_pack).then(|| structure_offer(home, opts, &card_dir)).flatten()
+        .filter(|c| gguf.is_empty() || gguf_metadata(home, &card_dir, &c.offer.format, &gguf).is_ok());
     Ok(Target {
         model_id,
         card_dir,
@@ -956,8 +959,9 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
     if crate::engines::ninfer::ninfer_in(dir).is_some() {
         return plan_ninfer(home, opts, t);
     }
-    let pack = dir.join(PACK_FILE).is_file();
-    if !dir.join("config.json").is_file() && !pack && !crate::engines::llama_cpp::gguf_paths(dir).is_empty() {
+    // GGUF weights with no safetensors and no kernel pack (here or coming) run on llama.cpp, with or without a config.json.
+    let pack = dir.join(PACK_FILE).is_file() || t.pack.is_some();
+    if !pack && !model_facts::weight_files(dir).is_ok_and(|w| !w.is_empty()) && !crate::engines::llama_cpp::gguf_paths(dir).is_empty() {
         return plan_gguf(home, opts, t);
     }
     let cfg = model_facts::read_config(dir)?;
@@ -1417,6 +1421,22 @@ mod tests {
             fs::write(bin.join("llama-server"), b"").unwrap();
         }
         (home, dir)
+    }
+
+    #[test]
+    fn a_local_gguf_folder_installs_for_llama_cpp_with_or_without_a_config() {
+        let (home, dir) = gguf_home(true);
+        fs::write(dir.join("config.json"), "{}").unwrap();
+        let p = plan_in_place(home.path(), "org/m-GGUF", &dir, None).unwrap();
+        assert_eq!(p.table.get("runtime").and_then(|v| v.as_str()), Some("llama.cpp"), "a config.json beside the GGUF changes nothing");
+        let src = tempfile::tempdir().unwrap();
+        crate::engines::llama_cpp::write_test_gguf(&src.path().join("m-Q8_0.gguf"));
+        let opts = InstallOpts { model_id: src.path().display().to_string(), name: Some("me/m".into()), ..Default::default() };
+        let t = install_local(home.path(), &opts).unwrap();
+        assert!(t.card_dir.join("m-Q8_0.gguf").exists() && t.pack.is_none());
+        let empty = tempfile::tempdir().unwrap();
+        let none = InstallOpts { model_id: empty.path().display().to_string(), name: Some("me/e".into()), ..Default::default() };
+        assert!(install_local(home.path(), &none).err().unwrap().contains("has no config.json"));
     }
 
     #[test]
