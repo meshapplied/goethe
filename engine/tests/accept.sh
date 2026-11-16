@@ -15,6 +15,7 @@ BAD='Illegal instruction|cannot open shared object|Traceback'
 REFUSED='is not supported|larger than the allowed GPUs|not supported here|gated or private|no placement fits'
 PACKFAIL='does not run on|a host library is missing|crashed at open|does not fit this GPU|failed to open|runs only with its kernel pack'
 GOETHE="${GOETHE_BIN:-goethe}"
+RESERVE_GB="${ACCEPT_RESERVE_GB:-35}"
 LIMIT="${ACCEPT_TIMEOUT:-3600}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
@@ -28,6 +29,22 @@ esac
 
 g() {
   if command -v timeout >/dev/null 2>&1; then timeout "${LIMIT}" "${GOETHE}" "$@"; else "${GOETHE}" "$@"; fi
+}
+
+free_gb() {
+  # Whole GB free where goethe keeps its models.
+  df -Pk "${GOETHE_HOME:-${HOME}/.goethe}/models/." 2>/dev/null | awk 'NR == 2 { printf "%d", $4 / 1048576 }'
+}
+
+model_row() {
+  # One field (gb, or installed as 1 or 0) of a model's row in goethe models --json.
+  g models --json 2>/dev/null | python3 -c 'import json, sys
+want, field = sys.argv[1], sys.argv[2]
+rows = [r for r in json.load(sys.stdin) if r["id"].lower() == want.lower()]
+if field == "installed":
+    print(int(any(r["status"] == "installed" for r in rows)))
+else:
+    print(max([r.get("gb", 0) for r in rows] or [0]))' "$1" "$2" 2>/dev/null
 }
 
 packed_models() {
@@ -136,15 +153,26 @@ else
 fi
 
 for spec in "${MODELS[@]}"; do
+  id="${spec%%:*}"
   VERDICT=FAIL
   REASON="not run"
-  accept_one "${spec}"
-  g unload "${spec%%:*}" >/dev/null 2>>"${WORK}/err"
-  if [[ "${VERDICT}" != SKIP ]] && grep -qE "${BAD}" "${WORK}/err"; then
-    VERDICT=FAIL
-    REASON="stderr has: $(grep -oE "${BAD}" "${WORK}/err" | head -n 1)"
+  before="$(free_gb)"
+  had="$(model_row "${id}" installed)"
+  need="$(model_row "${id}" gb)"
+  if [[ "${had:-0}" != 1 ]] && awk -v n="${need:-0}" -v f="${before:-0}" -v r="${RESERVE_GB}" 'BEGIN { exit !(n > f - r) }'; then
+    VERDICT=SKIP
+    REASON="needs ${need} GB, ${before} GB free with a ${RESERVE_GB} GB reserve"
+    : >"${WORK}/err"
+  else
+    accept_one "${spec}"
+    g unload "${id}" >/dev/null 2>>"${WORK}/err"
+    if [[ "${VERDICT}" != SKIP ]] && grep -qE "${BAD}" "${WORK}/err"; then
+      VERDICT=FAIL
+      REASON="stderr has: $(grep -oE "${BAD}" "${WORK}/err" | head -n 1)"
+    fi
+    [[ "${had:-0}" == 1 ]] || g remove "${id}" </dev/null >/dev/null 2>&1
   fi
-  echo "${VERDICT} ${spec%%:*} ${REASON}"
+  echo "${VERDICT} ${id} ${REASON} (disk free ${before} GB -> $(free_gb) GB)"
   case "${VERDICT}" in
     PASS) PASS=$((PASS + 1)) ;;
     SKIP) SKIP=$((SKIP + 1)) ;;
