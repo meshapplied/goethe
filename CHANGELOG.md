@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.3 (2026-11-17)
+
+- A model with a kernel pack that cannot open or run on this machine now stops with one reason line and the opt-in (`--fallback`, or `GOETHE_ALLOW_FALLBACK=1`). Nothing silently serves it with llama.cpp or SGLang any more. A model without a pack for this card still uses its plain runtime.
+- A pack-only model (Qwen3.8-27B-NVFP4) is refused before any download when the node is logged out or the card is not one its packs are built for.
+- A local GGUF folder is offered the kernel pack of the same structure (fine-tunes, Orca): the signed config and tokenizer come with it, the projector file is not taken for the model, and a dropped offer says why.
+- `goethe ps` and `goethe models --json` show the serving runtime. A Hugging Face id that does not exist says so instead of "gated".
+- Memory overhead learned from earlier loads is kept per serving runtime, so a figure learned under llama.cpp no longer blocks the kernel pack.
+- Speech models served by llama.cpp (an audio projector next to the weights) take `goethe run MODEL clip.wav`. `llama-server` comes from the pinned upstream release; the CUDA runtime libraries are fetched only when the host lacks them.
+- CI runs on pull requests into dev and finishes in about three minutes; the full package build runs on main and nightly. `engine/tests/accept.sh` installs, runs and removes each release model and fails any that is not served by its kernel pack.
+
+## 0.3.2 (2026-11-16)
+
+- Packages are served from https://pkg.goethe.sh and the installer from `curl -fsSL https://goethe.sh/install.sh | bash` (0.3.1's installer still pointed at pkg.meshapplied.com, which no longer serves).
+- GGUF models: a GGUF-only repo or a local folder of GGUF files installs and runs with llama.cpp, which goethe fetches as a pinned, checked prebuilt `llama-server` on first use. `goethe install <model>:<quant>` picks one GGUF file or one kernel pack variant. GGUF embedding models serve embeddings, and a llama.cpp model with an audio projector is a speech model.
+- Engines are one table with one module each (goethe-engine, NInfer, SGLang, ternary, llama.cpp).
+- Kernel packs: offered to weights of the same structure (fine-tunes, other repos, local folders); a pack's speculative-decoding drafter comes with it when both fit; a pack this GPU cannot run is known before any download; a pack that fails to open falls back to the plain runtime. Pack downloads check xz-compressed blocks correctly (0.3.1 refused them).
+- `goethe install` shows one plan line before any download, after a disk and VRAM check, and asks on a terminal.
+- `goethe run [MODEL] [INPUT]` tries a loaded model by hand, by input modality; the gateway serves `/v1/audio/transcriptions` to goethe-engine models.
+- tokio 1.54.1 (fixes a race in `tokio::time::Interval`).
+
 ## 0.3.1 (2026-11-16)
 
 - The Goethe platform moved to https://goethe.sh: `goethe login` links there by default (0.3.0 pointed at platform.meshapplied.com, where login no longer works). Nodes that need another platform still use `--platform-url` or `GOETHE_PLATFORM_URL`. When a platform's domain redirects to its `www.` form (or back), goethe follows that one redirect on the same path and keeps using the new address; any other redirect is still refused, so a node token never goes to another site.
