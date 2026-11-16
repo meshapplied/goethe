@@ -468,6 +468,28 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
     Ok(Some(Plan { entry, prefix, variants, serial }))
 }
 
+pub fn by_structure(home: &Path, dir: &Path, archs: &[String], broker: &dyn Broker, run: Runner) -> Result<Option<(String, Plan)>, String> {
+    // The signed index's pack, on the first of `archs` with one, whose structure (tensor table and metadata keys, never weight values) the weights in `dir` have, whatever repo they came from.
+    let work = home.join("packs");
+    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let (ix, sg) = (work.join("index.json"), work.join("index.sig"));
+    std::fs::write(&ix, broker.index()?).map_err(|e| e.to_string())?;
+    std::fs::write(&sg, broker.index_sig()?).map_err(|e| e.to_string())?;
+    let v = |x: &str| x.to_string();
+    for arch in archs {
+        let (code, out) = run(&[v("pack"), v("match"), v("--index"), s(&ix), v("--sig"), s(&sg), v("--model-dir"), s(dir), v("--arch"), v(arch), v("--last-serial"), last_serial(home).to_string()])?;
+        if code == 3 {
+            continue;
+        }
+        let hit: Value = serde_json::from_str(&out).map_err(|e| format!("pack match: {e}"))?;
+        let repo = hit["model"]["hf_repo"].as_str().ok_or("pack match: no model.hf_repo")?;
+        if let Some(p) = plan(home, repo, arch, None, broker, run)?.filter(|p| hit["file"] == p.entry.file.as_str()) {
+            return Ok(Some((arch.clone(), p)));
+        }
+    }
+    Ok(None)
+}
+
 fn merged(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     // Byte ranges sorted, with neighbours closer than MERGE_GAP joined, so a partial download takes few requests.
     ranges.sort();
@@ -644,7 +666,7 @@ mod tests {
             }
             let out = match key.as_str() {
                 "index verify" => r#"{"serial": 7}"#.to_string(),
-                "pack match" => r#"{"file": "m.gcpack", "variant": "q8"}"#.to_string(),
+                "pack match" => r#"{"file": "m.gcpack", "variant": "q8", "model": {"hf_repo": "org/M-GGUF"}}"#.to_string(),
                 "pack need" => serde_json::json!({"manifest_sha256": msha, "ranges": [{"off": off, "len": BLOB.len(), "sha256": sha(BLOB)}]}).to_string(),
                 "pack show" => "a q8 K1 ncol 1 maxctx 4096 3 files\nb q4 K1 ncol 1 maxctx 8192 3 files\n".to_string(),
                 _ => r#"{"ok": true, "weights": ["m-Q8_0.gguf"]}"#.to_string(),
@@ -678,6 +700,17 @@ mod tests {
         assert_eq!(e, "org/m-gguf: its kernel pack has no variant q5 (available: q4, q8)");
         assert!(plan(home.path(), "org/other", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap().is_none());
         assert!(plan(home.path(), "org/m-gguf", "sm_90a", None, &b, &engine(&b.pack, &[])).unwrap().is_none());
+    }
+
+    #[test]
+    fn weights_of_another_repo_find_the_pack_whose_structure_they_have() {
+        let (home, dir) = dirs();
+        let b = fake();
+        let archs = vec!["sm_90a".to_string(), "sm_120a".to_string()];
+        let (arch, p) = by_structure(home.path(), dir.path(), &archs, &b, &engine(&b.pack, &[])).unwrap().unwrap();
+        assert_eq!((arch.as_str(), p.entry.file.as_str(), p.entry.offer.hf_repo.as_str()), ("sm_120a", "m.gcpack", "org/M-GGUF"), "sm_90a has no entry");
+        assert!(by_structure(home.path(), dir.path(), &archs, &b, &engine(&b.pack, &[("pack match", 3)])).unwrap().is_none());
+        assert!(by_structure(home.path(), dir.path(), &archs, &b, &engine(&b.pack, &[("pack match", 1)])).is_err());
     }
 
     #[test]

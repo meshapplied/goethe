@@ -283,7 +283,10 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             confirm(opts, &format!("{} ({fmt}, {:.1} GB) with {engine} (no kernel pack: {why})", opts.model_id, bytes as f64 / GIB))?;
         }
     }
-    hf::ensure_model(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf, ..dl })?;
+    hf::ensure_model(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf.clone(), ..dl })?;
+    // A GGUF repo ships no config or tokenizer: written from the header for goethe-engine, else the plain path.
+    let pack = structure_offer(home, opts, &card_dir)
+        .filter(|c| gguf.as_ref().is_none_or(|f| gguf_metadata(home, &card_dir, &c.offer.format, f).is_ok()));
     Ok(Target {
         model_id: opts.model_id.clone(),
         card_dir,
@@ -291,8 +294,26 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         managed: true,
         source_dir: None,
         ternary: None,
-        pack: None,
+        pack,
     })
+}
+
+fn structure_offer(home: &Path, opts: &InstallOpts, dir: &Path) -> Option<PackChoice> {
+    // Weights no pack names (a fine-tune, another repo or a folder of the same architecture) on a logged-in node with the engine installed: the pack whose structure they have, if taken. Any miss or error: None, silently.
+    let creds = crate::platform::load_credentials(home).ok().flatten()?;
+    let archs = crate::packs::local_archs(home);
+    let engine = crate::pyenv::has(home, crate::pyenv::Layer::Engine) || crate::pyenv::dev_python(home);
+    crate::packs::catalog(home).filter(|ix| engine && !crate::packs::offers_any(ix, &archs).is_empty())?;
+    let login = crate::packs::Login(creds.clone());
+    let broker = crate::packs::HttpBroker::new(&creds.platform_url, &login);
+    let (_, plan) = crate::packs::by_structure(home, dir, &archs, &broker, &crate::packs::python_runner(home)).ok()??;
+    let what = format!("optimised kernels available for these weights (same structure as {})", plan.entry.offer.hf_repo);
+    if opts.yes || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        println!("{what}");
+    } else if !crate::term::ask(&format!("{what}; install them? [Y/n]"), "y").is_ok_and(|a| a.to_ascii_lowercase().starts_with('y')) {
+        return None;
+    }
+    Some(PackChoice { offer: plan.entry.offer.clone(), creds, plan: Some(plan) })
 }
 
 fn confirm(opts: &InstallOpts, plan: &str) -> Result<(), String> {
@@ -548,14 +569,15 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     } else {
         fetch(&registry_url()).ok().and_then(|r| find_model(&r, &model_id).cloned())
     };
+    let pack = structure_offer(home, opts, &card_dir);
     Ok(Target {
         model_id,
         card_dir,
         entry,
         managed: opts.copy_local,
+        pack,
         source_dir: (!opts.copy_local).then_some(src),
         ternary: None,
-        pack: None,
     })
 }
 
