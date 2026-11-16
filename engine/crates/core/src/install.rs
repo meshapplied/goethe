@@ -152,27 +152,49 @@ pub fn run(opts: InstallOpts) -> Result<(), String> {
     // Place the files, write the card, register the model, then optionally load it.
     let home = goethe_home();
     ensure_layout(&home).map_err(|e| e.to_string())?;
+    let model_id = install_model(&home, &opts)?;
+    if opts.load {
+        load_installed(&model_id, &opts)?;
+    }
+    Ok(())
+}
+
+fn install_lock(home: &Path, opts: &InstallOpts) -> Result<Option<crate::pyenv::Lock>, String> {
+    // One install of a model id at a time (two at once raced on the farm and the card); installs of different models run side by side.
+    let local = Path::new(&opts.model_id).is_dir();
+    let id = match (local, &opts.name) {
+        (true, Some(name)) => name.clone(),
+        (true, None) => match fs::canonicalize(&opts.model_id).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())) {
+            Some(dir) => format!("local/{dir}"),
+            None => return Ok(None),
+        },
+        (false, _) => opts.model_id.clone(),
+    };
+    if validate_model_id(&id).is_err() {
+        return Ok(None);
+    }
+    let path = home.join("run").join(format!("install-{}.lock", crate::paths::sanitize_model_id(&id)));
+    crate::pyenv::lock_file(&path, &format!("Another goethe is installing {id}; waiting for it to finish")).map(Some)
+}
+
+fn install_model(home: &Path, opts: &InstallOpts) -> Result<String, String> {
+    // The files placed and the model registered; its id. Holds the model's install lock throughout.
+    let _lock = install_lock(home, opts)?;
     let target = if Path::new(&opts.model_id).is_dir() {
-        install_local(&home, &opts)?
+        install_local(home, opts)?
     } else {
-        match install_hub(&home, &opts) {
+        match install_hub(home, opts) {
             Ok(t) => t,
-            Err(e) if gated_but_installed(&e, is_installed(&home, &opts.model_id), opts.force) => {
+            Err(e) if gated_but_installed(&e, is_installed(home, &opts.model_id), opts.force) => {
                 println!("{} is already installed; --force downloads it again", opts.model_id);
-                if opts.load {
-                    load_installed(&opts.model_id, &opts)?;
-                }
-                return Ok(());
+                return Ok(opts.model_id.clone());
             }
             Err(e) => return Err(e),
         }
     };
     let model_id = target.model_id.clone();
-    register(&home, &opts, target)?;
-    if opts.load {
-        load_installed(&model_id, &opts)?;
-    }
-    Ok(())
+    register(home, opts, target)?;
+    Ok(model_id)
 }
 
 fn is_installed(home: &Path, model_id: &str) -> bool {
@@ -1930,6 +1952,28 @@ mod tests {
         assert!(install_local(home.path(), &clash).err().unwrap().contains("would share it"));
         assert!(fs::read_link(first.card_dir.join("m-Q8_0.gguf")).unwrap().starts_with(a.path()), "the first install still points at its own folder");
         assert!(install_local(home.path(), &InstallOpts { name: Some("x/y".into()), ..clash }).is_ok(), "the same id reinstalls");
+    }
+
+    #[test]
+    fn installs_of_one_model_at_once_all_succeed_and_leave_one_card() {
+        let (home, _) = gguf_home(true);
+        let srcs: Vec<_> = (0..8).map(|_| tempfile::tempdir().unwrap()).collect();
+        for s in &srcs {
+            crate::engines::llama_cpp::write_test_gguf(&s.path().join("m-Q8_0.gguf"));
+        }
+        let results: Vec<Result<String, String>> = std::thread::scope(|sc| {
+            let hs: Vec<_> = srcs
+                .iter()
+                .map(|s| {
+                    let (h, o) = (home.path(), InstallOpts { model_id: s.path().display().to_string(), name: Some("me/same".into()), ..Default::default() });
+                    sc.spawn(move || install_model(h, &o))
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(results.iter().all(|r| r.as_deref() == Ok("me/same")), "{results:?}");
+        let card = read_card_table(&model_dir(home.path(), "me/same")).unwrap();
+        assert_eq!(card.get("model_id").and_then(|v| v.as_str()), Some("me/same"));
     }
 
     #[test]
