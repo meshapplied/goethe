@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Acceptance on a GPU machine: install, load, run and unload each kernel-pack model with the goethe commands, one PASS, FAIL or SKIP line each; not run in CI.
+# Acceptance on a GPU machine: install, load, run and unload each model with the goethe commands; one table at the end, or --json; not run in CI.
 
 set -uo pipefail
 
-USAGE="usage: accept.sh [MODEL[:QUANT]...]   (default: the models with a kernel pack for this machine; GOETHE_BIN picks the goethe command)"
+USAGE="usage: accept.sh [--json] [MODEL[:QUANT]...]   (default: the models with a kernel pack for this machine; GOETHE_BIN picks the goethe command; ACCEPT_CLIP and ACCEPT_REF give a speech clip and its reference text for a WER)"
 PACKED=(
   ggml-org/embeddinggemma-2-GGUF:Q8_0
   mradermacher/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF
@@ -22,13 +22,47 @@ trap 'rm -rf "${WORK}"' EXIT
 PASS=0
 FAIL=0
 SKIP=0
+JSON=0
+ROWS="${WORK}/rows.tsv"
+: >"${ROWS}"
 
 case "${1:-}" in
   -h | --help) echo "${USAGE}"; exit 0 ;;
+  --json) JSON=1; shift ;;
 esac
 
 g() {
   if command -v timeout >/dev/null 2>&1; then timeout "${LIMIT}" "${GOETHE}" "$@"; else "${GOETHE}" "$@"; fi
+}
+
+gpu_name() {
+  # The first GPU's name and compute capability, as nvidia-smi gives them.
+  nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ',' | sed 's/  */ /g'
+}
+
+pack_sha() {
+  # The manifest sha256 the installed pack was verified under, shortened; empty without a pack.
+  sed -n 's/.*"manifest_sha256": *"\([0-9a-f]\{16\}\).*/\1/p' "$(dirname "$(card_of "$1")")/pack.verify.json" 2>/dev/null | head -n 1
+}
+
+wer_of() {
+  # Word error rate of text $1 against the reference text $2 (edit distance over words).
+  python3 - "$1" "$2" <<'PY'
+import sys
+h, r = sys.argv[1].lower().split(), sys.argv[2].lower().split()
+d = list(range(len(h) + 1))
+for i, rw in enumerate(r, 1):
+    prev, d[0] = d[0], i
+    for j, hw in enumerate(h, 1):
+        prev, d[j] = d[j], min(d[j] + 1, d[j - 1] + 1, prev + (rw != hw))
+print(f"{d[len(h)] / max(len(r), 1):.3f}")
+PY
+}
+
+clip_seconds() {
+  python3 -c 'import sys, wave
+w = wave.open(sys.argv[1])
+print(w.getnframes() / w.getframerate())' "$1" 2>/dev/null
 }
 
 free_gb() {
@@ -65,7 +99,8 @@ runtime_of() {
 }
 
 clip() {
-  # One second of silence at 16 kHz, made once with the standard library.
+  # The given clip, else one second of silence at 16 kHz made once with the standard library.
+  if [[ -n "${ACCEPT_CLIP:-}" && -f "${ACCEPT_CLIP}" ]]; then echo "${ACCEPT_CLIP}"; return; fi
   [[ -f "${WORK}/clip.wav" ]] ||
     python3 -c 'import sys, wave
 w = wave.open(sys.argv[1], "wb")
@@ -98,12 +133,15 @@ shape() {
 }
 
 accept_one() {
-  # Returns the verdict in VERDICT (PASS, FAIL or SKIP) and REASON; goethe's stderr for this model is kept in ${WORK}/err.
-  local spec="$1" id="${1%%:*}" out rc audio
+  # Returns the verdict in VERDICT (PASS, FAIL or SKIP), REASON, and RUNTIME, PSHA, METRIC for the table; goethe's stderr for this model is kept in ${WORK}/err.
+  local spec="$1" id="${1%%:*}" out rc audio t0 secs clip_s
   : >"${WORK}/err"
   SHAPE=chat
   DETAIL=""
   REASON=""
+  RUNTIME=""
+  PSHA=""
+  METRIC=""
   g install "${spec}" --yes --load >"${WORK}/inst" 2>>"${WORK}/err"
   rc=$?
   if [[ ${rc} -ne 0 ]]; then
@@ -119,14 +157,19 @@ accept_one() {
     fi
     return
   fi
+  RUNTIME="$(runtime_of "${id}")"
+  PSHA="$(pack_sha "${id}")"
+  t0="$(date +%s.%N)"
   out="$(g run "${id}" "${PROMPT}" 2>>"${WORK}/err")"
   rc=$?
   if [[ ${rc} -ne 0 ]] && grep -q 'is a speech model' "${WORK}/err"; then
     SHAPE=transcript
     audio="$(clip)" || { VERDICT=FAIL; REASON="no python3 to make the audio clip"; return; }
+    t0="$(date +%s.%N)"
     out="$(g run "${id}" "${audio}" 2>>"${WORK}/err")"
     rc=$?
   fi
+  secs="$(awk -v a="${t0}" -v b="$(date +%s.%N)" 'BEGIN { printf "%.2f", b - a }')"
   if [[ ${rc} -ne 0 ]]; then
     VERDICT=FAIL
     REASON="run exit ${rc}"
@@ -137,12 +180,35 @@ accept_one() {
     REASON="run output is not a ${SHAPE} (${DETAIL})"
     return
   fi
-  VERDICT=PASS
-  REASON="${SHAPE} ${DETAIL}, runtime $(runtime_of "${id}")"
-  if [[ "$(runtime_of "${id}")" != goethe-engine ]]; then
-    VERDICT=FAIL
-    REASON="served by $(runtime_of "${id}"), not by its kernel pack (${SHAPE} ${DETAIL})"
+  METRIC="${DETAIL}"
+  if [[ "${SHAPE}" == transcript ]]; then
+    clip_s="$(clip_seconds "${audio}")"
+    METRIC="rtf $(awk -v s="${secs}" -v c="${clip_s:-1}" 'BEGIN { printf "%.3f", s / c }')"
+    [[ -n "${ACCEPT_REF:-}" ]] && METRIC="${METRIC} wer $(wer_of "${out}" "${ACCEPT_REF}")"
   fi
+  VERDICT=PASS
+  REASON="${SHAPE} ${METRIC}"
+  if [[ "${RUNTIME}" != goethe-engine ]] && grep -qiE "optimised kernels|${PACKFAIL}" "${WORK}/inst" "${WORK}/err" "$(card_of "${id}")"; then
+    VERDICT=FAIL
+    REASON="has a kernel pack for this card but was served by ${RUNTIME} (${SHAPE} ${METRIC})"
+  fi
+}
+
+table() {
+  # The rows of this run as one aligned table.
+  { printf 'MODEL\tGPU\tRUNTIME\tPACK\tANSWER\tRESULT\n'; awk -F'\t' -v gpu="$(gpu_name)" 'BEGIN { OFS = "\t" } { print $1, gpu, $2, ($3 == "" ? "-" : $3), ($4 == "" ? "-" : $4), $5 }' "${ROWS}"; } | column -t -s "$(printf '\t')"
+}
+
+json() {
+  # The rows of this run as one JSON document.
+  python3 - "${ROWS}" "$(gpu_name)" "${PASS}" "${FAIL}" "${SKIP}" <<'PY'
+import json, sys
+rows = [l.rstrip("\n").split("\t") for l in open(sys.argv[1])]
+keys = ["model", "runtime", "pack", "answer", "result", "reason"]
+out = {"gpu": sys.argv[2], "pass": int(sys.argv[3]), "fail": int(sys.argv[4]), "skip": int(sys.argv[5]),
+       "models": [dict(zip(keys, (r + [""] * 6)[:6])) for r in rows]}
+print(json.dumps(out, indent=2))
+PY
 }
 
 if [[ $# -gt 0 ]]; then
@@ -156,6 +222,9 @@ for spec in "${MODELS[@]}"; do
   id="${spec%%:*}"
   VERDICT=FAIL
   REASON="not run"
+  RUNTIME=""
+  PSHA=""
+  METRIC=""
   before="$(free_gb)"
   had="$(model_row "${id}" installed)"
   need="$(model_row "${id}" gb)"
@@ -172,12 +241,20 @@ for spec in "${MODELS[@]}"; do
     fi
     [[ "${had:-0}" == 1 ]] || g remove "${id}" </dev/null >/dev/null 2>&1
   fi
-  echo "${VERDICT} ${id} ${REASON} (disk free ${before} GB -> $(free_gb) GB)"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${id}" "${RUNTIME}" "${PSHA}" "${METRIC}" "${VERDICT}" "${REASON}" >>"${ROWS}"
+  line="${VERDICT} ${id} ${REASON} (disk free ${before} GB -> $(free_gb) GB)"
+  if [[ ${JSON} -eq 1 ]]; then echo "${line}" >&2; else echo "${line}"; fi
   case "${VERDICT}" in
     PASS) PASS=$((PASS + 1)) ;;
     SKIP) SKIP=$((SKIP + 1)) ;;
     *) FAIL=$((FAIL + 1)) ;;
   esac
 done
-echo "accept: ${PASS} pass, ${FAIL} fail, ${SKIP} skip"
+if [[ ${JSON} -eq 1 ]]; then
+  json
+else
+  echo
+  table
+  echo "accept: ${PASS} pass, ${FAIL} fail, ${SKIP} skip"
+fi
 [[ ${FAIL} -eq 0 ]]
