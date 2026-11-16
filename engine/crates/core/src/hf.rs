@@ -94,6 +94,15 @@ pub fn gated_guidance(model_id: &str) -> String {
     )
 }
 
+fn status_refusal(model_id: &str, status: u16, has_token: bool) -> Option<String> {
+    // An unauthenticated 401, 403 or 404 means no such repo or a private one (a gated repo answers 200 with its gated flag); with a token, no access.
+    match (status, has_token) {
+        (401 | 403 | 404, true) => Some(format!("{model_id}: not found, or this Hugging Face token has no access (accept the license at {}/{model_id})", hf_endpoint())),
+        (401 | 403 | 404, false) => Some(format!("{model_id}: not found on Hugging Face, or private (check the id; add --hf-token for a private model)")),
+        _ => None,
+    }
+}
+
 pub fn preflight_model_opts(model_id: &str, revision: Option<&str>, allow_gated: bool) -> Result<ModelPreflight, String> {
     // Model API query (at a revision when given), with the session token if one is set: gating, files, sizes, commit.
     if offline_mode() {
@@ -110,17 +119,10 @@ pub fn preflight_model_opts(model_id: &str, revision: Option<&str>, allow_gated:
     };
     let resp = api_get(&url)?;
     let allow_gated = allow_gated || token().is_some();
+    if let Some(e) = status_refusal(model_id, resp.status, token().is_some()) {
+        return Err(e);
+    }
     match resp.status {
-        401 | 403 | 404 if token().is_some() => {
-            return Err(format!(
-                "{model_id}: not found, or this Hugging Face token has no access (accept the license at {}/{model_id})",
-                hf_endpoint()
-            ))
-        }
-        401 | 403 | 404 if !allow_gated => return Err(gated_guidance(model_id)),
-        401 | 403 | 404 => {
-            return Err(format!("{model_id}: not found on Hugging Face, or private (add --hf-token)"))
-        }
         s if s >= 500 => return Err(format!("cannot reach {endpoint}: HTTP {s}")),
         s if s >= 400 => return Err(format!("HF API error for {model_id}: HTTP {s}")),
         _ => {}
@@ -687,6 +689,15 @@ fn available_bytes(path: &Path) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_repo_is_not_found_and_never_called_gated() {
+        let anon = status_refusal("org/nope", 401, false).unwrap();
+        assert!(anon.contains("not found") && !anon.contains("gated") && anon.contains("--hf-token"), "{anon}");
+        assert!(status_refusal("org/nope", 404, true).unwrap().contains("no access"));
+        assert_eq!(status_refusal("org/m", 200, false), None);
+        assert_eq!(status_refusal("org/m", 500, false), None, "a server error is reported as one");
+    }
 
     #[test]
     fn a_pack_install_downloads_its_weights_and_the_small_metadata_only() {

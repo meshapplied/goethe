@@ -42,6 +42,12 @@ const USER_GATE_WAIT: Duration = Duration::from_secs(590);
 
 pub type LoadErr = (i32, String, Value);
 
+fn card_runtime(home: &std::path::Path, model_id: &str) -> String {
+    // The engine serving a model: the card's runtime (goethe-engine runs the kernel pack), SGLang's when the card names none.
+    let card = std::fs::read_to_string(crate::paths::model_dir(home, model_id).join(crate::install::CARD_FILE)).ok().and_then(|t| t.parse::<toml::Table>().ok()).unwrap_or_default();
+    crate::engines::of_card(&toml::Value::Table(card)).map_or_else(|_| "unknown".to_string(), |e| e.id.to_string())
+}
+
 fn slot_lock(key: &str) -> Arc<Mutex<()>> {
     let map = SLOT_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut g = map.lock().unwrap_or_else(|e| e.into_inner());
@@ -1187,6 +1193,7 @@ pub fn handle_ps() -> Result<Value, (i32, String)> {
         }
         if let Some(mid) = v.get("model_id").and_then(|x| x.as_str()).map(str::to_string) {
             v["tokens_per_s_1m"] = json!(crate::metrics::model_tokens_per_s_1m(&mid));
+            v["runtime"] = json!(card_runtime(&home, &mid));
         }
         if let Some(id) = v.get("instance_id").and_then(|x| x.as_str()) {
             let path = home.join("logs").join(format!("{id}.requests.jsonl"));
@@ -1717,6 +1724,23 @@ fn uuid_simple() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ps_names_the_runtime_the_card_serves_with() {
+        let home = tempfile::tempdir().unwrap();
+        let card = |id: &str, text: &str| {
+            let d = crate::paths::model_dir(home.path(), id);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(crate::install::CARD_FILE), text).unwrap();
+        };
+        card("org/pack", "runtime = \"goethe-engine\"\n");
+        card("org/gguf", "runtime = \"llama.cpp\"\n");
+        card("org/plain", "model_id = \"org/plain\"\n");
+        assert_eq!(card_runtime(home.path(), "org/pack"), "goethe-engine");
+        assert_eq!(card_runtime(home.path(), "org/gguf"), "llama.cpp");
+        assert_eq!(card_runtime(home.path(), "org/plain"), "sglang");
+        assert_eq!(card_runtime(home.path(), "org/none"), "sglang");
+    }
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::process::{Child, Command};

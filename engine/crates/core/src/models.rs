@@ -27,6 +27,8 @@ struct ModelRow {
     custom: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     optimised: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<String>,
     #[serde(skip)]
     verdict: Verdict,
 }
@@ -91,6 +93,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 fit,
                 custom: is_custom_model(&m.id, reg.as_ref()).then_some(true),
                 optimised: (m.runtime == "goethe-engine").then_some(true),
+                runtime: Some(m.runtime.clone()),
                 verdict,
             });
         }
@@ -109,6 +112,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 fit: verdict.label(),
                 custom: None,
                 optimised: packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id)).then_some(true),
+                runtime: None,
                 verdict,
             });
         }
@@ -122,6 +126,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                     fit: Verdict::Fits { per_gpu: row.vram_per_gpu_gb, total: row.vram_per_gpu_gb * row.tp as f64 }.label(),
                     custom: None,
                     optimised: None,
+                    runtime: None,
                     verdict: Verdict::Fits { per_gpu: row.vram_per_gpu_gb, total: row.vram_per_gpu_gb * row.tp as f64 },
                 });
             }
@@ -145,6 +150,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 fit: format!("kernel pack for {}", o.arch),
                 custom: None,
                 optimised: Some(true),
+                runtime: None,
                 verdict: Verdict::Unknown,
             });
         }
@@ -733,6 +739,15 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn an_installed_row_names_its_runtime_in_json() {
+        let row = ModelRow { id: "org/m".into(), status: "installed".into(), gb: 1.0, fit: "fits".into(), custom: None, optimised: Some(true), runtime: Some("goethe-engine".into()), verdict: Verdict::Unknown };
+        let v = serde_json::to_value(&row).unwrap();
+        assert_eq!((v["runtime"].as_str(), v["optimised"].as_bool()), (Some("goethe-engine"), Some(true)));
+        let avail = ModelRow { runtime: None, ..row };
+        assert!(serde_json::to_value(&avail).unwrap().get("runtime").is_none(), "a catalog row has no runtime yet");
+    }
 
     #[test]
     fn typed_ids_resolve_by_case_and_folder_or_suggest_the_nearest() {

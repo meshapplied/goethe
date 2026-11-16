@@ -191,7 +191,7 @@ Stops a model. Requests in progress finish first.
 
 ### `goethe ps`
 
-Running models with their GPUs, port, memory, restarts, requests in progress and speed.
+Running models with the runtime serving each (goethe-engine runs a kernel pack; llama.cpp and sglang are the plain runtimes), their GPUs, port, memory, restarts, requests in progress and speed. `goethe models --json` gives installed models the same `runtime`.
 
 | Option | Description |
 |---|---|

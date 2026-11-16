@@ -42,7 +42,7 @@ model_row() {
 want, field = sys.argv[1], sys.argv[2]
 rows = [r for r in json.load(sys.stdin) if r["id"].lower() == want.lower()]
 if field == "installed":
-    print(int(any(r["status"] == "installed" for r in rows)))
+    print(int(any(r["status"] != "available" for r in rows)))
 else:
     print(max([r.get("gb", 0) for r in rows] or [0]))' "$1" "$2" 2>/dev/null
 }
