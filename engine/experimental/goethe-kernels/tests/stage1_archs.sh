@@ -3,10 +3,10 @@
 
 set -euo pipefail
 
-GOETHE_PKG="${GOETHE_PKG:-/scratch/ternary-flash/goethe-release/engine}"
+GOETHE_PKG="${GOETHE_PKG:?set GOETHE_PKG to the goethe-kernels directory}"
 BUILD="${GOETHE_PKG}/kernels/build.sh"
 GATE_ID="${GOETHE_GATE_RUN_ID:-$$}"
-GOETHE_PY="/scratch/ternary-flash/goethe-home/py-env/bin/python"
+GOETHE_PY="${GOETHE_HOME:-/var/tmp/goethe-dev-home}/py-env/bin/python"
 LOGDIR="$(mktemp -d "/tmp/goethe-test-${GATE_ID}-arch-XXXXXX")"
 trap 'rm -rf "$LOGDIR"' EXIT
 FAIL=0
