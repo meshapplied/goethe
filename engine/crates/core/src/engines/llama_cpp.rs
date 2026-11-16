@@ -6,7 +6,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const PIN: &str = "61dbf49228c8a96b72e40c89d93cb7c003411f8c";
+const PIN_FILE: &str = include_str!("../../../../llama-cpp/PIN");
+
+pub const PIN: &str = crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_COMMIT");
+const ASSET: (&str, &str) = (crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_ASSET_URL"), crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_ASSET_SHA256"));
+
+type Get<'a> = &'a dyn Fn(&str) -> Result<Box<dyn Read>, String>;
 
 pub const ENGINE: super::Engine = super::Engine {
     id: "llama.cpp",
@@ -28,6 +33,75 @@ pub fn server_bin(home: &Path) -> Result<PathBuf, String> {
     } else {
         Err(format!("llama-server not found at {}: build llama.cpp {PIN} there or set LLAMA_SERVER", p.display()))
     }
+}
+
+pub fn pinned<'a>(asset: (&'a str, &'a str), arch: &str) -> Option<(&'a str, &'a str)> {
+    // The prebuilt llama-server archive of the pin: Linux x86_64 only, and only once a release carries it.
+    let (url, sha) = asset;
+    (arch == "x86_64" && url.starts_with("https://") && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())).then_some(asset)
+}
+
+pub fn server_ready(home: &Path) -> Result<(), String> {
+    // Installed, or downloadable on first use: what an install plan needs, without touching the network.
+    match server_bin(home) {
+        Ok(_) => Ok(()),
+        Err(why) if std::env::var_os("LLAMA_SERVER").is_some() => Err(why),
+        Err(why) => pinned(ASSET, &crate::update::normalize_arch()).map(|_| ()).ok_or(why),
+    }
+}
+
+pub fn ensure_server(home: &Path) -> Result<PathBuf, String> {
+    // The installed llama-server, else the pinned prebuilt one downloaded once; a set LLAMA_SERVER is never replaced.
+    match server_bin(home) {
+        Ok(p) => Ok(p),
+        Err(why) if std::env::var_os("LLAMA_SERVER").is_some() => Err(why),
+        Err(why) => match pinned(ASSET, &crate::update::normalize_arch()) {
+            Some(asset) => provision(home, asset, &http_get),
+            None => Err(why),
+        },
+    }
+}
+
+fn http_get(url: &str) -> Result<Box<dyn Read>, String> {
+    let agent = crate::net::agent_builder().timeout_read(std::time::Duration::from_secs(60)).build();
+    let r = agent.get(url).call().map_err(|e| e.to_string())?;
+    Ok(Box::new(r.into_reader()))
+}
+
+fn provision(home: &Path, (url, sha): (&str, &str), get: Get) -> Result<PathBuf, String> {
+    // One line, then the archive at its pinned sha256, unpacked aside and moved into engines/llama.cpp: a failure leaves nothing.
+    let dest = home.join("engines/llama.cpp");
+    let part = home.join("engines/.llama.cpp.part");
+    println!("llama-server is not installed: downloading llama.cpp {} (CUDA, once) from {url}", &PIN[..12]);
+    let _ = std::fs::remove_dir_all(&part);
+    let done = unpack(&part, &dest, url, sha, get);
+    let _ = std::fs::remove_dir_all(&part);
+    done.map(|()| dest.join("bin/llama-server"))
+}
+
+fn unpack(part: &Path, dest: &Path, url: &str, sha: &str, get: Get) -> Result<(), String> {
+    let (tgz, x) = (part.join("llama.cpp.tar.gz"), part.join("x"));
+    std::fs::create_dir_all(&x).map_err(|e| format!("{}: {e}", x.display()))?;
+    let offline = |e: String| {
+        format!("cannot download llama-server from {url}: {e}; nothing was installed. Build llama.cpp {PIN} into {}/bin or set LLAMA_SERVER", dest.display())
+    };
+    let mut src = get(url).map_err(offline)?;
+    let mut f = std::fs::File::create(&tgz).map_err(|e| format!("{}: {e}", tgz.display()))?;
+    std::io::copy(&mut src, &mut f).map_err(|e| offline(e.to_string()))?;
+    let got = crate::update::sha256_file(&tgz)?;
+    if !got.eq_ignore_ascii_case(sha) {
+        return Err(format!("llama-server download from {url} has sha256 {got}, the pin says {sha}: refused, nothing was installed"));
+    }
+    let ok = Command::new("tar").arg("-xzf").arg(&tgz).arg("-C").arg(&x).arg("--no-same-owner").status().map_err(|e| format!("tar: {e}"))?.success();
+    if !ok || !x.join("bin/llama-server").is_file() {
+        return Err(format!("{url}: not a llama-server archive (no bin/llama-server): refused, nothing was installed"));
+    }
+    std::fs::create_dir_all(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    for e in std::fs::read_dir(&x).map_err(|e| e.to_string())?.flatten() {
+        let to = dest.join(e.file_name());
+        std::fs::rename(e.path(), &to).map_err(|err| format!("cannot place {}: {err}; move it away or set LLAMA_SERVER", to.display()))?;
+    }
+    Ok(())
 }
 
 pub fn gguf_paths(dir: &Path) -> Vec<PathBuf> {
@@ -237,6 +311,7 @@ mod tests {
     use super::super::{check_params, command, test_spec};
     use super::*;
     use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn launches_llama_server_on_the_gguf_with_goethe_budget_and_one_gpu() {
@@ -274,6 +349,71 @@ mod tests {
         if std::env::var_os("LLAMA_SERVER").is_none() {
             assert!(command(&test_spec(d.path(), &card, &[0])).unwrap_err().contains(PIN));
         }
+    }
+
+    fn archive(files: &[&str]) -> Vec<u8> {
+        // A tar.gz holding the given files (bin/llama-server executable), as the release workflow packs it.
+        let d = tempfile::tempdir().unwrap();
+        for f in files {
+            let p = d.path().join("in").join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = d.path().join("a.tar.gz");
+        assert!(Command::new("tar").arg("-czf").arg(&out).arg("-C").arg(d.path().join("in")).arg(".").status().unwrap().success());
+        std::fs::read(out).unwrap()
+    }
+
+    fn serve(bytes: Vec<u8>) -> impl Fn(&str) -> Result<Box<dyn Read>, String> {
+        move |_: &str| Ok(Box::new(std::io::Cursor::new(bytes.clone())) as Box<dyn Read>)
+    }
+
+    fn sha(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        format!("{:x}", sha2::Sha256::digest(bytes))
+    }
+
+    const URL: &str = "https://example.invalid/llama-server.tar.gz";
+
+    #[test]
+    fn the_pinned_archive_is_verified_unpacked_and_moved_in_whole() {
+        let home = tempfile::tempdir().unwrap();
+        let a = archive(&["bin/llama-server", "lib/libcudart.so.12"]);
+        let p = provision(home.path(), (URL, &sha(&a)), &serve(a.clone())).unwrap();
+        assert_eq!(p, home.path().join("engines/llama.cpp/bin/llama-server"));
+        assert!(p.is_file() && home.path().join("engines/llama.cpp/lib/libcudart.so.12").is_file());
+        assert!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o111 != 0, "the server stays executable");
+        assert!(!home.path().join("engines/.llama.cpp.part").exists());
+        if std::env::var_os("LLAMA_SERVER").is_none() {
+            assert_eq!(ensure_server(home.path()).unwrap(), p, "installed: never downloaded again");
+        }
+    }
+
+    #[test]
+    fn a_wrong_hash_a_refused_download_or_a_foreign_archive_install_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let a = archive(&["bin/llama-server"]);
+        let err = provision(home.path(), (URL, &"0".repeat(64)), &serve(a)).unwrap_err();
+        assert!(err.contains("sha256") && err.contains("refused"), "{err}");
+        let offline = |_: &str| -> Result<Box<dyn Read>, String> { Err("connection refused".into()) };
+        let err = provision(home.path(), (URL, &"0".repeat(64)), &offline).unwrap_err();
+        assert!(err.contains("cannot download llama-server") && err.contains("connection refused") && err.contains("LLAMA_SERVER"), "{err}");
+        let other = archive(&["bin/something-else"]);
+        let err = provision(home.path(), (URL, &sha(&other)), &serve(other)).unwrap_err();
+        assert!(err.contains("no bin/llama-server"), "{err}");
+        assert!(!home.path().join("engines/llama.cpp").exists() && !home.path().join("engines/.llama.cpp.part").exists());
+    }
+
+    #[test]
+    fn only_a_released_x86_64_archive_is_pinned() {
+        let sha = "ab".repeat(32);
+        assert_eq!(pinned((URL, &sha), "x86_64"), Some((URL, sha.as_str())));
+        assert_eq!(pinned(("", ""), "x86_64"), None, "no asset yet: the clear error and LLAMA_SERVER stay");
+        assert_eq!(pinned((URL, &sha), "aarch64"), None);
+        assert_eq!(pinned((URL, "abc"), "x86_64"), None);
+        assert_eq!(pinned(("http://plain.invalid/a.tar.gz", &sha), "x86_64"), None);
+        assert_eq!(PIN.len(), 40, "the commit comes from llama-cpp/PIN");
     }
 
     #[test]
