@@ -218,6 +218,9 @@ pub fn facts(dir: &Path, gguf: &Path) -> Result<crate::model_facts::ModelFacts, 
     let nums = |k: &str| m.get(&format!("{arch}.{k}")).map(|v| v.0.clone()).unwrap_or_default();
     let max = |k: &str| nums(k).into_iter().max().unwrap_or(0);
     let (layers, heads) = (max("block_count"), max("attention.head_count"));
+    if layers > MAX_LAYERS {
+        return Err(format!("{}: {arch}.block_count {layers} is not a model", gguf.display()));
+    }
     let mut kv = nums("attention.head_count_kv");
     if kv.len() < 2 {
         kv = vec![kv.first().copied().unwrap_or(heads); layers as usize];
@@ -245,12 +248,24 @@ fn le(r: &mut impl Read, n: usize) -> std::io::Result<u64> {
 }
 
 fn text(r: &mut impl Read) -> std::io::Result<String> {
-    let mut b = vec![0u8; le(r, 8)? as usize];
-    r.read_exact(&mut b)?;
+    // A length the file cannot back is read as far as the file goes, never allocated up front.
+    let n = le(r, 8)?;
+    if n > MAX_TEXT {
+        return Err(std::io::Error::other(format!("GGUF string of {n} bytes")));
+    }
+    let mut b = Vec::new();
+    r.take(n).read_to_end(&mut b)?;
+    if b.len() as u64 != n {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
     Ok(String::from_utf8_lossy(&b).into_owned())
 }
 
-fn value(r: &mut impl Read, t: u64, nums: &mut Vec<u64>, s: &mut String) -> std::io::Result<()> {
+const MAX_TEXT: u64 = 1 << 24;
+const MAX_ARRAY_DEPTH: u32 = 4;
+const MAX_LAYERS: u64 = 1 << 16;
+
+fn value(r: &mut impl Read, t: u64, depth: u32, nums: &mut Vec<u64>, s: &mut String) -> std::io::Result<()> {
     // One GGUF value: integers (floats as raw bits, never read as shape), a string, or an array of either.
     match t {
         0 | 1 | 7 => nums.push(le(r, 1)?),
@@ -258,10 +273,11 @@ fn value(r: &mut impl Read, t: u64, nums: &mut Vec<u64>, s: &mut String) -> std:
         4..=6 => nums.push(le(r, 4)?),
         10..=12 => nums.push(le(r, 8)?),
         8 => *s = text(r)?,
+        9 if depth >= MAX_ARRAY_DEPTH => return Err(std::io::Error::other("GGUF arrays nested too deep")),
         9 => {
             let (t, n) = (le(r, 4)?, le(r, 8)?);
             for _ in 0..n {
-                value(r, t, nums, s)?;
+                value(r, t, depth + 1, nums, s)?;
             }
         }
         _ => return Err(std::io::Error::other(format!("GGUF value type {t}"))),
@@ -280,7 +296,7 @@ fn header(path: &Path) -> std::io::Result<HashMap<String, (Vec<u64>, String)>> {
     for _ in 0..n {
         let (k, t) = (text(&mut r)?, le(&mut r, 4)?);
         let (mut nums, mut s) = (Vec::new(), String::new());
-        value(&mut r, t, &mut nums, &mut s)?;
+        value(&mut r, t, 0, &mut nums, &mut s)?;
         m.insert(k, (nums, s));
     }
     Ok(m)
@@ -487,6 +503,31 @@ mod tests {
         assert_eq!(pinned(("http://plain.invalid/a.tar.gz", &sha), "x86_64"), None);
         assert_eq!(PIN.len(), 40, "the commit comes from llama-cpp/PIN");
         assert!(pinned(MAIN, "x86_64").is_some() && pinned(CUDART, "x86_64").is_some() && MAIN.0.contains(TAG) && CUDART.0.contains(TAG));
+    }
+
+    fn hostile_gguf(kvs: &[(&str, u32, Vec<u8>)]) -> Vec<u8> {
+        let s = |v: &str| [(v.len() as u64).to_le_bytes().to_vec(), v.as_bytes().to_vec()].concat();
+        let mut g = [b"GGUF".to_vec(), 3u32.to_le_bytes().to_vec(), 0u64.to_le_bytes().to_vec(), (kvs.len() as u64).to_le_bytes().to_vec()].concat();
+        for (k, t, v) in kvs {
+            g.extend([s(k), t.to_le_bytes().to_vec(), v.clone()].concat());
+        }
+        g
+    }
+
+    #[test]
+    fn a_hostile_gguf_header_is_refused_without_allocating_what_it_claims() {
+        let d = tempfile::tempdir().unwrap();
+        let s = |v: &str| [(v.len() as u64).to_le_bytes().to_vec(), v.as_bytes().to_vec()].concat();
+        let cases = [
+            ("a string that claims 2^62 bytes", hostile_gguf(&[("general.architecture", 8, (1u64 << 62).to_le_bytes().to_vec())])),
+            ("4e9 layers", hostile_gguf(&[("general.architecture", 8, s("llama")), ("llama.block_count", 4, 4_000_000_000u32.to_le_bytes().to_vec())])),
+            ("arrays nested 300000 deep", hostile_gguf(&[("general.architecture", 8, s("llama")), ("x", 9, [9u32.to_le_bytes().to_vec(), 1u64.to_le_bytes().to_vec()].concat().repeat(300_000))])),
+        ];
+        for (what, bytes) in cases {
+            let p = d.path().join("m.gguf");
+            std::fs::write(&p, bytes).unwrap();
+            assert!(facts(d.path(), &p).is_err(), "{what}");
+        }
     }
 
     #[test]
