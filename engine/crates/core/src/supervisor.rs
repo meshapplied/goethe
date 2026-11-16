@@ -5,7 +5,7 @@ use crate::calc::{self, mem_fraction_from_free, shortfall, Need};
 use crate::chooser::{self, ChooserInput, LoadPlan};
 use crate::coordinator;
 use crate::db;
-use crate::engine_cmd::{self, EngineSpec};
+use crate::engines::{self, EngineSpec};
 use crate::engine_overhead::{Kind, Learned};
 use crate::foreign::{self, Foreign, GpuLive};
 use crate::hw::HardwareState;
@@ -184,15 +184,6 @@ fn insts(con: &Connection, filter: &str, args: &[&dyn ToSql]) -> rusqlite::Resul
     rows.collect()
 }
 
-fn runtime_layer(card: &toml::Value) -> Option<crate::pyenv::Layer> {
-    // The py-env layer a card's runtime runs on: goethe-engine, SGLang (also under ternary), none for ninfer.
-    match card.get("runtime").and_then(|v| v.as_str()) {
-        Some("ninfer") => None,
-        Some("goethe-engine") => Some(crate::pyenv::Layer::Engine),
-        _ => Some(crate::pyenv::Layer::Sglang),
-    }
-}
-
 pub fn handle_load(params: LoadParams) -> Result<(Value, String), LoadErr> {
     // Validate, then plan, gate, spawn and record one engine; the health wait continues on a background thread.
     let home = goethe_home();
@@ -201,11 +192,8 @@ pub fn handle_load(params: LoadParams) -> Result<(Value, String), LoadErr> {
     let row = fetch_installed(&con, &params.model_id).map_err(err1)?;
     let model_path = home.join(&row.local_path);
     let card = read_card_value(&model_path.join("goethe_card.toml")).map_err(err1)?;
-    if card.get("runtime").and_then(|v| v.as_str()) == Some("ternary") {
-        crate::runtime::require_ternary_runtime(&home).map_err(err1)?;
-    }
-    for extra in [engine_cmd::card_extra_args(&card), params.extra_sglang_args.clone()] {
-        engine_cmd::check_extra_args(&extra).map_err(|e| (2, e, Value::Null))?;
+    for extra in [engines::sglang::card_extra_args(&card), params.extra_sglang_args.clone()] {
+        engines::sglang::check_extra_args(&extra).map_err(|e| (2, e, Value::Null))?;
     }
     let pinned = pinned_gpus(params.gpus.as_deref(), &card, params.tp).map_err(|e| (2, e, Value::Null))?;
     let denied = crate::gpu_policy::denied_set(&con).map_err(err1)?;
@@ -280,7 +268,7 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
         let result = json!({"instance_id": first.0, "status": first.1, "already_loaded": true});
         return Ok(Step::Loaded(result, message));
     }
-    if let Some(layer) = runtime_layer(&req.card) {
+    if let Some(layer) = engines::of_card(&req.card).map_err(err1)?.layer {
         crate::pyenv::require(&req.home, layer, model_id).map_err(err1)?;
     }
     let snap = foreign::snapshot().map_err(err1)?;
@@ -409,7 +397,7 @@ fn start_engine(
         .clone()
         .unwrap_or_else(|| crate::slots::slot_key(model_id, &plan.gpus, ordinal));
     let instance_id = format!("inst-{}", uuid_simple());
-    let engine_key = engine_cmd::new_engine_key().map_err(err1)?;
+    let engine_key = engines::new_engine_key().map_err(err1)?;
     let budget = need.total();
     let context = crate::engine_overhead::read_context(con, &gpu_name, plan.tp as u64);
     let mem_frac = mem_fraction_from_free(&need, min_free, context).map_err(err1)?;
@@ -513,7 +501,7 @@ fn spawn_engine(spec: &EngineSpec, log_path: &Path) -> Result<(Identity, u64), S
         .open(log_path)
         .map_err(|e| e.to_string())?;
     let offset = log.metadata().map(|m| m.len()).unwrap_or(0);
-    let mut cmd = engine_cmd::command(spec)?;
+    let mut cmd = engines::command(spec)?;
     cmd.stdin(Stdio::null())
         .stdout(log.try_clone().map_err(|e| e.to_string())?)
         .stderr(log);
@@ -1202,7 +1190,7 @@ pub fn handle_ps() -> Result<Value, (i32, String)> {
         }
         if let Some(id) = v.get("instance_id").and_then(|x| x.as_str()) {
             let path = home.join("logs").join(format!("{id}.requests.jsonl"));
-            if let Some(done) = crate::engine_cmd::last_request_done(&path) {
+            if let Some(done) = crate::engines::ninfer::last_request_done(&path) {
                 v["prefix_cache_hit_tokens"] = json!(done.prefix_cache_hit_tokens);
                 v["prompt_tokens"] = json!(done.prompt_tokens);
                 v["computed_prefill_tokens"] = json!(done.computed_prefill_tokens);

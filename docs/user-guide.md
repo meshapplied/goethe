@@ -443,7 +443,7 @@ Dense, mixture-of-experts, hybrid (linear attention and Mamba) and vision-langua
 | INT8 (W8A8) | 8-bit integer |
 | Mixed precision | NVFP4 and FP8 in one model |
 
-The format is detected from the model files. `.bin` (PyTorch pickle) weights are not supported; use the safetensors release of the model. GGUF models run only with [optimised kernels](#add-models) (goethe-engine, logged-in nodes); `goethe install` says before downloading anything when a model is not supported.
+The format is detected from the model files. `.bin` (PyTorch pickle) weights are not supported; use the safetensors release of the model. GGUF models run with [optimised kernels](#add-models) (goethe-engine, logged-in nodes), or otherwise with llama.cpp when `llama-server` is in `engines/llama.cpp/bin` inside Goethe's folder (or named by `LLAMA_SERVER`): `goethe install` fetches one quantization (Q4_K_M, else Q8_0) and runs it on one GPU. `goethe install` says before downloading anything when a model is not supported.
 
 ## Settings
 
