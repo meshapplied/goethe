@@ -426,7 +426,12 @@ fn check_pyenv(home: &Path) -> Check {
     // The hermetic py-env's python and base layer, then SGLang and goethe-engine when installed, read from disk.
     let env = home.join("py-env");
     if !env.join("bin/python").is_file() {
-        return check("py-env", "FAIL", "run the installer");
+        // A release install made it (gone: broken); a source install makes it on first use.
+        let release = std::env::current_exe().ok().and_then(|e| crate::paths::home_of_binary(&e)).is_some();
+        return match release {
+            true => check("py-env", "FAIL", "run the installer"),
+            false => check("py-env", "INFO", "created on first goethe install (or goethe update --engine)"),
+        };
     }
     let (python, sglang) = pyenv_versions(&env);
     if !pyenv::has(home, Layer::Base) {
@@ -686,6 +691,13 @@ mod tests {
         let note = mixed_arch_note(&[(0, "12.0"), (1, "8.6"), (2, "12.0"), (3, "7.5")]).unwrap();
         assert_eq!(note, "mixed architectures: SM 12.0 on GPU 0,2, SM 8.6 on GPU 1; each model loads on GPUs of one architecture");
         assert_eq!(mixed_arch_note(&[(0, "9.0"), (1, "9.0"), (2, "7.5")]), None, "unsupported GPUs do not count");
+    }
+
+    #[test]
+    fn a_source_install_without_a_py_env_is_told_when_it_comes() {
+        let home = tempfile::tempdir().unwrap();
+        let c = check_pyenv(home.path());
+        assert_eq!((c.status.as_str(), c.hint.as_str()), ("INFO", "created on first goethe install (or goethe update --engine)"), "the test binary is not a release install");
     }
 
     #[test]
