@@ -26,6 +26,10 @@ fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
     if weights.iter().all(|w| w.extension().is_some_and(|x| x == "safetensors")) {
         weights = vec![dir.to_path_buf()];
     }
+    // The drafter verification listed (drafter/), after the target; the engine tells the roles apart by structure.
+    let drafter: Vec<PathBuf> = v["drafter"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).map(|f| dir.join(f)).filter(|f| f.is_file()).collect();
+    let shards = !drafter.is_empty() && drafter.iter().all(|w| w.extension().is_some_and(|x| x == "safetensors"));
+    weights.extend(if shards { vec![dir.join("drafter")] } else { drafter });
     let mut cmd = Command::new(resolve_python(spec.home));
     cmd.args(["-m", "goethe_engine", "serve", "--host", "127.0.0.1", "--port"])
         .arg(spec.port.to_string())
@@ -70,6 +74,19 @@ mod tests {
         }
         std::fs::write(d.path().join(PACK_VERIFY), serde_json::json!({ "weights": weights }).to_string()).unwrap();
         d
+    }
+
+    #[test]
+    fn a_listed_drafter_follows_the_target_weights() {
+        let d = model_dir(&["t-1.safetensors"]);
+        std::fs::create_dir(d.path().join("drafter")).unwrap();
+        std::fs::write(d.path().join("drafter/d.gguf"), b"w").unwrap();
+        let v = serde_json::json!({"weights": ["t-1.safetensors"], "drafter": ["drafter/d.gguf", "drafter/gone.gguf"]});
+        std::fs::write(d.path().join(PACK_VERIFY), v.to_string()).unwrap();
+        let a: Vec<String> = cmd_in(d.path(), "runtime = \"goethe-engine\"").unwrap().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let at = |f: &str| a.iter().position(|x| x == f).unwrap();
+        let dir = d.path().to_string_lossy().into_owned();
+        assert_eq!(a[at("--weights") + 1..at("--tokenizer")], [dir.clone(), format!("{dir}/drafter/d.gguf")]);
     }
 
     #[test]
