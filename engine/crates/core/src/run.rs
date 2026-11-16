@@ -97,11 +97,11 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
     }
     drop(snap);
     let t = target(&model)?;
-    if let Some(e) = mismatch(&model, &t.kind, input.as_deref()) {
-        return Err(e);
-    }
     if interactive(&input, opts.plain) {
         return crate::chat::run(t, &mut loaded, opts.thinking);
+    }
+    if let Some(e) = mismatch(&model, &t.kind, input.as_deref()) {
+        return Err(e);
     }
     let (api, llama) = (&t.api, t.llama);
     match (t.kind.as_str(), input) {
