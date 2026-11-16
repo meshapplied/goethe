@@ -235,7 +235,7 @@ fn ternary_delta(home: &Path, sums: &Path) -> Option<Delta> {
 
 pub fn pkg_base_url() -> String {
     crate::paths::setting("GOETHE_PKG_URL")
-        .unwrap_or_else(|| "https://pkg.meshapplied.com".to_string())
+        .unwrap_or_else(|| "https://pkg.goethe.sh".to_string())
         .trim_end_matches('/')
         .to_string()
 }

@@ -10,7 +10,7 @@
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
   <a href="https://github.com/meshapplied/goethe/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/meshapplied/goethe/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <br>
-  <a href="https://meshapplied.com/docs"><img alt="Documentation at meshapplied.com/docs" src="https://img.shields.io/badge/docs-meshapplied.com%2Fdocs-87D7FF?logo=readthedocs&logoColor=white"></a>
+  <a href="docs/user-guide.md"><img alt="User guide" src="https://img.shields.io/badge/docs-user%20guide-87D7FF?logo=readthedocs&logoColor=white"></a>
   <a href="https://discord.gg/fadnuFrm4"><img alt="Join us on Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
 </p>
 
@@ -21,7 +21,7 @@
 Goethe turns a Linux machine into your own API, compatible with OpenAI, Anthropic and LiteLLM clients. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
 
 ```bash
-curl -fsSL https://meshapplied.com/install.sh | bash
+curl -fsSL https://goethe.sh/install.sh | bash
 goethe start
 ```
 
@@ -101,7 +101,7 @@ Supported [model families and quantization formats](docs/user-guide.md#supported
 - **[User guide](docs/user-guide.md):** install, add models, share the API, and troubleshooting.
 - **[Command reference](docs/cli.md):** every `goethe` command and option.
 - **[Our models](docs/research-models.md):** the models we publish, and how fast they run.
-- **Full documentation:** [meshapplied.com/docs](https://meshapplied.com/docs).
+- **Full documentation:** the [user guide](docs/user-guide.md) and the [CLI reference](docs/cli.md).
 
 ## Repository layout
 
@@ -111,7 +111,7 @@ Supported [model families and quantization formats](docs/user-guide.md#supported
 | [`nvfp4-kernels/`](nvfp4-kernels/), [`ternary-kernels/`](ternary-kernels/) | GPU kernels behind our models |
 | [`docs/`](docs/) | User guide, command reference and model notes |
 
-Our models on [Hugging Face](https://huggingface.co/meshapplied) and at [meshapplied.com/models](https://meshapplied.com/models).
+Our models on [Hugging Face](https://huggingface.co/meshapplied).
 
 ## License
 

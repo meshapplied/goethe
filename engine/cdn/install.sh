@@ -4,7 +4,7 @@
 set -euo pipefail
 
 GOETHE_RELEASE_PUB_PEM='__GOETHE_RELEASE_PUB_PEM__'
-DEFAULT_PKG_URL="https://pkg.meshapplied.com"
+DEFAULT_PKG_URL="https://pkg.goethe.sh"
 DRIVER_MIN=580
 GLIBC_MIN=2.30
 DRIVER_REBOOT=0
