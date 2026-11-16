@@ -165,9 +165,9 @@ pub fn has_weight_files(siblings: &[HfSibling]) -> bool {
 }
 
 pub fn download_excludes(siblings: &[HfSibling]) -> Vec<String> {
-    // Skip original/ checkpoints, non-safetensors duplicates, and consolidated copies of sharded weights.
+    // Skip original/ checkpoints, non-safetensors duplicates, consolidated copies of sharded weights, and goethe's own files: a repo never writes the card or the verify cache.
     let names: Vec<&str> = siblings.iter().map(|s| s.rfilename.as_str()).collect();
-    let mut ex = vec!["original/*".to_string()];
+    let mut ex = vec!["original/*".to_string(), "goethe_card.toml*".to_string(), ".goethe_*".to_string()];
     let has_st = names
         .iter()
         .any(|n| n.ends_with(".safetensors") && !n.starts_with("original/"));
@@ -595,7 +595,7 @@ fn parse_siblings(body: &serde_json::Value) -> Vec<HfSibling> {
     };
     arr.iter()
         .filter_map(|item| {
-            let name = item.get("rfilename").and_then(|v| v.as_str())?;
+            let name = item.get("rfilename").and_then(|v| v.as_str()).filter(|n| is_repo_path(n))?;
             Some(HfSibling {
                 rfilename: name.to_string(),
                 size: item.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -607,6 +607,11 @@ fn parse_siblings(body: &serde_json::Value) -> Vec<HfSibling> {
             })
         })
         .collect()
+}
+
+fn is_repo_path(name: &str) -> bool {
+    // A file name inside the model dir: relative, no empty, '.' or '..' part, so a listing can never point outside it.
+    !name.contains(['\0', '\\']) && name.split('/').all(|c| !c.is_empty() && c != "." && c != "..")
 }
 
 struct ApiResponse {
@@ -697,6 +702,16 @@ mod tests {
         assert!(status_refusal("org/nope", 404, true).unwrap().contains("no access"));
         assert_eq!(status_refusal("org/m", 200, false), None);
         assert_eq!(status_refusal("org/m", 500, false), None, "a server error is reported as one");
+    }
+
+    #[test]
+    fn a_repo_cannot_write_goethes_card_and_a_listing_cannot_leave_the_model_dir() {
+        let s = vec![sib("model.safetensors", 4), sib("config.json", 2), sib("goethe_card.toml", 9), sib(".goethe_verified.json", 9)];
+        let kept: Vec<&str> = wanted(&s, &download_excludes(&s)).iter().map(|f| f.rfilename.as_str()).collect();
+        assert_eq!(kept, ["model.safetensors", "config.json"], "the card of a repo is never downloaded");
+        let body = serde_json::json!({"siblings": [{"rfilename": "a.json"}, {"rfilename": "../../x"}, {"rfilename": "/etc/x"}, {"rfilename": "d/../../x"}, {"rfilename": "d//x"}, {"rfilename": "d/ok.json"}]});
+        let names: Vec<String> = parse_siblings(&body).into_iter().map(|f| f.rfilename).collect();
+        assert_eq!(names, ["a.json", "d/ok.json"]);
     }
 
     #[test]
