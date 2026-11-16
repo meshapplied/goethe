@@ -106,6 +106,9 @@ impl Broker for HttpBroker<'_> {
         self.bytes("/packs/v2/index.sig")
     }
     fn range(&self, file: &str, off: u64, len: u64) -> Result<Vec<u8>, String> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
         let mut fresh = false;
         loop {
             let url = self.link(file, fresh)?;
@@ -506,7 +509,8 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
     let header = broker.range(&entry.file, 16, n)?;
     let h: Value = serde_json::from_slice(&header).map_err(|e| format!("{}: container header: {e}", entry.file))?;
     let (off, len) = (h["manifest"][0].as_u64().ok_or("container header: manifest")?, h["manifest"][1].as_u64().ok_or("container header: manifest")?);
-    if len == 0 || len > MAX_MANIFEST || 16 + n + off + len > entry.size {
+    let end = off.checked_add(len).and_then(|x| x.checked_add(16 + n));
+    if len == 0 || len > MAX_MANIFEST || !end.is_some_and(|e| e <= entry.size) {
         return Err(format!("{}: bad manifest range", entry.file));
     }
     let body = broker.range(&entry.file, 16 + n, off + len)?;
@@ -645,7 +649,7 @@ pub fn finish_as(
     let ranges: Vec<(u64, u64, String, bool)> = need["ranges"].as_array().into_iter().flatten()
         .filter_map(|r| Some((r["off"].as_u64()?, r["len"].as_u64()?, r["sha256"].as_str()?.to_string(), matches!(r["codec"].as_str(), None | Some("none") | Some("raw")))))
         .collect();
-    if ranges.iter().any(|(o, l, h, _)| o + l > e.size || !is_sha256(h)) {
+    if ranges.iter().any(|(o, l, h, _)| !o.checked_add(*l).is_some_and(|end| end <= e.size) || !is_sha256(h)) {
         return Err(undo("pack need: a range lies outside the pack".into()));
     }
     let sig = serde_json::to_vec(&e.sig).map_err(|err| undo(err.to_string()))?;
@@ -851,6 +855,57 @@ mod tests {
         assert_eq!((arch.as_str(), p.entry.file.as_str(), p.entry.offer.hf_repo.as_str()), ("sm_120a", "m.gcpack", "org/M-GGUF"), "sm_90a has no entry");
         assert!(by_structure(home.path(), dir.path(), &archs, &b, &engine(&b.pack, &[("pack match", 3)])).unwrap().is_none());
         assert!(by_structure(home.path(), dir.path(), &archs, &b, &engine(&b.pack, &[("pack match", 1)])).is_err());
+    }
+
+    struct Spy(Fake);
+
+    impl Broker for Spy {
+        fn index(&self) -> Result<Vec<u8>, String> {
+            self.0.index()
+        }
+        fn index_sig(&self) -> Result<Vec<u8>, String> {
+            self.0.index_sig()
+        }
+        fn range(&self, file: &str, off: u64, len: u64) -> Result<Vec<u8>, String> {
+            if off <= 16 {
+                return self.0.range(file, off, len);
+            }
+            Err(format!("asked for {len} bytes at {off}"))
+        }
+    }
+
+    #[test]
+    fn a_container_header_whose_manifest_range_overflows_is_refused_before_any_request() {
+        let (home, _) = dirs();
+        let header = serde_json::json!({"manifest": [u64::MAX - 100, 200]}).to_string().into_bytes();
+        let mut bytes = b"GCPACK3\n".to_vec();
+        bytes.extend((header.len() as u64).to_le_bytes());
+        bytes.extend(&header);
+        let pack = Pack { manifest: b"{}".to_vec(), blob_off: 0, bytes };
+        let index = index_of(&pack, &sha(&pack.manifest));
+        let b = Spy(Fake { pack, index, tamper: false, refuse: false, ranges: RefCell::new(Vec::new()) });
+        let e = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.0.pack, &[])).unwrap_err();
+        assert!(e.contains("bad manifest range"), "{e}");
+    }
+
+    #[test]
+    fn a_needed_range_that_overflows_is_refused_not_wrapped() {
+        let (home, dir) = dirs();
+        let b = fake();
+        let inner = engine(&b.pack, &[]);
+        let run = move |a: &[String]| {
+            let (c, out) = inner(a)?;
+            if a[0] == "pack" && a[1] == "need" {
+                let mut v: Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+                v["ranges"] = serde_json::json!([{"off": u64::MAX - 5, "len": 10, "sha256": sha(BLOB)}]);
+                return Ok((c, v.to_string()));
+            }
+            Ok((c, out))
+        };
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &run).unwrap().unwrap();
+        let e = finish(home.path(), dir.path(), "sm_120a", &p, &b, &run).unwrap_err();
+        assert!(e.contains("outside the pack"), "{e}");
+        nothing_left(dir.path());
     }
 
     #[test]
