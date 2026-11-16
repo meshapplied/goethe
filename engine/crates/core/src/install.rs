@@ -1475,7 +1475,9 @@ pub fn write_card_table(dir: &Path, table: &toml::Table) -> Result<(), String> {
     // Write goethe_card.toml through a temp file and rename so readers never see a partial card.
     let text = toml::to_string_pretty(table).map_err(|e| e.to_string())?;
     let tmp = dir.join(format!("{CARD_FILE}.tmp"));
-    fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let _ = fs::remove_file(&tmp);
+    let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    f.write_all(text.as_bytes()).map_err(|e| format!("{}: {e}", tmp.display()))?;
     fs::rename(&tmp, dir.join(CARD_FILE)).map_err(|e| format!("{}: {e}", dir.join(CARD_FILE).display()))
 }
 
@@ -1915,6 +1917,18 @@ mod tests {
         assert!(!is_installed(home.path(), "org/m-GGUF"));
         let con = db::open(home.path()).unwrap();
         con.execute("INSERT INTO installed_models (model_id, local_path, managed) VALUES ('org/m-GGUF', 'models/org/m-GGUF', 1)", []).ok();
+    }
+
+    #[test]
+    fn a_card_is_never_written_through_a_link_a_model_folder_ships() {
+        let (dir, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let victim = outside.path().join("keep.txt");
+        fs::write(&victim, "mine").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join(format!("{CARD_FILE}.tmp"))).unwrap();
+        write_card_table(dir.path(), &toml::from_str("model_id = \"a/b\"").unwrap()).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "mine");
+        assert!(fs::symlink_metadata(dir.path().join(CARD_FILE)).unwrap().is_file());
+        assert_eq!(read_card_table(dir.path()).unwrap()["model_id"].as_str(), Some("a/b"));
     }
 
     #[test]
