@@ -148,6 +148,8 @@ enum Commands {
         name: Option<String>,
         #[arg(long, help = "Copy local tree instead of symlinking.")]
         copy: bool,
+        #[arg(long, help = "If the model's kernel pack cannot run here, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also GOETHE_ALLOW_FALLBACK=1.")]
+        fallback: bool,
         #[arg(long = "sglang-arg", allow_hyphen_values = true, help = "Extra SGLang CLI flag.")]
         sglang_arg: Vec<String>,
     },
@@ -217,6 +219,8 @@ enum Commands {
         yes: bool,
         #[arg(long, help = "Start another instance even when the model is already loaded.")]
         replica: bool,
+        #[arg(long, help = "If the model's kernel pack fails to open, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also GOETHE_ALLOW_FALLBACK=1.")]
+        fallback: bool,
         #[arg(long, help = "Return after spawn without waiting for RUNNING.")]
         no_wait: bool,
         #[arg(long, help = "Print the instance as JSON instead of status lines.")]
@@ -865,6 +869,7 @@ fn main() {
             hf_token,
             name,
             copy,
+            fallback,
             sglang_arg,
         } => {
             if hf_token {
@@ -902,6 +907,7 @@ fn main() {
                 yes,
                 reset,
                 quant,
+                fallback,
             })
         }
         Commands::Scan(ScanArgs { dir, yes, json }) => goethe_core::scan::run(goethe_core::scan::ScanOpts { yes, json, dir }),
@@ -995,6 +1001,7 @@ fn main() {
             force,
             yes,
             replica,
+            fallback,
             no_wait,
             json,
             extra,
@@ -1008,6 +1015,7 @@ fn main() {
             force,
             yes,
             replica,
+            fallback,
             extra,
             no_wait,
             json,
@@ -1164,6 +1172,7 @@ struct DoLoadArgs {
     force: bool,
     yes: bool,
     replica: bool,
+    fallback: bool,
     extra: Vec<String>,
     no_wait: bool,
     json: bool,
@@ -1205,6 +1214,7 @@ fn do_load(args: DoLoadArgs) -> Result<(), String> {
         "force": args.force,
         "yes": args.yes,
         "replica": args.replica,
+        "fallback": args.fallback,
         "extra_sglang_args": extra,
         "async_finish": true,
     });

@@ -48,6 +48,17 @@ pub struct GoetheCard {
     pub supported_sm: Option<Vec<String>>,
 }
 
+pub fn fallback_allowed(flag: bool) -> bool {
+    // A model with a kernel pack for this card runs on its plain runtime only when the user opts in: --fallback, or GOETHE_ALLOW_FALLBACK=1.
+    allowed(flag, std::env::var("GOETHE_ALLOW_FALLBACK").ok().as_deref())
+}
+
+fn allowed(flag: bool, env: Option<&str>) -> bool {
+    flag || env == Some("1")
+}
+
+const FALLBACK_HINT: &str = "pass --fallback (or set GOETHE_ALLOW_FALLBACK=1) to serve it with the plain runtime instead";
+
 pub const PACK_SKIPPED: &str = "pack_skipped";
 
 const CARD_KEYS: &[&str] = &[
@@ -107,6 +118,7 @@ pub struct InstallOpts {
     pub yes: bool,
     pub reset: bool,
     pub quant: Option<String>,
+    pub fallback: bool,
 }
 
 struct Target {
@@ -243,7 +255,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             let plan = crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home))?
                 .ok_or_else(|| format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch))?;
             if let Some(why) = refused_before_download(home, &plan, &crate::packs::python_runner(home)) {
-                println!("{}", pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why)?);
+                println!("{}", pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why, fallback_allowed(opts.fallback))?);
                 pack_refused = true;
                 break 'packed false;
             }
@@ -318,7 +330,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         }
     }
     hf::ensure_model(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf.clone(), ..dl })?;
-    let pack = readable(structure_offer(home, opts, &card_dir), || gguf.as_ref().map_or(Ok(()), |f| gguf_metadata(home, &card_dir, "gguf", f)));
+    let pack = readable(structure_offer(home, opts, &card_dir), |c| config_for_pack(home, opts, &card_dir, c, gguf.as_deref().unwrap_or_default()), fallback_allowed(opts.fallback))?;
     Ok(Target {
         model_id: opts.model_id.clone(),
         card_dir,
@@ -330,15 +342,28 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     })
 }
 
-fn readable<T>(choice: Option<T>, meta: impl FnOnce() -> Result<(), String>) -> Option<T> {
-    // A pack offered for GGUF weights is used only when their config and tokenizer can be made; otherwise the plain runtime takes them, and the install says why instead of dropping the offer silently.
-    let c = choice?;
-    match meta() {
-        Ok(()) => Some(c),
-        Err(e) => {
+fn readable<T>(choice: Option<T>, meta: impl FnOnce(&T) -> Result<(), String>, allow: bool) -> Result<Option<T>, String> {
+    // A pack offered for GGUF weights is used only when their config and tokenizer are in place; otherwise the install fails with the reason, or with --fallback serves them with the plain runtime and says why.
+    let Some(c) = choice else { return Ok(None) };
+    match (meta(&c), allow) {
+        (Ok(()), _) => Ok(Some(c)),
+        (Err(e), true) => {
             eprintln!("note: the optimised kernels were not used, serving with the plain runtime: {e}");
-            None
+            Ok(None)
         }
+        (Err(e), false) => Err(format!("the optimised kernels for these weights cannot be used: {e}; {FALLBACK_HINT}")),
+    }
+}
+
+fn config_for_pack(home: &Path, opts: &InstallOpts, dir: &Path, c: &PackChoice, gguf: &[String]) -> Result<(), String> {
+    // The pack's signed entry names the model's own config and tokenizer files: fetch those beside the weights; only without them are they made from the GGUF header (which needs a transformers that knows the architecture).
+    if let Some((repo, revision, only)) = c.plan.as_ref().and_then(|p| crate::packs::aux(&p.entry)) {
+        hf::ensure_model(home, &repo, dir, &DownloadOpts { revision, force: opts.force, no_verify: opts.no_verify, only: Some(only) })?;
+    }
+    if gguf.is_empty() {
+        Ok(())
+    } else {
+        gguf_metadata(home, dir, "gguf", gguf)
     }
 }
 
@@ -631,7 +656,7 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     } else {
         fetch(&registry_url()).ok().and_then(|r| find_model(&r, &model_id).cloned())
     };
-    let pack = readable((!has_pack).then(|| structure_offer(home, opts, &card_dir)).flatten(), || if gguf.is_empty() { Ok(()) } else { gguf_metadata(home, &card_dir, "gguf", &gguf) });
+    let pack = readable((!has_pack).then(|| structure_offer(home, opts, &card_dir)).flatten(), |c| config_for_pack(home, opts, &card_dir, c, &gguf), fallback_allowed(opts.fallback))?;
     Ok(Target {
         model_id,
         card_dir,
@@ -831,6 +856,9 @@ fn register(home: &Path, opts: &InstallOpts, mut t: Target) -> Result<(), String
     };
     if let Some(why) = refused {
         drop_pack(&planned.dir);
+        if !fallback_allowed(opts.fallback) {
+            return Err(format!("{why}; {FALLBACK_HINT}"));
+        }
         t.pack = None;
         planned = plan(home, opts, &t)?;
         println!("{why}; using {}", crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?.id);
@@ -892,12 +920,25 @@ fn refused_before_download(home: &Path, plan: &crate::packs::Plan, run: crate::p
     why
 }
 
-fn pack_only_refusal(model_id: &str, pack_only: bool, why: &str) -> Result<String, String> {
-    // A pack that cannot run here before any download: a pack-only model is refused with the cards its pack is built for; any other falls to its plain runtime.
+fn pack_only_refusal(model_id: &str, pack_only: bool, why: &str, allow: bool) -> Result<String, String> {
+    // A pack that cannot run here before any download: a pack-only model is refused with the cards its pack is built for; any other is refused too unless the user opted into its plain runtime.
     if pack_only {
         return Err(format!("{model_id} runs only with its kernel pack, and {why}; nothing was downloaded"));
     }
+    if !allow {
+        return Err(format!("{why}; nothing was downloaded; {FALLBACK_HINT}"));
+    }
     Ok(format!("{why}; using its plain runtime"))
+}
+
+fn pack_failure_line(home: &Path, model_id: &str, log: &str) -> Option<String> {
+    // For a model that carries a kernel pack: why the pack did not open, in one line, and how to opt into the plain runtime when it has one.
+    let dir = model_dir(home, model_id);
+    if !dir.join(PACK_FILE).is_file() {
+        return None;
+    }
+    let why = load_failure(log);
+    Some(if has_plain_weights(&dir) { format!("{why}; {FALLBACK_HINT}") } else { why })
 }
 
 pub fn unpack_failed(home: &Path, model_id: &str, log: &str) -> Result<bool, String> {
@@ -1429,6 +1470,7 @@ fn load_installed(model_id: &str, opts: &InstallOpts) -> Result<(), String> {
         "yes": opts.yes,
         "extra_sglang_args": Vec::<String>::new(),
         "async_finish": true,
+        "fallback": opts.fallback,
     });
     run_load(params, opts.no_wait, false)
 }
@@ -1478,13 +1520,15 @@ pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), Stri
             let home = goethe_home();
             let log = fs::read_to_string(home.join("logs").join(format!("{iid}.log"))).unwrap_or_default();
             let failed = e.starts_with("the engine failed to start");
-            return match failed && unpack_failed(&home, &model_id, &log)? {
-                true => {
-                    let _ = crate::rpc::call("unload", json!({"model_id": model_id, "all": false, "force": true}));
-                    run_load(params, no_wait, json_out)
-                }
-                false => Err(e),
-            };
+            let allow = fallback_allowed(params.get("fallback").and_then(Value::as_bool) == Some(true));
+            if failed && allow && unpack_failed(&home, &model_id, &log)? {
+                let _ = crate::rpc::call("unload", json!({"model_id": model_id, "all": false, "force": true}));
+                return run_load(params, no_wait, json_out);
+            }
+            return Err(match failed.then(|| pack_failure_line(&home, &model_id, &log)).flatten() {
+                Some(line) => format!("{e}\n{line}"),
+                None => e,
+            });
         }
     }
     let row = instance_row(&iid);
@@ -1657,9 +1701,11 @@ mod tests {
     #[test]
     fn a_pack_only_model_is_refused_before_download_and_any_other_uses_its_plain_runtime() {
         let why = "kernel pack for rtx_pro_6000_maxq (sm_120a, 188 SMs) does not run on NVIDIA GeForce RTX 5090 (no fit)";
-        let err = pack_only_refusal("nvidia/Qwen3.8-27B-NVFP4", true, why).unwrap_err();
+        let err = pack_only_refusal("nvidia/Qwen3.8-27B-NVFP4", true, why, true).unwrap_err();
         assert!(err.contains("runs only with its kernel pack") && err.contains("rtx_pro_6000_maxq (sm_120a") && err.ends_with("nothing was downloaded"), "{err}");
-        let note = pack_only_refusal("org/m-GGUF", false, why).unwrap();
+        let held = pack_only_refusal("org/m-GGUF", false, why, false).unwrap_err();
+        assert!(held.contains("nothing was downloaded") && held.contains("--fallback") && held.contains("GOETHE_ALLOW_FALLBACK"), "{held}");
+        let note = pack_only_refusal("org/m-GGUF", false, why, true).unwrap();
         assert!(note.ends_with("using its plain runtime"), "{note}");
     }
 
@@ -1668,6 +1714,16 @@ mod tests {
         let reg = crate::registry::bundled().unwrap();
         assert!(reg.models.iter().find(|m| m.id == "nvidia/Qwen3.8-27B-NVFP4").is_some_and(|m| m.pack_only == Some(true)));
         assert!(reg.models.iter().filter(|m| m.pack_only == Some(true)).count() >= 1);
+    }
+
+    #[test]
+    fn a_pack_failure_is_one_line_with_the_opt_in_hint_and_fallback_needs_an_opt_in() {
+        let (home, _) = packed_home();
+        let line = pack_failure_line(home.path(), "org/m-GGUF", "ImportError: libnccl.so.2: cannot open shared object file").unwrap();
+        assert!(line.starts_with("kernel pack failed to open (a host library is missing") && line.ends_with("instead"), "{line}");
+        assert!(line.contains("--fallback") && !line.contains('\n'), "{line}");
+        assert_eq!(pack_failure_line(home.path(), "org/none", "x"), None, "no pack: nothing to add");
+        assert!(allowed(true, None) && allowed(false, Some("1")) && !allowed(false, Some("0")) && !allowed(false, None));
     }
 
     #[test]
@@ -1722,9 +1778,11 @@ mod tests {
 
     #[test]
     fn an_offered_pack_is_dropped_only_with_a_reason_and_a_projector_is_not_the_model() {
-        assert_eq!(readable(Some(1), || Ok(())), Some(1));
-        assert_eq!(readable(Some(1), || Err("no config".into())), None, "dropped, with a note on stderr");
-        assert_eq!(readable::<u8>(None, || panic!("no offer: nothing to read")), None);
+        assert_eq!(readable(Some(1), |_| Ok(()), false), Ok(Some(1)));
+        assert_eq!(readable(Some(1), |_| Err("no config".into()), true), Ok(None), "with --fallback: dropped, with a note on stderr");
+        let err = readable(Some(1), |_| Err("no config".into()), false).unwrap_err();
+        assert!(err.contains("no config") && err.contains("--fallback"), "{err}");
+        assert_eq!(readable::<u8>(None, |_| panic!("no offer: nothing to read"), false), Ok(None));
         let src = tempfile::tempdir().unwrap();
         crate::engines::llama_cpp::write_test_gguf(&src.path().join("OrcaCyber-Q4_K_M.gguf"));
         crate::engines::llama_cpp::write_test_gguf_with(&src.path().join("OrcaCyber-mmproj-F16.gguf"), &[("clip.vision.image_size", 448)]);
