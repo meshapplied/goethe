@@ -187,7 +187,7 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 | Command | What it does |
 |---|---|
 | `goethe models recommend` | Catalog models that fit your GPUs |
-| `goethe install …` | Download from Hugging Face, or register a local folder |
+| `goethe install …` | Download from Hugging Face (`org/name:Q8_0` picks one quantization: a GGUF file or a kernel pack variant), or register a local folder |
 | `goethe models scan` | Add folders you placed in the models directory |
 | `goethe models` | Installed and catalog models, and whether each fits |
 | `goethe models config …` | Default context, concurrency and GPUs for a model |

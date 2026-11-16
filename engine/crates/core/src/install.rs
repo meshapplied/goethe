@@ -103,6 +103,7 @@ pub struct InstallOpts {
     pub trust_remote_code: bool,
     pub yes: bool,
     pub reset: bool,
+    pub quant: Option<String>,
 }
 
 struct Target {
@@ -235,7 +236,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
             let login = crate::packs::Login(choice.creds.clone());
             let broker = crate::packs::HttpBroker::new(&choice.creds.platform_url, &login);
-            let plan = crate::packs::plan(home, &opts.model_id, &choice.offer.arch, &broker, &crate::packs::python_runner(home))?
+            let plan = crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home))?
                 .ok_or_else(|| format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch))?;
             let rev = choice.offer.revision.clone();
             let pre = hf::preflight_model(&choice.offer.hf_repo, Some(&rev))?;
@@ -270,7 +271,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         PackDecision::Declined => true,
         PackDecision::None => false,
     };
-    let gguf = engine_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), declined)?;
+    let gguf = engine_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), declined, opts.quant.as_deref())?;
     if !hf::offline_mode() {
         if let Ok(pre) = hf::preflight_model(&opts.model_id, dl.revision.as_deref()) {
             let bytes = match &gguf {
@@ -359,9 +360,16 @@ fn ask_login(offer: &crate::packs::Offer, opts: &InstallOpts) -> Result<bool, St
     Ok(a.to_ascii_lowercase().starts_with('y'))
 }
 
-fn engine_check(home: &Path, model_id: &str, revision: Option<&str>, entry: Option<&RegistryModel>, declined: bool) -> Result<Option<Vec<String>>, String> {
-    // Before any download: SGLang must serve the model's architecture and quantization (catalog entries are vetted); a GGUF-only repo gets llama.cpp and the files to fetch.
-    if entry.is_some() || hf::offline_mode() {
+fn engine_check(
+    home: &Path,
+    model_id: &str,
+    revision: Option<&str>,
+    entry: Option<&RegistryModel>,
+    declined: bool,
+    quant: Option<&str>,
+) -> Result<Option<Vec<String>>, String> {
+    // Before any download: SGLang must serve the model's architecture and quantization (catalog entries are vetted); a GGUF-only repo, or a :quant, gets llama.cpp and the files to fetch.
+    if (entry.is_some() && quant.is_none()) || hf::offline_mode() {
         return Ok(None);
     }
     let rev = revision.unwrap_or("main");
@@ -371,15 +379,18 @@ fn engine_check(home: &Path, model_id: &str, revision: Option<&str>, entry: Opti
     } else {
         ""
     };
-    if !pre.siblings.iter().any(|s| s.rfilename == "config.json") {
-        if pre.siblings.iter().any(|s| s.rfilename.ends_with(".gguf")) {
-            let none = if declined { "" } else { ", and no optimised kernel pack exists for it on this machine's GPUs" };
-            let names: Vec<&str> = pre.siblings.iter().map(|s| s.rfilename.as_str()).collect();
-            return match crate::engines::llama_cpp::server_bin(home) {
-                Ok(_) => Ok(Some(crate::engines::llama_cpp::pick_gguf(&names))),
-                Err(why) => Err(format!("{model_id} is not supported: it ships GGUF files only, which SGLang does not serve{none}; {why}.{hint}")),
-            };
-        }
+    let names: Vec<&str> = pre.siblings.iter().map(|s| s.rfilename.as_str()).collect();
+    let config = names.contains(&"config.json");
+    if quant.is_some() || (!config && names.iter().any(|n| n.ends_with(".gguf"))) {
+        let files = crate::engines::llama_cpp::pick_gguf(&names, quant).map_err(|e| format!("{model_id}: {e}"))?;
+        let none = if declined { "" } else { ", and no optimised kernel pack exists for it on this machine's GPUs" };
+        let only = if config { "" } else { " only" };
+        return match crate::engines::llama_cpp::server_bin(home) {
+            Ok(_) => Ok(Some(files)),
+            Err(why) => Err(format!("{model_id} is not supported: it ships GGUF files{only}, which SGLang does not serve{none}; {why}.{hint}")),
+        };
+    }
+    if !config {
         return Ok(None);
     }
     let cfg = hf::fetch_config_json(model_id, rev)?;
@@ -786,7 +797,7 @@ fn plan_gguf(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, Str
     // llama.cpp serves the GGUF: shape from its header, KV in f16, the file recorded in the card.
     crate::engines::llama_cpp::server_bin(home)?;
     let dir = &t.card_dir;
-    let gguf = crate::engines::llama_cpp::gguf_in(dir, &toml::Value::Table(read_card_table(dir).unwrap_or_default()))?;
+    let gguf = crate::engines::llama_cpp::gguf_in(dir, &toml::Value::Table(read_card_table(dir).unwrap_or_default()), opts.quant.as_deref())?;
     let facts = crate::engines::llama_cpp::facts(dir, &gguf)?;
     let mut p = plan_engine(home, opts, t, facts, crate::engines::llama_cpp::ENGINE.id, ("f16", 2), None)?;
     let rel = gguf.strip_prefix(dir).unwrap_or(&gguf).to_string_lossy().into_owned();

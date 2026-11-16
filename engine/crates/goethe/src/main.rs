@@ -112,7 +112,7 @@ enum Commands {
     Recommend(RecommendArgs),
     #[command(display_order = 6, about = "Download a model from Hugging Face, or add a local folder; --load serves it too.")]
     Install {
-        #[arg(value_name = "MODEL", num_args = 1.., required_unless_present = "model_id", help = "Hugging Face id (org/name), a local folder, or words from a catalog model's name.")]
+        #[arg(value_name = "MODEL", num_args = 1.., required_unless_present = "model_id", help = "Hugging Face id (org/name), a local folder, or words from a catalog model's name; a :QUANT suffix (org/name:Q8_0) picks that GGUF file or kernel pack variant.")]
         model: Vec<String>,
         #[arg(long = "model", value_name = "ID_OR_PATH", hide = true, conflicts_with = "model", help = "Older form of the model argument.")]
         model_id: Option<String>,
@@ -700,6 +700,14 @@ fn installed_id(id: &str, strict: bool) -> String {
     }
 }
 
+fn quant_suffix(query: &str) -> (String, Option<String>) {
+    // `model:QUANT` (Hugging Face style): the model, and the quant after the last ':'; a folder named with a ':' stays whole.
+    match query.rsplit_once(':') {
+        Some((m, q)) if !std::path::Path::new(query).is_dir() => (m.to_string(), Some(q.to_string()).filter(|q| !q.is_empty())),
+        _ => (query.to_string(), None),
+    }
+}
+
 fn install_target(query: &str) -> String {
     // A local folder or an org/name id as given; otherwise words from a catalog or installed model's name.
     if std::path::Path::new(query).is_dir() || query.starts_with(['.', '/', '~']) || validate_model_id(query).is_ok() {
@@ -861,7 +869,11 @@ fn main() {
                 goethe_core::hf::set_token(Some(token));
             }
             let gpus_parsed = gpu_list(gpu, gpus);
-            let model_id = install_target(&model_query(model, model_id));
+            let (query, mut quant) = quant_suffix(&model_query(model, model_id));
+            let model_id = install_target(&query);
+            if let Some(q) = quant.take_if(|_| std::path::Path::new(&model_id).is_dir()) {
+                eprintln!("note: {model_id} is a local folder; :{q} is ignored");
+            }
             if let Some(n) = name.as_deref() {
                 checked_id(n);
             }
@@ -884,6 +896,7 @@ fn main() {
                 trust_remote_code,
                 yes,
                 reset,
+                quant,
             })
         }
         Commands::Scan(ScanArgs { dir, yes, json }) => goethe_core::scan::run(goethe_core::scan::ScanOpts { yes, json, dir }),
@@ -2069,6 +2082,18 @@ fn fail(msg: String) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quant_suffix_is_split_off_the_model() {
+        assert_eq!(quant_suffix("org/m-GGUF:Q8_0"), ("org/m-GGUF".to_string(), Some("Q8_0".to_string())));
+        assert_eq!(quant_suffix("qwen 8b:q4_k_m"), ("qwen 8b".to_string(), Some("q4_k_m".to_string())));
+        assert_eq!(quant_suffix("org/m"), ("org/m".to_string(), None));
+        assert_eq!(quant_suffix("org/m:"), ("org/m".to_string(), None));
+        let odd = std::env::temp_dir().join(format!("goethe-test-{}-m:v2", std::process::id()));
+        std::fs::create_dir_all(&odd).unwrap();
+        assert_eq!(quant_suffix(odd.to_str().unwrap()), (odd.to_str().unwrap().to_string(), None), "a folder named with a ':'");
+        let _ = std::fs::remove_dir(&odd);
+    }
 
     #[test]
     fn gateway_status_explains_scope_and_allowlist() {

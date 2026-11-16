@@ -413,8 +413,8 @@ pub struct Plan {
     serial: u64,
 }
 
-pub fn plan(home: &Path, model_id: &str, arch: &str, broker: &dyn Broker, run: Runner) -> Result<Option<Plan>, String> {
-    // The signed index's pack for this model and arch, and its manifest's weight files per variant (what to download). None: no pack.
+pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &dyn Broker, run: Runner) -> Result<Option<Plan>, String> {
+    // The signed index's pack for this model and arch, and its manifest's weight files per variant (what to download), only the variant a quant names (id, desc.quant or desc.format, any case). None: no pack.
     let work = home.join("packs");
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let (ix, sg) = (work.join("index.json"), work.join("index.sig"));
@@ -446,15 +446,23 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, broker: &dyn Broker, run: R
     }
     let m: Value = serde_json::from_slice(manifest).map_err(|e| format!("{}: manifest: {e}", entry.file))?;
     let names: Vec<String> = m["model"]["weights"].as_array().into_iter().flatten().map(|w| w["file"].as_str().unwrap_or_default().to_string()).collect();
-    let mut variants: Vec<Vec<String>> = Vec::new();
-    for (_, var) in m["variants"].as_object().into_iter().flatten() {
+    let (mut variants, mut all): (Vec<Vec<String>>, Vec<&str>) = (Vec::new(), Vec::new());
+    for (id, var) in m["variants"].as_object().into_iter().flatten() {
+        let d = &var["desc"];
+        all.push(d["quant"].as_str().unwrap_or(id));
+        if quant.is_some_and(|q| ![Some(id.as_str()), d["quant"].as_str(), d["format"].as_str()].into_iter().flatten().any(|t| t.eq_ignore_ascii_case(q))) {
+            continue;
+        }
         let files: Vec<String> = var["weights"].as_array().into_iter().flatten().filter_map(|i| names.get(i.as_u64()? as usize).cloned()).collect();
         if !files.is_empty() && files.iter().all(|f| safe_name(f)) && !variants.contains(&files) {
             variants.push(files);
         }
     }
     if variants.is_empty() {
-        return Err(format!("{}: the manifest names no model files", entry.file));
+        return Err(match quant {
+            Some(q) => format!("{model_id}: its kernel pack has no variant {q} (available: {})", all.join(", ")),
+            None => format!("{}: the manifest names no model files", entry.file),
+        });
     }
     let prefix = [head, header, body].concat();
     Ok(Some(Plan { entry, prefix, variants, serial }))
@@ -659,13 +667,17 @@ mod tests {
     fn a_plan_reads_the_manifest_and_names_the_files_of_each_variant() {
         let (home, _) = dirs();
         let b = fake();
-        let p = plan(home.path(), "org/m-gguf", "sm_120a", &b, &engine(&b.pack, &[])).unwrap().unwrap();
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap().unwrap();
         assert_eq!(p.variants, vec![vec!["m-Q4_0.gguf".to_string()], vec!["m-Q8_0.gguf".to_string()]]);
         assert_eq!(p.prefix, b.pack.bytes[..p.prefix.len()]);
         let files = vec!["config.json".to_string(), "tokenizer.json".to_string()];
         assert_eq!(aux(&p.entry), Some(("org/M".to_string(), Some("def".to_string()), files)), "a path in aux files is dropped");
-        assert!(plan(home.path(), "org/other", "sm_120a", &b, &engine(&b.pack, &[])).unwrap().is_none());
-        assert!(plan(home.path(), "org/m-gguf", "sm_90a", &b, &engine(&b.pack, &[])).unwrap().is_none());
+        let q8 = plan(home.path(), "org/m-gguf", "sm_120a", Some("Q8"), &b, &engine(&b.pack, &[])).unwrap().unwrap();
+        assert_eq!(q8.variants, vec![vec!["m-Q8_0.gguf".to_string()]], "a quant names one variant by id");
+        let e = plan(home.path(), "org/m-gguf", "sm_120a", Some("q5"), &b, &engine(&b.pack, &[])).unwrap_err();
+        assert_eq!(e, "org/m-gguf: its kernel pack has no variant q5 (available: q4, q8)");
+        assert!(plan(home.path(), "org/other", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap().is_none());
+        assert!(plan(home.path(), "org/m-gguf", "sm_90a", None, &b, &engine(&b.pack, &[])).unwrap().is_none());
     }
 
     #[test]
@@ -673,14 +685,14 @@ mod tests {
         let (home, _) = dirs();
         let mut b = fake();
         b.index = index_of(&b.pack, &"0".repeat(64));
-        assert!(plan(home.path(), "org/m-gguf", "sm_120a", &b, &engine(&b.pack, &[])).unwrap_err().contains("manifest differs"));
+        assert!(plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap_err().contains("manifest differs"));
     }
 
     #[test]
     fn an_index_the_engine_refuses_fails_before_any_download() {
         let (home, _) = dirs();
         let b = fake();
-        assert!(plan(home.path(), "org/m-gguf", "sm_120a", &b, &engine(&b.pack, &[("index verify", 1)])).is_err());
+        assert!(plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[("index verify", 1)])).is_err());
         assert!(b.ranges.borrow().is_empty());
     }
 
@@ -689,7 +701,7 @@ mod tests {
         let (home, dir) = dirs();
         let b = fake();
         let run = engine(&b.pack, &[]);
-        let p = plan(home.path(), "org/m-gguf", "sm_120a", &b, &run).unwrap().unwrap();
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &run).unwrap().unwrap();
         b.ranges.borrow_mut().clear();
         assert_eq!(finish(home.path(), dir.path(), "sm_120a", &p, &b, &run).unwrap(), "q8");
         assert_eq!(*b.ranges.borrow(), vec![(b.pack.blob_off, BLOB.len() as u64)]);
@@ -707,7 +719,7 @@ mod tests {
         let (home, dir) = dirs();
         let b = fake();
         let run = engine(&b.pack, &[]);
-        let p = plan(home.path(), "org/m-gguf", "sm_120a", &b, &run).unwrap().unwrap();
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &run).unwrap().unwrap();
         std::fs::write(dir.path().join(PACK_FILE), &b.pack.bytes).unwrap();
         b.ranges.borrow_mut().clear();
         finish(home.path(), dir.path(), "sm_120a", &p, &b, &run).unwrap();
@@ -719,7 +731,7 @@ mod tests {
         let (home, dir) = dirs();
         let mut b = fake();
         let run = engine(&b.pack, &[]);
-        let p = plan(home.path(), "org/m-gguf", "sm_120a", &b, &run).unwrap().unwrap();
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &run).unwrap().unwrap();
         b.tamper = true;
         assert!(finish(home.path(), dir.path(), "sm_120a", &p, &b, &run).unwrap_err().contains("does not hash"));
         nothing_left(dir.path());
@@ -729,7 +741,7 @@ mod tests {
     fn files_that_match_no_pack_and_a_refused_download_fail_and_leave_nothing() {
         let (home, dir) = dirs();
         let mut b = fake();
-        let p = plan(home.path(), "org/m-gguf", "sm_120a", &b, &engine(&b.pack, &[])).unwrap().unwrap();
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap().unwrap();
         assert!(finish(home.path(), dir.path(), "sm_120a", &p, &b, &engine(&b.pack, &[("pack match", 3)])).unwrap_err().contains("do not match"));
         nothing_left(dir.path());
         for f in [format!("{PACK_FILE}.sig"), PACK_VERIFY.to_string()] {
@@ -745,7 +757,7 @@ mod tests {
     fn a_pack_the_engine_refuses_is_removed() {
         let (home, dir) = dirs();
         let b = fake();
-        let p = plan(home.path(), "org/m-gguf", "sm_120a", &b, &engine(&b.pack, &[])).unwrap().unwrap();
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap().unwrap();
         assert!(finish(home.path(), dir.path(), "sm_120a", &p, &b, &engine(&b.pack, &[("pack verify", 1)])).is_err());
         nothing_left(dir.path());
     }
