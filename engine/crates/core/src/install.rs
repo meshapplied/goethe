@@ -48,6 +48,8 @@ pub struct GoetheCard {
     pub supported_sm: Option<Vec<String>>,
 }
 
+pub const PACK_SKIPPED: &str = "pack_skipped";
+
 const CARD_KEYS: &[&str] = &[
     "model_id",
     "context_length",
@@ -291,7 +293,9 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         PackDecision::Declined => true,
         PackDecision::None => false,
     };
-    let gguf = engine_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), declined, opts.quant.as_deref())?;
+    let local = crate::hw::profile(home).map(|h| h.gpus.iter().map(|g| g.name.clone()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+    let no_pack_gpu = crate::packs::catalog(home).and_then(|ix| crate::packs::unsupported_here(&ix, &opts.model_id, &crate::packs::local_archs(home), &local));
+    let gguf = engine_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), (declined, no_pack_gpu.as_deref()), opts.quant.as_deref())?;
     if !hf::offline_mode() {
         if let Ok(pre) = hf::preflight_model(&opts.model_id, dl.revision.as_deref()) {
             let bytes = match &gguf {
@@ -360,7 +364,11 @@ fn vram_preflight(home: &Path, bytes: u64) -> Result<(), String> {
 }
 
 fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String> {
-    // A pack in the platform's index for this model and a local GPU: used when the node is logged in; otherwise the user may log in now. Without a login no pack is ever downloaded.
+    // A pack in the platform's index for this model and a local GPU: used when the node is logged in; otherwise the user may log in now. Without a login no pack is ever downloaded. A pack that failed to open here earlier is skipped unless --force.
+    if let Some(why) = read_card_table(&model_dir(home, &opts.model_id)).and_then(|c| c.get(PACK_SKIPPED).and_then(|v| v.as_str().map(String::from))).filter(|_| !opts.force) {
+        eprintln!("note: skipping the kernel pack: {why} (--force tries it again)");
+        return Ok(PackDecision::Declined);
+    }
     let Some(index) = crate::packs::catalog(home) else { return Ok(PackDecision::None) };
     let archs = crate::packs::local_archs(home);
     let Some(offer) = crate::packs::offers(&index, &opts.model_id, &archs).into_iter().next() else {
@@ -405,19 +413,19 @@ fn engine_check(
     model_id: &str,
     revision: Option<&str>,
     entry: Option<&RegistryModel>,
-    declined: bool,
+    (declined, no_pack_gpu): (bool, Option<&str>),
     quant: Option<&str>,
 ) -> Result<Option<Vec<String>>, String> {
-    // Before any download: SGLang must serve the model's architecture and quantization (catalog entries are vetted); a GGUF-only repo, or a :quant, gets llama.cpp and the files to fetch.
+    // Before any download: SGLang must serve the model's architecture and quantization (catalog entries are vetted); a GGUF-only repo, or a :quant, gets llama.cpp and the files to fetch. A model with no plain runtime and no pack for this GPU is refused with the GPUs its packs are built for.
     if (entry.is_some() && quant.is_none()) || hf::offline_mode() {
         return Ok(None);
     }
     let rev = revision.unwrap_or("main");
     let pre = hf::preflight_model(model_id, Some(rev))?;
-    let hint = if declined {
-        " Optimised kernels exist for it on this GPU: run goethe login, then goethe install again."
-    } else {
-        ""
+    let hint = match (declined, no_pack_gpu) {
+        (true, _) => " Optimised kernels exist for it on this GPU: run goethe login, then goethe install again.".to_string(),
+        (_, Some(n)) => format!(" {n}."),
+        _ => String::new(),
     };
     let names: Vec<&str> = pre.siblings.iter().map(|s| s.rfilename.as_str()).collect();
     let config = names.contains(&"config.json");
@@ -431,7 +439,10 @@ fn engine_check(
         };
     }
     if !config {
-        return Ok(None);
+        return match no_pack_gpu {
+            Some(n) => Err(format!("{model_id} is not supported: it is not a plain checkpoint (no config.json, no GGUF). {n}.")),
+            None => Ok(None),
+        };
     }
     let cfg = hf::fetch_config_json(model_id, rev)?;
     crate::scan::sglang_serves(&crate::scan::sglang_support(home), &cfg).map(|()| None).map_err(|why| format!("{model_id} is not supported: {why}.{hint}"))
@@ -836,23 +847,53 @@ fn refused_here(dir: &Path, run: crate::packs::Runner) -> Option<String> {
     Some(format!("kernel pack for {skus} does not run on {} ({})", v["device"].as_str().unwrap_or("this GPU"), v["why"].as_str().unwrap_or("no variant for it")))
 }
 
-pub fn unpack_refused(home: &Path, model_id: &str, log: &str) -> Result<bool, String> {
-    // An engine without `pack runs` refuses such a pack only at load: drop it, write the plain card, say so; false when there is nothing to drop.
-    let Some(why) = load_refusal(log) else { return Ok(false) };
+pub fn unpack_failed(home: &Path, model_id: &str, log: &str) -> Result<bool, String> {
+    // A pack that failed to open for any reason: drop it, write the plain card with a pack_skipped note, say why in one line; false when there is no pack or no plain runtime to fall back to.
     let dir = model_dir(home, model_id);
-    if !dir.join(PACK_FILE).is_file() {
+    if !dir.join(PACK_FILE).is_file() || !has_plain_weights(&dir) {
         return Ok(false);
     }
+    let why = load_failure(log);
     drop_pack(&dir);
     let source_dir = read_card_table(&dir).and_then(|c| c.get("source_dir").and_then(|v| v.as_str()).map(PathBuf::from));
     let entry = fetch(&registry_url()).ok().and_then(|r| find_model(&r, model_id).cloned());
     let t = Target { model_id: model_id.to_string(), card_dir: dir, entry, managed: source_dir.is_none(), source_dir, ternary: None, pack: None };
-    let p = plan(home, &InstallOpts { model_id: model_id.to_string(), ..InstallOpts::default() }, &t)?;
+    let mut p = plan(home, &InstallOpts { model_id: model_id.to_string(), ..InstallOpts::default() }, &t)?;
     let engine = crate::engines::of_card(&toml::Value::Table(p.table.clone()))?;
     ensure_runtime(home, engine)?;
+    p.table.insert(PACK_SKIPPED.into(), toml::Value::String(why.clone()));
     println!("{why}; using {}", engine.id);
     commit(home, &p, "installed", &mut std::io::sink())?;
     Ok(true)
+}
+
+fn has_plain_weights(dir: &Path) -> bool {
+    // Weights a runtime other than the pack can serve sit in the model dir: a GGUF, or safetensors.
+    let card = toml::Value::Table(read_card_table(dir).unwrap_or_default());
+    crate::engines::llama_cpp::gguf_in(dir, &card, None).is_ok() || model_facts::weight_files(dir).is_ok_and(|w| !w.is_empty())
+}
+
+type Cause = fn(&str) -> bool;
+
+fn load_failure(log: &str) -> String {
+    // Why a pack did not open, in one line: the engine's device refusal, else the first log line naming a known cause, else the last log line.
+    if let Some(refusal) = load_refusal(log) {
+        return refusal;
+    }
+    let causes: [(Cause, &str); 4] = [
+        (|l| l.contains("cannot open shared object file"), "a host library is missing"),
+        (|l| l.contains("Illegal instruction") || l.contains("SIGILL"), "it crashed at open (illegal instruction)"),
+        (|l| l.contains("Segmentation fault") || l.contains("SIGSEGV"), "it crashed at open"),
+        (|l| l.contains("needs ") && l.contains("GB"), "it does not fit this GPU"),
+    ];
+    let lines: Vec<&str> = log.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let short = |l: &str| l.chars().take(160).collect::<String>();
+    for (hit, cause) in causes {
+        if let Some(l) = lines.iter().find(|l| hit(l)) {
+            return format!("kernel pack failed to open ({cause}: {})", short(l));
+        }
+    }
+    format!("kernel pack failed to open (unknown error: {})", lines.last().map_or("no log".to_string(), |l| short(l)))
 }
 
 fn load_refusal(log: &str) -> Option<String> {
@@ -1377,7 +1418,8 @@ pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), Stri
         if let Err(e) = crate::load_wait::wait_for_instance(&iid, crate::load_wait::DEFAULT_LOAD_WAIT) {
             let home = goethe_home();
             let log = fs::read_to_string(home.join("logs").join(format!("{iid}.log"))).unwrap_or_default();
-            return match unpack_refused(&home, &model_id, &log)? {
+            let failed = e.starts_with("the engine failed to start");
+            return match failed && unpack_failed(&home, &model_id, &log)? {
                 true => {
                     let _ = crate::rpc::call("unload", json!({"model_id": model_id, "all": false, "force": true}));
                     run_load(params, no_wait, json_out)
@@ -1509,8 +1551,8 @@ mod tests {
         assert_eq!(refused_here(dir.path(), &old), None, "an engine without pack runs: as before, load decides");
     }
 
-    #[test]
-    fn a_pack_refused_at_load_leaves_a_plain_card_once() {
+    fn packed_home() -> (tempfile::TempDir, PathBuf) {
+        // A GGUF model dir carrying a kernel pack, with a goethe-engine card.
         let (home, _) = gguf_home(true);
         let dir = model_dir(home.path(), "org/m-GGUF");
         fs::create_dir_all(&dir).unwrap();
@@ -1520,14 +1562,58 @@ mod tests {
             fs::write(dir.join(f), b"p").unwrap();
         }
         write_card_table(&dir, &toml::from_str("model_id = \"org/m-GGUF\"\nruntime = \"goethe-engine\"").unwrap()).unwrap();
+        (home, dir)
+    }
+
+    #[test]
+    fn a_pack_refused_at_load_leaves_a_plain_card_once() {
+        let (home, dir) = packed_home();
         let log = "goethe-engine: pack REFUSED: device NVIDIA GeForce RTX 5090 cc 12.0 (170 SMs, smem per block 101376) runs no variant of this pack: rtx_pro_6000_maxq (sm_120a, 188 SMs): the plan's grid needs 188 SMs co-resident, the device has 170. Fallback: serve this model with llama.cpp\n";
         let why = "kernel pack for rtx_pro_6000_maxq (sm_120a, 188 SMs) does not run on NVIDIA GeForce RTX 5090 cc 12.0 (170 SMs, smem per block 101376) (the plan's grid needs 188 SMs co-resident, the device has 170)";
-        assert_eq!(load_refusal(log).as_deref(), Some(why));
-        assert!(!unpack_refused(home.path(), "org/m-GGUF", "some other failure").unwrap());
-        assert!(unpack_refused(home.path(), "org/m-GGUF", log).unwrap());
+        assert_eq!(load_failure(log), why);
+        assert!(unpack_failed(home.path(), "org/m-GGUF", log).unwrap());
         assert!(!dir.join(PACK_FILE).exists() && !dir.join(PACK_VERIFY).exists() && dir.join("m-Q4_K_M.gguf").exists());
-        assert_eq!(read_card_table(&dir).unwrap().get("runtime").and_then(|v| v.as_str()), Some("llama.cpp"));
-        assert!(!unpack_refused(home.path(), "org/m-GGUF", log).unwrap(), "no pack left: no second retry");
+        let card = read_card_table(&dir).unwrap();
+        assert_eq!(card.get("runtime").and_then(|v| v.as_str()), Some("llama.cpp"));
+        assert_eq!(card.get(PACK_SKIPPED).and_then(|v| v.as_str()), Some(why));
+        assert!(!unpack_failed(home.path(), "org/m-GGUF", log).unwrap(), "no pack left: no second retry");
+    }
+
+    #[test]
+    fn a_pack_that_fails_to_open_for_any_reason_falls_back_with_one_line() {
+        let cases = [
+            ("ImportError: libnccl.so.2: cannot open shared object file: No such file or directory\n", "kernel pack failed to open (a host library is missing: ImportError: libnccl.so.2: cannot open shared object file: No such file or directory)"),
+            ("opening the pack\nIllegal instruction (core dumped)\n", "kernel pack failed to open (it crashed at open (illegal instruction): Illegal instruction (core dumped))"),
+            ("goethe-engine: bucket b1 needs 40-51 GB, the device has 32\n", "kernel pack failed to open (it does not fit this GPU: goethe-engine: bucket b1 needs 40-51 GB, the device has 32)"),
+            ("starting\nsomething odd happened\n", "kernel pack failed to open (unknown error: something odd happened)"),
+            ("", "kernel pack failed to open (unknown error: no log)"),
+        ];
+        for (log, line) in cases {
+            let (home, dir) = packed_home();
+            assert_eq!(load_failure(log), line);
+            assert!(unpack_failed(home.path(), "org/m-GGUF", log).unwrap(), "{log}");
+            assert!(!dir.join(PACK_FILE).exists());
+            assert_eq!(read_card_table(&dir).unwrap().get(PACK_SKIPPED).and_then(|v| v.as_str()), Some(line));
+        }
+    }
+
+    #[test]
+    fn a_pack_with_no_plain_weights_is_kept_and_the_failure_reported() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = model_dir(home.path(), "org/p");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(PACK_FILE), b"p").unwrap();
+        assert!(!unpack_failed(home.path(), "org/p", "libnccl.so.2: cannot open shared object file").unwrap());
+        assert!(dir.join(PACK_FILE).exists());
+    }
+
+    #[test]
+    fn a_pack_that_failed_here_is_not_offered_again_unless_forced() {
+        let (home, dir) = packed_home();
+        assert!(unpack_failed(home.path(), "org/m-GGUF", "Illegal instruction").unwrap());
+        let opts = InstallOpts { model_id: "org/m-GGUF".into(), ..Default::default() };
+        assert!(matches!(pack_decision(home.path(), &opts).unwrap(), PackDecision::Declined));
+        assert!(dir.join(CARD_FILE).is_file());
     }
 
     #[test]
