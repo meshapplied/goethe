@@ -34,6 +34,7 @@ pub struct Snapshot {
     trace: Arc<TraceConfig>,
     learn: Arc<LearnConfig>,
     contexts: HashMap<String, u64>,
+    engines: HashMap<String, &'static crate::engines::Engine>,
 }
 
 impl Snapshot {
@@ -47,6 +48,10 @@ impl Snapshot {
 
     pub fn context_length(&self, model_id: &str) -> u64 {
         self.contexts.get(model_id).copied().unwrap_or(DEFAULT_CONTEXT)
+    }
+
+    pub fn engine(&self, model_id: &str) -> Option<&'static crate::engines::Engine> {
+        self.engines.get(model_id).copied()
     }
 
     pub fn has_key(&self, key: &ResolvedKey) -> bool {
@@ -182,7 +187,7 @@ impl GatewayCache {
         if state.version == Some(version) {
             return;
         }
-        match load_snapshot(&state.con) {
+        match load_snapshot(&state.con, &self.home) {
             Ok(snap) => {
                 let mut current = self.snap.write().unwrap_or_else(|e| e.into_inner());
                 let _ = std::mem::replace(&mut *current, Arc::new(snap));
@@ -207,8 +212,8 @@ fn open_if_needed(slot: &mut Option<DbState>, home: &Path) {
     }
 }
 
-fn load_snapshot(con: &Connection) -> rusqlite::Result<Snapshot> {
-    // Read keys, RUNNING/DRAINING instances, aliases and installed models in one read transaction.
+fn load_snapshot(con: &Connection, home: &Path) -> rusqlite::Result<Snapshot> {
+    // Read keys, RUNNING/DRAINING instances, aliases and installed models in one read transaction; served models' engines from their cards.
     let tx = con.unchecked_transaction()?;
     let mut snap = Snapshot::default();
     let mut stmt = tx.prepare(
@@ -263,11 +268,15 @@ fn load_snapshot(con: &Connection) -> rusqlite::Result<Snapshot> {
         snap.aliases.insert(alias, model_id);
     }
     let mut stmt = tx.prepare(
-        "SELECT model_id, COALESCE(CAST(strftime('%s', installed_at) AS INTEGER), 0), COALESCE(default_ctx, 0) FROM installed_models",
+        "SELECT model_id, COALESCE(CAST(strftime('%s', installed_at) AS INTEGER), 0), COALESCE(default_ctx, 0), local_path FROM installed_models",
     )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?)))?;
     for row in rows {
-        let (model_id, created, ctx) = row?;
+        let (model_id, created, ctx, local) = row?;
+        let card = || toml::from_str(&std::fs::read_to_string(home.join(&local).join("goethe_card.toml")).ok()?).ok();
+        if let Some(e) = snap.routes.contains_key(&model_id).then(card).flatten().and_then(|c| crate::engines::of_card(&c).ok()) {
+            snap.engines.insert(model_id.clone(), e);
+        }
         if let Some(ctx) = u64::try_from(ctx).ok().filter(|c| *c > 0) {
             snap.contexts.insert(model_id.clone(), ctx);
         }
@@ -387,12 +396,45 @@ mod tests {
         assert_eq!(snap.routes("org/m")[1].engine_key, None);
         assert!(snap.routes("other").is_empty(), "STARTING instances are not routable");
         assert_eq!(snap.serving_models(), vec!["org/m"]);
+        assert!(snap.engine("org/m").is_none(), "no card: the engine checks its own parameters");
+        std::fs::create_dir_all(dir.path().join("models/m")).unwrap();
+        std::fs::write(dir.path().join("models/m/goethe_card.toml"), "runtime = \"llama.cpp\"").unwrap();
+        other
+            .execute("INSERT INTO installed_models (model_id, local_path, architecture, static_vram_gb, kv_bytes_per_token, default_ctx,
+                      default_max_conc, default_tp) VALUES ('org/m', 'models/m', 'dense', 1.0, 1, 512, 1, 1)", [])
+            .unwrap();
+        assert_eq!(cache.exact().engine("org/m").map(|e| e.id), Some("llama.cpp"));
         other
             .execute("UPDATE loaded_instances SET status = 'DRAINING' WHERE model_id = 'org/m'", [])
             .unwrap();
         let snap = cache.exact();
         assert!(snap.routes("org/m").iter().all(|r| r.draining));
         assert!(snap.serving_models().is_empty());
+    }
+
+    #[test]
+    fn a_missing_or_broken_card_never_fails_the_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = db::open(dir.path()).unwrap();
+        let cache = GatewayCache::open(dir.path());
+        std::fs::create_dir_all(dir.path().join("models/m")).unwrap();
+        std::fs::write(dir.path().join("models/m/goethe_card.toml"), "runtime = \"llama.cpp\"").unwrap();
+        insert_instance(&other, "inst-d", "org/abs", 30004, "RUNNING", None);
+        insert_instance(&other, "inst-e", "org/gone", 30005, "RUNNING", None);
+        insert_instance(&other, "inst-f", "org/bad", 30006, "RUNNING", None);
+        std::fs::create_dir_all(dir.path().join("models/bad")).unwrap();
+        std::fs::write(dir.path().join("models/bad/goethe_card.toml"), "runtime = [").unwrap();
+        let abs = dir.path().join("models/m").to_string_lossy().into_owned();
+        for (id, path) in [("org/abs", abs.as_str()), ("org/gone", "models/gone"), ("org/bad", "models/bad")] {
+            other
+                .execute("INSERT INTO installed_models (model_id, local_path, architecture, static_vram_gb, kv_bytes_per_token, default_ctx,
+                          default_max_conc, default_tp) VALUES (?1, ?2, 'dense', 1.0, 1, 512, 1, 1)", [id, path])
+                .unwrap();
+        }
+        let snap = cache.exact();
+        assert_eq!(snap.engine("org/abs").map(|e| e.id), Some("llama.cpp"), "an absolute local_path");
+        assert!(snap.engine("org/gone").is_none() && snap.engine("org/bad").is_none(), "a missing or broken card only drops the check");
+        assert_eq!(snap.routes("org/gone").len(), 1, "the snapshot still loads");
     }
 
     #[test]

@@ -94,6 +94,13 @@ fn dispatch(req: Request) -> (bool, i32, String, String, Value) {
     }
 }
 
+fn blocking(stream: tokio::net::UnixStream) -> UnixStream {
+    // tokio hands the socket over non-blocking: a request line not yet arrived would read as WouldBlock and drop the client.
+    let stream = stream.into_std().expect("into_std");
+    stream.set_nonblocking(false).expect("blocking goethe.sock stream");
+    stream
+}
+
 fn handle_client(stream: UnixStream) {
     let mut stream = stream;
     let reader = BufReader::new(stream.try_clone().expect("dup goethe.sock stream"));
@@ -208,7 +215,7 @@ async fn main() {
             res = listener.accept() => {
                 match res {
                     Ok((stream, _)) => {
-                        let stream = stream.into_std().expect("into_std");
+                        let stream = blocking(stream);
                         tokio::task::spawn_blocking(move || {
                             handle_client(stream);
                         });
@@ -251,5 +258,27 @@ async fn drain_mux(home: &std::path::Path) {
     }
     while goethe_core::inflight::total() > 0 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_request_that_arrives_after_accept_is_still_read() {
+        let path = std::env::temp_dir().join(format!("goethed-test-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = TokioUnixListener::bind(&path).unwrap();
+        let mut client = std::os::unix::net::UnixStream::connect(&path).unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let server = std::thread::spawn(move || {
+            let mut line = String::new();
+            BufReader::new(blocking(stream)).read_line(&mut line).map(|_| line)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        client.write_all(b"{\"method\":\"ps\"}\n").unwrap();
+        assert_eq!(server.join().unwrap().unwrap(), "{\"method\":\"ps\"}\n");
+        let _ = std::fs::remove_file(&path);
     }
 }

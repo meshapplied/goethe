@@ -69,6 +69,7 @@ The API is at `https://<address>:<port>/v1`. It speaks three schemas at once, so
 | `POST /v1/messages/count_tokens` | Anthropic token count |
 | `POST /v1/embeddings` | Embeddings, for embedding models |
 | `POST /v1/rerank` | Reranking, for reranker models |
+| `POST /v1/audio/transcriptions` | Speech to text (OpenAI multipart upload), for transcription models; the body limit is `GOETHE_MAX_BODY_MB` (default 10 MB, about 5 minutes of 16 kHz WAV) |
 | `GET /v1/models`, `GET /v1/models/{id}` | Models your key can use |
 | `GET /model/info`, `GET /model_group/info` | Models in LiteLLM's format |
 | `GET /health` | Up check, no key needed |
@@ -186,7 +187,7 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 | Command | What it does |
 |---|---|
 | `goethe models recommend` | Catalog models that fit your GPUs |
-| `goethe install …` | Download from Hugging Face, or register a local folder |
+| `goethe install …` | Download from Hugging Face (`org/name:Q8_0` picks one quantization: a GGUF file or a kernel pack variant), or register a local folder |
 | `goethe models scan` | Add folders you placed in the models directory |
 | `goethe models` | Installed and catalog models, and whether each fits |
 | `goethe models config …` | Default context, concurrency and GPUs for a model |
@@ -198,6 +199,7 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 |---|---|
 | `goethe load …` | Load and wait until ready (`--gpu`, `--tp`, `--ctx`, `--max-conc`, `--replica`) |
 | `goethe unload …` | Stop a model (`--all`, `--force`) |
+| `goethe run [MODEL] [INPUT]` | Try a loaded model by hand: text to a text model (a chat without INPUT, else one reply) or an embedding model (dims, norm, first values); an audio file (.wav, .flac, .mp3, .ogg, .m4a) to a speech model (its transcript; without INPUT it records from the microphone until Enter, with arecord, parecord or ffmpeg) |
 | `goethe ps` | Running instances, GPUs and speed |
 | `goethe logs [model]` | `--daemon`, `--gateway`, `-f`, `-n` |
 
@@ -242,6 +244,8 @@ goethe install zai-org/GLM-5.3-Flash --load     # download and load in one step
 The model id is the Hugging Face repo name. Any [supported model](#supported-models) on Hugging Face works, not only the catalog. Useful flags: `--load`, `--ctx`, `--max-conc`, `--trust-remote-code` (only for models you trust) and `--hf-token`.
 
 **Optimised kernels:** some models have a kernel pack: the optimised kernels for every supported GPU microarchitecture, with the model's quantizations and configs (NVIDIA CUDA for now; other platforms such as AMD ROCm later). Packs are available to nodes logged in to the Goethe platform (`goethe login`), and `goethe install` uses them automatically. A node that is not logged in is asked to log in, or continues with SGLang. `goethe models` marks the models that have optimised kernels for your machine.
+
+**GGUF models:** a Hugging Face GGUF repo (`org/model-GGUF`, or `org/model-GGUF:Q8_0` for one quant) is served by llama.cpp on one GPU; a GGUF with a mean, cls or last pooling type is served as an embedding model (`goethe run <model> "text"`). If a kernel pack cannot open on a machine for any reason, goethe prints the reason, drops the pack and serves the GGUF with llama.cpp. A model that has only a pack, and none for your GPU, is refused before anything is downloaded.
 
 **Gated or private models:** accept the license on the model's Hugging Face page, create a read token at huggingface.co/settings/tokens, then run `goethe install <org>/<model> --hf-token` and type the token when asked. It is used for that download only and never stored. In `goethe start`, choose "A private or gated model".
 
@@ -443,7 +447,7 @@ Dense, mixture-of-experts, hybrid (linear attention and Mamba) and vision-langua
 | INT8 (W8A8) | 8-bit integer |
 | Mixed precision | NVFP4 and FP8 in one model |
 
-The format is detected from the model files. `.bin` (PyTorch pickle) weights are not supported; use the safetensors release of the model. GGUF models run only with [optimised kernels](#add-models) (goethe-engine, logged-in nodes); `goethe install` says before downloading anything when a model is not supported.
+The format is detected from the model files. `.bin` (PyTorch pickle) weights are not supported; use the safetensors release of the model. GGUF models run with [optimised kernels](#add-models) (goethe-engine, logged-in nodes), or otherwise with llama.cpp when `llama-server` is in `engines/llama.cpp/bin` inside Goethe's folder (or named by `LLAMA_SERVER`): `goethe install` fetches one quantization (Q4_K_M, else Q8_0) and runs it on one GPU. `goethe install` says before downloading anything when a model is not supported.
 
 ## Settings
 

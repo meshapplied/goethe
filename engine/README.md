@@ -121,7 +121,7 @@ Loaded models are restored after a daemon restart or reboot unless you unloaded 
 Source file: `cdn/v1/registry.json`, served at `https://pkg.goethe.sh/v1/registry.json` (override with `GOETHE_REGISTRY_URL`, `file://` works). It describes models only; GPU count, TP, context and concurrency are computed per machine.
 
 Required per entry: `id` (Hugging Face repo, owned by an organization), `runtime` (`sglang` or `ternary`), `architecture` (`dense` or `moe`), `supported_sm`, `static_vram_gb` (whole model), `kv_elems_per_token`, `max_ctx`, `num_attention_heads`, `num_kv_heads`.
-Optional: `memory` (the memory spec `registry add` measures from `config.json`; when present, `static_vram_gb` is the weights alone), `attention` (`gqa`, `mla`, `hybrid`), `extra_sglang_args`, `revision`, `gated`, `manual_download` (weights are published somewhere other than Hugging Face), `download_gb`, `description`, `family`, `license`, `released`, `modalities`. Ternary entries also take `pack_id`, `base_model_id`, `env`, `pythonpath`.
+Optional: `memory` (the memory spec `registry add` measures from `config.json`; when present, `static_vram_gb` is the weights alone), `attention` (`gqa`, `mla`, `hybrid`), `extra_sglang_args`, `revision`, `gated`, `manual_download` (weights are published somewhere other than Hugging Face), `pack_only` (no plain runtime: on a GPU whose kernel pack variants do not run, install is refused before any download), `download_gb`, `description`, `family`, `license`, `released`, `modalities`. Ternary entries also take `pack_id`, `base_model_id`, `env`, `pythonpath`.
 
 Add models without writing numbers by hand:
 

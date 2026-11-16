@@ -1155,9 +1155,9 @@ mod tests {
         fs::create_dir_all(home.join("nginx")).unwrap();
         fs::write(home.join("nginx/mux_port"), "30000\n").unwrap();
         fs::write(home.join("nginx/public_port"), "8443\n").unwrap();
-        store_public_bind(home, "100.116.114.80").unwrap();
+        store_public_bind(home, "100.64.1.7").unwrap();
         let conf = render_gateway(home, Path::new("/bin/false")).unwrap();
-        assert!(conf.contains("listen 100.116.114.80:8443"), "{conf}");
+        assert!(conf.contains("listen 100.64.1.7:8443"), "{conf}");
         assert!(conf.contains("listen 127.0.0.1:8443"), "{conf}");
     }
 

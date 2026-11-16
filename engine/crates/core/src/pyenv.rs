@@ -19,7 +19,7 @@ pub const ENGINE_VERSION: &str = pin_value(PIN, "GOETHE_ENGINE_VERSION");
 const ENGINE_WHEEL_URL: &str = pin_value(PIN, "GOETHE_ENGINE_WHEEL_URL");
 const ENGINE_WHEEL_SHA256: &str = pin_value(PIN, "GOETHE_ENGINE_WHEEL_SHA256");
 
-const fn pin_value(text: &'static str, key: &str) -> &'static str {
+pub(crate) const fn pin_value(text: &'static str, key: &str) -> &'static str {
     // The value of a KEY=value line, at compile time (a missing key fails the build).
     let (t, k) = (text.as_bytes(), key.as_bytes());
     let mut i = 0;
@@ -38,7 +38,7 @@ const fn pin_value(text: &'static str, key: &str) -> &'static str {
             let (value, _) = rest.split_at(end - start);
             match std::str::from_utf8(value) {
                 Ok(v) => return v,
-                Err(_) => panic!("goethe-engine/PIN is not UTF-8"),
+                Err(_) => panic!("a PIN file is not UTF-8"),
             }
         }
         while i < t.len() && t[i] != b'\n' {
@@ -46,7 +46,7 @@ const fn pin_value(text: &'static str, key: &str) -> &'static str {
         }
         i += 1;
     }
-    panic!("goethe-engine/PIN lacks a key")
+    panic!("a PIN file lacks a key")
 }
 
 impl Layer {
@@ -125,7 +125,7 @@ pub fn engine_installed(home: &Path) -> Option<String> {
     dist_version(&site_packages(home)?, "goethe_engine")
 }
 
-fn dev_python(home: &Path) -> bool {
+pub fn dev_python(home: &Path) -> bool {
     // A source or test setup runs engines with GOETHE_PYTHON and has no py-env: goethe installs nothing there.
     std::env::var_os("GOETHE_PYTHON").is_some() && !home.join("py-env/bin/python").exists()
 }

@@ -1,0 +1,6 @@
+LLAMA_CPP_TAG=b12376
+LLAMA_CPP_COMMIT=61dbf49228c8a96b72e40c89d93cb7c003411f8c
+LLAMA_CPP_URL=https://github.com/ggml-org/llama.cpp/releases/download/b12376/llama-b12376-bin-ubuntu-cuda-12.8-x64.tar.gz
+LLAMA_CPP_SHA256=ef9bb8bd810807bb41fe2a7d474ca6c71a856ec3098512f46f0148032f7f5b0c
+LLAMA_CPP_CUDART_URL=https://github.com/ggml-org/llama.cpp/releases/download/b12376/cudart-llama-b12376-bin-ubuntu-cuda-12.8-x64.tar.gz
+LLAMA_CPP_CUDART_SHA256=9b77cfba63c70cd18394f62c6ab59616e5d6fb5a090a7fc02d49faf38a646747

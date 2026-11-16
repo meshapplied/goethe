@@ -393,12 +393,12 @@ fn model_id_for(name: &str, con: &Connection, path: &Path) -> Result<String, Str
 
 pub fn classify(dir: &Path, m: &Machine) -> Verdict {
     // Decide whether goethe can serve the model in dir, with a concrete reason when it cannot.
-    if let Some(path) = crate::engine_cmd::ninfer_in(dir) {
-        return match crate::engine_cmd::verify_ninfer_file(&path) {
+    if let Some(path) = crate::engines::ninfer::ninfer_in(dir) {
+        return match crate::engines::ninfer::verify_ninfer_file(&path) {
             Ok(()) => Verdict::Supported {
                 arch: "ninfer".into(),
                 kind: "nvfp4".into(),
-                size_gb: crate::engine_cmd::NINFER_BYTES as f64 / crate::model_facts::GIB,
+                size_gb: crate::engines::ninfer::NINFER_BYTES as f64 / crate::model_facts::GIB,
                 notes: Vec::new(),
             },
             Err(e) => Verdict::Unsupported(e),
@@ -501,8 +501,8 @@ fn architectures(cfg: &Value) -> Vec<String> {
 
 fn check_weights(dir: &Path) -> Result<(), String> {
     // The pinned NInfer artifact, or safetensors: an index whose shards are all present, or exactly one file.
-    if let Some(path) = crate::engine_cmd::ninfer_in(dir) {
-        return crate::engine_cmd::verify_ninfer_file(&path);
+    if let Some(path) = crate::engines::ninfer::ninfer_in(dir) {
+        return crate::engines::ninfer::verify_ninfer_file(&path);
     }
     if dir.join("model.safetensors.index.json").is_file() {
         let index: Value = fs::read_to_string(dir.join("model.safetensors.index.json"))

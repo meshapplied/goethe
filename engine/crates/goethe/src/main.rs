@@ -112,7 +112,7 @@ enum Commands {
     Recommend(RecommendArgs),
     #[command(display_order = 6, about = "Download a model from Hugging Face, or add a local folder; --load serves it too.")]
     Install {
-        #[arg(value_name = "MODEL", num_args = 1.., required_unless_present = "model_id", help = "Hugging Face id (org/name), a local folder, or words from a catalog model's name.")]
+        #[arg(value_name = "MODEL", num_args = 1.., required_unless_present = "model_id", help = "Hugging Face id (org/name), a local folder, or words from a catalog model's name; a :QUANT suffix (org/name:Q8_0) picks that GGUF file or kernel pack variant.")]
         model: Vec<String>,
         #[arg(long = "model", value_name = "ID_OR_PATH", hide = true, conflicts_with = "model", help = "Older form of the model argument.")]
         model_id: Option<String>,
@@ -138,7 +138,7 @@ enum Commands {
         reset: bool,
         #[arg(long = "trust-remote-code", help = "Let SGLang run Python code shipped with the model (config.json auto_map).")]
         trust_remote_code: bool,
-        #[arg(long, help = "With --load, load next to processes goethe did not start without asking.")]
+        #[arg(long, help = "Do not ask: download without confirming, and with --load load next to processes goethe did not start.")]
         yes: bool,
         #[arg(long, help = "Skip sha256 verification.")]
         no_verify: bool,
@@ -234,6 +234,11 @@ enum Commands {
         all: bool,
         #[arg(long, help = "Skip connection draining and tear down immediately.")]
         force: bool,
+    },
+    #[command(display_order = 5, about = "Try a loaded model by hand: give text (a chat without INPUT, else one reply or an embedding summary) or an audio file (its transcript; a speech model without INPUT records from the microphone).")]
+    Run {
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", num_args = 0..=2, help = "[MODEL] [INPUT]: MODEL may be left out when one model is loaded.")]
+        args: Vec<String>,
     },
     #[command(display_order = 5, about = "Running models: GPUs, port, memory, requests and speed.")]
     Ps {
@@ -700,6 +705,14 @@ fn installed_id(id: &str, strict: bool) -> String {
     }
 }
 
+fn quant_suffix(query: &str) -> (String, Option<String>) {
+    // `model:QUANT` (Hugging Face style): the model, and the quant after the last ':'; a folder named with a ':' stays whole.
+    match query.rsplit_once(':') {
+        Some((m, q)) if !std::path::Path::new(query).is_dir() => (m.to_string(), Some(q.to_string()).filter(|q| !q.is_empty())),
+        _ => (query.to_string(), None),
+    }
+}
+
 fn install_target(query: &str) -> String {
     // A local folder or an org/name id as given; otherwise words from a catalog or installed model's name.
     if std::path::Path::new(query).is_dir() || query.starts_with(['.', '/', '~']) || validate_model_id(query).is_ok() {
@@ -861,7 +874,11 @@ fn main() {
                 goethe_core::hf::set_token(Some(token));
             }
             let gpus_parsed = gpu_list(gpu, gpus);
-            let model_id = install_target(&model_query(model, model_id));
+            let (query, mut quant) = quant_suffix(&model_query(model, model_id));
+            let model_id = install_target(&query);
+            if let Some(q) = quant.take_if(|_| std::path::Path::new(&model_id).is_dir()) {
+                eprintln!("note: {model_id} is a local folder; :{q} is ignored");
+            }
             if let Some(n) = name.as_deref() {
                 checked_id(n);
             }
@@ -884,6 +901,7 @@ fn main() {
                 trust_remote_code,
                 yes,
                 reset,
+                quant,
             })
         }
         Commands::Scan(ScanArgs { dir, yes, json }) => goethe_core::scan::run(goethe_core::scan::ScanOpts { yes, json, dir }),
@@ -1002,6 +1020,7 @@ fn main() {
                 _ => each(models, |id| do_unload(Some(&installed_id(&id, false)), force)),
             }
         }
+        Commands::Run { args } => goethe_core::run::run(&args),
         Commands::Ps { json } => do_ps(json),
         Commands::Up { no_boot } => do_up(!no_boot),
         Commands::Status => do_status(),
@@ -2069,6 +2088,18 @@ fn fail(msg: String) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quant_suffix_is_split_off_the_model() {
+        assert_eq!(quant_suffix("org/m-GGUF:Q8_0"), ("org/m-GGUF".to_string(), Some("Q8_0".to_string())));
+        assert_eq!(quant_suffix("qwen 8b:q4_k_m"), ("qwen 8b".to_string(), Some("q4_k_m".to_string())));
+        assert_eq!(quant_suffix("org/m"), ("org/m".to_string(), None));
+        assert_eq!(quant_suffix("org/m:"), ("org/m".to_string(), None));
+        let odd = std::env::temp_dir().join(format!("goethe-test-{}-m:v2", std::process::id()));
+        std::fs::create_dir_all(&odd).unwrap();
+        assert_eq!(quant_suffix(odd.to_str().unwrap()), (odd.to_str().unwrap().to_string(), None), "a folder named with a ':'");
+        let _ = std::fs::remove_dir(&odd);
+    }
 
     #[test]
     fn gateway_status_explains_scope_and_allowlist() {

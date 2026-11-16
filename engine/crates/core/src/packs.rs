@@ -1,6 +1,6 @@
 // Gated kernel-pack pull. goethe does network and auth; goethe-engine decides trust (signature, rollback, identity, arch).
 
-use crate::engine_cmd::{resolve_python, PACK_FILE, PACK_VERIFY};
+use crate::engines::{goethe_engine::{PACK_FILE, PACK_VERIFY}, resolve_python};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
@@ -174,6 +174,9 @@ pub struct Entry {
     pub manifest_sha256: String,
     pub size: u64,
     pub sig: Value,
+    pub aux: Value,
+    pub drafter: Value,
+    pub min_engine: (u64, u64, u64),
 }
 
 pub fn platform_base(home: &Path) -> Result<String, String> {
@@ -228,12 +231,12 @@ pub fn catalog(home: &Path) -> Option<Vec<u8>> {
 
 pub fn offers(index: &[u8], model_id: &str, archs: &[String]) -> Vec<Offer> {
     // Packs of `index` for `model_id` (case-insensitive) on one of `archs`, in `archs` order, that the pinned engine can run.
-    dedup(entries(index, archs, |repo| repo.eq_ignore_ascii_case(model_id)).into_iter().map(|e| e.offer).collect())
+    dedup(entries(index, archs, |repo| repo.eq_ignore_ascii_case(model_id)).into_iter().filter(runnable).map(|e| e.offer).collect())
 }
 
 pub fn offers_any(index: &[u8], archs: &[String]) -> Vec<Offer> {
     // Every pack of `index` on one of `archs` that the pinned engine can run, whatever the model.
-    dedup(entries(index, archs, |_| true).into_iter().map(|e| e.offer).collect())
+    dedup(entries(index, archs, |_| true).into_iter().filter(runnable).map(|e| e.offer).collect())
 }
 
 fn dedup(v: Vec<Offer>) -> Vec<Offer> {
@@ -246,13 +249,48 @@ fn dedup(v: Vec<Offer>) -> Vec<Offer> {
     out
 }
 
+fn runnable(e: &Entry) -> bool {
+    // The pinned goethe-engine (the one goethe installs) is at least the pack's min_engine.
+    Some(e.min_engine) <= version(crate::pyenv::ENGINE_VERSION)
+}
+
+pub fn engine_too_old(index: &[u8], model_id: &str, archs: &[String]) -> Option<String> {
+    // A note when the index has packs for `model_id` on `archs` but each needs a newer goethe-engine than the pinned one.
+    let es = entries(index, archs, |r| r.eq_ignore_ascii_case(model_id));
+    if es.iter().any(runnable) {
+        return None;
+    }
+    let (a, b, c) = es.iter().map(|e| e.min_engine).min()?;
+    Some(format!("engine_too_old: {model_id} needs goethe-engine >= {a}.{b}.{c}, installed {}: run goethe update", crate::pyenv::ENGINE_VERSION))
+}
+
+pub fn pack_archs(index: &[u8], model_id: &str) -> Vec<String> {
+    // The archs the index has a pack of `model_id` for, whatever GPUs this machine has.
+    let ix: Value = serde_json::from_slice(index).unwrap_or_default();
+    let all: Vec<String> = ix["entries"].as_array().into_iter().flatten().filter_map(|e| e["arch"].as_str().map(String::from)).collect();
+    let mut out: Vec<String> = entries(index, &all, |r| r.eq_ignore_ascii_case(model_id)).into_iter().map(|e| e.offer.arch).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+pub fn unsupported_here(index: &[u8], model_id: &str, archs: &[String], local: &str) -> Option<String> {
+    // One line when the index has packs of `model_id` but none for this machine's GPUs: which GPUs the packs are built for, and that this one is not among them.
+    let theirs = pack_archs(index, model_id);
+    if theirs.is_empty() || theirs.iter().any(|a| archs.contains(a)) {
+        return None;
+    }
+    let built = theirs.iter().map(|a| crate::gpu_arch::SUPPORTED.iter().find(|x| &x.tag() == a).map_or(a.clone(), |x| format!("{a}, {}", x.family))).collect::<Vec<_>>().join("; ");
+    let here = if local.is_empty() { archs.join(", ") } else { format!("{local} ({})", archs.join(", ")) };
+    Some(format!("It runs only with a kernel pack, built for {built}; this machine has {here}, so it is not supported here and nothing was downloaded"))
+}
+
 pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> Vec<Entry> {
-    // Index entries on one of `archs` (in that order) for a model `model` accepts, in a format, ABI, runtime and engine version this goethe runs.
+    // Index entries on one of `archs` (in that order) for a model `model` accepts, in a format, ABI and runtime this goethe runs, whatever min_engine they need (`runnable` filters).
     let Ok(ix) = serde_json::from_slice::<Value>(index) else { return Vec::new() };
     if ix["schema"] != "gc-pack-index" || ix["version"] != INDEX_VERSION {
         return Vec::new();
     }
-    let engine = version(crate::pyenv::ENGINE_VERSION);
     let mut out = Vec::new();
     for arch in archs {
         for e in ix["entries"].as_array().into_iter().flatten() {
@@ -260,10 +298,10 @@ pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> 
             let runs = ENGINE_RUNTIMES.iter().any(|(k, v)| e["runtime"]["kind"] == *k && e["runtime"]["version"] == *v);
             let file = e["file"].as_str().unwrap_or_default();
             let manifest = e["manifest_sha256"].as_str().unwrap_or_default();
+            let Some(min_engine) = e["min_engine"].as_str().and_then(version) else { continue };
             let fits = e["arch"].as_str() == Some(arch.as_str())
                 && e["abi_major"].as_u64() == Some(ENGINE_ABI_MAJOR)
                 && runs
-                && e["min_engine"].as_str().and_then(version).is_some_and(|v| Some(v) <= engine)
                 && m["hf_repo"].as_str().is_some_and(&model)
                 && pack_file_name(file)
                 && is_sha256(manifest)
@@ -282,6 +320,9 @@ pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> 
                 manifest_sha256: manifest.to_string(),
                 size: e["size"].as_u64().unwrap_or(0),
                 sig: e["sig"].clone(),
+                aux: e["aux"].clone(),
+                drafter: e["drafter"].clone(),
+                min_engine,
             });
         }
     }
@@ -305,6 +346,35 @@ fn pack_file_name(f: &str) -> bool {
         && f.len() > ".gcpack".len()
         && f.as_bytes()[0].is_ascii_alphanumeric()
         && f.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+pub fn aux(e: &Entry) -> Option<(String, Option<String>, Vec<String>)> {
+    // The model's own config and tokenizer files the signed entry names (repo, revision, files): a GGUF repo ships none.
+    let repo = e.aux["repo"].as_str().filter(|r| crate::paths::validate_model_id(r).is_ok())?;
+    let files: Vec<String> = e.aux["files"].as_array()?.iter().filter_map(|f| f.as_str()).filter(|f| safe_name(f)).map(String::from).collect();
+    (!files.is_empty()).then(|| (repo.to_string(), e.aux["revision"].as_str().map(String::from), files))
+}
+
+pub struct Drafter {
+    pub name: String,
+    pub repo: String,
+    pub revision: Option<String>,
+    pub files: Vec<(String, u64, String)>,
+}
+
+pub fn drafter(e: &Entry) -> Option<Drafter> {
+    // The speculative-decoding drafter the signed entry names: aux's rules, plus each file's bytes and sha256; any bad field drops it whole.
+    let d = &e.drafter;
+    let repo = d["repo"].as_str().filter(|r| crate::paths::validate_model_id(r).is_ok())?.to_string();
+    let files = d["files"].as_array()?.iter().map(|f| Some((f["name"].as_str().filter(|n| safe_name(n))?.to_string(), f["bytes"].as_u64()?, f["sha256"].as_str().filter(|h| is_sha256(h))?.to_string())));
+    let files: Vec<(String, u64, String)> = files.collect::<Option<_>>().filter(|f: &Vec<_>| !f.is_empty())?;
+    Some(Drafter { name: d["name"].as_str().unwrap_or("drafter").to_string(), repo, revision: d["revision"].as_str().map(String::from), files })
+}
+
+fn sha256_file(p: &Path) -> Option<String> {
+    let mut h = Sha256::new();
+    std::io::copy(&mut std::fs::File::open(p).ok()?, &mut h).ok()?;
+    Some(format!("{:x}", h.finalize()))
 }
 
 pub fn safe_name(f: &str) -> bool {
@@ -378,8 +448,8 @@ pub struct Plan {
     serial: u64,
 }
 
-pub fn plan(home: &Path, model_id: &str, arch: &str, broker: &dyn Broker, run: Runner) -> Result<Option<Plan>, String> {
-    // The signed index's pack for this model and arch, and its manifest's weight files per variant (what to download). None: no pack.
+pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &dyn Broker, run: Runner) -> Result<Option<Plan>, String> {
+    // The signed index's pack for this model and arch, and its manifest's weight files per variant (what to download), only the variant a quant names (id, desc.quant or desc.format, any case). None: no pack.
     let work = home.join("packs");
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let (ix, sg) = (work.join("index.json"), work.join("index.sig"));
@@ -389,7 +459,7 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, broker: &dyn Broker, run: R
     let v = |x: &str| x.to_string();
     let verified = run(&[v("index"), v("verify"), v("--index"), s(&ix), v("--sig"), s(&sg), v("--last-serial"), last_serial(home).to_string()])?.1;
     let serial = serde_json::from_str::<Value>(&verified).map_err(|e| format!("index verify: {e}"))?["serial"].as_u64().ok_or("index verify: no serial")?;
-    let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().next() else { return Ok(None) };
+    let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().find(runnable) else { return Ok(None) };
     let head = broker.range(&entry.file, 0, 16)?;
     if &head[..8] != b"GCPACK3\n" {
         return Err(format!("{}: not a pack of ABI 3", entry.file));
@@ -411,18 +481,48 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, broker: &dyn Broker, run: R
     }
     let m: Value = serde_json::from_slice(manifest).map_err(|e| format!("{}: manifest: {e}", entry.file))?;
     let names: Vec<String> = m["model"]["weights"].as_array().into_iter().flatten().map(|w| w["file"].as_str().unwrap_or_default().to_string()).collect();
-    let mut variants: Vec<Vec<String>> = Vec::new();
-    for (_, var) in m["variants"].as_object().into_iter().flatten() {
+    let (mut variants, mut all): (Vec<Vec<String>>, Vec<&str>) = (Vec::new(), Vec::new());
+    for (id, var) in m["variants"].as_object().into_iter().flatten() {
+        let d = &var["desc"];
+        all.push(d["quant"].as_str().unwrap_or(id));
+        if quant.is_some_and(|q| ![Some(id.as_str()), d["quant"].as_str(), d["format"].as_str()].into_iter().flatten().any(|t| t.eq_ignore_ascii_case(q))) {
+            continue;
+        }
         let files: Vec<String> = var["weights"].as_array().into_iter().flatten().filter_map(|i| names.get(i.as_u64()? as usize).cloned()).collect();
         if !files.is_empty() && files.iter().all(|f| safe_name(f)) && !variants.contains(&files) {
             variants.push(files);
         }
     }
     if variants.is_empty() {
-        return Err(format!("{}: the manifest names no model files", entry.file));
+        return Err(match quant {
+            Some(q) => format!("{model_id}: its kernel pack has no variant {q} (available: {})", all.join(", ")),
+            None => format!("{}: the manifest names no model files", entry.file),
+        });
     }
     let prefix = [head, header, body].concat();
     Ok(Some(Plan { entry, prefix, variants, serial }))
+}
+
+pub fn by_structure(home: &Path, dir: &Path, archs: &[String], broker: &dyn Broker, run: Runner) -> Result<Option<(String, Plan)>, String> {
+    // The signed index's pack, on the first of `archs` with one, whose structure (tensor table and metadata keys, never weight values) the weights in `dir` have, whatever repo they came from.
+    let work = home.join("packs");
+    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let (ix, sg) = (work.join("index.json"), work.join("index.sig"));
+    std::fs::write(&ix, broker.index()?).map_err(|e| e.to_string())?;
+    std::fs::write(&sg, broker.index_sig()?).map_err(|e| e.to_string())?;
+    let v = |x: &str| x.to_string();
+    for arch in archs {
+        let (code, out) = run(&[v("pack"), v("match"), v("--index"), s(&ix), v("--sig"), s(&sg), v("--model-dir"), s(dir), v("--arch"), v(arch), v("--last-serial"), last_serial(home).to_string()])?;
+        if code == 3 {
+            continue;
+        }
+        let hit: Value = serde_json::from_str(&out).map_err(|e| format!("pack match: {e}"))?;
+        let repo = hit["model"]["hf_repo"].as_str().ok_or("pack match: no model.hf_repo")?;
+        if let Some(p) = plan(home, repo, arch, None, broker, run)?.filter(|p| hit["file"] == p.entry.file.as_str()) {
+            return Ok(Some((arch.clone(), p)));
+        }
+    }
+    Ok(None)
 }
 
 fn merged(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
@@ -468,10 +568,10 @@ pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Bro
     if need["manifest_sha256"].as_str() != Some(e.manifest_sha256.as_str()) {
         return Err(undo("pack need: the manifest differs from the signed index".into()));
     }
-    let ranges: Vec<(u64, u64, String)> = need["ranges"].as_array().into_iter().flatten()
-        .filter_map(|r| Some((r["off"].as_u64()?, r["len"].as_u64()?, r["sha256"].as_str()?.to_string())))
+    let ranges: Vec<(u64, u64, String, bool)> = need["ranges"].as_array().into_iter().flatten()
+        .filter_map(|r| Some((r["off"].as_u64()?, r["len"].as_u64()?, r["sha256"].as_str()?.to_string(), matches!(r["codec"].as_str(), None | Some("none") | Some("raw")))))
         .collect();
-    if ranges.iter().any(|(o, l, h)| o + l > e.size || !is_sha256(h)) {
+    if ranges.iter().any(|(o, l, h, _)| o + l > e.size || !is_sha256(h)) {
         return Err(undo("pack need: a range lies outside the pack".into()));
     }
     let sig = serde_json::to_vec(&e.sig).map_err(|err| undo(err.to_string()))?;
@@ -482,9 +582,9 @@ pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Bro
         let mut f = std::fs::File::create(&pack).map_err(|err| undo(format!("{}: {err}", pack.display())))?;
         f.set_len(e.size).map_err(|err| undo(err.to_string()))?;
         f.write_all(&plan.prefix).map_err(|err| undo(err.to_string()))?;
-        for (o, l) in merged(ranges.iter().map(|(o, l, _)| (*o, *l)).collect()) {
+        for (o, l) in merged(ranges.iter().map(|(o, l, ..)| (*o, *l)).collect()) {
             let bytes = broker.range(&e.file, o, l).map_err(undo)?;
-            for (ro, rl, h) in ranges.iter().filter(|(ro, rl, _)| *ro >= o && ro + rl <= o + l) {
+            for (ro, rl, h, _) in ranges.iter().filter(|(ro, rl, _, stored)| *stored && *ro >= o && ro + rl <= o + l) {
                 let part = &bytes[(ro - o) as usize..(ro - o + rl) as usize];
                 if format!("{:x}", Sha256::digest(part)) != *h {
                     return Err(undo(format!("pack download: a block of {} does not hash to its name", e.file)));
@@ -494,7 +594,17 @@ pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Bro
         }
         f.sync_all().map_err(|err| undo(err.to_string()))?;
     }
-    let ok = verify().map_err(undo)?.1;
+    let mut ok = verify().map_err(undo)?.1;
+    if let Some(d) = drafter(e).filter(|d| dir.join("drafter").join(&d.files[0].0).is_file()) {
+        match d.files.iter().all(|(n, _, h)| sha256_file(&dir.join("drafter").join(n)).as_deref() == Some(h.as_str())) {
+            true => {
+                let mut v: Value = serde_json::from_str(&ok).map_err(|err| undo(format!("pack verify: {err}")))?;
+                v["drafter"] = d.files.iter().map(|(n, ..)| format!("drafter/{n}")).collect();
+                ok = v.to_string();
+            }
+            false => eprintln!("note: the {} drafter files differ from the signed index; speculative decoding off", d.name),
+        }
+    }
     std::fs::write(&pv, ok).map_err(|err| undo(err.to_string()))?;
     let _ = std::fs::remove_file(&pre);
     std::fs::write(serial_path(home), format!("{}\n", plan.serial)).map_err(|err| undo(err.to_string()))?;
@@ -548,7 +658,9 @@ mod tests {
         serde_json::json!({"schema": "gc-pack-index", "version": 3, "serial": 7, "entries": [{
             "model": {"hf_repo": "org/M-GGUF", "revision": "abc", "format": "gguf", "structure": []},
             "arch": "sm_120a", "abi_major": 3, "runtime": {"kind": "gc-c", "version": 1}, "min_engine": "0.2.0", "tier": "base",
-            "file": "m.gcpack", "manifest_sha256": manifest_sha, "size": p.bytes.len(), "sig": {"keyid": "k"}}]})
+            "file": "m.gcpack", "manifest_sha256": manifest_sha, "size": p.bytes.len(), "sig": {"keyid": "k"},
+            "aux": {"repo": "org/M", "revision": "def", "files": ["config.json", "tokenizer.json", "../x"]},
+            "drafter": {"name": "DFlash2", "repo": "org/D", "revision": "r", "files": [{"name": "d.gguf", "bytes": 3, "sha256": sha(b"abc")}]}}]})
         .to_string()
         .into_bytes()
     }
@@ -600,7 +712,7 @@ mod tests {
             }
             let out = match key.as_str() {
                 "index verify" => r#"{"serial": 7}"#.to_string(),
-                "pack match" => r#"{"file": "m.gcpack", "variant": "q8"}"#.to_string(),
+                "pack match" => r#"{"file": "m.gcpack", "variant": "q8", "model": {"hf_repo": "org/M-GGUF"}}"#.to_string(),
                 "pack need" => serde_json::json!({"manifest_sha256": msha, "ranges": [{"off": off, "len": BLOB.len(), "sha256": sha(BLOB)}]}).to_string(),
                 "pack show" => "a q8 K1 ncol 1 maxctx 4096 3 files\nb q4 K1 ncol 1 maxctx 8192 3 files\n".to_string(),
                 _ => r#"{"ok": true, "weights": ["m-Q8_0.gguf"]}"#.to_string(),
@@ -623,11 +735,28 @@ mod tests {
     fn a_plan_reads_the_manifest_and_names_the_files_of_each_variant() {
         let (home, _) = dirs();
         let b = fake();
-        let p = plan(home.path(), "org/m-gguf", "sm_120a", &b, &engine(&b.pack, &[])).unwrap().unwrap();
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap().unwrap();
         assert_eq!(p.variants, vec![vec!["m-Q4_0.gguf".to_string()], vec!["m-Q8_0.gguf".to_string()]]);
         assert_eq!(p.prefix, b.pack.bytes[..p.prefix.len()]);
-        assert!(plan(home.path(), "org/other", "sm_120a", &b, &engine(&b.pack, &[])).unwrap().is_none());
-        assert!(plan(home.path(), "org/m-gguf", "sm_90a", &b, &engine(&b.pack, &[])).unwrap().is_none());
+        let files = vec!["config.json".to_string(), "tokenizer.json".to_string()];
+        assert_eq!(aux(&p.entry), Some(("org/M".to_string(), Some("def".to_string()), files)), "a path in aux files is dropped");
+        let q8 = plan(home.path(), "org/m-gguf", "sm_120a", Some("Q8"), &b, &engine(&b.pack, &[])).unwrap().unwrap();
+        assert_eq!(q8.variants, vec![vec!["m-Q8_0.gguf".to_string()]], "a quant names one variant by id");
+        let e = plan(home.path(), "org/m-gguf", "sm_120a", Some("q5"), &b, &engine(&b.pack, &[])).unwrap_err();
+        assert_eq!(e, "org/m-gguf: its kernel pack has no variant q5 (available: q4, q8)");
+        assert!(plan(home.path(), "org/other", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap().is_none());
+        assert!(plan(home.path(), "org/m-gguf", "sm_90a", None, &b, &engine(&b.pack, &[])).unwrap().is_none());
+    }
+
+    #[test]
+    fn weights_of_another_repo_find_the_pack_whose_structure_they_have() {
+        let (home, dir) = dirs();
+        let b = fake();
+        let archs = vec!["sm_90a".to_string(), "sm_120a".to_string()];
+        let (arch, p) = by_structure(home.path(), dir.path(), &archs, &b, &engine(&b.pack, &[])).unwrap().unwrap();
+        assert_eq!((arch.as_str(), p.entry.file.as_str(), p.entry.offer.hf_repo.as_str()), ("sm_120a", "m.gcpack", "org/M-GGUF"), "sm_90a has no entry");
+        assert!(by_structure(home.path(), dir.path(), &archs, &b, &engine(&b.pack, &[("pack match", 3)])).unwrap().is_none());
+        assert!(by_structure(home.path(), dir.path(), &archs, &b, &engine(&b.pack, &[("pack match", 1)])).is_err());
     }
 
     #[test]
@@ -635,15 +764,39 @@ mod tests {
         let (home, _) = dirs();
         let mut b = fake();
         b.index = index_of(&b.pack, &"0".repeat(64));
-        assert!(plan(home.path(), "org/m-gguf", "sm_120a", &b, &engine(&b.pack, &[])).unwrap_err().contains("manifest differs"));
+        assert!(plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap_err().contains("manifest differs"));
     }
 
     #[test]
     fn an_index_the_engine_refuses_fails_before_any_download() {
         let (home, _) = dirs();
         let b = fake();
-        assert!(plan(home.path(), "org/m-gguf", "sm_120a", &b, &engine(&b.pack, &[("index verify", 1)])).is_err());
+        assert!(plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[("index verify", 1)])).is_err());
         assert!(b.ranges.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_compressed_block_is_named_by_its_raw_bytes_so_only_pack_verify_checks_it() {
+        // The real engine names an xz block by the sha256 of what it decompresses to (`pack need` says codec xz); hashing the stored bytes would refuse every real pack.
+        let (home, dir) = dirs();
+        let b = fake();
+        let inner = engine(&b.pack, &[]);
+        let run = move |a: &[String]| {
+            let (c, out) = inner(a)?;
+            if a[0] == "pack" && a[1] == "need" {
+                let mut v: Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+                for r in v["ranges"].as_array_mut().into_iter().flatten() {
+                    r["codec"] = "xz".into();
+                    r["sha256"] = sha(b"the raw bytes").into();
+                }
+                return Ok((c, v.to_string()));
+            }
+            Ok((c, out))
+        };
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &run).unwrap().unwrap();
+        assert_eq!(finish(home.path(), dir.path(), "sm_120a", &p, &b, &run).unwrap(), "q8");
+        let got = std::fs::read(dir.path().join(PACK_FILE)).unwrap();
+        assert_eq!(&got[b.pack.blob_off as usize..], BLOB, "the stored bytes are written as they are");
     }
 
     #[test]
@@ -651,9 +804,19 @@ mod tests {
         let (home, dir) = dirs();
         let b = fake();
         let run = engine(&b.pack, &[]);
-        let p = plan(home.path(), "org/m-gguf", "sm_120a", &b, &run).unwrap().unwrap();
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &run).unwrap().unwrap();
+        let d = drafter(&p.entry).unwrap();
+        assert_eq!((d.name.as_str(), d.repo.as_str(), d.files[0].1), ("DFlash2", "org/D", 3));
+        std::fs::create_dir(dir.path().join("drafter")).unwrap();
+        std::fs::write(dir.path().join("drafter/d.gguf"), b"abc").unwrap();
         b.ranges.borrow_mut().clear();
         assert_eq!(finish(home.path(), dir.path(), "sm_120a", &p, &b, &run).unwrap(), "q8");
+        let v: Value = serde_json::from_slice(&std::fs::read(dir.path().join(PACK_VERIFY)).unwrap()).unwrap();
+        assert_eq!(v["drafter"], serde_json::json!(["drafter/d.gguf"]), "a drafter with its signed sha256 is listed");
+        std::fs::write(dir.path().join("drafter/d.gguf"), b"abd").unwrap();
+        finish(home.path(), dir.path(), "sm_120a", &p, &b, &run).unwrap();
+        let v: Value = serde_json::from_slice(&std::fs::read(dir.path().join(PACK_VERIFY)).unwrap()).unwrap();
+        assert!(v["drafter"].is_null(), "a drafter that differs from the index is not listed");
         assert_eq!(*b.ranges.borrow(), vec![(b.pack.blob_off, BLOB.len() as u64)]);
         let got = std::fs::read(dir.path().join(PACK_FILE)).unwrap();
         assert_eq!(got.len(), b.pack.bytes.len());
@@ -669,7 +832,7 @@ mod tests {
         let (home, dir) = dirs();
         let b = fake();
         let run = engine(&b.pack, &[]);
-        let p = plan(home.path(), "org/m-gguf", "sm_120a", &b, &run).unwrap().unwrap();
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &run).unwrap().unwrap();
         std::fs::write(dir.path().join(PACK_FILE), &b.pack.bytes).unwrap();
         b.ranges.borrow_mut().clear();
         finish(home.path(), dir.path(), "sm_120a", &p, &b, &run).unwrap();
@@ -681,7 +844,7 @@ mod tests {
         let (home, dir) = dirs();
         let mut b = fake();
         let run = engine(&b.pack, &[]);
-        let p = plan(home.path(), "org/m-gguf", "sm_120a", &b, &run).unwrap().unwrap();
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &run).unwrap().unwrap();
         b.tamper = true;
         assert!(finish(home.path(), dir.path(), "sm_120a", &p, &b, &run).unwrap_err().contains("does not hash"));
         nothing_left(dir.path());
@@ -691,7 +854,7 @@ mod tests {
     fn files_that_match_no_pack_and_a_refused_download_fail_and_leave_nothing() {
         let (home, dir) = dirs();
         let mut b = fake();
-        let p = plan(home.path(), "org/m-gguf", "sm_120a", &b, &engine(&b.pack, &[])).unwrap().unwrap();
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap().unwrap();
         assert!(finish(home.path(), dir.path(), "sm_120a", &p, &b, &engine(&b.pack, &[("pack match", 3)])).unwrap_err().contains("do not match"));
         nothing_left(dir.path());
         for f in [format!("{PACK_FILE}.sig"), PACK_VERIFY.to_string()] {
@@ -707,9 +870,22 @@ mod tests {
     fn a_pack_the_engine_refuses_is_removed() {
         let (home, dir) = dirs();
         let b = fake();
-        let p = plan(home.path(), "org/m-gguf", "sm_120a", &b, &engine(&b.pack, &[])).unwrap().unwrap();
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap().unwrap();
         assert!(finish(home.path(), dir.path(), "sm_120a", &p, &b, &engine(&b.pack, &[("pack verify", 1)])).is_err());
         nothing_left(dir.path());
+    }
+
+    #[test]
+    fn a_pack_only_model_on_an_unbuilt_gpu_is_named_before_any_download() {
+        let p = container();
+        let ix = index_of(&p, &sha(&p.manifest));
+        let here = |a: &str| vec![a.to_string()];
+        let line = unsupported_here(&ix, "org/M-GGUF", &here("sm_89"), "NVIDIA GeForce RTX 4090").unwrap();
+        for part in ["sm_120a", "Blackwell", "NVIDIA GeForce RTX 4090 (sm_89)", "not supported here", "nothing was downloaded"] {
+            assert!(line.contains(part), "{part} in {line}");
+        }
+        assert_eq!(unsupported_here(&ix, "org/M-GGUF", &here("sm_120a"), "RTX 5090"), None, "a pack for this GPU");
+        assert_eq!(unsupported_here(&ix, "org/other", &here("sm_89"), "RTX 4090"), None, "a model with no pack");
     }
 
     #[test]
@@ -730,9 +906,21 @@ mod tests {
         let o = offers(ix.to_string().as_bytes(), "ORG/m-gguf", &archs);
         assert_eq!(o.iter().map(|o| o.arch.as_str()).collect::<Vec<_>>(), ["sm_120a", "sm_90a"]);
         assert_eq!(offers_any(ix.to_string().as_bytes(), &archs).len(), 2);
+        assert_eq!(pack_archs(ix.to_string().as_bytes(), "org/M-GGUF"), ["sm_100a", "sm_120a", "sm_90a"]);
         ix["version"] = 2.into();
         assert!(offers(ix.to_string().as_bytes(), "org/m-gguf", &archs).is_empty());
         assert!(offers(b"not json", "org/m-gguf", &archs).is_empty());
+    }
+
+    #[test]
+    fn a_pack_only_a_newer_engine_runs_is_named() {
+        let archs = vec!["sm_120a".to_string()];
+        let p = container();
+        let mut ix: Value = serde_json::from_slice(&index_of(&p, &sha(&p.manifest))).unwrap();
+        assert_eq!(engine_too_old(ix.to_string().as_bytes(), "org/m-gguf", &archs), None);
+        ix["entries"][0]["min_engine"] = "9.0.0".into();
+        let e = engine_too_old(ix.to_string().as_bytes(), "org/m-gguf", &archs).unwrap();
+        assert!(e.starts_with("engine_too_old: org/m-gguf needs goethe-engine >= 9.0.0, installed "), "{e}");
     }
 
     #[test]
