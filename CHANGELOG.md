@@ -8,6 +8,8 @@
 - `goethe ps` and `goethe models --json` show the serving runtime. A Hugging Face id that does not exist says so instead of "gated".
 - Memory overhead learned from earlier loads is kept per serving runtime, so a figure learned under llama.cpp no longer blocks the kernel pack.
 - Speech models served by llama.cpp (an audio projector next to the weights) take `goethe run MODEL clip.wav`. `llama-server` comes from the pinned upstream release; the CUDA runtime libraries are fetched only when the host lacks them.
+- `goethe update` also refreshes kernel packs of installed models when the index has a newer one: only the blocks the installed pack lacks are fetched, the new pack is verified and swapped in atomically, and the old one is kept for `goethe update --rollback`. A running model keeps its pack until reload; `goethe load` says once a day when a newer pack exists.
+- `goethe remove` of a local-folder install removes its whole managed folder (never your source folder), and installing the same folder again replaces it. Installing a gated Hugging Face id that is already installed says so instead of asking for a token.
 - CI runs on pull requests into dev and finishes in about three minutes; the full package build runs on main and nightly. `engine/tests/accept.sh` installs, runs and removes each release model and fails any that is not served by its kernel pack.
 
 ## 0.3.2 (2026-11-16)
