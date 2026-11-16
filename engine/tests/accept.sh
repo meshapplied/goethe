@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Acceptance on a GPU machine: install, load, run and unload each model with the goethe commands; one table at the end, or --json; not run in CI.
+# Acceptance on a GPU machine: install, load, run and unload each model (and a local folder) with the goethe commands, in this home or a fresh one; one table at the end, or --json; not run in CI.
 
 set -uo pipefail
 
-USAGE="usage: accept.sh [--json] [MODEL[:QUANT]...]   (default: the models with a kernel pack for this machine; GOETHE_BIN picks the goethe command; ACCEPT_CLIP and ACCEPT_REF give a speech clip and its reference text for a WER)"
+USAGE="usage: accept.sh [--json] [--fresh] [MODEL[:QUANT]...]   (default: the models with a kernel pack for this machine; --fresh runs each cell in a throwaway home with no engine environment, logged in by cloning ACCEPT_LOGIN_HOME; ACCEPT_LOCAL_DIR [ACCEPT_LOCAL_NAME] adds a local-folder install that must end on the pack runtime; GOETHE_BIN picks the goethe command; ACCEPT_CLIP and ACCEPT_REF give a speech clip and its reference text for a WER)"
 PACKED=(
   ggml-org/embeddinggemma-2-GGUF:Q8_0
   mradermacher/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF
@@ -23,13 +23,20 @@ PASS=0
 FAIL=0
 SKIP=0
 JSON=0
+FRESH=0
+HOMEKIND=warm
 ROWS="${WORK}/rows.tsv"
 : >"${ROWS}"
 
-case "${1:-}" in
-  -h | --help) echo "${USAGE}"; exit 0 ;;
-  --json) JSON=1; shift ;;
-esac
+while [[ "${1:-}" == -* ]]; do
+  case "$1" in
+    -h | --help) echo "${USAGE}"; exit 0 ;;
+    --json) JSON=1 ;;
+    --fresh) FRESH=1; HOMEKIND=fresh ;;
+    *) echo "${USAGE}" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 g() {
   if command -v timeout >/dev/null 2>&1; then timeout "${LIMIT}" "${GOETHE}" "$@"; else "${GOETHE}" "$@"; fi
@@ -134,7 +141,13 @@ shape() {
 
 accept_one() {
   # Returns the verdict in VERDICT (PASS, FAIL or SKIP), REASON, and RUNTIME, PSHA, METRIC for the table; goethe's stderr for this model is kept in ${WORK}/err.
-  local spec="$1" id="${1%%:*}" out rc audio t0 secs clip_s
+  local spec="$1" out rc audio t0 secs clip_s expect=0
+  local id="${1%%:*}" install=(install "$1")
+  if [[ "${spec}" == @local ]]; then
+    id="${ACCEPT_LOCAL_NAME:-local/accept}"
+    install=(install "${ACCEPT_LOCAL_DIR}" --name "${id}")
+    expect=1
+  fi
   : >"${WORK}/err"
   SHAPE=chat
   DETAIL=""
@@ -142,7 +155,7 @@ accept_one() {
   RUNTIME=""
   PSHA=""
   METRIC=""
-  g install "${spec}" --yes --load >"${WORK}/inst" 2>>"${WORK}/err"
+  g "${install[@]}" --yes --load >"${WORK}/inst" 2>>"${WORK}/err"
   rc=$?
   if [[ ${rc} -ne 0 ]]; then
     if grep -qE "${PACKFAIL}" "${WORK}/inst" "${WORK}/err"; then
@@ -188,7 +201,7 @@ accept_one() {
   fi
   VERDICT=PASS
   REASON="${SHAPE} ${METRIC}"
-  if [[ "${RUNTIME}" != goethe-engine ]] && grep -qiE "optimised kernels|${PACKFAIL}" "${WORK}/inst" "${WORK}/err" "$(card_of "${id}")"; then
+  if [[ "${RUNTIME}" != goethe-engine ]] && { [[ ${expect} -eq 1 ]] || grep -qiE "optimised kernels|${PACKFAIL}" "${WORK}/inst" "${WORK}/err" "$(card_of "${id}")"; }; then
     VERDICT=FAIL
     REASON="has a kernel pack for this card but was served by ${RUNTIME} (${SHAPE} ${METRIC})"
   fi
@@ -196,7 +209,7 @@ accept_one() {
 
 table() {
   # The rows of this run as one aligned table.
-  { printf 'MODEL\tGPU\tRUNTIME\tPACK\tANSWER\tRESULT\n'; awk -F'\t' -v gpu="$(gpu_name)" 'BEGIN { OFS = "\t" } { print $1, gpu, $2, ($3 == "" ? "-" : $3), ($4 == "" ? "-" : $4), $5 }' "${ROWS}"; } | column -t -s "$(printf '\t')"
+  { printf 'MODEL\tHOME\tGPU\tRUNTIME\tPACK\tANSWER\tRESULT\n'; awk -F'\t' -v gpu="$(gpu_name)" 'BEGIN { OFS = "\t" } { print $1, $2, gpu, $3, ($4 == "" ? "-" : $4), ($5 == "" ? "-" : $5), $6 }' "${ROWS}"; } | column -t -s "$(printf '\t')"
 }
 
 json() {
@@ -204,9 +217,9 @@ json() {
   python3 - "${ROWS}" "$(gpu_name)" "${PASS}" "${FAIL}" "${SKIP}" <<'PY'
 import json, sys
 rows = [l.rstrip("\n").split("\t") for l in open(sys.argv[1])]
-keys = ["model", "runtime", "pack", "answer", "result", "reason"]
+keys = ["model", "home", "runtime", "pack", "answer", "result", "reason"]
 out = {"gpu": sys.argv[2], "pass": int(sys.argv[3]), "fail": int(sys.argv[4]), "skip": int(sys.argv[5]),
-       "models": [dict(zip(keys, (r + [""] * 6)[:6])) for r in rows]}
+       "models": [dict(zip(keys, (r + [""] * 7)[:7])) for r in rows]}
 print(json.dumps(out, indent=2))
 PY
 }
@@ -218,8 +231,31 @@ else
   [[ ${#MODELS[@]} -gt 0 ]] || MODELS=("${PACKED[@]}")
 fi
 
-for spec in "${MODELS[@]}"; do
-  id="${spec%%:*}"
+fresh_open() {
+  # A throwaway home with the login cloned from a linked one and no engine environment; goethe is started in it on its own ports.
+  FRESH="$(mktemp -d "${ACCEPT_FRESH_ROOT:-${TMPDIR:-/tmp}}/goethe-accept-XXXXXX")" || return 1
+  mkdir -p "${FRESH}/models" "${FRESH}/nginx"
+  cp -a "${ACCEPT_LOGIN_HOME}/platform" "${FRESH}/platform"
+  python3 -c 'import socket
+for _ in range(2):
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])' | { read -r mux; read -r pub; echo "${mux}" >"${FRESH}/nginx/mux_port"; echo "${pub}" >"${FRESH}/nginx/public_port"; }
+  OUTER_HOME="${GOETHE_HOME-}"
+  export GOETHE_HOME="${FRESH}" GOETHE_NO_AUTOSTART=1 GOETHE_SYSTEMD_USER_UNIT_DIR="${FRESH}/systemd-user" GOETHE_SYSTEMD_UNIT_DIR="${FRESH}/systemd-system"
+  g up --no-boot >/dev/null 2>>"${WORK}/err"
+}
+
+fresh_close() {
+  g down >/dev/null 2>&1
+  [[ "${FRESH}" == *goethe-accept-* ]] && rm -rf "${FRESH}"
+  if [[ -n "${OUTER_HOME}" ]]; then export GOETHE_HOME="${OUTER_HOME}"; else unset GOETHE_HOME; fi
+}
+
+cell() {
+  # One install path in the current home: size guard, the run, unload, removal of what it installed.
+  local spec="$1" id="${1%%:*}"
+  [[ "${spec}" == @local ]] && id="${ACCEPT_LOCAL_NAME:-local/accept}"
   VERDICT=FAIL
   REASON="not run"
   RUNTIME=""
@@ -241,8 +277,32 @@ for spec in "${MODELS[@]}"; do
     fi
     [[ "${had:-0}" == 1 ]] || g remove "${id}" </dev/null >/dev/null 2>&1
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${id}" "${RUNTIME}" "${PSHA}" "${METRIC}" "${VERDICT}" "${REASON}" >>"${ROWS}"
-  line="${VERDICT} ${id} ${REASON} (disk free ${before} GB -> $(free_gb) GB)"
+}
+
+if [[ -n "${ACCEPT_LOCAL_DIR:-}" ]]; then
+  MODELS+=("@local")
+fi
+
+for spec in "${MODELS[@]}"; do
+  id="${spec%%:*}"
+  [[ "${spec}" == @local ]] && id="${ACCEPT_LOCAL_NAME:-local/accept}"
+  if [[ ${FRESH} -eq 0 ]]; then
+    cell "${spec}"
+  elif [[ ! -d "${ACCEPT_LOGIN_HOME:-/nonexistent}/platform" ]]; then
+    VERDICT=SKIP
+    REASON="a fresh home needs ACCEPT_LOGIN_HOME, a linked home to clone the login from"
+    RUNTIME="" PSHA="" METRIC="" before=""
+  elif fresh_open; then
+    cell "${spec}"
+    fresh_close
+  else
+    VERDICT=FAIL
+    REASON="goethe did not start in a fresh home"
+    RUNTIME="" PSHA="" METRIC="" before=""
+    fresh_close
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${id}" "${HOMEKIND}" "${RUNTIME}" "${PSHA}" "${METRIC}" "${VERDICT}" "${REASON}" >>"${ROWS}"
+  line="${VERDICT} ${id} ${HOMEKIND} ${REASON} (disk free ${before} GB -> $(free_gb) GB)"
   if [[ ${JSON} -eq 1 ]]; then echo "${line}" >&2; else echo "${line}"; fi
   case "${VERDICT}" in
     PASS) PASS=$((PASS + 1)) ;;

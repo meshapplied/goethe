@@ -15,8 +15,11 @@ home="$GOETHE_HOME/models"
 case "$1" in
   models) echo '[{"id":"org/packed","status":"available","gb":1.0},{"id":"org/plain","status":"available","gb":1.0},'\
     '{"id":"org/lost","status":"available","gb":1.0}]' ;;
+  up) echo "$GOETHE_HOME" >> "$FAKE_LOG" ;;
+  down) : ;;
   install)
-    id="${2%%:*}"; d="$home/${id//\//__}"; mkdir -p "$d"
+    id="${2%%:*}"; [[ "$2" == /* ]] && id="$4"
+    d="$home/${id//\//__}"; mkdir -p "$d"
     case "$id" in
       org/packed) echo "installing the optimised kernels for sm_120a ..."
         echo 'runtime = "goethe-engine"' > "$d/goethe_card.toml"
@@ -25,6 +28,8 @@ case "$1" in
         echo 'runtime = "llama.cpp"' > "$d/goethe_card.toml" ;;
       org/lost) echo "installing the optimised kernels for sm_120a ..."
         echo 'runtime = "llama.cpp"' > "$d/goethe_card.toml" ;;
+      local/accept) echo "installing the optimised kernels for sm_120a ..."
+        echo "runtime = \"${FAKE_LOCAL_RUNTIME:-goethe-engine}\"" > "$d/goethe_card.toml" ;;
     esac ;;
   run) echo "hello there my friend" ;;
   unload | remove) : ;;
@@ -33,15 +38,21 @@ esac
 
 
 class Accept(unittest.TestCase):
-    def run_accept(self, *args):
+    def run_accept(self, *args, extra=None, models=("org/packed", "org/plain", "org/lost")):
         with tempfile.TemporaryDirectory() as d:
             fake = Path(d, "goethe")
             fake.write_text(FAKE)
             fake.chmod(0o755)
             Path(d, "models").mkdir()
+            log = Path(d, "up.log")
             env = {**os.environ, "GOETHE_HOME": d, "GOETHE_BIN": str(fake), "ACCEPT_RESERVE_GB": "0"}
-            cmd = ["bash", str(SCRIPT), *args, "org/packed", "org/plain", "org/lost"]
-            return subprocess.run(cmd, env=env, capture_output=True, text=True)
+            env["FAKE_LOG"] = str(log)
+            env.update(extra or {})
+            out = subprocess.run(["bash", str(SCRIPT), *args, *models], env=env, capture_output=True, text=True)
+            out.warm = d
+            out.started = log.read_text().split() if log.exists() else []
+            out.warm_models = sorted(p.name for p in Path(d, "models").iterdir())
+            return out
 
     def test_json_names_runtime_pack_and_verdict_and_a_pack_model_must_run_on_its_pack(self):
         out = self.run_accept("--json")
@@ -52,6 +63,7 @@ class Accept(unittest.TestCase):
         self.assertEqual(got, ("goethe-engine", "0123456789abcdef", "PASS"))
         plain = rows["org/plain"]
         self.assertEqual((plain["runtime"], plain["result"]), ("llama.cpp", "PASS"), "no pack: plain is right")
+        self.assertEqual((packed["home"], plain["home"]), ("warm", "warm"))
         self.assertEqual(rows["org/lost"]["result"], "FAIL")
         self.assertIn("kernel pack", rows["org/lost"]["reason"])
         self.assertEqual((doc["pass"], doc["fail"], doc["skip"]), (2, 1, 0))
@@ -60,10 +72,45 @@ class Accept(unittest.TestCase):
     def test_text_mode_ends_with_one_aligned_table(self):
         out = self.run_accept()
         self.assertIn("MODEL", out.stdout)
+        self.assertIn("HOME", out.stdout)
         table = out.stdout.split("\n\n", 1)[1]
         self.assertEqual(len([ln for ln in table.splitlines() if ln.startswith("org/")]), 3)
         self.assertIn("RUNTIME", table)
         self.assertIn("accept: 2 pass, 1 fail, 0 skip", table)
+
+    def test_a_fresh_home_without_a_login_to_clone_is_skipped_with_the_reason(self):
+        out = self.run_accept("--json", "--fresh")
+        doc = json.loads(out.stdout)
+        self.assertEqual((doc["pass"], doc["fail"], doc["skip"]), (0, 0, 3))
+        self.assertTrue(all(m["home"] == "fresh" and "ACCEPT_LOGIN_HOME" in m["reason"] for m in doc["models"]))
+        self.assertEqual(out.started, [], "goethe was not started anywhere")
+        self.assertEqual(out.returncode, 0)
+
+    def test_a_fresh_cell_runs_in_a_throwaway_home_with_the_login_cloned_and_leaves_nothing(self):
+        with tempfile.TemporaryDirectory() as linked, tempfile.TemporaryDirectory() as root:
+            Path(linked, "platform").mkdir()
+            Path(linked, "platform", "credentials.json").write_text("{}")
+            out = self.run_accept("--json", "--fresh", extra={"ACCEPT_LOGIN_HOME": linked, "ACCEPT_FRESH_ROOT": root},
+                                  models=("org/packed", "org/plain"))
+            doc = json.loads(out.stdout)
+            self.assertEqual([m["home"] for m in doc["models"]], ["fresh", "fresh"])
+            self.assertEqual((doc["pass"], doc["fail"]), (2, 0))
+            self.assertEqual(len(out.started), 2, "goethe started once per cell")
+            self.assertTrue(all(h.startswith(root) and h != out.warm for h in out.started), out.started)
+            self.assertEqual(list(Path(root).iterdir()), [], "the throwaway homes are gone")
+            self.assertEqual(out.warm_models, [], "the warm home was not touched")
+
+    def test_a_local_folder_cell_must_end_on_the_pack_runtime_like_a_hub_cell(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ok = self.run_accept("--json", extra={"ACCEPT_LOCAL_DIR": folder}, models=("org/packed",))
+            rows = {m["model"]: m for m in json.loads(ok.stdout)["models"]}
+            local = rows["local/accept"]
+            self.assertEqual((local["runtime"], local["result"]), ("goethe-engine", "PASS"))
+            plain = {"ACCEPT_LOCAL_DIR": folder, "FAKE_LOCAL_RUNTIME": "llama.cpp"}
+            bad = self.run_accept("--json", extra=plain, models=())
+            row = json.loads(bad.stdout)["models"][-1]
+            self.assertEqual((row["model"], row["result"]), ("local/accept", "FAIL"))
+            self.assertIn("kernel pack", row["reason"], "a plain runtime on a local folder is a failure")
 
 
 if __name__ == "__main__":
