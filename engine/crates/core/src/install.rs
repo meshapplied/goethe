@@ -264,13 +264,17 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         PackDecision::Declined => true,
         PackDecision::None => false,
     };
-    sglang_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), declined)?;
+    let gguf = engine_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), declined)?;
     if !hf::offline_mode() {
         if let Ok(pre) = hf::preflight_model(&opts.model_id, dl.revision.as_deref()) {
-            announce(&opts.model_id, "SGLang", hf::download_bytes(&pre.siblings));
+            let bytes = match &gguf {
+                Some(files) => pre.siblings.iter().filter(|s| files.contains(&s.rfilename)).map(|s| s.size).sum(),
+                None => hf::download_bytes(&pre.siblings),
+            };
+            announce(&opts.model_id, if gguf.is_some() { "llama.cpp" } else { "SGLang" }, bytes);
         }
     }
-    hf::ensure_model(home, &opts.model_id, &card_dir, &dl)?;
+    hf::ensure_model(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf, ..dl })?;
     Ok(Target {
         model_id: opts.model_id.clone(),
         card_dir,
@@ -325,10 +329,10 @@ fn ask_login(offer: &crate::packs::Offer, opts: &InstallOpts) -> Result<bool, St
     Ok(a.to_ascii_lowercase().starts_with('y'))
 }
 
-fn sglang_check(home: &Path, model_id: &str, revision: Option<&str>, entry: Option<&RegistryModel>, declined: bool) -> Result<(), String> {
-    // Before any download: SGLang must serve the model's architecture and quantization (catalog entries are vetted).
+fn engine_check(home: &Path, model_id: &str, revision: Option<&str>, entry: Option<&RegistryModel>, declined: bool) -> Result<Option<Vec<String>>, String> {
+    // Before any download: SGLang must serve the model's architecture and quantization (catalog entries are vetted); a GGUF-only repo gets llama.cpp and the files to fetch.
     if entry.is_some() || hf::offline_mode() {
-        return Ok(());
+        return Ok(None);
     }
     let rev = revision.unwrap_or("main");
     let pre = hf::preflight_model(model_id, Some(rev))?;
@@ -340,12 +344,16 @@ fn sglang_check(home: &Path, model_id: &str, revision: Option<&str>, entry: Opti
     if !pre.siblings.iter().any(|s| s.rfilename == "config.json") {
         if pre.siblings.iter().any(|s| s.rfilename.ends_with(".gguf")) {
             let none = if declined { "" } else { ", and no optimised kernel pack exists for it on this machine's GPUs" };
-            return Err(format!("{model_id} is not supported: it ships GGUF files only, which SGLang does not serve{none}.{hint}"));
+            let names: Vec<&str> = pre.siblings.iter().map(|s| s.rfilename.as_str()).collect();
+            return match crate::engines::llama_cpp::server_bin(home) {
+                Ok(_) => Ok(Some(crate::engines::llama_cpp::pick_gguf(&names))),
+                Err(why) => Err(format!("{model_id} is not supported: it ships GGUF files only, which SGLang does not serve{none}; {why}.{hint}")),
+            };
         }
-        return Ok(());
+        return Ok(None);
     }
     let cfg = hf::fetch_config_json(model_id, rev)?;
-    crate::scan::sglang_serves(&crate::scan::sglang_support(home), &cfg).map_err(|why| format!("{model_id} is not supported: {why}.{hint}"))
+    crate::scan::sglang_serves(&crate::scan::sglang_support(home), &cfg).map(|()| None).map_err(|why| format!("{model_id} is not supported: {why}.{hint}"))
 }
 
 const GGUF_META: &str = r#"
@@ -668,8 +676,11 @@ fn register(home: &Path, opts: &InstallOpts, t: Target) -> Result<(), String> {
     let mut planned = plan(home, opts, &t)?;
     match &t.pack {
         Some(choice) => use_pack(home, &mut planned, choice, opts.ctx)?,
-        None if crate::engines::ninfer::ninfer_in(&t.card_dir).is_none() => crate::pyenv::ensure(home, crate::pyenv::Layer::Sglang)?,
-        None => {}
+        None => {
+            if let Some(layer) = crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?.layer {
+                crate::pyenv::ensure(home, layer)?;
+            }
+        }
     }
     commit(home, &planned, "installed", &mut std::io::stdout())
 }
@@ -738,6 +749,33 @@ fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, S
         swa_kv_elems_per_request: 0,
         linear_state_bytes_per_request: 0,
     };
+    plan_engine(home, opts, t, facts, crate::engines::ninfer::ENGINE.id, ("fp8_e4m3", 1), Some("nvfp4".into()))
+}
+
+fn plan_gguf(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> {
+    // llama.cpp serves the GGUF: shape from its header, KV in f16, the file recorded in the card.
+    crate::engines::llama_cpp::server_bin(home)?;
+    let dir = &t.card_dir;
+    let gguf = crate::engines::llama_cpp::gguf_in(dir, &toml::Value::Table(read_card_table(dir).unwrap_or_default()))?;
+    let facts = crate::engines::llama_cpp::facts(dir, &gguf)?;
+    let mut p = plan_engine(home, opts, t, facts, crate::engines::llama_cpp::ENGINE.id, ("f16", 2), None)?;
+    let rel = gguf.strip_prefix(dir).unwrap_or(&gguf).to_string_lossy().into_owned();
+    p.table.insert("gguf".into(), toml::Value::String(rel));
+    Ok(p)
+}
+
+fn plan_engine(
+    home: &Path,
+    opts: &InstallOpts,
+    t: &Target,
+    facts: model_facts::ModelFacts,
+    runtime: &str,
+    (kv_dtype, kv_elem_bytes): (&str, u64),
+    quant: Option<String>,
+) -> Result<Planned, String> {
+    // The card of an engine that takes no SGLang arguments: the model's facts, its KV dtype, 4 parallel requests by default.
+    let dir = &t.card_dir;
+    let entry = t.entry.as_ref();
     let ctx = opts.ctx.unwrap_or(facts.max_ctx).min(facts.max_ctx);
     let max_conc = opts.max_conc.unwrap_or(4);
     let card = GoetheCard {
@@ -746,10 +784,10 @@ fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, S
         max_running_requests: max_conc,
         tp_size: opts.tp.unwrap_or(1),
         ep_size: 1,
-        kv_cache_dtype: "fp8_e4m3".into(),
+        kv_cache_dtype: kv_dtype.into(),
         preferred_gpus: opts.gpus.clone().unwrap_or_default(),
         extra_sglang_args: Vec::new(),
-        runtime: Some("ninfer".into()),
+        runtime: Some(runtime.into()),
         pack_id: None,
         base_model_id: None,
         env: None,
@@ -772,10 +810,10 @@ fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, S
             weights_gb: facts.static_vram_gb,
             state_gb: 0.0,
             host_offload_gb: 0.0,
-            kv_bytes_per_token: facts.kv_elems_per_token,
+            kv_bytes_per_token: facts.kv_elems_per_token * kv_elem_bytes,
         },
         facts,
-        kv_dtype: "fp8_e4m3".into(),
+        kv_dtype: kv_dtype.into(),
         ctx,
         max_conc,
         tp: card.tp_size,
@@ -783,7 +821,7 @@ fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, S
         notes: Vec::new(),
         managed: t.managed,
         source_dir: t.source_dir.clone(),
-        quant: Some("nvfp4".into()),
+        quant,
         engine: None,
     })
 }
@@ -793,6 +831,10 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
     let dir = &t.card_dir;
     if crate::engines::ninfer::ninfer_in(dir).is_some() {
         return plan_ninfer(home, opts, t);
+    }
+    let pack = dir.join(crate::engines::goethe_engine::PACK_FILE).is_file();
+    if !dir.join("config.json").is_file() && !pack && !crate::engines::llama_cpp::gguf_paths(dir).is_empty() {
+        return plan_gguf(home, opts, t);
     }
     let cfg = model_facts::read_config(dir)?;
     let facts = model_facts::facts_from_install_dir(dir, t.entry.as_ref().map(|e| e.architecture.as_str()))?;
@@ -1238,6 +1280,58 @@ fn print_reply_text(reply: &crate::rpc::RpcReply) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gguf_home(server: bool) -> (tempfile::TempDir, PathBuf) {
+        // A GOETHE_HOME with a GGUF-only model dir, and llama-server installed when asked.
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("models/org/m-GGUF");
+        fs::create_dir_all(&dir).unwrap();
+        crate::engines::llama_cpp::write_test_gguf(&dir.join("m-Q4_K_M.gguf"));
+        if server {
+            let bin = home.path().join("engines/llama.cpp/bin");
+            fs::create_dir_all(&bin).unwrap();
+            fs::write(bin.join("llama-server"), b"").unwrap();
+        }
+        (home, dir)
+    }
+
+    #[test]
+    fn a_gguf_only_dir_becomes_a_llama_cpp_card_with_ninfer_row_units() {
+        let (home, dir) = gguf_home(true);
+        let p = plan_in_place(home.path(), "org/m-GGUF", &dir, None).unwrap();
+        assert_eq!(p.table.get("runtime").and_then(|v| v.as_str()), Some("llama.cpp"));
+        assert_eq!(p.table.get("gguf").and_then(|v| v.as_str()), Some("m-Q4_K_M.gguf"));
+        commit(home.path(), &p, "installed", &mut Vec::new()).unwrap();
+        let nin = home.path().join("models/n");
+        fs::create_dir_all(&nin).unwrap();
+        fs::File::create(nin.join(crate::engines::ninfer::NINFER_FILE)).unwrap().set_len(crate::engines::ninfer::NINFER_BYTES).unwrap();
+        commit(home.path(), &plan_in_place(home.path(), "org/n", &nin, None).unwrap(), "installed", &mut Vec::new()).unwrap();
+        let con = db::open(home.path()).unwrap();
+        let row = |id: &str| {
+            con.query_row(
+                "SELECT kv_bytes_per_token, kv_elems_per_token, max_ctx, num_kv_heads, static_vram_gb > 0, default_max_conc FROM installed_models WHERE model_id = ?1",
+                [id],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, bool>(4)?, r.get::<_, i64>(5)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(row("org/m-GGUF"), (768 * 2, 768, 4096, 4, true, 4), "f16 KV: two bytes per element");
+        let (bytes, elems, ..) = row("org/n");
+        assert_eq!(bytes, elems, "fp8 KV: one byte per element");
+    }
+
+    #[test]
+    fn a_pack_dir_or_a_missing_llama_server_never_makes_a_llama_cpp_card() {
+        let (home, dir) = gguf_home(true);
+        fs::write(dir.join(crate::engines::goethe_engine::PACK_FILE), b"p").unwrap();
+        let err = plan_in_place(home.path(), "org/m-GGUF", &dir, None).map(|p| p.table).unwrap_err();
+        assert!(err.contains("config.json"), "{err}");
+        if std::env::var_os("LLAMA_SERVER").is_none() {
+            let (home, dir) = gguf_home(false);
+            let err = plan_in_place(home.path(), "org/m-GGUF", &dir, None).map(|p| p.table).unwrap_err();
+            assert!(err.contains("llama-server not found"), "{err}");
+        }
+    }
 
     #[test]
     fn installing_a_model_drops_a_same_named_alias() {

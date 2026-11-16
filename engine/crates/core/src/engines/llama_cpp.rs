@@ -1,6 +1,8 @@
 // llama.cpp: llama-server on one GGUF, one GPU, OpenAI-compatible; the universal engine for GGUF models.
 
 use super::{card_env, kept_env, placement_env, EngineSpec};
+use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -20,7 +22,7 @@ pub const ENGINE: super::Engine = super::Engine {
     command: llama_command,
 };
 
-fn server_bin(home: &Path) -> Result<PathBuf, String> {
+pub fn server_bin(home: &Path) -> Result<PathBuf, String> {
     // $LLAMA_SERVER, else the one under GOETHE_HOME; no PATH lookup, so the build is the one installed for goethe.
     let p = std::env::var_os("LLAMA_SERVER").map(PathBuf::from).unwrap_or_else(|| home.join("engines/llama.cpp/bin/llama-server"));
     if p.is_file() {
@@ -30,23 +32,124 @@ fn server_bin(home: &Path) -> Result<PathBuf, String> {
     }
 }
 
+pub fn gguf_paths(dir: &Path) -> Vec<PathBuf> {
+    // GGUF files in dir and one subdirectory level down (repos keep each quant in its own folder), sorted.
+    let list = |d: &Path| std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| e.path());
+    let mut out: Vec<PathBuf> =
+        list(dir).flat_map(|p| if p.is_dir() { list(&p).collect() } else { vec![p] }).filter(|p| p.extension().is_some_and(|x| x == "gguf")).collect();
+    out.sort();
+    out
+}
+
+fn is_model_gguf(name: &str) -> bool {
+    // A model file or the first shard of a split one; mmproj files are vision projectors.
+    let base = name.rsplit('/').next().unwrap_or(name);
+    base.ends_with(".gguf") && !base.starts_with("mmproj") && (!base.contains("-of-") || base.contains("-00001-of-"))
+}
+
 pub fn gguf_in(dir: &Path, card: &toml::Value) -> Result<PathBuf, String> {
-    // The card's gguf file, else the directory's only model GGUF (first shard of a split, no mmproj projector).
+    // The card's gguf file, else the directory's only model GGUF.
     if let Some(f) = card.get("gguf").and_then(|v| v.as_str()) {
         return Ok(dir.join(f));
     }
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .map_err(|e| format!("{}: {e}", dir.display()))?
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".gguf") && !n.starts_with("mmproj") && (!n.contains("-of-") || n.contains("-00001-of-")))
+    let names: Vec<String> = gguf_paths(dir)
+        .iter()
+        .filter_map(|p| Some(p.strip_prefix(dir).ok()?.to_string_lossy().into_owned()))
+        .filter(|n| is_model_gguf(n))
         .collect();
-    names.sort();
     match names.as_slice() {
         [one] => Ok(dir.join(one)),
         [] => Err(format!("{}: no GGUF file for llama.cpp", dir.display())),
         many => Err(format!("{}: several GGUF files ({}); set gguf = \"<file>\" in goethe_card.toml", dir.display(), many.join(", "))),
     }
+}
+
+pub fn pick_gguf(names: &[&str]) -> Vec<String> {
+    // Of a GGUF-only repo: Q4_K_M, else Q8_0, else the first model GGUF by name, with every shard of a split.
+    let mut models: Vec<&str> = names.iter().copied().filter(|n| is_model_gguf(n)).collect();
+    models.sort();
+    let Some(pick) = ["Q4_K_M", "Q8_0"].iter().find_map(|q| models.iter().find(|n| n.to_ascii_uppercase().contains(q))).or(models.first()) else {
+        return Vec::new();
+    };
+    let stem = pick.split("-00001-of-").next().unwrap_or(pick);
+    let mut out: Vec<String> = names.iter().filter(|n| *n == pick || (n.starts_with(&format!("{stem}-000")) && n.ends_with(".gguf"))).map(|n| n.to_string()).collect();
+    out.sort();
+    out
+}
+
+pub fn facts(dir: &Path, gguf: &Path) -> Result<crate::model_facts::ModelFacts, String> {
+    // Shape from the GGUF header; every layer's KV counted at full context (sliding windows overcounted, never under).
+    let m = header(gguf).map_err(|e| format!("{}: {e}", gguf.display()))?;
+    let arch = m.get("general.architecture").map(|v| v.1.clone()).filter(|a| !a.is_empty()).ok_or_else(|| format!("{}: no general.architecture", gguf.display()))?;
+    let nums = |k: &str| m.get(&format!("{arch}.{k}")).map(|v| v.0.clone()).unwrap_or_default();
+    let max = |k: &str| nums(k).into_iter().max().unwrap_or(0);
+    let (layers, heads) = (max("block_count"), max("attention.head_count"));
+    let mut kv = nums("attention.head_count_kv");
+    if kv.len() < 2 {
+        kv = vec![kv.first().copied().unwrap_or(heads); layers as usize];
+    }
+    let dim = |k: &str| Some(max(k)).filter(|d| *d > 0).unwrap_or(max("embedding_length") / heads.max(1));
+    let weights = gguf_paths(dir).into_iter().filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("mmproj")));
+    let bytes: u64 = weights.filter_map(|p| p.metadata().ok()).map(|m| m.len()).sum();
+    Ok(crate::model_facts::ModelFacts {
+        architecture: if max("expert_count") > 0 { "moe" } else { "dense" }.into(),
+        static_vram_gb: bytes as f64 / crate::model_facts::GIB,
+        kv_elems_per_token: kv.iter().sum::<u64>() * (dim("attention.key_length") + dim("attention.value_length")),
+        max_ctx: max("context_length"),
+        num_attention_heads: heads,
+        num_kv_heads: kv.iter().copied().max().unwrap_or(0),
+        attention: "gqa".into(),
+        swa_kv_elems_per_request: 0,
+        linear_state_bytes_per_request: 0,
+    })
+}
+
+fn le(r: &mut impl Read, n: usize) -> std::io::Result<u64> {
+    let mut b = [0u8; 8];
+    r.read_exact(&mut b[..n])?;
+    Ok(u64::from_le_bytes(b))
+}
+
+fn text(r: &mut impl Read) -> std::io::Result<String> {
+    let mut b = vec![0u8; le(r, 8)? as usize];
+    r.read_exact(&mut b)?;
+    Ok(String::from_utf8_lossy(&b).into_owned())
+}
+
+fn value(r: &mut impl Read, t: u64, nums: &mut Vec<u64>, s: &mut String) -> std::io::Result<()> {
+    // One GGUF value: integers (floats as raw bits, never read as shape), a string, or an array of either.
+    match t {
+        0 | 1 | 7 => nums.push(le(r, 1)?),
+        2 | 3 => nums.push(le(r, 2)?),
+        4..=6 => nums.push(le(r, 4)?),
+        10..=12 => nums.push(le(r, 8)?),
+        8 => *s = text(r)?,
+        9 => {
+            let (t, n) = (le(r, 4)?, le(r, 8)?);
+            for _ in 0..n {
+                value(r, t, nums, s)?;
+            }
+        }
+        _ => return Err(std::io::Error::other(format!("GGUF value type {t}"))),
+    }
+    Ok(())
+}
+
+fn header(path: &Path) -> std::io::Result<HashMap<String, (Vec<u64>, String)>> {
+    // The key-value section of a GGUF v2/v3 file.
+    let mut r = std::io::BufReader::new(std::fs::File::open(path)?);
+    if le(&mut r, 4)? != u64::from(u32::from_le_bytes(*b"GGUF")) || le(&mut r, 4)? < 2 {
+        return Err(std::io::Error::other("not a GGUF v2+ file"));
+    }
+    let (_tensors, n) = (le(&mut r, 8)?, le(&mut r, 8)?);
+    let mut m = HashMap::new();
+    for _ in 0..n {
+        let (k, t) = (text(&mut r)?, le(&mut r, 4)?);
+        let (mut nums, mut s) = (Vec::new(), String::new());
+        value(&mut r, t, &mut nums, &mut s)?;
+        m.insert(k, (nums, s));
+    }
+    Ok(m)
 }
 
 fn llama_command(spec: &EngineSpec) -> Result<Command, String> {
@@ -79,6 +182,23 @@ fn llama_command(spec: &EngineSpec) -> Result<Command, String> {
         .envs(card_env(spec))
         .envs(placement_env(spec));
     Ok(cmd)
+}
+
+#[cfg(test)]
+pub fn write_test_gguf(path: &Path) {
+    // A llama header: 2 layers, 8 heads of 64, per-layer KV heads 2 and 4, context 4096, and a token list to skip.
+    let s = |v: &str| [(v.len() as u64).to_le_bytes().to_vec(), v.as_bytes().to_vec()].concat();
+    let arr = |t: u32, items: Vec<Vec<u8>>| [t.to_le_bytes().to_vec(), (items.len() as u64).to_le_bytes().to_vec(), items.concat()].concat();
+    let mut kvs = vec![("general.architecture".to_string(), 8u32, s("llama")), ("tokenizer.ggml.tokens".into(), 9, arr(8, vec![s("a"), s("bc")]))];
+    for (k, v) in [("block_count", 2u32), ("attention.head_count", 8), ("embedding_length", 512), ("context_length", 4096)] {
+        kvs.push((format!("llama.{k}"), 4, v.to_le_bytes().to_vec()));
+    }
+    kvs.push(("llama.attention.head_count_kv".into(), 9, arr(4, vec![2u32.to_le_bytes().to_vec(), 4u32.to_le_bytes().to_vec()])));
+    let mut g = [b"GGUF".to_vec(), 3u32.to_le_bytes().to_vec(), 0u64.to_le_bytes().to_vec(), (kvs.len() as u64).to_le_bytes().to_vec()].concat();
+    for (k, t, v) in kvs {
+        g.extend([s(&k), t.to_le_bytes().to_vec(), v].concat());
+    }
+    std::fs::write(path, g).unwrap();
 }
 
 #[cfg(test)]
@@ -150,5 +270,18 @@ mod tests {
             assert_eq!(check_params(&ENGINE, body.to_string().as_bytes()).err().as_deref(), refused, "{body}");
             assert!(check_params(ge, body.to_string().as_bytes()).is_ok(), "goethe-engine refuses in the engine");
         }
+    }
+
+    #[test]
+    fn facts_come_from_the_gguf_header_and_the_install_picks_one_quant() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("Q4_K_M")).unwrap();
+        write_test_gguf(&d.path().join("Q4_K_M/m.gguf"));
+        let f = facts(d.path(), &gguf_in(d.path(), &toml::Value::Table(Default::default())).unwrap()).unwrap();
+        assert_eq!((f.kv_elems_per_token, f.max_ctx, f.num_attention_heads, f.num_kv_heads), ((2 + 4) * 128, 4096, 8, 4));
+        assert_eq!(f.architecture, "dense");
+        let names = ["m-Q8_0.gguf", "Q4_K_M/m-Q4_K_M-00002-of-00002.gguf", "Q4_K_M/m-Q4_K_M-00001-of-00002.gguf", "mmproj-m.gguf", "README.md"];
+        assert_eq!(pick_gguf(&names), ["Q4_K_M/m-Q4_K_M-00001-of-00002.gguf", "Q4_K_M/m-Q4_K_M-00002-of-00002.gguf"]);
+        assert_eq!(pick_gguf(&["b-IQ2.gguf", "a-IQ3.gguf"]), ["a-IQ3.gguf"]);
     }
 }
