@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""A llama-server that only serves the OpenAI routes (flags as goethe passes them)."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from goethe_engine import openai_server  # noqa: E402
+
+openai_server.serve(sys.argv[1:])

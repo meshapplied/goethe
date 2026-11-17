@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# nvidia-smi for the GPUs in FAKE_NVML ("name|major.minor|total_mib|used_mib;..."): the csv queries accept.sh and the tests use.
+IFS=';' read -ra gpus <<<"${FAKE_NVML:-}"
+[[ ${#gpus[@]} -gt 0 ]] || { echo "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver." >&2; exit 9; }
+for g in "${gpus[@]}"; do
+  IFS='|' read -r name cc total used <<<"${g}"
+  echo "${name}, ${cc}, ${total} MiB, ${used} MiB"
+done
