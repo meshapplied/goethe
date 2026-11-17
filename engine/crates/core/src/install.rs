@@ -616,7 +616,7 @@ fn pack_fit(view: &crate::recommend::View, cfg: &Value, entry: Option<&RegistryM
         if loading {
             format!("{id} does not fit the allowed GPUs now ({}), so {NOTHING_DOWNLOADED}: {why}. Stop what is using the GPU (goethe gpu shows what), or use --no-load to download without loading; --ctx with a smaller value or goethe gpu --deny or --allow also change the fit", cards.join(", "))
         } else {
-            format!("{id} cannot run on the allowed GPUs even when they are empty ({}), so {NOTHING_DOWNLOADED}: {why}. Options: --ctx with a smaller value, or more cards with goethe gpu --allow", cards.join(", "))
+            format!("{id} does not fit the allowed GPUs even when they are empty ({}), so {NOTHING_DOWNLOADED}: {why}. Options: --ctx with a smaller value, or more cards with goethe gpu --allow", cards.join(", "))
         }
     })?;
     let free = fit.gpus.iter().filter_map(|g| view.gpus.iter().find(|x| x.index == *g)).map(|g| g.free_vram_mb as f64 / 1024.0).fold(f64::INFINITY, f64::min);
@@ -2307,7 +2307,7 @@ mod tests {
         assert!(err.contains("9.0 GB free now") && err.contains("Stop what is using the GPU") && err.contains("--no-load"), "{err}");
         let tiny = InstallOpts { model_id: "org/Huge".into(), ..Default::default() };
         let never = pack_fit(&capacity, &llama_cfg(), None, &tiny, "sm_120a", PackWeights { bytes: 60 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path()).unwrap_err();
-        assert!(never.contains("cannot run on the allowed GPUs even when they are empty") && never.contains("32.0 GB in total"), "{never}");
+        assert!(never.contains("does not fit the allowed GPUs even when they are empty") && never.contains("32.0 GB in total"), "{never}");
     }
 
     #[test]
