@@ -19,6 +19,7 @@ GOETHE="${GOETHE_BIN:-goethe}"
 UXBAD='Traceback|os error|panicked at|No such file or directory'
 UXGAP="${ACCEPT_UX_GAP:-10}"
 UXERR="${ACCEPT_UX_STDERR:-10}"
+UXLINES="${ACCEPT_UX_INSTALL_LINES:-12}"
 UXBIG="${ACCEPT_UX_BIG_GB:-0.1}"
 UXSMALL="${ACCEPT_UX_SMALL:-ggml-org/embeddinggemma-2-GGUF:Q8_0}"
 RESERVE_GB="${ACCEPT_RESERVE_GB:-35}"
@@ -68,6 +69,7 @@ ux_note() {
   UX_WALL="$(awk -v a="${UX_WALL}" -v b="${U_WALL}" 'BEGIN { printf "%.1f", a + b }')"
   UX_GAP="$(awk -v a="${UX_GAP}" -v b="${U_GAP}" 'BEGIN { printf "%.1f", (b > a ? b : a) }')"
   UX_ERRN=$((UX_ERRN + U_ERR))
+  [[ "$1" == install ]] && UX_LINES=$((U_OUT + U_ERR))
   grep -qE "${UXBAD}" "${WORK}/xg.out" "${WORK}/xg.err" && UX_TRACE=1
   if [[ "$1" == install ]] && awk -v n="${need:-0}" -v b="${UXBIG}" 'BEGIN { exit !(n > b) }' && ! cat "${WORK}/xg.out" "${WORK}/xg.err" | grep -qE '[0-9]+(\.[0-9]+)? ?(GB|MB)'; then
     UX_UNANN=1
@@ -76,11 +78,12 @@ ux_note() {
 
 ux_verdict() {
   # A passing cell must also keep the first-run limits.
-  UXCELL="ttfa ${UX_WALL}s gap ${UX_GAP}s err ${UX_ERRN}"
+  UXCELL="ttfa ${UX_WALL}s gap ${UX_GAP}s err ${UX_ERRN} lines ${UX_LINES}"
   local bad=()
   [[ ${UX_TRACE} -eq 1 ]] && bad+=("a traceback or raw OS error")
   awk -v g="${UX_GAP}" -v m="${UXGAP}" 'BEGIN { exit !(g > m) }' && bad+=("silent for ${UX_GAP}s (limit ${UXGAP}s)")
   [[ ${UX_UNANN} -eq 1 ]] && bad+=("a download over ${UXBIG} GB not announced with its size")
+  [[ ${UX_LINES} -gt ${UXLINES} ]] && bad+=("install printed ${UX_LINES} lines (limit ${UXLINES})")
   [[ ${UX_ERRN} -gt ${UXERR} ]] && bad+=("${UX_ERRN} stderr lines on a success path (limit ${UXERR})")
   if [[ ${#bad[@]} -gt 0 ]]; then
     VERDICT=FAIL
@@ -201,7 +204,7 @@ accept_one() {
   RUNTIME=""
   PSHA=""
   METRIC=""
-  UX_WALL=0 UX_GAP=0 UX_ERRN=0 UX_TRACE=0 UX_UNANN=0 UXCELL=""
+  UX_WALL=0 UX_GAP=0 UX_ERRN=0 UX_LINES=0 UX_TRACE=0 UX_UNANN=0 UXCELL=""
   xg install "${install[@]}" --yes --load
   rc=$?
   cp "${WORK}/xg.out" "${WORK}/inst"

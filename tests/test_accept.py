@@ -16,7 +16,8 @@ case "$1" in
   models) echo '[{"id":"org/packed","status":"available","gb":1.0},{"id":"org/plain","status":"available","gb":1.0},'\
     '{"id":"org/lost","status":"available","gb":1.0},{"id":"org/noisy","status":"available","gb":0.0},'\
     '{"id":"org/slow","status":"available","gb":0.0},{"id":"org/chatty","status":"available","gb":0.0},'\
-    '{"id":"org/big","status":"available","gb":5.0},{"id":"org/biggood","status":"available","gb":5.0}]' ;;
+    '{"id":"org/big","status":"available","gb":5.0},{"id":"org/biggood","status":"available","gb":5.0},'\
+    '{"id":"org/wordy","status":"available","gb":0.0}]' ;;
   up) echo "$GOETHE_HOME" >> "$FAKE_LOG" ;;
   down) : ;;
   install)
@@ -31,6 +32,7 @@ case "$1" in
       org/chatty) for i in $(seq 12); do echo "note $i" >&2; done ;;
       org/slow) sleep 3 ;;
       org/biggood) echo "org/biggood (gguf, 5.0 GB) with llama.cpp" ;;
+      org/wordy) for i in $(seq 14); do echo "step $i"; done ;;
     esac
     id="${2%%:*}"; [[ "$2" == /* ]] && id="$4"
     d="$home/${id//\//__}"; mkdir -p "$d"
@@ -42,7 +44,7 @@ case "$1" in
         echo 'runtime = "llama.cpp"' > "$d/goethe_card.toml" ;;
       org/lost) echo "installing the optimised kernels for sm_120a ..."
         echo 'runtime = "llama.cpp"' > "$d/goethe_card.toml" ;;
-      org/noisy | org/slow | org/chatty | org/big | org/biggood) echo 'runtime = "llama.cpp"' > "$d/goethe_card.toml" ;;
+      org/noisy | org/slow | org/chatty | org/big | org/biggood | org/wordy) echo 'runtime = "llama.cpp"' > "$d/goethe_card.toml" ;;
       local/accept) echo "installing the optimised kernels for sm_120a ..."
         echo "runtime = \"${FAKE_LOCAL_RUNTIME:-goethe-engine}\"" > "$d/goethe_card.toml" ;;
     esac ;;
@@ -130,17 +132,18 @@ class Accept(unittest.TestCase):
             self.assertIn("kernel pack", row["reason"], "a plain runtime on a local folder is a failure")
 
     def test_ux_mode_times_each_cell_enforces_the_limits_and_runs_the_failure_cells(self):
-        models = ("org/packed", "org/noisy", "org/slow", "org/chatty", "org/big", "org/biggood")
+        models = ("org/packed", "org/noisy", "org/slow", "org/chatty", "org/big", "org/biggood", "org/wordy")
         out = self.run_accept("--json", "--ux", extra={"ACCEPT_UX_GAP": "1"}, models=models, slow_once=True)
         rows = {m["model"]: m for m in json.loads(out.stdout)["models"]}
         self.assertEqual(rows["org/packed"]["result"], "PASS")
-        self.assertRegex(rows["org/packed"]["ux"], r"^ttfa [0-9.]+s gap [0-9.]+s err 0$")
+        self.assertRegex(rows["org/packed"]["ux"], r"^ttfa [0-9.]+s gap [0-9.]+s err 0 lines [0-9]+$")
         reasons = {k: rows[k]["reason"] for k in ("org/noisy", "org/slow", "org/chatty", "org/big")}
         self.assertTrue(all(rows[k]["result"] == "FAIL" for k in reasons), reasons)
         self.assertRegex(reasons["org/noisy"], "[Tt]raceback")
         self.assertIn("silent for", reasons["org/slow"])
         self.assertIn("12 stderr lines", reasons["org/chatty"])
         self.assertIn("not announced", reasons["org/big"])
+        self.assertIn("install printed 14 lines (limit 12)", rows["org/wordy"]["reason"])
         self.assertEqual(rows["org/biggood"]["result"], "PASS", "a download announced with its size passes")
         cells = {k: v["result"] for k, v in rows.items() if k.startswith("ux/")}
         wanted = ("ux/unknown-id", "ux/gated-no-token", "ux/offline", "ux/interrupt-rerun", "ux/not-logged-in")
