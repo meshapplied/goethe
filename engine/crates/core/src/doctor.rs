@@ -36,7 +36,8 @@ pub fn run(json: bool, probe_public: bool) -> Result<(), String> {
             table.row(vec![c.name.clone(), crate::term::status(&c.status), c.hint.clone()]);
         }
         table.print();
-        println!("\nSupported microarchitectures: {}", crate::gpu_arch::microarchitectures_text());
+        println!("\nGPU architectures goethe supports: {}", crate::gpu_arch::microarchitectures_text());
+        println!("Architectures of this machine: {}", crate::packs::local_archs(&home).join(", "));
     }
     if probe_public {
         probe_public_reachability(&home);
@@ -67,6 +68,8 @@ type CheckFn = fn(&Path) -> Check;
 
 const CHECKS: &[(&str, CheckFn)] = &[
     ("hardware", check_hardware),
+    ("driver", check_driver),
+    ("platform", check_platform),
     ("glibc", |_| check_glibc()),
     ("nginx", check_nginx),
     ("goethe_home", check_goethe_home),
@@ -105,6 +108,42 @@ fn collect_checks(home: &Path) -> Vec<Check> {
             c
         })
         .collect()
+}
+
+fn driver_note(driver: &str) -> (&'static str, String) {
+    // The NVIDIA driver against goethe's floors: 580 and newer run every supported GPU, 535 to 579 only data-center GPUs (CUDA forward compatibility), older ones nothing.
+    match driver.split('.').next().and_then(|m| m.parse::<u32>().ok()) {
+        Some(580..) => ("OK", format!("NVIDIA driver {driver}: every supported GPU")),
+        Some(535..=579) => ("WARN", format!("NVIDIA driver {driver}: data-center GPUs only (GeForce and TITAN need 580 or newer)")),
+        Some(_) => ("FAIL", format!("NVIDIA driver {driver} is older than 535 and not supported: goethe install offers to update it")),
+        None => ("WARN", "the NVIDIA driver version could not be read".to_string()),
+    }
+}
+
+fn check_driver(home: &Path) -> Check {
+    match crate::hw::profile(home) {
+        Ok(hw) => {
+            let (status, note) = driver_note(&hw.driver);
+            check("driver", status, note)
+        }
+        Err(_) => check("driver", "WARN", "no driver answered (see the hardware row)"),
+    }
+}
+
+fn platform_note(link: crate::platform_cli::Link) -> (&'static str, String) {
+    // Whether this node is linked to the Goethe platform, which also decides whether optimised kernels install.
+    use crate::platform_cli::Link;
+    match link {
+        Link::NotLinked => ("INFO", "not logged in: optional; goethe login links this node and unlocks optimised kernels".to_string()),
+        Link::Unreadable(e) => ("WARN", format!("login not usable ({e}); goethe login again")),
+        Link::Linked { revoked: true, workspace, .. } => ("WARN", format!("revoked (workspace {workspace}); goethe login again")),
+        Link::Linked { workspace, heartbeat, .. } => ("OK", format!("logged in, workspace {workspace}, heartbeat {heartbeat}")),
+    }
+}
+
+fn check_platform(home: &Path) -> Check {
+    let (status, note) = platform_note(crate::platform_cli::link_state(home, crate::service::goethed_running()));
+    check("platform", status, note)
 }
 
 fn check(name: &str, status: &str, hint: impl Into<String>) -> Check {
@@ -696,6 +735,20 @@ fn available_gb(path: &Path) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_driver_and_the_platform_get_their_own_rows() {
+        assert_eq!(driver_note("580.126.09").0, "OK");
+        assert_eq!(driver_note("570.1").0, "WARN");
+        assert_eq!(driver_note("525.60").0, "FAIL");
+        assert_eq!(driver_note("").0, "WARN");
+        use crate::platform_cli::Link;
+        assert_eq!(platform_note(Link::NotLinked).0, "INFO");
+        assert!(platform_note(Link::NotLinked).1.contains("goethe login"));
+        assert_eq!(platform_note(Link::Linked { workspace: "w".into(), revoked: false, heartbeat: "OK".into(), ok: true }).0, "OK");
+        assert_eq!(platform_note(Link::Linked { workspace: "w".into(), revoked: true, heartbeat: String::new(), ok: false }).0, "WARN");
+        assert!(CHECKS.iter().any(|(n, _)| *n == "driver") && CHECKS.iter().any(|(n, _)| *n == "platform"));
+    }
 
     #[test]
     fn a_busy_gpu_gets_one_hint_how_to_keep_it_free() {
