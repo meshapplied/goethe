@@ -152,7 +152,7 @@ fn likely_cause(engine: &[String]) -> Option<String> {
             crate::host_compiler::Verdict::TooNew(why) | crate::host_compiler::Verdict::Unusable(why) => why,
         });
     }
-    if has(&["OutOfMemoryError", "CUDA out of memory"]) {
+    if has(&["OutOfMemoryError", "CUDA out of memory", "alloc chain KV: out of memory"]) {
         let loading = has(&["process_weights_after_loading", "load_weights", "Load weight begin"]) && !has(&["Load weight end"]);
         return Some(if loading {
             "the GPU ran out of memory while loading the weights; the model needs more memory than these GPUs have free during loading: split it across more GPUs with --gpu".into()

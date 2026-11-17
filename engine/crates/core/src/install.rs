@@ -336,7 +336,8 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 (Ok(cfg), Ok(hw)) => {
                     let marlin = pack_marlin_gb(&cfg, &choice.offer.hf_repo, &rev, &files);
                     let cap = plan.variants.iter().position(|v| *v == files).and_then(|i| plan.variant_ids.get(i)).and_then(|id| crate::packs::variant_max_ctx(&plan.prefix, id));
-                    println!("{}", pack_fit(&crate::recommend::View::new(home, hw), &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: cap }, &card_dir)?);
+                    let view = if opts.load { crate::recommend::View::new(home, hw) } else { crate::recommend::View::capacity(home, hw) };
+                    println!("{}", pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: cap }, &card_dir)?);
                 }
                 (Err(e), _) | (_, Err(e)) => eprintln!("note: the per-GPU fit was not checked before the download: {e}"),
             }
@@ -602,13 +603,18 @@ fn pack_fit(view: &crate::recommend::View, cfg: &Value, entry: Option<&RegistryM
     // The per-GPU budget goethe load will compute for a kernel-pack model (the pack runtime's own learned rows), from its config and the listed size of its weights, before a weight byte is fetched: refused with what is missing when no GPU set fits, else the fit line with its headroom.
     let id = &opts.model_id;
     let (input, pinned) = pack_input(cfg, entry, opts, arch, &w, dir)?;
+    let (loading, memory) = (opts.load, if opts.load { "free now" } else { "in total" });
     let fit = view.fit_as(id, &input, pinned, crate::engine_overhead::PACK_RUNTIME).map_err(|why| {
-        let cards: Vec<String> = view.gpus.iter().map(|g| format!("gpu{} {} {:.1} GB free", g.index, view.hw.gpus.iter().find(|h| h.index == g.index).map_or("", |h| h.name.as_str()), g.free_vram_mb as f64 / 1024.0)).collect();
-        format!("{id} does not fit the allowed GPUs now ({}), so {NOTHING_DOWNLOADED}: {why}. Options: --ctx with a smaller value, free the GPU (goethe gpu shows what uses it), or change which cards are used with goethe gpu --deny or --allow", cards.join(", "))
+        let cards: Vec<String> = view.gpus.iter().map(|g| format!("gpu{} {} {:.1} GB {memory}", g.index, view.hw.gpus.iter().find(|h| h.index == g.index).map_or("", |h| h.name.as_str()), g.free_vram_mb as f64 / 1024.0)).collect();
+        if loading {
+            format!("{id} does not fit the allowed GPUs now ({}), so {NOTHING_DOWNLOADED}: {why}. Stop what is using the GPU (goethe gpu shows what), or use --no-load to download without loading; --ctx with a smaller value or goethe gpu --deny or --allow also change the fit", cards.join(", "))
+        } else {
+            format!("{id} cannot run on the allowed GPUs even when they are empty ({}), so {NOTHING_DOWNLOADED}: {why}. Options: --ctx with a smaller value, or more cards with goethe gpu --allow", cards.join(", "))
+        }
     })?;
     let free = fit.gpus.iter().filter_map(|g| view.gpus.iter().find(|x| x.index == *g)).map(|g| g.free_vram_mb as f64 / 1024.0).fold(f64::INFINITY, f64::min);
     let total = fit.need.total();
-    Ok(format!("fit: {}; {total:.1} of {free:.1} GB free, {:.1} GB spare", fit.describe(&input), free - total))
+    Ok(format!("fit: {}; {total:.1} of {free:.1} GB {}, {:.1} GB spare", fit.describe(&input), if loading { "free" } else { "on the card" }, free - total))
 }
 
 fn stale_skip(card: Option<&toml::Table>, force: bool, allow: bool) -> Option<String> {
@@ -1205,13 +1211,13 @@ fn pack_failure_line(home: &Path, model_id: &str, log: &str) -> Option<String> {
         return None;
     }
     let why = load_failure(log);
-    Some(if has_plain_weights(&dir) { format!("{why}; {FALLBACK_HINT}") } else { why })
+    Some(if has_plain_weights(&dir) && memory_contention(log).is_none() { format!("{why}; {FALLBACK_HINT}") } else { why })
 }
 
 pub fn unpack_failed(home: &Path, model_id: &str, log: &str) -> Result<bool, String> {
     // A pack that failed to open for any reason: drop it, write the plain card with a pack_skipped note, say why in one line; false when there is no pack or no plain runtime to fall back to.
     let dir = model_dir(home, model_id);
-    if !dir.join(PACK_FILE).is_file() || !has_plain_weights(&dir) {
+    if !dir.join(PACK_FILE).is_file() || !has_plain_weights(&dir) || memory_contention(log).is_some() {
         return Ok(false);
     }
     let why = load_failure(log);
@@ -1236,10 +1242,18 @@ fn has_plain_weights(dir: &Path) -> bool {
 
 type Cause = fn(&str) -> bool;
 
+fn memory_contention(log: &str) -> Option<&str> {
+    // The log line that says the GPU had no memory left for the pack: another process held it, a condition of the moment, not of this machine.
+    log.lines().map(str::trim).find(|l| l.to_ascii_lowercase().contains("out of memory"))
+}
+
 fn load_failure(log: &str) -> String {
-    // Why a pack did not open, in one line: the engine's device refusal, else the first log line naming a known cause, else the last log line.
+    // Why a pack did not open, in one line: the engine's device refusal, else the GPU's memory held by something else, else the first log line naming a known cause, else the last log line.
     if let Some(refusal) = load_refusal(log) {
         return refusal;
+    }
+    if let Some(line) = memory_contention(log) {
+        return format!("not enough free GPU memory now ({}); stop what is using the GPU (goethe gpu shows what) and run it again", line.chars().take(160).collect::<String>());
     }
     let causes: [(Cause, &str); 4] = [
         (|l| l.contains("cannot open shared object file"), "a host library is missing"),
@@ -1997,6 +2011,17 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_that_cannot_open_because_the_gpu_is_busy_says_so_and_is_kept() {
+        let (home, dir) = packed_home();
+        let log = "goethe-engine: pack REFUSED: gc_open -4: alloc chain KV: out of memory\n";
+        let line = pack_failure_line(home.path(), "org/m-GGUF", log).unwrap();
+        assert!(line.starts_with("not enough free GPU memory now (goethe-engine: pack REFUSED: gc_open -4: alloc chain KV: out of memory)"), "{line}");
+        assert!(!line.contains("failed to open") && !line.contains("--fallback"), "memory held by another process is not a fault of the pack: {line}");
+        assert!(!unpack_failed(home.path(), "org/m-GGUF", log).unwrap(), "the pack stays for the next try");
+        assert!(dir.join(PACK_FILE).is_file());
+    }
+
+    #[test]
     fn a_pack_that_fails_to_open_for_any_reason_falls_back_with_one_line() {
         let cases = [
             ("ImportError: libnccl.so.2: cannot open shared object file: No such file or directory\n", "kernel pack failed to open (a host library is missing: ImportError: libnccl.so.2: cannot open shared object file: No such file or directory)"),
@@ -2244,9 +2269,26 @@ mod tests {
     }
 
     #[test]
+    fn a_download_only_install_checks_the_card_not_what_is_free_at_that_moment() {
+        let home = tempfile::tempdir().unwrap();
+        let weights = || PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: Some(4096) };
+        let busy = card(9);
+        let capacity = crate::recommend::View::capacity(home.path(), crate::hw::HardwareState { profiled_at: "t".into(), driver: "t".into(), gpus: vec![busy.clone()], links: vec![], unavailable: vec![], host: None, environment: None });
+        let download_only = InstallOpts { model_id: "org/Transcribe-GGUF".into(), ..Default::default() };
+        let line = pack_fit(&capacity, &llama_cfg(), None, &download_only, "sm_120a", weights(), home.path()).unwrap();
+        assert!(line.contains("of 32.0 GB on the card"), "{line}");
+        let loading = InstallOpts { model_id: "org/Transcribe-GGUF".into(), load: true, ..Default::default() };
+        let err = pack_fit(&view_of(home.path(), busy), &llama_cfg(), None, &loading, "sm_120a", weights(), home.path()).unwrap_err();
+        assert!(err.contains("9.0 GB free now") && err.contains("Stop what is using the GPU") && err.contains("--no-load"), "{err}");
+        let tiny = InstallOpts { model_id: "org/Huge".into(), ..Default::default() };
+        let never = pack_fit(&capacity, &llama_cfg(), None, &tiny, "sm_120a", PackWeights { bytes: 60 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path()).unwrap_err();
+        assert!(never.contains("cannot run on the allowed GPUs even when they are empty") && never.contains("32.0 GB in total"), "{never}");
+    }
+
+    #[test]
     fn a_model_that_cannot_fit_one_card_is_refused_before_a_byte_with_what_is_missing() {
         let home = tempfile::tempdir().unwrap();
-        let opts = InstallOpts { model_id: "nvidia/Big-NVFP4".into(), ..Default::default() };
+        let opts = InstallOpts { model_id: "nvidia/Big-NVFP4".into(), load: true, ..Default::default() };
         let line = pack_fit(&view_of(home.path(), card(31)), &llama_cfg(), None, &opts, "sm_120a", PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path()).unwrap();
         assert!(line.starts_with("fit: tp=1 on GPU 0") && line.contains("GB per GPU (weights 20.0 + KV") && line.contains("of 31.0 GB free") && line.contains("GB spare"), "{line}");
         let err = pack_fit(&view_of(home.path(), card(21)), &llama_cfg(), None, &opts, "sm_120a", PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path()).unwrap_err();
