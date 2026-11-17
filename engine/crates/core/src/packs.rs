@@ -603,18 +603,8 @@ pub fn variant_max_ctx(prefix: &[u8], variant: &str) -> Option<u64> {
     manifest_of(prefix)?["buckets"].as_array()?.iter().filter(|b| b["variant"].as_str() == Some(variant)).filter_map(|b| b["maxctx"].as_u64()).max()
 }
 
-pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &dyn Broker, run: Runner) -> Result<Option<Plan>, String> {
-    // The signed index's pack for this model and arch, and its manifest's weight files per variant (what to download), only the variant a quant names (id, desc.quant or desc.format, any case). None: no pack.
-    let work = home.join("packs");
-    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
-    let (ix, sg) = (work.join("index.json"), work.join("index.sig"));
-    let raw = broker.index()?;
-    std::fs::write(&ix, &raw).map_err(|e| e.to_string())?;
-    std::fs::write(&sg, broker.index_sig()?).map_err(|e| e.to_string())?;
-    let v = |x: &str| x.to_string();
-    let verified = run(&[v("index"), v("verify"), v("--index"), s(&ix), v("--sig"), s(&sg), v("--last-serial"), last_serial(home).to_string()])?.1;
-    let serial = serde_json::from_str::<Value>(&verified).map_err(|e| format!("index verify: {e}"))?["serial"].as_u64().ok_or("index verify: no serial")?;
-    let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().find(runnable) else { return Ok(None) };
+fn fetch_prefix(broker: &dyn Broker, entry: &Entry) -> Result<(Vec<u8>, usize), String> {
+    // The pack's head, container header and manifest (its first bytes, no weights), the manifest checked against the index entry's hash; and where the manifest starts in them.
     let head = broker.range(&entry.file, 0, 16)?;
     if &head[..8] != b"GCPACK3\n" {
         return Err(format!("{}: not a pack of ABI 3", entry.file));
@@ -631,10 +621,36 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
         return Err(format!("{}: bad manifest range", entry.file));
     }
     let body = broker.range(&entry.file, 16 + n, off + len)?;
+    let at = 16 + n as usize + off as usize;
     let manifest = &body[off as usize..];
     if format!("{:x}", Sha256::digest(manifest)) != entry.manifest_sha256 {
         return Err(format!("{}: manifest differs from the signed index", entry.file));
     }
+    Ok(([head, header, body].concat(), at))
+}
+
+pub fn unverified_prefix(model_id: &str, arch: &str, broker: &dyn Broker) -> Result<Option<(Entry, Vec<u8>)>, String> {
+    // The pack's first bytes by the index as the platform serves it, before goethe-engine exists to verify the index: only for refusing early; anything installed is checked by plan() again.
+    let raw = broker.index()?;
+    let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().find(runnable) else { return Ok(None) };
+    let (prefix, _) = fetch_prefix(broker, &entry)?;
+    Ok(Some((entry, prefix)))
+}
+
+pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &dyn Broker, run: Runner) -> Result<Option<Plan>, String> {
+    // The signed index's pack for this model and arch, and its manifest's weight files per variant (what to download), only the variant a quant names (id, desc.quant or desc.format, any case). None: no pack.
+    let work = home.join("packs");
+    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let (ix, sg) = (work.join("index.json"), work.join("index.sig"));
+    let raw = broker.index()?;
+    std::fs::write(&ix, &raw).map_err(|e| e.to_string())?;
+    std::fs::write(&sg, broker.index_sig()?).map_err(|e| e.to_string())?;
+    let v = |x: &str| x.to_string();
+    let verified = run(&[v("index"), v("verify"), v("--index"), s(&ix), v("--sig"), s(&sg), v("--last-serial"), last_serial(home).to_string()])?.1;
+    let serial = serde_json::from_str::<Value>(&verified).map_err(|e| format!("index verify: {e}"))?["serial"].as_u64().ok_or("index verify: no serial")?;
+    let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().find(runnable) else { return Ok(None) };
+    let (prefix, at) = fetch_prefix(broker, &entry)?;
+    let manifest = &prefix[at..];
     let m: Value = serde_json::from_slice(manifest).map_err(|e| format!("{}: manifest: {e}", entry.file))?;
     let names: Vec<String> = m["model"]["weights"].as_array().into_iter().flatten().map(|w| w["file"].as_str().unwrap_or_default().to_string()).collect();
     let (mut variants, mut all): (Vec<Vec<String>>, Vec<&str>) = (Vec::new(), Vec::new());
@@ -657,7 +673,6 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
             None => format!("{}: the manifest names no model files", entry.file),
         });
     }
-    let prefix = [head, header, body].concat();
     Ok(Some(Plan { entry, prefix, variants, variant_ids, serial }))
 }
 
@@ -1011,6 +1026,25 @@ mod tests {
         assert_eq!((arch_runs("sm_90", "9.0"), arch_runs("sm_90", "8.9").is_empty(), arch_runs("compute_80", "9.0")), (String::new(), false, String::new()));
         assert_eq!(arch_runs("sm_100f", "10.3"), "");
         assert!(arch_runs("ptx", "9.0").contains("not sm_XY"));
+    }
+
+    #[test]
+    fn the_pack_manifest_is_known_before_any_engine_exists_and_a_wrong_hash_is_refused() {
+        let manifest = serde_json::json!({"model": {"weights": [{"file": "m-Q8_0.gguf"}]}, "buckets": [bucket("rtx_pro_6000_maxq", "sm_120a", 188)], "variants": {"q8": {"weights": [0]}}}).to_string().into_bytes();
+        let header = serde_json::json!({"manifest": [0, manifest.len()]}).to_string().into_bytes();
+        let mut bytes = b"GCPACK3\n".to_vec();
+        bytes.extend((header.len() as u64).to_le_bytes());
+        bytes.extend(&header);
+        bytes.extend(&manifest);
+        let pack = Pack { bytes, manifest, blob_off: 0 };
+        let index = index_of(&pack, &sha(&pack.manifest));
+        let mut b = Fake { pack, index, tamper: false, refuse: false, ranges: RefCell::new(Vec::new()) };
+        let (entry, prefix) = unverified_prefix("org/m-gguf", "sm_120a", &b).unwrap().unwrap();
+        assert_eq!(entry.file, "m.gcpack");
+        assert_eq!(sku_reqs(&manifest_of(&prefix).unwrap())[0].sms, 188, "the variants come from the first bytes of the pack, no weight fetched");
+        assert!(unverified_prefix("org/other", "sm_120a", &b).unwrap().is_none() && unverified_prefix("org/m-gguf", "sm_90a", &b).unwrap().is_none());
+        b.index = index_of(&b.pack, &"0".repeat(64));
+        assert!(unverified_prefix("org/m-gguf", "sm_120a", &b).unwrap_err().contains("manifest differs"));
     }
 
     #[test]

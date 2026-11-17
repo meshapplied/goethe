@@ -14,7 +14,7 @@ def flag(args, name, default=None):
 
 
 def say(obj, code=0):
-    print(obj if isinstance(obj, str) else json.dumps(obj))
+    print(obj if isinstance(obj, str) else json.dumps(obj), file=sys.stderr if code not in (0, 3) else sys.stdout)
     sys.exit(code)
 
 

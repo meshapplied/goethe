@@ -190,14 +190,54 @@ jobs:
         run: sudo apt-get install -y -qq nginx >/dev/null
       - run: cargo build --locked --features goethe/test-release-key
       - name: The real binaries as a pristine user, no GPU (fake driver library, package host, platform, Hub mirror, packs and engines)
-        run: python3 tests/e2e_cli.py
+        run: python3 tests/e2e_cli.py FreshUser
+
+  user-paths:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          shared-key: engine-dev
+      - run: cargo build --locked --features goethe/test-release-key
+      - name: The other user paths with no GPU (cards, offline, gated, Ctrl-C, fallback, bad index, update)
+        run: python3 tests/e2e_cli.py Matrix
+
+  # Does the end-to-end suite notice the bugs we shipped? Each patch in engine/tests/mutants brings one back; the suite must go red.
+  mutants:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          shared-key: engine-dev
+      - name: nginx, which goethe up starts
+        run: sudo apt-get install -y -qq nginx >/dev/null
+      - run: bash tests/mutants/run.sh
 
   # The one check the main ruleset requires. It needs every other job (package-smoke runs only on main/nightly and is exempt),
   # fails when a job exists that it does not list (a new job cannot be forgotten: add it to `needs`), and accepts a skipped job
   # only when the `changes` flag that gates it is false; a failed `changes` job or any other skip fails it.
   gate:
     if: ${{ always() }}
-    needs: [changes, main-in-dev, python, lint, attribution, ninfer-patch, engine-test, engine-clippy, fresh-user]
+    needs: [changes, main-in-dev, python, lint, attribution, ninfer-patch, engine-test, engine-clippy, fresh-user, user-paths]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -207,13 +247,13 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           listed=$(jq -r 'keys[]' <<<"$NEEDS" | sort)
-          defined=$(awk '/^jobs:/{f=1;next} f&&/^  [a-z0-9-]+:/{gsub(/[ :]/,"");print}' .github/workflows/ci.yml | grep -vxE 'gate|package-smoke' | sort)
+          defined=$(awk '/^jobs:/{f=1;next} f&&/^  [a-z0-9-]+:/{gsub(/[ :]/,"");print}' .github/workflows/ci.yml | grep -vxE 'gate|package-smoke|mutants' | sort)
           [ "$listed" = "$defined" ] || { echo "gate.needs and the jobs of ci.yml differ:"; diff <(echo "$listed") <(echo "$defined"); exit 1; }
           bad=$(jq -r '
             .changes.outputs as $f
             | to_entries[]
             | select(.value.result != "success")
-            | select((.value.result == "skipped" and ((.key == "python" and $f.python != "true") or (.key | IN("engine-test", "engine-clippy", "fresh-user") and $f.rust != "true"))) | not)
+            | select((.value.result == "skipped" and ((.key == "python" and $f.python != "true") or (.key | IN("engine-test", "engine-clippy", "fresh-user", "user-paths") and $f.rust != "true"))) | not)
             | "\(.key): \(.value.result)"' <<<"$NEEDS")
           [ -z "$bad" ] || { echo "$bad"; exit 1; }
 
