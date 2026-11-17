@@ -25,9 +25,13 @@ pub fn wait_banner(log: &str) -> &'static str {
     }
 }
 
-fn heartbeat(banner: &str, secs: u64) -> String {
-    // One line that says the load is alive: "loading into VRAM, 12 s".
-    format!("{}, {secs} s", banner.trim_end_matches('.').to_lowercase().replacen(", first load on this gpu", "", 1))
+fn heartbeat(phase: &str, secs: u64, eta: Option<u64>) -> String {
+    // One line that says the load is alive: "loading into VRAM, 12 s", or "warming up kernels, 12 s (about 40 s)" once the last warm-up time is known.
+    let name = phase.trim_end_matches('.').to_lowercase().replacen(", first load on this gpu", "", 1);
+    match eta {
+        Some(e) => format!("{name}, {secs} s (about {e} s)"),
+        None => format!("{name}, {secs} s"),
+    }
 }
 
 pub fn wait_for_instance(instance_id: &str, timeout: Duration) -> Result<(), String> {
@@ -36,12 +40,13 @@ pub fn wait_for_instance(instance_id: &str, timeout: Duration) -> Result<(), Str
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     let banner = wait_banner(&log);
     eprintln!("{banner}");
+    let (mut phase, mut eta) = (banner.to_string(), None);
     let (started, mut last) = (Instant::now(), Instant::now());
     let deadline = started + timeout;
     let mut printed_notices = 0usize;
     while Instant::now() < deadline {
         if last.elapsed() >= crate::progress::every() {
-            crate::progress::eprint_line(heartbeat(banner, started.elapsed().as_secs()));
+            crate::progress::eprint_line(heartbeat(&phase, started.elapsed().as_secs(), eta));
             last = Instant::now();
         }
         let ps = rpc::call("ps", json!(null)).map_err(rpc::map_daemon_err)?;
@@ -61,6 +66,11 @@ pub fn wait_for_instance(instance_id: &str, timeout: Duration) -> Result<(), Str
                                 last = Instant::now();
                                 for n in notices.iter().skip(printed_notices) {
                                     if let Some(s) = n.as_str() {
+                                        if s.starts_with("warming up") {
+                                            phase = "warming up kernels".to_string();
+                                            let model = row.get("model_id").and_then(|v| v.as_str()).unwrap_or_default();
+                                            eta = crate::progress::warmup_secs(&crate::paths::goethe_home(), model);
+                                        }
                                         let _ = writeln!(io::stderr(), "{s}");
                                         io::stderr().flush().ok();
                                     }
@@ -192,8 +202,9 @@ mod tests {
 
     #[test]
     fn a_waiting_load_says_it_is_alive() {
-        assert_eq!(heartbeat("Loading into VRAM...", 12), "loading into vram, 12 s");
-        assert_eq!(heartbeat("Building kernels, first load on this GPU...", 40), "building kernels, 40 s");
+        assert_eq!(heartbeat("Loading into VRAM...", 12, None), "loading into vram, 12 s");
+        assert_eq!(heartbeat("Building kernels, first load on this GPU...", 40, None), "building kernels, 40 s");
+        assert_eq!(heartbeat("warming up kernels", 12, Some(40)), "warming up kernels, 12 s (about 40 s)");
     }
 
     #[test]

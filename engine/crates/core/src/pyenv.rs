@@ -156,7 +156,9 @@ pub fn ensure(home: &Path, layer: Layer) -> Result<(), String> {
         return Ok(());
     }
     check_disk(home, layer)?;
-    println!("{}", progress_line(home, layer));
+    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        println!("{}", progress_line(home, layer));
+    }
     let tmp = home.join(".pyenv-staging");
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
@@ -292,6 +294,7 @@ pub(crate) fn install_from(home: &Path, pkg: &str, sums: &Path, tmp: &Path, laye
     let ticker = crate::progress::Ticker::start(layer_label(layer), None, crate::progress::every(), move || held(&watched, &cache).saturating_sub(base), crate::progress::eprint_line);
     let started = std::time::Instant::now();
     let done = crate::step::run(&mut cmd).map_err(|e| format!("could not run bootstrap.sh: {e}"));
+    let had_line = crate::progress::updating();
     drop(ticker);
     let done = done?;
     if !done.status.success() {
@@ -305,6 +308,9 @@ pub(crate) fn install_from(home: &Path, pkg: &str, sums: &Path, tmp: &Path, laye
     let version = if layer == Layer::Engine { format!("{ENGINE_VERSION} ") } else { String::new() };
     let secs = started.elapsed();
     let time = if secs >= crate::step::SLOW { format!(", {} s", secs.as_secs()) } else { String::new() };
+    if had_line && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        print!("\x1b[1A\x1b[2K");
+    }
     println!("{}", crate::step::row(layer_label(layer), &format!("{version}ready ({grown}{time})")));
     if let Some(w) = wheel {
         let name = w.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
