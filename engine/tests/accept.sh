@@ -12,11 +12,12 @@ PACKED=(
 )
 PROMPT="Say hello in one short sentence."
 BAD='Illegal instruction|cannot open shared object|Traceback'
-REFUSED='is not supported|larger than the allowed GPUs|not supported here|gated or private|no placement fits'
+REFUSED='is not supported|larger than the allowed GPUs|not supported here|gated or private|no placement fits|not enough free GPU memory now'
 PACKFAIL='does not run on|a host library is missing|crashed at open|does not fit this GPU|failed to open|runs only with its kernel pack'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GOETHE="${GOETHE_BIN:-goethe}"
 UXBAD='Traceback|os error|panicked at|No such file or directory'
+UXTICK='^[^ ]+: [0-9.]+ (MB|GB)[ ,]|^[a-z ]+, [0-9]+ s$'
 UXGAP="${ACCEPT_UX_GAP:-10}"
 UXERR="${ACCEPT_UX_STDERR:-10}"
 UXLINES="${ACCEPT_UX_INSTALL_LINES:-12}"
@@ -68,8 +69,8 @@ ux_note() {
   # Add one step's time, longest silence and stderr lines to this cell's totals, and flag a traceback or an unannounced download.
   UX_WALL="$(awk -v a="${UX_WALL}" -v b="${U_WALL}" 'BEGIN { printf "%.1f", a + b }')"
   UX_GAP="$(awk -v a="${UX_GAP}" -v b="${U_GAP}" 'BEGIN { printf "%.1f", (b > a ? b : a) }')"
-  UX_ERRN=$((UX_ERRN + U_ERR))
-  [[ "$1" == install ]] && UX_LINES=$(cat "${WORK}/xg.out" "${WORK}/xg.err" | grep -cvE '^[^ ]+: [0-9.]+ (MB|GB)[ ,]')
+  UX_ERRN=$((UX_ERRN + $(grep -cvE "${UXTICK}" "${WORK}/xg.err")))
+  [[ "$1" == install ]] && UX_LINES=$(cat "${WORK}/xg.out" "${WORK}/xg.err" | grep -cvE "${UXTICK}")
   grep -qE "${UXBAD}" "${WORK}/xg.out" "${WORK}/xg.err" && UX_TRACE=1
   if [[ "$1" == install ]] && awk -v n="${need:-0}" -v b="${UXBIG}" 'BEGIN { exit !(n > b) }' && ! cat "${WORK}/xg.out" "${WORK}/xg.err" | grep -qE '[0-9]+(\.[0-9]+)? ?(GB|MB)'; then
     UX_UNANN=1
@@ -209,7 +210,10 @@ accept_one() {
   rc=$?
   cp "${WORK}/xg.out" "${WORK}/inst"
   if [[ ${rc} -ne 0 ]]; then
-    if grep -qE "${PACKFAIL}" "${WORK}/inst" "${WORK}/err"; then
+    if grep -q "nothing was downloaded" "${WORK}/err" && ! grep -qE "${BAD}" "${WORK}/err"; then
+      VERDICT=SKIP
+      REASON="refused before any download (no kernel pack variant for this card, or no memory free)"
+    elif grep -qE "${PACKFAIL}" "${WORK}/inst" "${WORK}/err"; then
       VERDICT=FAIL
       REASON="the kernel pack does not work here ($(grep -ohE "${PACKFAIL}" "${WORK}/inst" "${WORK}/err" | head -n 1))"
     elif grep -qE "${REFUSED}" "${WORK}/err" && ! grep -qE "${BAD}" "${WORK}/err"; then

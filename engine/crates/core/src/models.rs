@@ -59,9 +59,20 @@ struct Installed {
     runtime: String,
 }
 
+const SCREEN_LINES: usize = 40;
+
+fn cap_screen(text: &str, limit: usize) -> String {
+    // The first `limit` lines, then how many more there are and how to see them.
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= limit {
+        return text.to_string();
+    }
+    format!("{}\n... {} more lines; all of them: goethe models --all\n", lines[..limit].join("\n"), lines.len() - limit)
+}
+
 const LIVE: &str = "status NOT IN ('FAILED', 'CANCELLED')";
 
-pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Result<(), String> {
+pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: bool) -> Result<(), String> {
     // Installed rows use the stored budget inputs; registry rows use the registry estimate.
     let home = goethe_home();
     let con = db::open(&home).map_err(|e| e.to_string())?;
@@ -157,9 +168,9 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
         }
         println!("{}", serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?);
     } else {
-        print!("{}", list_text(&rows, view.as_ref().map(View::free_text)));
         let sized: Vec<(&crate::packs::Offer, Option<f64>)> = pack_only.iter().map(|o| (*o, crate::packs::model_gb(&home, o))).collect();
-        print!("{}", packs_text(&sized, linked));
+        let text = format!("{}{}", list_text(&rows, view.as_ref().map(View::free_text)), packs_text(&sized, linked));
+        print!("{}", if all { text } else { cap_screen(&text, SCREEN_LINES) });
     }
     Ok(())
 }
@@ -744,6 +755,15 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_long_listing_is_cut_to_a_screen_with_the_way_to_the_rest() {
+        let text: String = (1..=55).map(|n| format!("line {n}\n")).collect();
+        let cut = cap_screen(&text, SCREEN_LINES);
+        assert_eq!(cut.lines().count(), 41);
+        assert!(cut.ends_with("... 15 more lines; all of them: goethe models --all\n"), "{cut}");
+        assert_eq!(cap_screen("a\nb\n", 40), "a\nb\n");
+    }
 
     #[test]
     fn a_gated_catalog_model_is_marked_and_explained() {

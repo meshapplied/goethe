@@ -111,19 +111,53 @@ impl Broker for HttpBroker<'_> {
         if len == 0 {
             return Ok(Vec::new());
         }
+        retry(&RETRY_DELAYS, &|d| std::thread::sleep(d), &mut |line| eprintln!("{line}"), || self.range_once(file, off, len))
+    }
+}
+
+pub const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(6)];
+
+pub enum Attempt {
+    Again(String),
+    Final(String),
+}
+
+pub fn retry<T>(delays: &[Duration], sleep: &dyn Fn(Duration), say: &mut dyn FnMut(String), mut f: impl FnMut() -> Result<T, Attempt>) -> Result<T, String> {
+    // Up to delays.len() + 1 tries: a transient failure (network, timeout, 5xx) waits and tries again with one line each, a final one stops.
+    for (i, delay) in delays.iter().enumerate() {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(Attempt::Final(e)) => return Err(e),
+            Err(Attempt::Again(e)) => {
+                say(format!("note: {e}; trying again in {} s ({} of {})", delay.as_secs(), i + 2, delays.len() + 1));
+                sleep(*delay);
+            }
+        }
+    }
+    f().map_err(|a| match a {
+        Attempt::Again(e) | Attempt::Final(e) => e,
+    })
+}
+
+impl HttpBroker<'_> {
+    fn range_once(&self, file: &str, off: u64, len: u64) -> Result<Vec<u8>, Attempt> {
+        // One try of a byte range: a stale download link is renewed once; network trouble and 429 or 5xx are worth another try, other answers are not.
         let mut fresh = false;
         loop {
-            let url = self.link(file, fresh)?;
+            let url = self.link(file, fresh).map_err(Attempt::Final)?;
             let req = Self::agent().get(&url).set("Range", &format!("bytes={off}-{}", off + len - 1));
+            let again = |e: String| Attempt::Again(format!("pack download: {e}"));
             match req.call() {
-                Ok(r) if r.status() == 206 => return read_exact(r.into_reader(), len),
+                Ok(r) if r.status() == 206 => return read_exact(r.into_reader(), len).map_err(Attempt::Again),
                 Ok(r) => {
                     let mut rd = r.into_reader();
-                    std::io::copy(&mut (&mut rd).take(off), &mut std::io::sink()).map_err(|e| format!("pack download: {e}"))?;
-                    return read_exact(rd, len);
+                    std::io::copy(&mut (&mut rd).take(off), &mut std::io::sink()).map_err(|e| again(e.to_string()))?;
+                    return read_exact(rd, len).map_err(Attempt::Again);
                 }
                 Err(ureq::Error::Status(403, _)) if !fresh => fresh = true,
-                Err(e) => return Err(format!("pack download: {e}")),
+                Err(ureq::Error::Status(c, _)) if c == 429 || c >= 500 => return Err(again(format!("HTTP {c}"))),
+                Err(ureq::Error::Status(c, _)) => return Err(Attempt::Final(format!("pack download: HTTP {c}"))),
+                Err(e) => return Err(again(e.to_string())),
             }
         }
     }
@@ -594,21 +628,17 @@ pub struct Plan {
     pub entry: Entry,
     pub prefix: Vec<u8>,
     pub variants: Vec<Vec<String>>,
+    pub variant_ids: Vec<String>,
     pub serial: u64,
 }
 
-pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &dyn Broker, run: Runner) -> Result<Option<Plan>, String> {
-    // The signed index's pack for this model and arch, and its manifest's weight files per variant (what to download), only the variant a quant names (id, desc.quant or desc.format, any case). None: no pack.
-    let work = home.join("packs");
-    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
-    let (ix, sg) = (work.join("index.json"), work.join("index.sig"));
-    let raw = broker.index()?;
-    std::fs::write(&ix, &raw).map_err(|e| e.to_string())?;
-    std::fs::write(&sg, broker.index_sig()?).map_err(|e| e.to_string())?;
-    let v = |x: &str| x.to_string();
-    let verified = run(&[v("index"), v("verify"), v("--index"), s(&ix), v("--sig"), s(&sg), v("--last-serial"), last_serial(home).to_string()])?.1;
-    let serial = serde_json::from_str::<Value>(&verified).map_err(|e| format!("index verify: {e}"))?["serial"].as_u64().ok_or("index verify: no serial")?;
-    let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().find(runnable) else { return Ok(None) };
+pub fn variant_max_ctx(prefix: &[u8], variant: &str) -> Option<u64> {
+    // The longest context any bucket of `variant` serves (what `pack show` lists as maxctx), from the manifest in the pack's first bytes: the card's context cap.
+    manifest_of(prefix)?["buckets"].as_array()?.iter().filter(|b| b["variant"].as_str() == Some(variant)).filter_map(|b| b["maxctx"].as_u64()).max()
+}
+
+fn fetch_prefix(broker: &dyn Broker, entry: &Entry) -> Result<(Vec<u8>, usize), String> {
+    // The pack's head, container header and manifest (its first bytes, no weights), the manifest checked against the index entry's hash; and where the manifest starts in them.
     let head = broker.range(&entry.file, 0, 16)?;
     if &head[..8] != b"GCPACK3\n" {
         return Err(format!("{}: not a pack of ABI 3", entry.file));
@@ -625,13 +655,40 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
         return Err(format!("{}: bad manifest range", entry.file));
     }
     let body = broker.range(&entry.file, 16 + n, off + len)?;
+    let at = 16 + n as usize + off as usize;
     let manifest = &body[off as usize..];
     if format!("{:x}", Sha256::digest(manifest)) != entry.manifest_sha256 {
         return Err(format!("{}: manifest differs from the signed index", entry.file));
     }
+    Ok(([head, header, body].concat(), at))
+}
+
+pub fn unverified_prefix(model_id: &str, arch: &str, broker: &dyn Broker) -> Result<Option<(Entry, Vec<u8>)>, String> {
+    // The pack's first bytes by the index as the platform serves it, before goethe-engine exists to verify the index: only for refusing early; anything installed is checked by plan() again.
+    let raw = broker.index()?;
+    let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().find(runnable) else { return Ok(None) };
+    let (prefix, _) = fetch_prefix(broker, &entry)?;
+    Ok(Some((entry, prefix)))
+}
+
+pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &dyn Broker, run: Runner) -> Result<Option<Plan>, String> {
+    // The signed index's pack for this model and arch, and its manifest's weight files per variant (what to download), only the variant a quant names (id, desc.quant or desc.format, any case). None: no pack.
+    let work = home.join("packs");
+    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let (ix, sg) = (work.join("index.json"), work.join("index.sig"));
+    let raw = broker.index()?;
+    std::fs::write(&ix, &raw).map_err(|e| e.to_string())?;
+    std::fs::write(&sg, broker.index_sig()?).map_err(|e| e.to_string())?;
+    let v = |x: &str| x.to_string();
+    let verified = run(&[v("index"), v("verify"), v("--index"), s(&ix), v("--sig"), s(&sg), v("--last-serial"), last_serial(home).to_string()])?.1;
+    let serial = serde_json::from_str::<Value>(&verified).map_err(|e| format!("index verify: {e}"))?["serial"].as_u64().ok_or("index verify: no serial")?;
+    let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().find(runnable) else { return Ok(None) };
+    let (prefix, at) = fetch_prefix(broker, &entry)?;
+    let manifest = &prefix[at..];
     let m: Value = serde_json::from_slice(manifest).map_err(|e| format!("{}: manifest: {e}", entry.file))?;
     let names: Vec<String> = m["model"]["weights"].as_array().into_iter().flatten().map(|w| w["file"].as_str().unwrap_or_default().to_string()).collect();
     let (mut variants, mut all): (Vec<Vec<String>>, Vec<&str>) = (Vec::new(), Vec::new());
+    let mut variant_ids: Vec<String> = Vec::new();
     for (id, var) in m["variants"].as_object().into_iter().flatten() {
         let d = &var["desc"];
         all.push(d["quant"].as_str().unwrap_or(id));
@@ -641,6 +698,7 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
         let files: Vec<String> = var["weights"].as_array().into_iter().flatten().filter_map(|i| names.get(i.as_u64()? as usize).cloned()).collect();
         if !files.is_empty() && files.iter().all(|f| safe_name(f)) && !variants.contains(&files) {
             variants.push(files);
+            variant_ids.push(id.clone());
         }
     }
     if variants.is_empty() {
@@ -649,8 +707,7 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
             None => format!("{}: the manifest names no model files", entry.file),
         });
     }
-    let prefix = [head, header, body].concat();
-    Ok(Some(Plan { entry, prefix, variants, serial }))
+    Ok(Some(Plan { entry, prefix, variants, variant_ids, serial }))
 }
 
 pub fn by_structure(home: &Path, dir: &Path, archs: &[String], broker: &dyn Broker, run: Runner) -> Result<Option<(String, Plan)>, String> {
@@ -949,6 +1006,32 @@ mod tests {
     }
 
     #[test]
+    fn a_transient_pack_failure_is_tried_again_with_one_line_each_and_a_final_one_is_not() {
+        let delays = [Duration::from_secs(1), Duration::from_secs(2)];
+        let (mut said, mut calls) = (Vec::new(), 0);
+        let slept = std::cell::RefCell::new(Vec::new());
+        let got = retry(&delays, &|d| slept.borrow_mut().push(d.as_secs()), &mut |l| said.push(l), || {
+            calls += 1;
+            if calls < 3 { Err(Attempt::Again("pack download: timed out reading response".into())) } else { Ok(calls) }
+        });
+        assert_eq!(got, Ok(3));
+        assert_eq!((said.len(), slept.borrow().clone()), (2, vec![1, 2]));
+        assert!(said[0].ends_with("trying again in 1 s (2 of 3)") && said[1].ends_with("trying again in 2 s (3 of 3)"), "{said:?}");
+        let mut tries = 0;
+        let fin: Result<(), String> = retry(&delays, &|_| {}, &mut |_| {}, || {
+            tries += 1;
+            Err(Attempt::Final("pack download: HTTP 404".into()))
+        });
+        assert_eq!((fin.unwrap_err().as_str(), tries), ("pack download: HTTP 404", 1));
+        let mut all = 0;
+        let out: Result<(), String> = retry(&delays, &|_| {}, &mut |_| {}, || {
+            all += 1;
+            Err(Attempt::Again("pack download: timed out".into()))
+        });
+        assert_eq!((out.is_err(), all), (true, 3), "three tries, then the last error");
+    }
+
+    #[test]
     fn a_platform_response_past_the_cap_is_refused() {
         assert_eq!(read_capped(std::io::repeat(b'x').take(10), 10).unwrap().len(), 10);
         assert!(read_capped(std::io::repeat(b'x'), 1 << 20).unwrap_err().contains("longer than"));
@@ -1003,6 +1086,25 @@ mod tests {
         assert_eq!((arch_runs("sm_90", "9.0"), arch_runs("sm_90", "8.9").is_empty(), arch_runs("compute_80", "9.0")), (String::new(), false, String::new()));
         assert_eq!(arch_runs("sm_100f", "10.3"), "");
         assert!(arch_runs("ptx", "9.0").contains("not sm_XY"));
+    }
+
+    #[test]
+    fn the_pack_manifest_is_known_before_any_engine_exists_and_a_wrong_hash_is_refused() {
+        let manifest = serde_json::json!({"model": {"weights": [{"file": "m-Q8_0.gguf"}]}, "buckets": [bucket("rtx_pro_6000_maxq", "sm_120a", 188)], "variants": {"q8": {"weights": [0]}}}).to_string().into_bytes();
+        let header = serde_json::json!({"manifest": [0, manifest.len()]}).to_string().into_bytes();
+        let mut bytes = b"GCPACK3\n".to_vec();
+        bytes.extend((header.len() as u64).to_le_bytes());
+        bytes.extend(&header);
+        bytes.extend(&manifest);
+        let pack = Pack { bytes, manifest, blob_off: 0 };
+        let index = index_of(&pack, &sha(&pack.manifest));
+        let mut b = Fake { pack, index, tamper: false, refuse: false, ranges: RefCell::new(Vec::new()) };
+        let (entry, prefix) = unverified_prefix("org/m-gguf", "sm_120a", &b).unwrap().unwrap();
+        assert_eq!(entry.file, "m.gcpack");
+        assert_eq!(sku_reqs(&manifest_of(&prefix).unwrap())[0].sms, 188, "the variants come from the first bytes of the pack, no weight fetched");
+        assert!(unverified_prefix("org/other", "sm_120a", &b).unwrap().is_none() && unverified_prefix("org/m-gguf", "sm_90a", &b).unwrap().is_none());
+        b.index = index_of(&b.pack, &"0".repeat(64));
+        assert!(unverified_prefix("org/m-gguf", "sm_120a", &b).unwrap_err().contains("manifest differs"));
     }
 
     #[test]

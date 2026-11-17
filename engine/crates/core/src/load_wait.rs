@@ -25,14 +25,25 @@ pub fn wait_banner(log: &str) -> &'static str {
     }
 }
 
+fn heartbeat(banner: &str, secs: u64) -> String {
+    // One line that says the load is alive: "loading into VRAM, 12 s".
+    format!("{}, {secs} s", banner.trim_end_matches('.').to_lowercase().replacen(", first load on this gpu", "", 1))
+}
+
 pub fn wait_for_instance(instance_id: &str, timeout: Duration) -> Result<(), String> {
     // Poll ps until the instance is RUNNING, printing its notices; a final status or a vanished row ends the wait.
     let log_path = crate::paths::goethe_home().join("logs").join(format!("{instance_id}.log"));
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-    eprintln!("{}", wait_banner(&log));
-    let deadline = Instant::now() + timeout;
+    let banner = wait_banner(&log);
+    eprintln!("{banner}");
+    let (started, mut last) = (Instant::now(), Instant::now());
+    let deadline = started + timeout;
     let mut printed_notices = 0usize;
     while Instant::now() < deadline {
+        if last.elapsed() >= crate::progress::every() {
+            crate::progress::eprint_line(heartbeat(banner, started.elapsed().as_secs()));
+            last = Instant::now();
+        }
         let ps = rpc::call("ps", json!(null)).map_err(rpc::map_daemon_err)?;
         if ps.code == 0 {
             if let Ok(rows) = serde_json::from_str::<serde_json::Value>(&ps.stdout) {
@@ -46,6 +57,8 @@ pub fn wait_for_instance(instance_id: &str, timeout: Duration) -> Result<(), Str
                         }
                         if let Some(notices) = row.get("notices").and_then(|v| v.as_array()) {
                             if notices.len() > printed_notices {
+                                crate::progress::end_line();
+                                last = Instant::now();
                                 for n in notices.iter().skip(printed_notices) {
                                     if let Some(s) = n.as_str() {
                                         let _ = writeln!(io::stderr(), "{s}");
@@ -152,7 +165,7 @@ fn likely_cause(engine: &[String]) -> Option<String> {
             crate::host_compiler::Verdict::TooNew(why) | crate::host_compiler::Verdict::Unusable(why) => why,
         });
     }
-    if has(&["OutOfMemoryError", "CUDA out of memory"]) {
+    if has(&["OutOfMemoryError", "CUDA out of memory", "alloc chain KV: out of memory"]) {
         let loading = has(&["process_weights_after_loading", "load_weights", "Load weight begin"]) && !has(&["Load weight end"]);
         return Some(if loading {
             "the GPU ran out of memory while loading the weights; the model needs more memory than these GPUs have free during loading: split it across more GPUs with --gpu".into()
@@ -176,6 +189,12 @@ fn likely_cause(engine: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_waiting_load_says_it_is_alive() {
+        assert_eq!(heartbeat("Loading into VRAM...", 12), "loading into vram, 12 s");
+        assert_eq!(heartbeat("Building kernels, first load on this GPU...", 40), "building kernels, 40 s");
+    }
 
     #[test]
     fn known_engine_failures_get_a_plain_cause() {

@@ -70,9 +70,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - run: pipx run ruff check goethe tests
-      - run: shellcheck -S warning install.sh engine/tests/accept.sh engine/tests/main_in_dev.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
       - uses: astral-sh/setup-uv@v6
+      - run: uvx ruff@0.17.0 check goethe tests
+      - run: shellcheck -S warning install.sh engine/tests/accept.sh engine/tests/main_in_dev.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
       - name: Style lint (headers, function comments, no dashes or emojis, leak guard, pinned ruff with the repo rules)
         working-directory: engine
         run: python3 tests/lint_style.py
@@ -170,12 +170,74 @@ jobs:
           shared-key: engine-clippy
       - run: cargo clippy --locked --all-targets -- -D warnings
 
+  fresh-user:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          shared-key: engine-dev
+      - name: nginx, which goethe up starts
+        run: sudo apt-get install -y -qq nginx >/dev/null
+      - run: cargo build --locked --features goethe/test-release-key
+      - name: The real binaries as a pristine user, no GPU (fake driver library, package host, platform, Hub mirror, packs and engines)
+        run: python3 tests/e2e_cli.py FreshUser
+
+  user-paths:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          shared-key: engine-dev
+      - run: cargo build --locked --features goethe/test-release-key
+      - name: The other user paths with no GPU (cards, offline, gated, Ctrl-C, fallback, bad index, update)
+        run: python3 tests/e2e_cli.py Matrix
+
+  # Does the end-to-end suite notice the bugs we shipped? Each patch in engine/tests/mutants brings one back; the suite must go red.
+  mutants:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          shared-key: engine-dev
+      - name: nginx, which goethe up starts
+        run: sudo apt-get install -y -qq nginx >/dev/null
+      - run: bash tests/mutants/run.sh
+
   # The one check the main ruleset requires. It needs every other job (package-smoke runs only on main/nightly and is exempt),
   # fails when a job exists that it does not list (a new job cannot be forgotten: add it to `needs`), and accepts a skipped job
   # only when the `changes` flag that gates it is false; a failed `changes` job or any other skip fails it.
   gate:
     if: ${{ always() }}
-    needs: [changes, main-in-dev, python, lint, attribution, ninfer-patch, engine-test, engine-clippy]
+    needs: [changes, main-in-dev, python, lint, attribution, ninfer-patch, engine-test, engine-clippy, fresh-user, user-paths]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -185,13 +247,13 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           listed=$(jq -r 'keys[]' <<<"$NEEDS" | sort)
-          defined=$(awk '/^jobs:/{f=1;next} f&&/^  [a-z0-9-]+:/{gsub(/[ :]/,"");print}' .github/workflows/ci.yml | grep -vxE 'gate|package-smoke' | sort)
+          defined=$(awk '/^jobs:/{f=1;next} f&&/^  [a-z0-9-]+:/{gsub(/[ :]/,"");print}' .github/workflows/ci.yml | grep -vxE 'gate|package-smoke|mutants' | sort)
           [ "$listed" = "$defined" ] || { echo "gate.needs and the jobs of ci.yml differ:"; diff <(echo "$listed") <(echo "$defined"); exit 1; }
           bad=$(jq -r '
             .changes.outputs as $f
             | to_entries[]
             | select(.value.result != "success")
-            | select((.value.result == "skipped" and ((.key == "python" and $f.python != "true") or (.key | IN("engine-test", "engine-clippy") and $f.rust != "true"))) | not)
+            | select((.value.result == "skipped" and ((.key == "python" and $f.python != "true") or (.key | IN("engine-test", "engine-clippy", "fresh-user", "user-paths") and $f.rust != "true"))) | not)
             | "\(.key): \(.value.result)"' <<<"$NEEDS")
           [ -z "$bad" ] || { echo "$bad"; exit 1; }
 
@@ -218,3 +280,20 @@ jobs:
         run: |
           engine/dist/cdn/bin/linux-x86_64/goethe --version
           engine/dist/cdn/bin/linux-x86_64/goethe --help >/dev/null
+      - name: The portable binary refuses a foreign release key planted in the environment (a build trusting the test key would accept it)
+        run: |
+          d="$(mktemp -d)"
+          mkdir "${d}/pkg"
+          openssl ecparam -name prime256v1 -genkey -noout -out "${d}/foreign.key"
+          openssl ec -in "${d}/foreign.key" -pubout -out "${d}/foreign_pub.pem" 2>/dev/null
+          echo 9.9.9 >"${d}/pkg/VERSION"
+          (cd "${d}/pkg" && sha256sum VERSION >SHA256SUMS)
+          openssl dgst -sha256 -sign "${d}/foreign.key" -out "${d}/pkg/SHA256SUMS.sig" "${d}/pkg/SHA256SUMS"
+          python3 -m http.server 18765 --bind 127.0.0.1 --directory "${d}/pkg" >/dev/null 2>&1 &
+          server=$!
+          sleep 1
+          out="$(GOETHE_HOME="${d}/home" GOETHE_RELEASE_PUB="${d}/foreign_pub.pem" GOETHE_PKG_URL=http://127.0.0.1:18765 \
+            engine/dist/cdn/bin/linux-x86_64/goethe update --check 2>&1)" && rc=0 || rc=$?
+          kill "${server}"
+          echo "${out}"
+          [[ "${rc}" -ne 0 && "${out}" == *"never takes its release key from the environment"* ]]

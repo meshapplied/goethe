@@ -22,6 +22,9 @@ case "$1" in
   down) : ;;
   install)
     case "$2" in
+      org/refused27) refusal="nvidia/Qwen3.8-27B-NVFP4 runs only with its kernel pack, and the kernel pack is built for"
+        refusal+=" rtx_pro_6000_maxq (sm_120a, 188 SMs); none runs on NVIDIA GeForce RTX 5090 (cc 12.0, 170 SMs);"
+        echo "${refusal} nothing was downloaded; pass --fallback" >&2; exit 3 ;;
       org/does-not-exist-xyz-123) [[ -n "$FAKE_TRACE" ]] && echo "Traceback (most recent call last):" >&2
         echo "$2: not found on Hugging Face (check the id; add --hf-token if private)" >&2; exit 1 ;;
       orcarouter/OrcaCyber-Nano-1.0) echo "$2 is gated: goethe install $2 --hf-token" >&2; exit 1 ;;
@@ -150,6 +153,13 @@ class Accept(unittest.TestCase):
         cells = {k: v["result"] for k, v in rows.items() if k.startswith("ux/")}
         wanted = ("ux/unknown-id", "ux/gated-no-token", "ux/offline", "ux/interrupt-rerun", "ux/not-logged-in")
         self.assertEqual(cells, {k: "PASS" for k in wanted}, rows)
+
+    def test_the_refusal_of_a_pack_only_model_on_a_card_without_its_pack_is_a_skip_not_a_fail(self):
+        out = self.run_accept("--json", models=("org/refused27",))
+        row = json.loads(out.stdout)["models"][0]
+        self.assertEqual(row["result"], "SKIP", row)
+        self.assertIn("before any download", row["reason"])
+        self.assertEqual(out.returncode, 0)
 
     def test_a_failure_cell_that_prints_a_traceback_fails(self):
         out = self.run_accept("--json", "--ux", extra={"FAKE_TRACE": "1"}, models=("org/plain",), slow_once=True)

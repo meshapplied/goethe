@@ -290,20 +290,27 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     let mut pack_refused = false;
     let declined = match pack_decision(home, opts)? {
         PackDecision::Use(mut choice) => 'packed: {
-            // Only the files the pack was built for, at its pinned revision; the engine layer once, on first use.
-            crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
+            // Only the files the pack was built for, at its pinned revision; a pack no allowed GPU runs is refused from its manifest before anything is installed, the engine layer once, on first use.
             let login = crate::packs::Login(choice.creds.clone());
             let broker = crate::packs::HttpBroker::new(&choice.creds.platform_url, &login);
+            let refuse = |why: String| match pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why, fallback_allowed(opts.fallback)) {
+                Ok(line) => line,
+                Err(refusal) => {
+                    eprintln!("{refusal}");
+                    std::process::exit(3);
+                }
+            };
+            let early = crate::packs::unverified_prefix(&opts.model_id, &choice.offer.arch, &broker).ok().flatten().and_then(|(_, prefix)| sku_refused(home, &prefix));
+            if let Some(why) = early {
+                println!("{}", refuse(why));
+                pack_refused = true;
+                break 'packed false;
+            }
+            crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
             let plan = crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home))?
                 .ok_or_else(|| format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch))?;
             if let Some(why) = refused_before_download(home, &plan, &crate::packs::python_runner(home)) {
-                match pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why, fallback_allowed(opts.fallback)) {
-                    Ok(line) => println!("{line}"),
-                    Err(refusal) => {
-                        eprintln!("{refusal}");
-                        std::process::exit(3);
-                    }
-                }
+                println!("{}", refuse(why));
                 pack_refused = true;
                 break 'packed false;
             }
@@ -335,7 +342,9 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             match (hf::fetch_config_json(&fit_repo, &fit_rev), crate::hw::profile(home)) {
                 (Ok(cfg), Ok(hw)) => {
                     let marlin = pack_marlin_gb(&cfg, &choice.offer.hf_repo, &rev, &files);
-                    println!("{}", pack_fit(&crate::recommend::View::new(home, hw), &cfg, entry.as_ref(), opts, &choice.offer.arch, (bytes(&files), marlin), &card_dir)?);
+                    let cap = plan.variants.iter().position(|v| *v == files).and_then(|i| plan.variant_ids.get(i)).and_then(|id| crate::packs::variant_max_ctx(&plan.prefix, id));
+                    let view = if opts.load { crate::recommend::View::new(home, hw) } else { crate::recommend::View::capacity(home, hw) };
+                    println!("{}", pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: cap }, &card_dir)?);
                 }
                 (Err(e), _) | (_, Err(e)) => eprintln!("note: the per-GPU fit was not checked before the download: {e}"),
             }
@@ -566,33 +575,53 @@ fn pack_marlin_gb(cfg: &Value, repo: &str, rev: &str, files: &[String]) -> f64 {
     bytes as f64 / GIB
 }
 
-fn pack_fit(view: &crate::recommend::View, cfg: &Value, entry: Option<&RegistryModel>, opts: &InstallOpts, arch: &str, (weights_bytes, marlin_gb): (u64, f64), dir: &Path) -> Result<String, String> {
-    // The per-GPU budget goethe load will compute for a kernel-pack model (the pack runtime's own learned rows), from its config and the listed size of its weights, before a weight byte is fetched: refused with what is missing when no GPU set fits, else the fit line with its headroom.
-    let id = &opts.model_id;
-    let facts = model_facts::facts_from_config(cfg, weights_bytes as f64 / GIB, entry.map(|e| e.architecture.as_str()), id)?;
+struct PackWeights {
+    bytes: u64,
+    marlin_gb: f64,
+    ctx_cap: Option<u64>,
+}
+
+fn pack_input(cfg: &Value, entry: Option<&RegistryModel>, opts: &InstallOpts, arch: &str, w: &PackWeights, dir: &Path) -> Result<(crate::chooser::ChooserInput, Option<usize>), String> {
+    // The budget input goethe load will build for this pack model: the card install would write (kernel-pack runtime, its context capped by the pack, the Marlin copy, the compute capabilities of the arch) through the same constructor and memory spec the load uses.
+    let facts = model_facts::facts_from_config(cfg, w.bytes as f64 / GIB, entry.map(|e| e.architecture.as_str()), &opts.model_id)?;
     let vram = vram_estimate(dir, cfg, &facts, &[], "auto");
-    let ctx = opts.ctx.unwrap_or_else(|| entry.and_then(|e| e.effective_max_ctx()).unwrap_or(facts.max_ctx)).min(facts.max_ctx);
-    let input = crate::chooser::ChooserInput {
+    let ctx = opts.ctx.unwrap_or_else(|| entry.and_then(|e| e.effective_max_ctx()).unwrap_or(facts.max_ctx)).min(facts.max_ctx).min(w.ctx_cap.unwrap_or(u64::MAX));
+    let mut card = toml::Table::new();
+    card.insert("kv_cache_dtype".into(), toml::Value::String("auto".into()));
+    card.insert("supported_sm".into(), toml::Value::Array(crate::packs::arch_ccs(arch).into_iter().map(toml::Value::String).collect()));
+    if w.marlin_gb > 0.0 {
+        card.insert("marlin_extra_gb".into(), toml::Value::Float(w.marlin_gb));
+    }
+    let card = toml::Value::Table(card);
+    let installed = crate::chooser::CardFacts {
         static_vram_gb: vram.weights_gb + vram.state_gb,
-        kv_bytes_per_token: vram.kv_bytes_per_token.max(1),
+        kv_bytes_per_token: vram.kv_bytes_per_token,
         num_attention_heads: facts.num_attention_heads,
         num_kv_heads: facts.num_kv_heads,
         attention: facts.attention.clone(),
         max_ctx: facts.max_ctx,
-        ctx,
-        max_conc: opts.max_conc.or(entry.and_then(|e| e.default_max_conc)).unwrap_or(8),
-        marlin_extra_gb: marlin_gb,
-        supported_sm: crate::packs::arch_ccs(arch),
-        memory: entry.and_then(|e| e.memory.clone()),
     };
-    let pinned = opts.tp.or(entry.and_then(|e| e.default_tp)).filter(|t| *t > 0).map(|t| t as usize);
+    let max_conc = opts.max_conc.or(entry.and_then(|e| e.default_max_conc)).unwrap_or(8);
+    let input = crate::chooser::ChooserInput::from_card(installed, &card, crate::memory_spec::installed_from_config(cfg, &card, &[]), ctx, max_conc);
+    Ok((input, opts.tp.or(entry.and_then(|e| e.default_tp)).filter(|t| *t > 0).map(|t| t as usize)))
+}
+
+fn pack_fit(view: &crate::recommend::View, cfg: &Value, entry: Option<&RegistryModel>, opts: &InstallOpts, arch: &str, w: PackWeights, dir: &Path) -> Result<String, String> {
+    // The per-GPU budget goethe load will compute for a kernel-pack model (the pack runtime's own learned rows), from its config and the listed size of its weights, before a weight byte is fetched: refused with what is missing when no GPU set fits, else the fit line with its headroom.
+    let id = &opts.model_id;
+    let (input, pinned) = pack_input(cfg, entry, opts, arch, &w, dir)?;
+    let (loading, memory) = (opts.load, if opts.load { "free now" } else { "in total" });
     let fit = view.fit_as(id, &input, pinned, crate::engine_overhead::PACK_RUNTIME).map_err(|why| {
-        let cards: Vec<String> = view.gpus.iter().map(|g| format!("gpu{} {} {:.1} GB free", g.index, view.hw.gpus.iter().find(|h| h.index == g.index).map_or("", |h| h.name.as_str()), g.free_vram_mb as f64 / 1024.0)).collect();
-        format!("{id} does not fit the allowed GPUs now ({}), so {NOTHING_DOWNLOADED}: {why}. Options: --ctx with a smaller value, free the GPU (goethe gpu shows what uses it), or change which cards are used with goethe gpu --deny or --allow", cards.join(", "))
+        let cards: Vec<String> = view.gpus.iter().map(|g| format!("gpu{} {} {:.1} GB {memory}", g.index, view.hw.gpus.iter().find(|h| h.index == g.index).map_or("", |h| h.name.as_str()), g.free_vram_mb as f64 / 1024.0)).collect();
+        if loading {
+            format!("{id} does not fit the allowed GPUs now ({}), so {NOTHING_DOWNLOADED}: {why}. Stop what is using the GPU (goethe gpu shows what), or use --no-load to download without loading; --ctx with a smaller value or goethe gpu --deny or --allow also change the fit", cards.join(", "))
+        } else {
+            format!("{id} does not fit the allowed GPUs even when they are empty ({}), so {NOTHING_DOWNLOADED}: {why}. Options: --ctx with a smaller value, or more cards with goethe gpu --allow", cards.join(", "))
+        }
     })?;
     let free = fit.gpus.iter().filter_map(|g| view.gpus.iter().find(|x| x.index == *g)).map(|g| g.free_vram_mb as f64 / 1024.0).fold(f64::INFINITY, f64::min);
     let total = fit.need.total();
-    Ok(format!("fit: {}; {total:.1} of {free:.1} GB free, {:.1} GB spare", fit.describe(&input), free - total))
+    Ok(format!("fit: {}; {total:.1} of {free:.1} GB {}, {:.1} GB spare", fit.describe(&input), if loading { "free" } else { "on the card" }, free - total))
 }
 
 fn stale_skip(card: Option<&toml::Table>, force: bool, allow: bool) -> Option<String> {
@@ -1107,11 +1136,22 @@ fn local_devices(home: &Path) -> Vec<crate::packs::Device> {
         .collect()
 }
 
+static NO_REQUIREMENTS_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn say_once(said: &std::sync::atomic::AtomicBool, line: &str) -> bool {
+    // Print a note the first time only; true when it was printed now.
+    let first = !said.swap(true, std::sync::atomic::Ordering::SeqCst);
+    if first {
+        eprintln!("{line}");
+    }
+    first
+}
+
 fn sku_refused(home: &Path, prefix: &[u8]) -> Option<String> {
     // goethe's own check from the pack's manifest (the signed index fixes its hash): no variant runs on any allowed GPU. A manifest that lists no variant requirements is said so once and left to the engine.
     let reqs = crate::packs::sku_reqs(&crate::packs::manifest_of(prefix)?);
     if reqs.is_empty() {
-        eprintln!("note: this pack's manifest lists no per-variant requirements (buckets[].requires: arch, sms), so this GPU is not checked before the download");
+        say_once(&NO_REQUIREMENTS_SAID, "note: this pack's manifest lists no per-variant requirements (buckets[].requires: arch, sms), so this GPU is not checked before the download");
         return None;
     }
     crate::packs::sku_refusal(&reqs, &local_devices(home))
@@ -1189,13 +1229,13 @@ fn pack_failure_line(home: &Path, model_id: &str, log: &str) -> Option<String> {
         return None;
     }
     let why = load_failure(log);
-    Some(if has_plain_weights(&dir) { format!("{why}; {FALLBACK_HINT}") } else { why })
+    Some(if has_plain_weights(&dir) && memory_contention(log).is_none() { format!("{why}; {FALLBACK_HINT}") } else { why })
 }
 
 pub fn unpack_failed(home: &Path, model_id: &str, log: &str) -> Result<bool, String> {
     // A pack that failed to open for any reason: drop it, write the plain card with a pack_skipped note, say why in one line; false when there is no pack or no plain runtime to fall back to.
     let dir = model_dir(home, model_id);
-    if !dir.join(PACK_FILE).is_file() || !has_plain_weights(&dir) {
+    if !dir.join(PACK_FILE).is_file() || !has_plain_weights(&dir) || memory_contention(log).is_some() {
         return Ok(false);
     }
     let why = load_failure(log);
@@ -1220,10 +1260,18 @@ fn has_plain_weights(dir: &Path) -> bool {
 
 type Cause = fn(&str) -> bool;
 
+fn memory_contention(log: &str) -> Option<&str> {
+    // The log line that says the GPU had no memory left for the pack: another process held it, a condition of the moment, not of this machine.
+    log.lines().map(str::trim).find(|l| l.to_ascii_lowercase().contains("out of memory"))
+}
+
 fn load_failure(log: &str) -> String {
-    // Why a pack did not open, in one line: the engine's device refusal, else the first log line naming a known cause, else the last log line.
+    // Why a pack did not open, in one line: the engine's device refusal, else the GPU's memory held by something else, else the first log line naming a known cause, else the last log line.
     if let Some(refusal) = load_refusal(log) {
         return refusal;
+    }
+    if let Some(line) = memory_contention(log) {
+        return format!("not enough free GPU memory now ({}); stop what is using the GPU (goethe gpu shows what) and run it again", line.chars().take(160).collect::<String>());
     }
     let causes: [(Cause, &str); 4] = [
         (|l| l.contains("cannot open shared object file"), "a host library is missing"),
@@ -1981,6 +2029,17 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_that_cannot_open_because_the_gpu_is_busy_says_so_and_is_kept() {
+        let (home, dir) = packed_home();
+        let log = "goethe-engine: pack REFUSED: gc_open -4: alloc chain KV: out of memory\n";
+        let line = pack_failure_line(home.path(), "org/m-GGUF", log).unwrap();
+        assert!(line.starts_with("not enough free GPU memory now (goethe-engine: pack REFUSED: gc_open -4: alloc chain KV: out of memory)"), "{line}");
+        assert!(!line.contains("failed to open") && !line.contains("--fallback"), "memory held by another process is not a fault of the pack: {line}");
+        assert!(!unpack_failed(home.path(), "org/m-GGUF", log).unwrap(), "the pack stays for the next try");
+        assert!(dir.join(PACK_FILE).is_file());
+    }
+
+    #[test]
     fn a_pack_that_fails_to_open_for_any_reason_falls_back_with_one_line() {
         let cases = [
             ("ImportError: libnccl.so.2: cannot open shared object file: No such file or directory\n", "kernel pack failed to open (a host library is missing: ImportError: libnccl.so.2: cannot open shared object file: No such file or directory)"),
@@ -2110,7 +2169,7 @@ mod tests {
 
     fn matched() -> Looked {
         let entry = crate::packs::entries(&offer_index(), &["sm_120a".to_string()], |_| true).remove(0);
-        Ok(Some(("sm_120a".into(), crate::packs::Plan { entry, prefix: Vec::new(), variants: Vec::new(), serial: 7 })))
+        Ok(Some(("sm_120a".into(), crate::packs::Plan { entry, prefix: Vec::new(), variants: Vec::new(), variant_ids: Vec::new(), serial: 7 })))
     }
 
     fn offered(opts: &InstallOpts, creds: Option<crate::platform::Credentials>, archs: &[&str], look: Looked, engine: Result<(), String>) -> (Result<Option<PackChoice>, String>, Vec<&'static str>) {
@@ -2132,6 +2191,13 @@ mod tests {
             },
         );
         (got, calls.into_inner())
+    }
+
+    #[test]
+    fn a_note_about_a_pack_without_requirements_is_said_once_per_install() {
+        let said = std::sync::atomic::AtomicBool::new(false);
+        assert!(say_once(&said, "note: first"));
+        assert!(!say_once(&said, "note: first"), "the second check of the same install stays quiet");
     }
 
     #[test]
@@ -2196,6 +2262,10 @@ mod tests {
         assert!(got.unwrap().is_none() && calls == ["engine", "lookup"], "weights no pack matches: plain runtime");
     }
 
+    fn card_gpu(free_gb: u64) -> crate::hw::GpuState {
+        card(free_gb)
+    }
+
     fn card(free_gb: u64) -> crate::hw::GpuState {
         crate::hw::GpuState {
             index: 0,
@@ -2224,22 +2294,66 @@ mod tests {
     }
 
     #[test]
+    fn a_download_only_install_checks_the_card_not_what_is_free_at_that_moment() {
+        let home = tempfile::tempdir().unwrap();
+        let weights = || PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: Some(4096) };
+        let busy = card(9);
+        let capacity = crate::recommend::View::capacity(home.path(), crate::hw::HardwareState { profiled_at: "t".into(), driver: "t".into(), gpus: vec![busy.clone()], links: vec![], unavailable: vec![], host: None, environment: None });
+        let download_only = InstallOpts { model_id: "org/Transcribe-GGUF".into(), ..Default::default() };
+        let line = pack_fit(&capacity, &llama_cfg(), None, &download_only, "sm_120a", weights(), home.path()).unwrap();
+        assert!(line.contains("of 32.0 GB on the card"), "{line}");
+        let loading = InstallOpts { model_id: "org/Transcribe-GGUF".into(), load: true, ..Default::default() };
+        let err = pack_fit(&view_of(home.path(), busy), &llama_cfg(), None, &loading, "sm_120a", weights(), home.path()).unwrap_err();
+        assert!(err.contains("9.0 GB free now") && err.contains("Stop what is using the GPU") && err.contains("--no-load"), "{err}");
+        let tiny = InstallOpts { model_id: "org/Huge".into(), ..Default::default() };
+        let never = pack_fit(&capacity, &llama_cfg(), None, &tiny, "sm_120a", PackWeights { bytes: 60 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path()).unwrap_err();
+        assert!(never.contains("does not fit the allowed GPUs even when they are empty") && never.contains("32.0 GB in total"), "{never}");
+    }
+
+    #[test]
     fn a_model_that_cannot_fit_one_card_is_refused_before_a_byte_with_what_is_missing() {
         let home = tempfile::tempdir().unwrap();
-        let opts = InstallOpts { model_id: "nvidia/Big-NVFP4".into(), ..Default::default() };
-        let line = pack_fit(&view_of(home.path(), card(31)), &llama_cfg(), None, &opts, "sm_120a", (20 << 30, 0.0), home.path()).unwrap();
+        let opts = InstallOpts { model_id: "nvidia/Big-NVFP4".into(), load: true, ..Default::default() };
+        let line = pack_fit(&view_of(home.path(), card(31)), &llama_cfg(), None, &opts, "sm_120a", PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path()).unwrap();
         assert!(line.starts_with("fit: tp=1 on GPU 0") && line.contains("GB per GPU (weights 20.0 + KV") && line.contains("of 31.0 GB free") && line.contains("GB spare"), "{line}");
-        let err = pack_fit(&view_of(home.path(), card(21)), &llama_cfg(), None, &opts, "sm_120a", (20 << 30, 0.0), home.path()).unwrap_err();
+        let err = pack_fit(&view_of(home.path(), card(21)), &llama_cfg(), None, &opts, "sm_120a", PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path()).unwrap_err();
         for part in ["does not fit the allowed GPUs now", "gpu0 NVIDIA GeForce RTX 5090 21.0 GB free", "nothing was downloaded", "safety margin", "missing", "--ctx", "goethe gpu --deny"] {
             assert!(err.contains(part), "{part}: {err}");
         }
     }
 
     #[test]
+    fn the_install_time_fit_is_the_plan_goethe_load_makes_from_the_card_it_writes() {
+        let cfg = json!({"architectures": ["Qwen3_5ForConditionalGeneration"], "num_hidden_layers": 8, "num_attention_heads": 24, "num_key_value_heads": 4, "head_dim": 256,
+            "full_attention_interval": 4, "layer_types": ["linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention"],
+            "linear_num_value_heads": 48, "linear_num_key_heads": 16, "linear_key_head_dim": 128, "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4, "max_position_embeddings": 262144, "torch_dtype": "bfloat16"});
+        let card: toml::Value = toml::from_str("context_length = 4096\nmax_running_requests = 8\nkv_cache_dtype = \"auto\"\nmarlin_extra_gb = 1.0701003707945347\nruntime = \"goethe-engine\"\nsupported_sm = [\"12.0\"]\n").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("config.json"), cfg.to_string()).unwrap();
+        let opts = InstallOpts { model_id: "nvidia/Big-NVFP4".into(), ..Default::default() };
+        let weights = PackWeights { bytes: 20 << 30, marlin_gb: 1.0701003707945347, ctx_cap: Some(4096) };
+        let (input, _) = pack_input(&cfg, None, &opts, "sm_120a", &weights, home.path()).unwrap();
+        let loaded = crate::chooser::ChooserInput::from_card(
+            crate::chooser::CardFacts { static_vram_gb: input.static_vram_gb, kv_bytes_per_token: input.kv_bytes_per_token, num_attention_heads: input.num_attention_heads, num_kv_heads: input.num_kv_heads, attention: input.attention.clone(), max_ctx: input.max_ctx },
+            &card,
+            crate::memory_spec::installed(home.path(), &card, &[]),
+            card["context_length"].as_integer().unwrap() as u64,
+            card["max_running_requests"].as_integer().unwrap() as u64,
+        );
+        assert_eq!((input.ctx, input.max_conc, input.marlin_extra_gb, &input.supported_sm), (loaded.ctx, loaded.max_conc, loaded.marlin_extra_gb, &loaded.supported_sm), "the card the install would write");
+        assert_eq!(serde_json::to_value(&input.memory).unwrap(), serde_json::to_value(&loaded.memory).unwrap(), "the memory spec of the load");
+        let view = view_of(home.path(), card_gpu(31));
+        let (a, b) = (view.fit_as("nvidia/Big-NVFP4", &input, None, "goethe-engine").unwrap(), view.fit_as("nvidia/Big-NVFP4", &loaded, None, "goethe-engine").unwrap());
+        assert_eq!(a.describe(&input), b.describe(&loaded), "one plan, one number");
+        assert!(a.need.state > 0.1 && a.describe(&input).contains("per-request state"), "the per-request state is in the line: {}", a.describe(&input));
+        assert_eq!(a.ctx, 4096);
+    }
+
+    #[test]
     fn the_pack_fit_ignores_what_llama_cpp_learned_for_the_same_model() {
         let home = tempfile::tempdir().unwrap();
         let opts = InstallOpts { model_id: "nvidia/Big-NVFP4".into(), ctx: Some(4096), ..Default::default() };
-        let spare = |gpu: crate::hw::GpuState| pack_fit(&view_of(home.path(), gpu), &llama_cfg(), None, &opts, "sm_120a", (20 << 30, 0.0), home.path());
+        let spare = |gpu: crate::hw::GpuState| pack_fit(&view_of(home.path(), gpu), &llama_cfg(), None, &opts, "sm_120a", PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path());
         let line = spare(card(31)).unwrap();
         let total: f64 = line.split(" GB per GPU").next().unwrap().rsplit(' ').next().unwrap().parse().unwrap();
         let tight = (total + 1.5 + 0.3).ceil() as u64;
