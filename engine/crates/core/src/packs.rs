@@ -628,7 +628,13 @@ pub struct Plan {
     pub entry: Entry,
     pub prefix: Vec<u8>,
     pub variants: Vec<Vec<String>>,
+    pub variant_ids: Vec<String>,
     pub serial: u64,
+}
+
+pub fn variant_max_ctx(prefix: &[u8], variant: &str) -> Option<u64> {
+    // The longest context any bucket of `variant` serves (what `pack show` lists as maxctx), from the manifest in the pack's first bytes: the card's context cap.
+    manifest_of(prefix)?["buckets"].as_array()?.iter().filter(|b| b["variant"].as_str() == Some(variant)).filter_map(|b| b["maxctx"].as_u64()).max()
 }
 
 fn fetch_prefix(broker: &dyn Broker, entry: &Entry) -> Result<(Vec<u8>, usize), String> {
@@ -682,6 +688,7 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
     let m: Value = serde_json::from_slice(manifest).map_err(|e| format!("{}: manifest: {e}", entry.file))?;
     let names: Vec<String> = m["model"]["weights"].as_array().into_iter().flatten().map(|w| w["file"].as_str().unwrap_or_default().to_string()).collect();
     let (mut variants, mut all): (Vec<Vec<String>>, Vec<&str>) = (Vec::new(), Vec::new());
+    let mut variant_ids: Vec<String> = Vec::new();
     for (id, var) in m["variants"].as_object().into_iter().flatten() {
         let d = &var["desc"];
         all.push(d["quant"].as_str().unwrap_or(id));
@@ -691,6 +698,7 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
         let files: Vec<String> = var["weights"].as_array().into_iter().flatten().filter_map(|i| names.get(i.as_u64()? as usize).cloned()).collect();
         if !files.is_empty() && files.iter().all(|f| safe_name(f)) && !variants.contains(&files) {
             variants.push(files);
+            variant_ids.push(id.clone());
         }
     }
     if variants.is_empty() {
@@ -699,7 +707,7 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
             None => format!("{}: the manifest names no model files", entry.file),
         });
     }
-    Ok(Some(Plan { entry, prefix, variants, serial }))
+    Ok(Some(Plan { entry, prefix, variants, variant_ids, serial }))
 }
 
 pub fn by_structure(home: &Path, dir: &Path, archs: &[String], broker: &dyn Broker, run: Runner) -> Result<Option<(String, Plan)>, String> {
