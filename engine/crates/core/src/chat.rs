@@ -124,6 +124,7 @@ pub(crate) struct Ui {
     pick: usize,
     streaming: bool,
     thinking: bool,
+    waiting: Option<Instant>,
     scroll: usize,
     follow: bool,
     size: (usize, usize),
@@ -131,7 +132,7 @@ pub(crate) struct Ui {
 
 impl Ui {
     pub(crate) fn new(header: String, thinking: bool) -> Ui {
-        Ui { mode: Mode::Typing, back: Mode::Typing, input: Vec::new(), at: 0, entries: Vec::new(), header, picks: Vec::new(), pick: 0, streaming: false, thinking, scroll: 0, follow: true, size: (80, 24) }
+        Ui { mode: Mode::Typing, back: Mode::Typing, input: Vec::new(), at: 0, entries: Vec::new(), header, picks: Vec::new(), pick: 0, streaming: false, thinking, waiting: None, scroll: 0, follow: true, size: (80, 24) }
     }
 
     pub(crate) fn key(&mut self, key: Input) -> Act {
@@ -266,7 +267,7 @@ impl Ui {
         // The scrollback wrapped to the width.
         let mut out = Vec::new();
         let wrap = |text: &str, style: Style, out: &mut Vec<(String, Style)>| out.extend(wrap(&clean(text), width).into_iter().map(|l| (l, style)));
-        for e in &self.entries {
+        for (i, e) in self.entries.iter().enumerate() {
             match e {
                 Entry::User(t) => wrap(&format!("> {t}"), Style::Bold, &mut out),
                 Entry::Vector(t) => wrap(t, Style::Plain, &mut out),
@@ -281,6 +282,10 @@ impl Ui {
                             wrap(&think, Style::Dim, &mut out);
                         }
                         (false, false) => wrap(&format!("thinking ({} words)", think.split_whitespace().count()), Style::Dim, &mut out),
+                    }
+                    let waits = self.waiting.filter(|_| self.streaming && answer.is_empty() && think.is_empty() && i + 1 == self.entries.len());
+                    if let Some(since) = waits {
+                        wrap(&format!("thinking... {} s", since.elapsed().as_secs()), Style::Dim, &mut out);
                     }
                     wrap(&answer, Style::Plain, &mut out);
                 }
@@ -470,6 +475,8 @@ impl State {
         self.ui.entries.push(Entry::Reply(String::new()));
         self.ui.streaming = true;
         let (started, clock) = (SystemTime::now(), Instant::now());
+        self.ui.waiting = Some(clock);
+        draw(&mut self.ui, &mut self.last);
         let mut ttft = None;
         let State { t, ui, msgs, last, .. } = self;
         let result = t.api.chat(&t.model, msgs, &mut |piece| {
@@ -481,6 +488,7 @@ impl State {
             !stop_asked()
         });
         self.ui.streaming = false;
+        self.ui.waiting = None;
         match result {
             Ok(reply) => {
                 self.turns.push(Turn { started, seconds: clock.elapsed().as_secs_f64(), ttft, messages: self.msgs.clone(), reply: reply.clone() });
@@ -611,6 +619,22 @@ mod tests {
         for c in s.chars() {
             ui.key(if c == ' ' { Input::Space } else { Input::Char(c) });
         }
+    }
+
+    #[test]
+    fn a_reply_that_has_shown_nothing_yet_says_the_model_is_thinking_and_for_how_long() {
+        let mut ui = Ui::new("m".into(), false);
+        ui.entries.push(Entry::User("hi".into()));
+        ui.entries.push(Entry::Reply(String::new()));
+        ui.streaming = true;
+        ui.waiting = Some(Instant::now() - Duration::from_secs(25));
+        let shown: Vec<String> = ui.lines(40).into_iter().map(|l| l.0).collect();
+        assert!(shown.contains(&"thinking... 25 s".to_string()), "{shown:?}");
+        ui.entries[1] = Entry::Reply("hello".into());
+        assert!(!ui.lines(40).iter().any(|l| l.0.starts_with("thinking...")), "an answer replaces the indicator");
+        ui.entries[1] = Entry::Reply(String::new());
+        ui.streaming = false;
+        assert!(!ui.lines(40).iter().any(|l| l.0.starts_with("thinking...")), "none once the reply is over");
     }
 
     #[test]
