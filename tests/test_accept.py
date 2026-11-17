@@ -24,7 +24,7 @@ case "$1" in
       org/does-not-exist-xyz-123) [[ -n "$FAKE_TRACE" ]] && echo "Traceback (most recent call last):" >&2
         echo "$2: not found on Hugging Face (check the id; add --hf-token if private)" >&2; exit 1 ;;
       orcarouter/OrcaCyber-Nano-1.0) echo "$2 is gated: goethe install $2 --hf-token" >&2; exit 1 ;;
-      org/offline-probe-xyz) [[ -z "$HTTPS_PROXY" ]] || { echo "cannot reach huggingface.co; check the net" >&2; exit 1; } ;;
+      org/offline-probe-xyz) [[ -z "$HTTPS_PROXY" ]] || { echo "cannot reach the hub; check the net" >&2; exit 1; } ;;
       nvidia/Qwen3.8-27B-NVFP4) [[ -d "$GOETHE_HOME/platform" ]] || { echo "$2: goethe login first" >&2; exit 1; } ;;
       ggml-org/embeddinggemma-2-GGUF:Q8_0) f="$GOETHE_HOME/.slow_once"; [[ ! -f "$f" ]] || { rm -f "$f"; sleep 30; } ;;
       org/noisy) echo "Traceback (most recent call last):" >&2 ;;
