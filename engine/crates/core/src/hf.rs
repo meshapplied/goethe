@@ -275,7 +275,7 @@ pub fn ensure_model(home: &Path, model_id: &str, local_dir: &Path, opts: &Downlo
     disk_preflight(home, bytes_needed(&files, local_dir))?;
     let existed = local_dir.exists();
     fs::create_dir_all(local_dir).map_err(|e| format!("{}: {e}", local_dir.display()))?;
-    if let Err(e) = download_with_retries(home, model_id, local_dir, &revision, &excludes) {
+    if let Err(e) = download_with_retries(home, model_id, local_dir, &revision, &excludes, bytes_missing(&files, local_dir)) {
         drop_empty_new_dir(local_dir, existed);
         return Err(e);
     }
@@ -307,13 +307,16 @@ pub fn is_installed_fast(local_dir: &Path, revision: &str, no_verify: bool) -> b
     no_verify || verify_cache_matches(local_dir)
 }
 
-fn bytes_needed(files: &[&HfSibling], local_dir: &Path) -> u64 {
-    let need: u64 = files
+fn bytes_missing(files: &[&HfSibling], local_dir: &Path) -> u64 {
+    files
         .iter()
         .filter(|s| fs::metadata(local_dir.join(&s.rfilename)).map(|m| m.len() != s.size).unwrap_or(true))
         .map(|s| s.size)
-        .sum();
-    ((need as f64) * 1.05) as u64
+        .sum()
+}
+
+fn bytes_needed(files: &[&HfSibling], local_dir: &Path) -> u64 {
+    ((bytes_missing(files, local_dir) as f64) * 1.05) as u64
 }
 
 fn check_present(local_dir: &Path, files: &[&HfSibling]) -> Result<(), String> {
@@ -355,11 +358,11 @@ pub fn disk_preflight(home: &Path, needed: u64) -> Result<(), String> {
     Ok(())
 }
 
-fn download_with_retries(home: &Path, model_id: &str, local_dir: &Path, revision: &str, excludes: &[String]) -> Result<(), String> {
+fn download_with_retries(home: &Path, model_id: &str, local_dir: &Path, revision: &str, excludes: &[String], total: u64) -> Result<(), String> {
     let delays = [2u64, 5, 10];
     let mut last = String::new();
     for (i, delay) in delays.iter().enumerate() {
-        match run_hf_download(home, model_id, local_dir, revision, excludes) {
+        match run_hf_download(home, model_id, local_dir, revision, excludes, total) {
             Ok(()) => return Ok(()),
             Err(e) if is_auth_error(&e) => return Err(e),
             Err(e) => {
@@ -377,8 +380,8 @@ fn is_auth_error(msg: &str) -> bool {
     msg.contains("gated or private") || msg.contains("401") || msg.contains("403")
 }
 
-pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: &str, excludes: &[String]) -> Result<(), String> {
-    // hf download resumes partial files and is cheap when everything is already present.
+pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: &str, excludes: &[String], total: u64) -> Result<(), String> {
+    // hf download resumes partial files and is cheap when everything is already present; every 5 s a line says how far it is.
     let program = hf_binary(home)?;
     let mut cmd = match python_of_script(&program) {
         Some(python) => {
@@ -407,7 +410,15 @@ pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: 
         Some(t) => cmd.env("HF_TOKEN", t),
         None => cmd.env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1"),
     };
-    let (status, tail) = run_guarded(&mut cmd).map_err(|e| format!("hf download failed to start: {e}"))?;
+    let base = crate::progress::dir_bytes(local_dir);
+    let watched = local_dir.to_path_buf();
+    let ticker = (total > 0).then(|| {
+        eprintln!("downloading {model_id}: {} to fetch", crate::progress::size(total));
+        crate::progress::Ticker::start(model_id, Some(total), crate::progress::INTERVAL, move || crate::progress::dir_bytes(&watched).saturating_sub(base), crate::progress::eprint_line)
+    });
+    let outcome = run_guarded(&mut cmd);
+    drop(ticker);
+    let (status, tail) = outcome.map_err(|e| format!("hf download failed to start: {e}"))?;
     if !status.success() {
         return Err(download_failure(&status, &tail));
     }
@@ -621,7 +632,7 @@ fn verify_model(
         for s in &bad {
             let _ = fs::remove_file(local_dir.join(&s.rfilename));
         }
-        download_with_retries(home, model_id, local_dir, revision, excludes)?;
+        download_with_retries(home, model_id, local_dir, revision, excludes, bad.iter().map(|s| s.size).sum())?;
         let again = hash_all(local_dir, &bad);
         if let Some((name, _)) = again.iter().find(|(_, r)| r.is_err()) {
             return Err(format!("checksum mismatch for {name} after re-download"));

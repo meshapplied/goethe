@@ -1,0 +1,165 @@
+// Byte-based progress lines for long downloads, and the learned warm-up time.
+
+use std::io::Read;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+pub const INTERVAL: Duration = Duration::from_secs(5);
+pub static NET_BYTES: AtomicU64 = AtomicU64::new(0);
+
+pub struct Counted<R>(pub R);
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.0.read(buf)?;
+        NET_BYTES.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+pub fn dir_bytes(dir: &Path) -> u64 {
+    // Every byte under a directory, partial downloads included.
+    std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| match e.metadata() {
+        Ok(m) if m.is_dir() => dir_bytes(&e.path()),
+        Ok(m) => m.len(),
+        Err(_) => 0,
+    }).sum()
+}
+
+pub fn size(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1 << 30 => format!("{:.1} GB", b as f64 / (1u64 << 30) as f64),
+        b => format!("{:.0} MB", b as f64 / (1u64 << 20) as f64),
+    }
+}
+
+fn span(seconds: u64) -> String {
+    match seconds {
+        s if s >= 5400 => format!("{} h", s.div_ceil(3600)),
+        s if s >= 90 => format!("{} min", s.div_ceil(60)),
+        s => format!("{s} s"),
+    }
+}
+
+pub fn line(label: &str, done: u64, total: Option<u64>, bytes_per_s: f64) -> String {
+    // "model: 1.2 GB of 4.7 GB, 85 MB/s, about 41 s left".
+    let rate = format!("{:.0} MB/s", bytes_per_s / (1u64 << 20) as f64);
+    match total {
+        Some(t) if bytes_per_s >= 1.0 && t > done => {
+            format!("{label}: {} of {}, {rate}, about {} left", size(done), size(t), span(((t - done) as f64 / bytes_per_s).ceil() as u64))
+        }
+        Some(t) => format!("{label}: {} of {}, {rate}", size(done.min(t)), size(t)),
+        None => format!("{label}: {}, {rate}", size(done)),
+    }
+}
+
+pub struct Ticker {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Ticker {
+    pub fn start(label: &str, total: Option<u64>, every: Duration, done: impl Fn() -> u64 + Send + 'static, say: impl Fn(String) + Send + 'static) -> Ticker {
+        // One line per interval until dropped, with the rate over the last interval.
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let label = label.to_string();
+        let handle = thread::spawn(move || {
+            let (mut last, mut at) = (done(), Instant::now());
+            while !flag.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(20).min(every));
+                if at.elapsed() < every {
+                    continue;
+                }
+                let now = done();
+                let rate = now.saturating_sub(last) as f64 / at.elapsed().as_secs_f64();
+                say(line(&label, now, total, rate));
+                (last, at) = (now, Instant::now());
+            }
+        });
+        Ticker { stop, handle: Some(handle) }
+    }
+}
+
+impl Drop for Ticker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+pub fn eprint_line(text: String) {
+    eprintln!("{text}");
+}
+
+fn warmup_file(home: &Path) -> std::path::PathBuf {
+    home.join("warmup.json")
+}
+
+pub fn warmup_secs(home: &Path, model_id: &str) -> Option<u64> {
+    // How long this model's last warm-up request took.
+    let text = std::fs::read_to_string(warmup_file(home)).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text).ok()?[model_id].as_u64()
+}
+
+pub fn record_warmup(home: &Path, model_id: &str, secs: u64) {
+    let mut all: serde_json::Value = std::fs::read_to_string(warmup_file(home)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| serde_json::json!({}));
+    all[model_id] = secs.into();
+    let _ = std::fs::write(warmup_file(home), all.to_string());
+}
+
+pub fn warmup_notice(home: &Path, model_id: &str) -> String {
+    match warmup_secs(home, model_id) {
+        Some(s) => format!("warming up kernels with one request, about {} (as last time)", span(s.max(1))),
+        None => "warming up kernels with one request (the first time can take a few minutes)".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn the_line_has_sizes_rate_and_eta() {
+        let gb = 1u64 << 30;
+        let mb = 1u64 << 20;
+        assert_eq!(line("model", gb, Some(3 * gb), 100.0 * mb as f64), "model: 1.0 GB of 3.0 GB, 100 MB/s, about 21 s left");
+        assert_eq!(line("pack", 10 * mb, Some(12 * gb), 1.0 * mb as f64), "pack: 10 MB of 12.0 GB, 1 MB/s, about 4 h left");
+        assert_eq!(line("pack", 5 * mb, None, 0.0), "pack: 5 MB, 0 MB/s");
+        assert_eq!(line("pack", 9 * gb, Some(3 * gb), 0.0), "pack: 3.0 GB of 3.0 GB, 0 MB/s");
+    }
+
+    #[test]
+    fn the_ticker_says_a_line_every_interval_and_stops_on_drop() {
+        let n = Arc::new(AtomicU64::new(0));
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let (counter, sink) = (n.clone(), lines.clone());
+        let t = Ticker::start("x", Some(10 << 20), Duration::from_millis(60), move || counter.fetch_add(1 << 20, Ordering::Relaxed), move |l| sink.lock().unwrap().push(l));
+        thread::sleep(Duration::from_millis(400));
+        drop(t);
+        let seen = lines.lock().unwrap().len();
+        assert!((3..=8).contains(&seen), "{seen}");
+        thread::sleep(Duration::from_millis(150));
+        assert_eq!(lines.lock().unwrap().len(), seen, "no line after the drop");
+    }
+
+    #[test]
+    fn a_directory_counts_partial_files_and_the_warmup_is_remembered() {
+        let d = std::env::temp_dir().join(format!("goethe-progress-{}", std::process::id()));
+        std::fs::create_dir_all(d.join(".cache/dl")).unwrap();
+        std::fs::write(d.join("a"), [0u8; 10]).unwrap();
+        std::fs::write(d.join(".cache/dl/b.incomplete"), [0u8; 5]).unwrap();
+        assert_eq!(dir_bytes(&d), 15);
+        assert!(warmup_notice(&d, "m").contains("first time"));
+        record_warmup(&d, "m", 42);
+        assert_eq!(warmup_secs(&d, "m"), Some(42));
+        assert!(warmup_notice(&d, "m").contains("about 42 s"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

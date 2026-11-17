@@ -144,7 +144,7 @@ fn read_capped(r: impl Read, max: u64) -> Result<Vec<u8>, String> {
 
 fn read_exact(r: impl Read, len: u64) -> Result<Vec<u8>, String> {
     let mut v = Vec::with_capacity(len.min(1 << 26) as usize);
-    r.take(len).read_to_end(&mut v).map_err(|e| format!("pack download: {e}"))?;
+    crate::progress::Counted(r).take(len).read_to_end(&mut v).map_err(|e| format!("pack download: {e}"))?;
     if v.len() as u64 != len {
         return Err(format!("pack download: {} of {len} bytes", v.len()));
     }
@@ -693,7 +693,15 @@ pub fn finish_as(
                 missing.push(r.clone());
             }
         }
-        for (o, l) in merged(missing.iter().map(|(o, l, ..)| (*o, *l)).collect()) {
+        let runs = merged(missing.iter().map(|(o, l, ..)| (*o, *l)).collect());
+        let total: u64 = runs.iter().map(|(_, l)| *l).sum();
+        let started_at = crate::progress::NET_BYTES.load(std::sync::atomic::Ordering::Relaxed);
+        let ticker = (total > 0).then(|| {
+            eprintln!("downloading the kernel pack: {} to fetch", crate::progress::size(total));
+            let counted = move || crate::progress::NET_BYTES.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(started_at);
+            crate::progress::Ticker::start("kernel pack", Some(total), crate::progress::INTERVAL, counted, crate::progress::eprint_line)
+        });
+        for (o, l) in runs {
             delta.fetched += l;
             let bytes = broker.range(&e.file, o, l).map_err(undo)?;
             for (ro, rl, h, _) in missing.iter().filter(|(ro, rl, _, stored)| *stored && *ro >= o && ro + rl <= o + l) {
@@ -704,6 +712,7 @@ pub fn finish_as(
             }
             f.seek(SeekFrom::Start(o)).and_then(|_| f.write_all(&bytes)).map_err(|err| undo(err.to_string()))?;
         }
+        drop(ticker);
         f.sync_all().map_err(|err| undo(err.to_string()))?;
     }
     let mut ok = verify().map_err(undo)?.1;
