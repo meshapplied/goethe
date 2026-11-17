@@ -115,6 +115,7 @@ class Accept(unittest.TestCase):
             doc = json.loads(out.stdout)
             self.assertEqual([m["home"] for m in doc["models"]], ["fresh", "fresh"])
             self.assertEqual((doc["pass"], doc["fail"]), (2, 0))
+            self.assertNotIn("syntax error", out.stderr, "the flag and the home path are different variables")
             self.assertEqual(len(out.started), 2, "goethe started once per cell")
             self.assertTrue(all(h.startswith(root) and h != out.warm for h in out.started), out.started)
             self.assertEqual(list(Path(root).iterdir()), [], "the throwaway homes are gone")

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import tempfile
@@ -46,13 +47,13 @@ def main() -> None:
     srv: ThreadingHTTPServer | None = None
     try:
         key, pub = make_release_key(work / "keys")
+        os.environ["GOETHE_RELEASE_PUB"] = str(pub)
         cdn = work / "cdn"
         _cdn_tree(cdn)
         sign_cdn_tree(cdn, key, "9.9.9-test")
         srv = ThreadingHTTPServer(("127.0.0.1", 0), partial(SimpleHTTPRequestHandler, directory=str(cdn)))
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         with temp_home(stub_python=True, tag="engine") as home:
-            shutil.copy(pub, home / "release_pub.pem")
             rr = run(
                 [str(goethe), "update", "--engine", "--yes"],
                 env={"GOETHE_HOME": str(home), "GOETHE_PKG_URL": f"http://127.0.0.1:{srv.server_address[1]}"},
@@ -70,7 +71,6 @@ def main() -> None:
             if f"LAYER=sglang GOETHE_SGLANG_WHEEL={wheel}" not in text:
                 raise RuntimeError(f"bootstrap did not receive the sglang layer and wheel path: {text!r}")
         with temp_home(stub_python=True, tag="engine") as home:
-            shutil.copy(pub, home / "release_pub.pem")
             shutil.rmtree(home / "py-env/lib/python3.11/site-packages/sglang-0.0.0+stub.dist-info")
             rr = run(
                 [str(goethe), "update", "--engine", "--yes"],

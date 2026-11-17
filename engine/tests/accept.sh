@@ -347,22 +347,22 @@ ux_cells() {
 
 fresh_open() {
   # A throwaway home with the login cloned from a linked one and no engine environment; goethe is started in it on its own ports.
-  FRESH="$(mktemp -d "${ACCEPT_FRESH_ROOT:-${TMPDIR:-/tmp}}/goethe-accept-XXXXXX")" || return 1
-  mkdir -p "${FRESH}/models" "${FRESH}/nginx"
-  [[ -z "${NOLOGIN:-}" ]] && cp -a "${ACCEPT_LOGIN_HOME}/platform" "${FRESH}/platform"
+  FRESH_HOME="$(mktemp -d "${ACCEPT_FRESH_ROOT:-${TMPDIR:-/tmp}}/goethe-accept-XXXXXX")" || return 1
+  mkdir -p "${FRESH_HOME}/models" "${FRESH_HOME}/nginx"
+  [[ -z "${NOLOGIN:-}" ]] && cp -a "${ACCEPT_LOGIN_HOME}/platform" "${FRESH_HOME}/platform"
   python3 -c 'import socket
 for _ in range(2):
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
-    print(s.getsockname()[1])' | { read -r mux; read -r pub; echo "${mux}" >"${FRESH}/nginx/mux_port"; echo "${pub}" >"${FRESH}/nginx/public_port"; }
+    print(s.getsockname()[1])' | { read -r mux; read -r pub; echo "${mux}" >"${FRESH_HOME}/nginx/mux_port"; echo "${pub}" >"${FRESH_HOME}/nginx/public_port"; }
   OUTER_HOME="${GOETHE_HOME-}"
-  export GOETHE_HOME="${FRESH}" GOETHE_NO_AUTOSTART=1 GOETHE_SYSTEMD_USER_UNIT_DIR="${FRESH}/systemd-user" GOETHE_SYSTEMD_UNIT_DIR="${FRESH}/systemd-system"
+  export GOETHE_HOME="${FRESH_HOME}" GOETHE_NO_AUTOSTART=1 GOETHE_SYSTEMD_USER_UNIT_DIR="${FRESH_HOME}/systemd-user" GOETHE_SYSTEMD_UNIT_DIR="${FRESH_HOME}/systemd-system"
   g up --no-boot >/dev/null 2>>"${WORK}/err"
 }
 
 fresh_close() {
   g down >/dev/null 2>&1
-  [[ "${FRESH}" == *goethe-accept-* ]] && rm -rf "${FRESH}"
+  [[ "${FRESH_HOME}" == *goethe-accept-* ]] && rm -rf "${FRESH_HOME}"
   if [[ -n "${OUTER_HOME}" ]]; then export GOETHE_HOME="${OUTER_HOME}"; else unset GOETHE_HOME; fi
 }
 

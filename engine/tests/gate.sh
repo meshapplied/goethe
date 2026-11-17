@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-USAGE="usage: gate.sh <0..6|all> [--strict] [--only <file>]"
+USAGE="usage: gate.sh <0..6|all> [--strict] [--only <file>]; GOETHE_GATE_PROFILE=debug uses the dev build, GOETHE_GATE_CARGO_CHECKS=0 skips the test, clippy and style steps"
 STAGE="${1:?${USAGE}}"
 shift || true
 STRICT=0
@@ -38,6 +38,10 @@ export PYTHONPATH="${GOETHE_PKG}/tests${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONDONTWRITEBYTECODE=1
 export GOETHE_TEST_GPUS="${GOETHE_TEST_GPUS:-2,3}"
 export GOETHE_NO_AUTOSTART=1
+PROFILE="${GOETHE_GATE_PROFILE:-release}"
+CARGO_CHECKS="${GOETHE_GATE_CARGO_CHECKS:-1}"
+PROFILE_FLAG=(--release)
+[[ "${PROFILE}" == debug ]] && PROFILE_FLAG=()
 TEST_TIMEOUT="${GOETHE_TEST_TIMEOUT:-2400}"
 
 GATE_TMP="$(mktemp -d "/tmp/goethe-test-${GOETHE_GATE_RUN_ID}-gate-XXXXXX")"
@@ -121,10 +125,12 @@ build_step() {
     record "step0 sources" FAIL 0 "no Cargo.toml in ${GOETHE_PKG}"
     return 1
   fi
-  cargo_step "cargo build" cargo build -j 12 --release --locked || return 1
-  cargo_step "cargo test" cargo test -j 12 --workspace --release --locked -- --test-threads 4 || true
-  cargo_step "cargo clippy" cargo clippy -j 12 --workspace --release --all-targets --locked -- -D warnings || true
-  export GOETHE_BIN_DIR="${GOETHE_BIN_DIR:-${GOETHE_PKG}/target/release}"
+  cargo_step "cargo build" cargo build -j 12 "${PROFILE_FLAG[@]}" --locked --features goethe/test-release-key || return 1
+  if [[ "${CARGO_CHECKS}" == 1 ]]; then
+    cargo_step "cargo test" cargo test -j 12 --workspace --release --locked -- --test-threads 4 || true
+    cargo_step "cargo clippy" cargo clippy -j 12 --workspace --release --all-targets --locked -- -D warnings || true
+  fi
+  export GOETHE_BIN_DIR="${GOETHE_BIN_DIR:-${GOETHE_PKG}/target/${PROFILE}}"
   local b stale
   for b in goethe goethed; do
     if [[ ! -x "${GOETHE_BIN_DIR}/${b}" ]]; then
@@ -215,15 +221,17 @@ if build_step; then
   done
 fi
 
-set +e
-"${PY}" "${GOETHE_PKG}/tests/lint_style.py" "${GOETHE_PKG}" >"${GATE_TMP}/lint.txt" 2>&1
-lint_rc=$?
-set -e
-if [[ ${lint_rc} -eq 0 ]]; then
-  record "lint_style" PASS 0 ""
-else
-  record "lint_style" FAIL 0 "$(head -3 "${GATE_TMP}/lint.txt" | tr '\n' ' ')"
-  head -20 "${GATE_TMP}/lint.txt"
+if [[ "${CARGO_CHECKS}" == 1 ]]; then
+  set +e
+  "${PY}" "${GOETHE_PKG}/tests/lint_style.py" "${GOETHE_PKG}" >"${GATE_TMP}/lint.txt" 2>&1
+  lint_rc=$?
+  set -e
+  if [[ ${lint_rc} -eq 0 ]]; then
+    record "lint_style" PASS 0 ""
+  else
+    record "lint_style" FAIL 0 "$(head -3 "${GATE_TMP}/lint.txt" | tr '\n' ' ')"
+    head -20 "${GATE_TMP}/lint.txt"
+  fi
 fi
 
 printf '%-30s %-8s %8s %s\n' "TEST" "STATUS" "SEC" "NOTE"

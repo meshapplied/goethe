@@ -14,6 +14,31 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.flags.outputs.rust }}
+      python: ${{ steps.flags.outputs.python }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: What the pull request touches (anything else than a pull request runs everything)
+        id: flags
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          rust=true python=true
+          if [[ -n "${BASE}" ]]; then
+            files="$(git diff --name-only "${BASE}" HEAD)"
+            grep -qE '^(engine/|\.github/)' <<<"${files}" || rust=false
+            grep -qE '^(goethe/|tests/|pyproject|requirements|\.github/)' <<<"${files}" || python=false
+          fi
+          echo "rust=${rust}" >>"${GITHUB_OUTPUT}"
+          echo "python=${python}" >>"${GITHUB_OUTPUT}"
+          echo "rust=${rust} python=${python}"
+
   main-in-dev:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -25,6 +50,8 @@ jobs:
         run: bash engine/tests/main_in_dev.sh origin/main origin/dev
 
   python:
+    needs: changes
+    if: ${{ needs.changes.outputs.python == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -45,6 +72,13 @@ jobs:
       - uses: actions/checkout@v4
       - run: pipx run ruff check goethe tests
       - run: shellcheck -S warning install.sh engine/tests/accept.sh engine/tests/main_in_dev.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
+      - uses: astral-sh/setup-uv@v6
+      - name: Style lint (headers, function comments, no dashes or emojis, leak guard, pinned ruff with the repo rules)
+        working-directory: engine
+        run: python3 tests/lint_style.py
+      - name: Shell syntax of installer and packaging scripts
+        working-directory: engine
+        run: for f in cdn/install.sh packaging/*.sh tests/gate.sh tests/*.sh; do bash -n "$f"; done
 
   attribution:
     runs-on: ubuntu-24.04
@@ -91,6 +125,8 @@ jobs:
           git -C ninfer apply --check "$GITHUB_WORKSPACE/nvfp4-kernels/patches/openai-tool-name-128.patch"
 
   engine-test:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -103,10 +139,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
-          shared-key: engine-test
+          shared-key: engine-dev
       - run: cargo test --locked
+      - run: cargo build --locked --features goethe/test-release-key
+      - name: CPU gates (harness self-test, package signing and verification) on the dev build
+        env:
+          GOETHE_TEST_GPUS: ""
+          GOETHE_NO_AUTOSTART: "1"
+          GOETHE_GATE_PROFILE: debug
+          GOETHE_GATE_CARGO_CHECKS: "0"
+        run: |
+          bash tests/gate.sh 0
+          bash tests/gate.sh 6 --only stage6_integrity.py
 
   engine-clippy:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -122,37 +170,30 @@ jobs:
           shared-key: engine-clippy
       - run: cargo clippy --locked --all-targets -- -D warnings
 
-  engine-gates:
+  # The one check the main ruleset requires. It needs every other job (package-smoke runs only on main/nightly and is exempt),
+  # fails when a job exists that it does not list (a new job cannot be forgotten: add it to `needs`), and accepts a skipped job
+  # only when the `changes` flag that gates it is false; a failed `changes` job or any other skip fails it.
+  gate:
+    if: ${{ always() }}
+    needs: [changes, main-in-dev, python, lint, attribution, ninfer-patch, engine-test, engine-clippy]
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: engine
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Rust toolchain from rust-toolchain.toml
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: engine
-          shared-key: engine-release
-      - run: cargo build --release --locked
-      - name: The release binaries run on a stock runner
-        run: |
-          target/release/goethe --version
-          target/release/goethe --help >/dev/null
-      - uses: astral-sh/setup-uv@v6
-      - name: Style lint (headers, function comments, no dashes or emojis, leak guard, pinned ruff with the repo rules)
-        run: python3 tests/lint_style.py
-      - name: Shell syntax of installer and packaging scripts
-        run: for f in cdn/install.sh packaging/*.sh tests/gate.sh tests/*.sh; do bash -n "$f"; done
-      - name: CPU gates (harness self-test, package signing and verification)
+      - name: Every job passed (or was skipped for a false flag) and every job is listed
         env:
-          GOETHE_TEST_GPUS: ""
-          GOETHE_NO_AUTOSTART: "1"
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          bash tests/gate.sh 0
-          bash tests/gate.sh 6 --only stage6_integrity.py
+          listed=$(jq -r 'keys[]' <<<"$NEEDS" | sort)
+          defined=$(awk '/^jobs:/{f=1;next} f&&/^  [a-z0-9-]+:/{gsub(/[ :]/,"");print}' .github/workflows/ci.yml | grep -vxE 'gate|package-smoke' | sort)
+          [ "$listed" = "$defined" ] || { echo "gate.needs and the jobs of ci.yml differ:"; diff <(echo "$listed") <(echo "$defined"); exit 1; }
+          bad=$(jq -r '
+            .changes.outputs as $f
+            | to_entries[]
+            | select(.value.result != "success")
+            | select((.value.result == "skipped" and ((.key == "python" and $f.python != "true") or (.key | IN("engine-test", "engine-clippy") and $f.rust != "true"))) | not)
+            | "\(.key): \(.value.result)"' <<<"$NEEDS")
+          [ -z "$bad" ] || { echo "$bad"; exit 1; }
 
   package-smoke:
     runs-on: ubuntu-24.04
