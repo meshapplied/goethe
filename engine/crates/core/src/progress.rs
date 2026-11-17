@@ -20,6 +20,23 @@ impl<R: Read> Read for Counted<R> {
     }
 }
 
+pub fn weights_in(dir: &Path) -> (usize, u64) {
+    // The files of a model directory and their bytes; the downloader's hidden bookkeeping is not counted.
+    let mut found = (0, 0);
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let hidden = e.file_name().to_string_lossy().starts_with('.');
+        match e.metadata() {
+            Ok(m) if m.is_dir() && !hidden => {
+                let inner = weights_in(&e.path());
+                found = (found.0 + inner.0, found.1 + inner.1);
+            }
+            Ok(m) if m.is_file() && !hidden => found = (found.0 + 1, found.1 + m.len()),
+            _ => {}
+        }
+    }
+    found
+}
+
 pub fn dir_bytes(dir: &Path) -> u64 {
     // Every byte under a directory, partial downloads included.
     std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| match e.metadata() {
@@ -90,12 +107,36 @@ impl Drop for Ticker {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
+        if UPDATING.swap(false, Ordering::Relaxed) {
+            eprintln!();
+        }
+    }
+}
+
+pub fn every() -> Duration {
+    cadence(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+}
+
+fn cadence(tty: bool) -> Duration {
+    // One updating line a second on a terminal, one plain line every 5 s otherwise.
+    if tty {
+        Duration::from_secs(1)
+    } else {
+        INTERVAL
     }
 }
 
 pub fn eprint_line(text: String) {
-    eprintln!("{text}");
+    // Rewrites the line in place on a terminal; the Ticker ends it with a newline.
+    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        eprint!("\r\x1b[2K{text}");
+        UPDATING.store(true, Ordering::Relaxed);
+    } else {
+        eprintln!("{text}");
+    }
 }
+
+static UPDATING: AtomicBool = AtomicBool::new(false);
 
 fn warmup_file(home: &Path) -> std::path::PathBuf {
     home.join("warmup.json")
@@ -133,6 +174,12 @@ mod tests {
         assert_eq!(line("pack", 10 * mb, Some(12 * gb), 1.0 * mb as f64), "pack: 10 MB of 12.0 GB, 1 MB/s, about 4 h left");
         assert_eq!(line("pack", 5 * mb, None, 0.0), "pack: 5 MB, 0 MB/s");
         assert_eq!(line("pack", 9 * gb, Some(3 * gb), 0.0), "pack: 3.0 GB of 3.0 GB, 0 MB/s");
+    }
+
+    #[test]
+    fn off_a_terminal_a_line_comes_every_5_seconds() {
+        assert_eq!(cadence(false), Duration::from_secs(5));
+        assert_eq!(cadence(true), Duration::from_secs(1), "a terminal's single line updates each second");
     }
 
     #[test]
