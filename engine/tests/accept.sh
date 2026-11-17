@@ -69,7 +69,7 @@ ux_note() {
   UX_WALL="$(awk -v a="${UX_WALL}" -v b="${U_WALL}" 'BEGIN { printf "%.1f", a + b }')"
   UX_GAP="$(awk -v a="${UX_GAP}" -v b="${U_GAP}" 'BEGIN { printf "%.1f", (b > a ? b : a) }')"
   UX_ERRN=$((UX_ERRN + U_ERR))
-  [[ "$1" == install ]] && UX_LINES=$((U_OUT + U_ERR))
+  [[ "$1" == install ]] && UX_LINES=$(cat "${WORK}/xg.out" "${WORK}/xg.err" | grep -cvE '^[^ ]+: [0-9.]+ (MB|GB)[ ,]')
   grep -qE "${UXBAD}" "${WORK}/xg.out" "${WORK}/xg.err" && UX_TRACE=1
   if [[ "$1" == install ]] && awk -v n="${need:-0}" -v b="${UXBIG}" 'BEGIN { exit !(n > b) }' && ! cat "${WORK}/xg.out" "${WORK}/xg.err" | grep -qE '[0-9]+(\.[0-9]+)? ?(GB|MB)'; then
     UX_UNANN=1
