@@ -44,7 +44,8 @@ case "$1" in
         echo 'runtime = "llama.cpp"' > "$d/goethe_card.toml" ;;
       org/lost) echo "installing the optimised kernels for sm_120a ..."
         echo 'runtime = "llama.cpp"' > "$d/goethe_card.toml" ;;
-      org/noisy | org/slow | org/chatty | org/big | org/biggood | org/wordy) echo 'runtime = "llama.cpp"' > "$d/goethe_card.toml" ;;
+      org/noisy | org/slow | org/chatty | org/big | org/biggood | org/wordy)
+        echo 'runtime = "llama.cpp"' > "$d/goethe_card.toml" ;;
       local/accept) echo "installing the optimised kernels for sm_120a ..."
         echo "runtime = \"${FAKE_LOCAL_RUNTIME:-goethe-engine}\"" > "$d/goethe_card.toml" ;;
     esac ;;
