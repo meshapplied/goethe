@@ -74,6 +74,15 @@ pub fn line(label: &str, done: u64, total: Option<u64>, bytes_per_s: f64) -> Str
     }
 }
 
+pub fn spaced(every: Duration, running: Duration) -> Duration {
+    // A plain-line cadence (5 s) widens to 8 s after the first minute, so a long download stays near one line per 8 s; a terminal's 1 s line does not change.
+    if every >= INTERVAL && running > Duration::from_secs(60) {
+        Duration::from_secs(8)
+    } else {
+        every
+    }
+}
+
 pub struct Ticker {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
@@ -87,10 +96,10 @@ impl Ticker {
         ACTIVE.fetch_add(1, Ordering::Relaxed);
         let label = label.to_string();
         let handle = thread::spawn(move || {
-            let (mut last, mut at) = (done(), Instant::now());
+            let (mut last, mut at, began) = (done(), Instant::now(), Instant::now());
             while !flag.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(20).min(every));
-                if at.elapsed() < every {
+                if at.elapsed() < spaced(every, began.elapsed()) {
                     continue;
                 }
                 let now = done();
@@ -247,6 +256,14 @@ mod tests {
         drop(beat);
         let seen = lines.lock().unwrap().clone();
         assert!(seen.len() >= 3 && seen[0] == "starting the engine, 0 s", "{seen:?}");
+    }
+
+    #[test]
+    fn plain_lines_slow_down_after_the_first_minute_and_a_terminal_line_does_not() {
+        let (s, m) = (Duration::from_secs, Duration::from_secs(61));
+        assert_eq!(spaced(s(5), s(30)), s(5));
+        assert_eq!(spaced(s(5), m), s(8));
+        assert_eq!(spaced(s(1), m), s(1));
     }
 
     #[test]
