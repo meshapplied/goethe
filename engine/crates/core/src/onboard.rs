@@ -1,4 +1,4 @@
-// goethe start: a guided first run (install a model, serve it through the API, set up access) and an advanced track.
+// goethe: a guided first run (install a model, serve it through the API, set up access) and an advanced track.
 
 use crate::configure::{self, ApiOpts};
 use crate::install::{self, InstallOpts};
@@ -79,7 +79,7 @@ fn not_ready_text(blocking: &[String]) -> String {
     format!(
         "Goethe cannot serve models on this machine yet:\n\n{}\n\n{}",
         list.join("\n"),
-        term::commands("Fix it, then check and start again:", &["goethe doctor", "goethe start"])
+        term::commands("Fix it, then check and start again:", &["goethe doctor", "goethe"])
     )
 }
 
@@ -158,7 +158,7 @@ fn pick_installed(installed: &[String]) -> Result<Option<String>, String> {
 fn install_from_catalog() -> Result<Option<String>, String> {
     // Catalog models that fit the allowed GPUs, then a free Hugging Face id, then a gated or private one with a token.
     let home = goethe_home();
-    let hw = crate::placement::load_hw(&home).ok_or("no hardware profile; run goethe hw profile")?;
+    let hw = crate::placement::load_hw(&home).ok_or("no hardware profile; run goethe doctor --hardware")?;
     let view = crate::recommend::View::capacity(&home, hw);
     let reg = crate::registry::fetch(&crate::registry::registry_url())?;
     let mut fits = crate::recommend::recommend(&home, &view, &reg).recommended;
@@ -328,7 +328,7 @@ fn ready_text(api: &str, model: &str, token: &str) -> String {
          or trust $GOETHE_HOME/nginx/certs/server.crt.\n\n{}",
         paint("Your API is ready", Color::Bold),
         term::commands("Try it:", &[&curl]),
-        term::commands("See all models and keys, or add, scope and delete keys:", &["goethe api", "goethe api manage"])
+        term::commands("See all models and keys, or add, scope and delete keys:", &["goethe api", "goethe api keys"])
     )
 }
 
@@ -420,7 +420,7 @@ fn new_model(before: &[String]) -> Option<String> {
 fn later_text(model: Option<&str>) -> String {
     // How to pick up where the user stopped.
     let load = model.map(|m| format!("goethe load {m}"));
-    let mut lines = vec!["goethe start"];
+    let mut lines = vec!["goethe"];
     if let Some(l) = load.as_deref() {
         lines.push(l);
     }
@@ -439,10 +439,10 @@ pub fn suggested(offline: bool) -> String {
 fn no_terminal_text(example: &str) -> String {
     // The same three steps as commands, for scripts and terminals without arrow keys.
     format!(
-        "goethe start needs an interactive terminal. The same steps as commands:\n\n{}\n{}\n{}",
+        "Running goethe alone needs an interactive terminal. The same steps as commands:\n\n{}\n{}\n{}",
         term::commands("Step 1/3  Install a model:", &["goethe up", "goethe models recommend", &format!("goethe install {example}")]),
         term::commands("Step 2/3  Serve through an API:", &[&format!("goethe load {example}")]),
-        term::commands("Step 3/3  Configure API access:", &["goethe api configure", "goethe api manage"])
+        term::commands("Step 3/3  Configure API access:", &["goethe api expose vpn", "goethe api keys"])
     )
 }
 
@@ -457,7 +457,7 @@ mod tests {
         assert!(text.contains("-H \"Authorization: Bearer goethe_sk_abc\""), "{text}");
         assert!(text.contains("\"model\": \"org/m\""), "{text}");
         assert!(!text.contains("<key>"));
-        assert!(text.ends_with("\t\u{2192} goethe api\n\t\u{2192} goethe api manage\n"), "{text}");
+        assert!(text.ends_with("\t\u{2192} goethe api\n\t\u{2192} goethe api keys\n"), "{text}");
     }
 
     #[test]

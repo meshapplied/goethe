@@ -52,23 +52,23 @@ def _listing(home: Path) -> list[str]:
 def _check_remove(goethe: Path, home: Path, env: dict[str, str]) -> None:
     """Managed copies are deleted, in-place folders are kept with an rm hint, bad ids change nothing."""
     managed_src = _tree(home / "src", "managed")
-    run_goethe([str(goethe), "install", "--model", str(managed_src), "--copy", "--name", "org/managed"], env=env)
+    run_goethe([str(goethe), "install", str(managed_src), "--copy", "--name", "org/managed"], env=env)
     copy_dir = home / "models" / "org__managed"
     if not (copy_dir / "w.safetensors").is_file() or (copy_dir / "w.safetensors").is_symlink():
         raise RuntimeError("--copy install did not copy the weights")
-    rr = run([str(goethe), "remove", "--model", "org/managed"], env=env, input_text="")
+    rr = run([str(goethe), "remove", "org/managed"], env=env, input_text="")
     if rr.returncode != 3:
         raise RuntimeError(f"remove without --yes and without a tty should exit 3, got {rr.returncode}")
-    run_goethe([str(goethe), "remove", "--model", "org/managed", "--yes"], env=env)
+    run_goethe([str(goethe), "remove", "org/managed", "--yes"], env=env)
     if copy_dir.exists():
         raise RuntimeError("remove of a managed model left its files")
     if not (managed_src / "w.safetensors").is_file():
         raise RuntimeError("remove of a copy touched the source folder")
     inplace_src = _tree(home / "src", "inplace")
-    run_goethe([str(goethe), "install", "--model", str(inplace_src), "--name", "local/inplace"], env=env)
+    run_goethe([str(goethe), "install", str(inplace_src), "--name", "local/inplace"], env=env)
     if (inplace_src / "goethe_card.toml").exists():
         raise RuntimeError("in-place install wrote its card into the user folder")
-    rr = run_goethe([str(goethe), "remove", "--model", "local/inplace", "--yes"], env=env)
+    rr = run_goethe([str(goethe), "remove", "local/inplace", "--yes"], env=env)
     if not (inplace_src / "w.safetensors").is_file() or not (inplace_src / "config.json").is_file():
         raise RuntimeError("remove deleted an in-place model's files")
     if f"rm -rf '{inplace_src.resolve()}'" not in rr.stdout:
@@ -77,7 +77,7 @@ def _check_remove(goethe: Path, home: Path, env: dict[str, str]) -> None:
         raise RuntimeError("remove left goethe's link directory")
     before = _listing(home)
     for bad in ("", "..", ".", "/", "org/..", "../models"):
-        rr = run([str(goethe), "remove", "--model", bad, "--yes"], env=env)
+        rr = run([str(goethe), "remove", bad, "--yes"], env=env)
         if rr.returncode != 2:
             raise RuntimeError(f"remove {bad!r} exited {rr.returncode}, expected usage error 2")
     if _listing(home) != before:
@@ -85,24 +85,24 @@ def _check_remove(goethe: Path, home: Path, env: dict[str, str]) -> None:
 
 
 def _check_key_and_profile(goethe: Path, home: Path, env: dict[str, str]) -> None:
-    """--raw prints exactly one token line; hw profile JSON carries host and environment."""
-    rr = run_goethe([str(goethe), "key", "--create", "ci", "--raw"], env=env)
+    """--raw prints exactly one token line; doctor --hardware JSON carries host and environment."""
+    rr = run_goethe([str(goethe), "api", "keys", "create", "ci", "--raw"], env=env)
     if not re.fullmatch(r"goethe_sk_[0-9a-f]{32}\n", rr.stdout):
         raise RuntimeError(f"key create --raw stdout is not exactly the token: {rr.stdout!r}")
-    rr = run_goethe([str(goethe), "key", "--create", "ci2"], env=env)
+    rr = run_goethe([str(goethe), "api", "keys", "create", "ci2"], env=env)
     if "goethe_sk_" not in rr.stdout or "goethe api shows it again" not in rr.stdout:
         raise RuntimeError(f"key create without --raw must show the token once: {rr.stdout!r}")
-    rr = run_goethe([str(goethe), "hw", "profile", "--json"], env=env, timeout=120)
+    rr = run_goethe([str(goethe), "doctor", "--hardware", "--json"], env=env, timeout=120)
     state = json.loads(rr.stdout)
     host = state.get("host") or {}
     environment = state.get("environment") or {}
     for key in ("cpu", "memory", "disks", "os"):
         if key not in host:
-            raise RuntimeError(f"hw profile host section lacks {key}")
+            raise RuntimeError(f"doctor --hardware host section lacks {key}")
     if host["cpu"].get("logical_threads", 0) < 1 or host["memory"].get("total_mb", 0) < 1:
-        raise RuntimeError(f"hw profile host section looks empty: {host}")
+        raise RuntimeError(f"doctor --hardware host section looks empty: {host}")
     if "cloud" not in environment or "systemd_pid1" not in environment:
-        raise RuntimeError(f"hw profile environment section incomplete: {environment}")
+        raise RuntimeError(f"doctor --hardware environment section incomplete: {environment}")
     for link in state.get("links", []):
         if link["type"] not in ("NVLINK", "PCIE_SWITCH", "SAME_NUMA", "CROSS_SOCKET") or not link.get("topo"):
             raise RuntimeError(f"link is not a CONTRACT C class with a raw topo code: {link}")
@@ -111,7 +111,7 @@ def _check_key_and_profile(goethe: Path, home: Path, env: dict[str, str]) -> Non
 def _check_foreign_notice(goethe: Path, home: Path, env: dict[str, str]) -> None:
     """A non-tty load next to a process goethe did not start exits 3 with the notice (any foreign PID)."""
     src = _tree(home / "src", "tiny")
-    run_goethe([str(goethe), "install", "--model", str(src), "--name", "org/tiny"], env=env)
+    run_goethe([str(goethe), "install", str(src), "--name", "org/tiny"], env=env)
     goethed = spawn([str(require_cli("goethed"))], env=env, label="goethed")
     alien = None
     try:
@@ -121,12 +121,12 @@ def _check_foreign_notice(goethe: Path, home: Path, env: dict[str, str]) -> None
         pid = alien.popen.pid
         if not wait_until(lambda: any(p == pid for p, _ in gpu_pids(gpu_index)), timeout=90):
             raise RuntimeError("test allocation never appeared on the GPU")
-        rr = run_goethe([str(goethe), "hw", "profile", "--json"], env=env, timeout=120)
+        rr = run_goethe([str(goethe), "doctor", "--hardware", "--json"], env=env, timeout=120)
         gpu = next(g for g in json.loads(rr.stdout)["gpus"] if int(g["index"]) == gpu_index)
         if not any(int(p["pid"]) == pid and int(p["used_vram_mb"]) >= 900 for p in gpu["running_processes"]):
-            raise RuntimeError("hw profile does not list the foreign process with its VRAM")
+            raise RuntimeError("doctor --hardware does not list the foreign process with its VRAM")
         proc = subprocess.run(
-            [str(goethe), "load", "--model", "org/tiny", "--gpus", str(gpu_index), "--no-wait"],
+            [str(goethe), "load", "org/tiny", "--gpu", f"gpu{gpu_index}", "--no-wait"],
             env={**os.environ, **env},
             stdin=subprocess.DEVNULL,
             capture_output=True,

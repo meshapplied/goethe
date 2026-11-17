@@ -63,9 +63,22 @@ pub fn authkey_stdin() -> Vec<CompletionCandidate> {
     vec![candidate("-", "read the auth key from stdin")]
 }
 
-pub fn binds() -> Vec<CompletionCandidate> {
-    let mut out = vec![candidate("127.0.0.1", "this machine only"), candidate("0.0.0.0", "every address")];
+pub fn expose_targets() -> Vec<CompletionCandidate> {
+    // goethe api expose: the three modes, then the addresses and interfaces it can listen on directly.
+    let mut out = vec![
+        candidate("local", "this machine only"),
+        candidate("vpn", "a VPN or private network"),
+        candidate("public", "a public network, allowlisted clients"),
+        candidate("127.0.0.1", "this machine only"),
+        candidate("0.0.0.0", "every address"),
+    ];
     out.extend(interfaces());
+    out
+}
+
+pub fn log_targets() -> Vec<CompletionCandidate> {
+    let mut out = vec![candidate("goethed", "the daemon log"), candidate("gateway", "the gateway log")];
+    out.extend(models());
     out
 }
 

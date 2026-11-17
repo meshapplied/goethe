@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gate: goethe service enable/disable/status with redirected unit/crontab paths."""
+"""Gate: goethe up and down install and remove the boot entry, with redirected unit/crontab paths."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def _run_crontab_scenario(goethe: Path, goethed: Path) -> None:
             "PATH": f"{fake_bin}:/usr/bin:/bin",
         }
         rr = subprocess.run(
-            [str(goethe), "service", "enable"],
+            [str(goethe), "up"],
             env=env,
             capture_output=True,
             text=True,
@@ -85,15 +85,15 @@ def _run_crontab_scenario(goethe: Path, goethed: Path) -> None:
         if "/home/u/bin/goethed-other --keep" not in body:
             raise RuntimeError("unrelated crontab line removed on enable")
         st = subprocess.run(
-            [str(goethe), "service", "status"],
+            [str(goethe), "status"],
             env=env,
             capture_output=True,
             text=True,
             check=False,
         )
-        if "crontab" not in st.stdout:
-            raise RuntimeError(f"expected crontab status: {st.stdout!r}")
-        subprocess.run([str(goethe), "service", "disable"], env=env, check=True)
+        if "goethe: running" not in st.stdout:
+            raise RuntimeError(f"expected a running goethe: {st.stdout!r}")
+        subprocess.run([str(goethe), "down"], env=env, check=True)
         after = cron_file.read_text(encoding="utf-8")
         if "# goethe-goethed-reboot" in after or f"GOETHE_HOME={home}" in after:
             raise RuntimeError("goethe crontab not removed on disable")
@@ -147,26 +147,26 @@ def _run_two_homes_scenario(goethe: Path, goethed: Path) -> None:
         def disables() -> list[str]:
             return [c for c in log.read_text(encoding="utf-8").splitlines() if " disable" in f" {c}"]
 
-        ok(home_a, "service", "enable")
+        ok(home_a, "up")
         if _user_units(unit_dir) != {"goethed.service": str(home_a)}:
             raise RuntimeError(f"home A's enable must write the user unit pinning A: {_user_units(unit_dir)}")
         a_unit = (unit_dir / "goethed.service").read_text(encoding="utf-8")
-        refused = cli(home_b, "service", "enable")
+        refused = cli(home_b, "up")
         said = refused.stdout + refused.stderr
-        if refused.returncode != 1 or str(home_a) not in said or "goethe service disable" not in said:
+        if refused.returncode != 1 or str(home_a) not in said or "goethe down" not in said:
             raise RuntimeError(f"home B's enable must exit 1 naming home A and the disable command: {said[-300:]}")
         log.write_text("", encoding="utf-8")
-        ok(home_b, "service", "disable")
+        ok(home_b, "down")
         if (unit_dir / "goethed.service").read_text(encoding="utf-8") != a_unit or disables():
             raise RuntimeError(f"home B's disable touched home A's unit: {disables()}")
-        ok(home_a, "service", "disable")
-        ok(home_b, "service", "enable")
+        ok(home_a, "down")
+        ok(home_b, "up")
         if _user_units(unit_dir) != {"goethed.service": str(home_b)}:
             raise RuntimeError(f"after A disabled, home B must get the unit: {_user_units(unit_dir)}")
-        ok(home_b, "service", "disable")
-        ok(home_a, "service", "enable")
+        ok(home_b, "down")
+        ok(home_a, "up")
         _write_fake_systemctl(fake_bin, log, user_ok=False)
-        ok(home_a, "service", "enable")
+        ok(home_a, "up")
         cron_a = cron_file.read_text(encoding="utf-8")
         if str(home_a) not in cron_a:
             raise RuntimeError(f"home A's crontab entry is missing: {cron_a!r}")
@@ -202,18 +202,18 @@ def main() -> None:
             "GOETHE_SYSTEMD_USER_UNIT_DIR": str(unit_dir),
             "GOETHE_CRONTAB_FILE": str(cron_file),
         }
-        run_goethe([str(goethe), "service", "enable"], env=env)
+        run_goethe([str(goethe), "up"], env=env)
         units = _user_units(unit_dir)
         if list(units.values()) != [str(home)]:
             raise RuntimeError(f"enable with systemd --user must write one user unit pinning this home: {units}")
         unit = unit_dir / next(iter(units))
         if "KillMode=process" not in unit.read_text(encoding="utf-8"):
             raise RuntimeError("the generated unit must use KillMode=process so engines can outlive goethed")
-        out = run_goethe([str(goethe), "service", "status"], env=env).stdout
-        if "boot method:" not in out or "goethed:" not in out or "systemd" not in out:
+        out = run_goethe([str(goethe), "status"], env=env).stdout
+        if "goethe: running" not in out:
             raise RuntimeError(f"unexpected status output: {out!r}")
-        run_goethe([str(goethe), "service", "enable"], env=env)
-        run_goethe([str(goethe), "service", "disable"], env=env)
+        run_goethe([str(goethe), "up"], env=env)
+        run_goethe([str(goethe), "down"], env=env)
         if unit.is_file():
             raise RuntimeError("user unit not removed on disable")
         if "# goethe-goethed-reboot" in cron_file.read_text(encoding="utf-8"):
@@ -223,24 +223,6 @@ def main() -> None:
             raise RuntimeError(f"systemctl enable/disable not issued: {calls}")
         if any(not c.startswith("--user") for c in calls):
             raise RuntimeError(f"service touched the system manager instead of --user: {calls}")
-        off = subprocess.run(
-            [str(goethe), "service", "restore", "--off"],
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if off.returncode != 0:
-            raise RuntimeError(f"restore off: {off.stderr}")
-        on = subprocess.run(
-            [str(goethe), "service", "restore", "--on"],
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if on.returncode != 0:
-            raise RuntimeError(f"restore on: {on.stderr}")
     _run_two_homes_scenario(goethe, goethed)
     print("stage3_service ok")
 

@@ -546,7 +546,7 @@ impl Writer {
         self.last_space = None;
         let _ = make_private_dir(dir);
         if let Err(e) = prune(dir) {
-            eprintln!("goethe api trace: {e}");
+            eprintln!("goethe trace: {e}");
         }
         let manifest: Value = std::fs::read(dir.join("manifest.json"))
             .ok()
@@ -592,7 +592,7 @@ impl Writer {
             return;
         }
         if let Err(e) = self.record(c) {
-            eprintln!("goethe api trace: {e}");
+            eprintln!("goethe trace: {e}");
             self.totals.errors += 1;
             self.totals.last_error = Some(e);
             self.dirty = true;
@@ -624,7 +624,7 @@ impl Writer {
         };
         if paused != self.paused {
             if let Some(p) = &paused {
-                eprintln!("goethe api trace: recording paused: {p}");
+                eprintln!("goethe trace: recording paused: {p}");
             }
             self.paused = paused;
             self.dirty = true;
@@ -632,7 +632,7 @@ impl Writer {
     }
 
     fn turn_off_at_limit(&mut self, max_gb: f64) {
-        // The size limit turns recording off like goethe api trace off, with the reason kept for goethe api trace and in history.jsonl.
+        // The size limit turns recording off like goethe trace off, with the reason kept for goethe trace and in history.jsonl.
         if self.con.is_none() {
             self.con = db::open(&self.home).ok();
         }
@@ -648,13 +648,13 @@ impl Writer {
         cfg.enabled = false;
         cfg.stopped = Some(format!("the {max_gb} GB limit was reached at {at}"));
         if let Err(e) = save_config(con, &cfg) {
-            eprintln!("goethe api trace: turning off at the size limit: {e}");
+            eprintln!("goethe trace: turning off at the size limit: {e}");
             return;
         }
-        eprintln!("goethe api trace: recording turned off: the {max_gb} GB limit was reached");
+        eprintln!("goethe trace: recording turned off: the {max_gb} GB limit was reached");
         let line = json!({"at": at, "action": "off", "reason": "size limit", "max_gb": max_gb, "was": before, "config": cfg});
         if let Err(e) = append_private(&dir.join("history.jsonl"), format!("{line}\n").as_bytes()) {
-            eprintln!("goethe api trace: trace history: {e}");
+            eprintln!("goethe trace: trace history: {e}");
         }
     }
 
@@ -875,7 +875,7 @@ impl Writer {
     fn forget_vanished(&mut self, dir: &Path) {
         // A model folder deleted under us (goethe remove, or by hand): prune the index, drop its counts and sessions, keep the rest.
         if let Err(e) = prune(dir) {
-            eprintln!("goethe api trace: {e}");
+            eprintln!("goethe trace: {e}");
         }
         self.totals.by_model.retain(|m, _| dir.join("v1").join(sanitize_model_id(m)).is_dir());
         self.totals.turns = self.totals.by_model.values().sum();
@@ -923,7 +923,7 @@ impl Writer {
         });
         let text = serde_json::to_vec_pretty(&manifest).unwrap_or_default();
         if let Err(e) = write_private_atomic(&dir.join("manifest.json"), &text) {
-            eprintln!("goethe api trace: manifest.json: {e}");
+            eprintln!("goethe trace: manifest.json: {e}");
         }
         self.dirty = false;
         self.last_manifest = Instant::now();
@@ -949,7 +949,7 @@ impl Writer {
             if let Some(dir) = &self.dir {
                 let text = serde_json::to_vec_pretty(&self.models).unwrap_or_default();
                 if let Err(e) = locked(dir, || write_private_atomic(&dir.join("models.json"), &text)) {
-                    eprintln!("goethe api trace: models.json: {e}");
+                    eprintln!("goethe trace: models.json: {e}");
                 }
             }
         }

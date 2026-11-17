@@ -9,9 +9,9 @@ goethe <command> --help
 
 ## Conventions
 
-- The model is a plain argument: `goethe load qwen 27b`, `goethe unload qwen-27b`. Give its id, an alias, or words from its name; when several models match, a menu asks which one (without a terminal, they are listed). `--model <id>` still works.
-- Every other value goes after its flag: `goethe gpu --allow gpu0 gpu1`. A value typed without its flag prints the corrected command instead of running anything.
-- Commands are grouped: what concerns the API is under `goethe api` (configure, manage, keys, allowlist, gateway, domain, learn, trace), and model housekeeping under `goethe models` (recommend, scan, config, alias). The older top-level forms such as `goethe key` still work and say where they moved.
+- The model is a plain argument: `goethe load qwen 27b`, `goethe unload qwen-27b`. Give its id, an alias, or words from its name; when several models match, a menu asks which one (without a terminal, they are listed).
+- Every action is a word, and flags only change how it runs: `goethe gpu allow gpu0 gpu1`, `goethe api keys create my-app`, `goethe models alias set fast org/model`.
+- Commands are grouped: what concerns the API is under `goethe api` (keys, expose, allow, domain, share), and model housekeeping under `goethe models` (recommend, scan, alias). Learning and traces have their own commands, `goethe learn` and `goethe trace`.
 - GPUs are named as `goethe gpu` lists them: `gpu0`, `gpu1`, and so on. Flags that take GPUs accept several: `--gpu gpu2 gpu3`.
 - Model ids are Hugging Face repo names such as `zai-org/GLM-5.3-Flash`. Case doesn't matter, and the folder form `zai-org__GLM-5.3-Flash` works too. A mistyped id gets a suggestion.
 - Commands that list things accept `--json` for scripts.
@@ -27,22 +27,28 @@ Exit codes:
 
 ## Contents
 
-- [Start and stop](#start-and-stop): `goethe`, `start`, `up`, `status`, `down`
-- [Models](#models): `install`, `models`, `models recommend`, `models scan`, `models config`, `models alias`, `remove`
-- [Running models](#running-models): `load`, `unload`, `ps`, `logs`
-- [API access](#api-access): `api`, `api configure`, `api manage`, `api keys`, `api allowlist`, `api gateway`, `api domain`, `api learn`, `api trace`, `serve --public`
-- [GPUs and system](#gpus-and-system): `gpu`, `hw`, `doctor`, `update`, `uninstall`, `completion`, `--version`
+- [Start and stop](#start-and-stop): `goethe`, `up`, `status`, `down`
+- [Models](#models): `install`, `models`, `models recommend`, `models scan`, `models alias`, `remove`
+- [Running models](#running-models): `load`, `unload`, `run`, `ps`, `logs`
+- [API access](#api-access): `api`, `api keys`, `api expose`, `api allow`, `api domain`, `api share`
+- [Learning and traces](#learning-and-traces): `learn`, `trace`
+- [GPUs and system](#gpus-and-system): `gpu`, `doctor`, `update`, `uninstall`, `completion`, `--version`
 - [Platform](#platform): `login`, `logout`
 
 ## Start and stop
 
 ### `goethe`
 
-On a terminal, plain `goethe` opens the home screen: the sections on the left (Models, API access, API keys, GPUs, Learning & traces, Platform, Done), their state and what can be done on the right, refreshed every 5 seconds. ↑↓ move, → opens a section, ← goes back, `q` leaves. Enter on a model loads or unloads it; the access, key, learning and trace rows run `goethe api configure`, `goethe api manage`, `goethe api learn` and `goethe api trace` in the normal terminal and come back on Enter; Enter on a GPU allows or denies it; the Platform rows run `goethe login` or `goethe logout`. Without a terminal, `goethe` prints the commands.
+On a terminal, plain `goethe` opens the menu on its own screen:
 
-### `goethe start`
+| Entry | What it does |
+|---|---|
+| Quick setup | Install a model, serve it through the API and choose who can reach it, step by step |
+| Install models | A table of the catalog models that fit this machine's GPUs, with their size and the VRAM they need, under the machine's VRAM and storage. Space selects models, a custom Hugging Face id and a token for gated models can be typed below the table, and Enter installs them |
+| API keys and gateway | API keys (create, scope, show or delete), network exposure (local, VPN or private network, public) and the public address ([`goethe api share`](#goethe-api-share-duration)) |
+| Status | Whether Goethe runs, the environment, then live tables of the GPUs (VRAM, processes, allowed or denied, memory bandwidth), CPU and memory |
 
-Guided setup. Starts Goethe, then walks through three steps: install a model, serve it through the API, and configure who can reach it. An advanced mode does each part on its own. Without a terminal, it prints the equivalent commands. Step 3 offers only API keys that may call the model just served, and the advanced setup opens `goethe api manage` for keys.
+↑↓ move, Enter opens, ← goes back, `q` quits. On the main menu 1, 2 and 3 pick a color theme (default, sea, earth); the choice is remembered. Without a terminal, `goethe` prints the commands.
 
 ### `goethe up`
 
@@ -54,7 +60,7 @@ Starts Goethe and the API gateway, and starts them at every boot from now on. Mo
 
 ### `goethe status`
 
-Whether Goethe is running, the API address, the names and ids of your API keys, and the public gateway while it is open ([`goethe serve --public`](#goethe-serve---public)). The last lines show the [platform](#platform) link (`Linked (workspace X)`, `Not linked`, or `Revoked`) and, when linked, the last heartbeat (`OK (2 s ago)` or `failing: <reason>`).
+Whether Goethe is running, the API address, the names and ids of your API keys, the models it serves, and the public gateway while it is open ([`goethe api share`](#goethe-api-share-duration)). The last lines show the [platform](#platform) link (`Linked (workspace X)`, `Not linked`, or `Revoked`) and, when linked, the last heartbeat (`OK (2 s ago)` or `failing: <reason>`).
 
 ### `goethe down`
 
@@ -63,17 +69,6 @@ Stops Goethe and its models, and turns off start at boot. Loaded models come bac
 | Option | Description |
 |---|---|
 | `--keep-engines` | Keep models serving while Goethe itself restarts |
-
-### `goethe service`
-
-Not listed in `goethe --help`: `goethe up` already turns on start at boot and `goethe down` turns it off. It stays for the restore setting.
-
-| Command | Description |
-|---|---|
-| `goethe service enable` | Start Goethe at boot |
-| `goethe service disable` | Don't start Goethe at boot |
-| `goethe service status` | Whether Goethe starts at boot |
-| `goethe service restore --on` / `--off` | Whether loaded models come back when Goethe starts |
 
 ## Models
 
@@ -85,7 +80,7 @@ The catalog models that fit the GPUs Goethe may use, grouped by the memory they 
 |---|---|
 | `--json` | JSON instead of a table |
 
-### `goethe install <model or folder>`
+### `goethe install <model or folder> [-- <engine options>]`
 
 Downloads a model from Hugging Face, or registers a model folder on this machine. Models with optimised kernels for this GPU use them when the node is logged in (`goethe login`); otherwise goethe asks to log in or continues with SGLang. A model that cannot be served is refused before anything is downloaded.
 
@@ -93,29 +88,26 @@ Downloads a model from Hugging Face, or registers a model folder on this machine
 |---|---|
 | `<model>` | A Hugging Face id (`org/name`), a local folder, or words from a catalog model's name such as `glm flash` |
 | `--load` | Load the model after installing it |
-| `--no-load` | Install only |
 | `--no-wait` | With `--load`, return without waiting until it's ready |
 | `--ctx <N>` | Default context length (default: the model's full context window; a load uses the largest that fits in VRAM) |
 | `--max-conc <N>` | Default number of requests served at the same time |
-| `--tp <N>` | Default number of GPUs to split it across (`0`: automatic) |
-| `--gpu <gpuN>...` | GPUs to load on |
+| `--gpu <gpuN>...` | Default GPUs; several split the model across them |
 | `--trust-remote-code` | Allow Python code that ships with the model; only for models you trust |
 | `--hf-token` | Ask for a Hugging Face token, for gated or private models; used for this download only, never stored |
-| `--yes` | With `--load`, load next to other programs on the GPU without asking |
-| `--force` | Download again, or replace an existing install |
-| `--reset` | Forget this model's saved settings |
-| `--no-verify` | Skip checking the downloaded files |
+| `--yes` | Don't ask: download without confirming, and with `--load` load next to other programs on the GPU |
+| `--force` | Download again, or replace an existing install, and rebuild the model's saved settings from the defaults |
+| `--fallback` | If the model's kernel pack cannot run here, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also `GOETHE_ALLOW_FALLBACK=1` |
 | `--name <id>` | Id for a local folder |
 | `--copy` | Copy a local folder instead of linking to it |
-| `--sglang-arg <flag>` | An extra engine option saved with the model |
+| `-- <options>` | Extra engine options, after `--`, saved with the model |
 
-### `goethe models scan`
+### `goethe models scan [folder]`
 
 Adds model folders you placed in Goethe's `models` folder yourself. It checks each one and asks before adding it; a folder that can't be served is named with the reason.
 
 | Option | Description |
 |---|---|
-| `--dir <folder>` | Only this folder |
+| `<folder>` | Only this folder (default: all of them) |
 | `--yes` | Add every supported model without asking |
 | `--json` | JSON output |
 
@@ -129,18 +121,17 @@ Installed models, then catalog models, with whether each fits this machine and i
 | `--available` | Only catalog models |
 | `--json` | JSON output |
 
-### `goethe models config <model>`
+### `goethe models alias`
 
-Changes the default settings a model loads with.
+Short model names for clients. Changing what an alias points to moves every client that uses it.
 
-| Option | Description |
+| Command | Description |
 |---|---|
-| `--ctx <N>` | Default context length (default: the model's full context window; a load uses the largest that fits in VRAM) |
-| `--max-conc <N>` | Default number of requests served at the same time |
-| `--tp <N>` | Default number of GPUs |
-| `--gpu <gpuN>...` | Default GPUs |
-| `--sglang-arg <flag>` | Add an engine option |
-| `--clear-sglang-args` | Remove the saved engine options |
+| `goethe models alias` | List the aliases |
+| `goethe models alias set <alias> <model>` | Point an alias at an installed model; clients send the alias as the model |
+| `goethe models alias remove <alias>...` | Remove aliases |
+
+To change the settings a model loads with, use [`goethe load`](#goethe-load---) with `--save`.
 
 ### `goethe remove <model>...`
 
@@ -148,10 +139,9 @@ Unloads a model and deletes the files Goethe downloaded. For a folder you regist
 
 | Option | Description |
 |---|---|
-| `--yes` | Don't ask; unload it first if it's loaded; keep its traces |
-| `--force` | Don't wait for requests in progress |
-| `--delete-traces` | Also delete the model's traces, without asking |
-| `--keep-traces` | Keep the model's traces, without asking |
+| `--yes` | Don't ask; unload it first if it's loaded; keep its traces unless `--traces delete` |
+| `--force` | When unloading first, don't wait for requests in progress |
+| `--traces keep\|delete` | What happens to the model's traces, without asking |
 
 ## Running models
 
@@ -161,14 +151,16 @@ Loads a model and waits until it answers. Goethe picks the GPUs and sizes the me
 
 | Option | Description |
 |---|---|
-| `--gpu <gpuN>...` | GPUs to load on; several split the model across them |
-| `--tp <N>` | Number of GPUs to split it across |
+| `--gpu <gpuN>...` | GPUs to load on; the number given is the split |
+| `--tp <N>` | Split the model across N GPUs that Goethe picks (not with `--gpu`) |
 | `--ep <N>` | Expert-parallel size, for mixture-of-experts models |
 | `--ctx <N>` | Context length |
 | `--max-conc <N>` | Requests served at the same time |
+| `--save` | Keep `--gpu`, `--ctx`, `--max-conc` and the options after `--` as the model's defaults; a bare `--` clears the saved options |
+| `--dry-run` | Show where the model would be placed now and the memory it needs, and load nothing; with `--save` it only stores the defaults |
 | `--replica` | Start another copy, to serve more traffic |
-| `--yes` | Load next to other programs on the GPU without asking |
-| `--force` | Load on busy GPUs without asking |
+| `--yes` | Don't ask: load on busy GPUs, or next to other programs on the GPU |
+| `--fallback` | If the model's kernel pack fails to open, serve it with the plain runtime instead of failing |
 | `--no-wait` | Return without waiting until it's ready |
 | `--json` | Print the instance as JSON |
 | `-- <options>` | Extra engine options, after `--` |
@@ -177,6 +169,8 @@ Loads a model and waits until it answers. Goethe picks the GPUs and sizes the me
 goethe load zai-org/GLM-5.3-Flash --gpu gpu1
 goethe load zai-org/GLM-5.3-Flash --gpu gpu0 gpu1 gpu2 gpu3 --ctx 65536
 goethe load zai-org/GLM-5.3-Flash -- --chunked-prefill-size 4096
+goethe load zai-org/GLM-5.3-Flash --ctx 32768 --save --dry-run   # only store the defaults
+goethe load zai-org/GLM-5.3-Flash --dry-run                      # where would it go?
 ```
 
 ### `goethe unload`
@@ -209,42 +203,53 @@ Running models with the runtime serving each (goethe-engine runs a kernel pack; 
 |---|---|
 | `--json` | JSON output |
 
-### `goethe logs`
+### `goethe logs <target>`
 
 | Option | Description |
 |---|---|
-| `<model>` | A model's log (also takes an instance id) |
+| `<target>` | A model (id, alias or words from its name), an instance id, `goethed` for Goethe's own log, or `gateway` for the API gateway's log |
 | `-f`, `--follow` | Keep printing new lines |
 | `-n`, `--lines <N>` | Number of lines (default 100) |
-| `--daemon` | Goethe's own log |
-| `--gateway` | The API gateway's log |
-| `--prune` | Clean up old logs |
+
+Goethe rotates its logs every hour.
 
 ## API access
 
-### `goethe api configure`
-
-Chooses who can reach the API: this machine only, a VPN or other private network (recommended), or a public address. For a VPN it lists the networks this machine is on, with the ranges each one reaches, and works with any VPN that has a network interface. It then asks whether to restrict access to specific IP addresses. The gateway follows the chosen interface: when its address changes, it moves within a few seconds, and while the interface has no address only this machine can connect.
-
-| Option | Description |
-|---|---|
-| `--mode local\|vpn\|public` | The access mode (asked when omitted) |
-| `--interface <name>` | The network interface to serve, such as `wg0`; needed without a terminal when there are several |
-| `--vpn-ip <ip>` | A fixed address of this machine instead of an interface |
-| `--allow <cidr>` | A client address or range to allow; repeatable |
-| `--yes` | Apply without questions |
-
 ### `goethe api`
 
-The API address, how to authenticate, the models it serves, your API keys and a `curl` command to try it.
+The API address, how to authenticate, your API keys and a `curl` command to try it. The models it serves are in `goethe status`.
 
 | Option | Description |
 |---|---|
-| `--json` | JSON output |
+| `--json` | JSON output (`api`, `goethed_running`, `keys`, `models`) |
 
-### `goethe api manage`
+### `goethe api keys`
 
-A full-screen key manager in two columns, like ranger. The left column picks what to work on: **+ Create new key**, **Done**, then your keys. The right column shows the hovered entry and is where things change. For a key it shows `API key:` with the key itself, its name and id (fixed), then what can change: the allowed models (**Every model**, or ticked models), the rate limit, the expiry, **Save changes** and **Delete key**. For **+ Create new key** it is the same form with a name, ending in **Create key**.
+Lists API keys with their limits and today's usage, or creates or revokes one. On a terminal, `goethe api keys` alone opens a full-screen key manager (see below).
+
+| Command | Description |
+|---|---|
+| `goethe api keys` | List the keys (`--json` for scripts) |
+| `goethe api keys create <name>` | Create a key |
+| `goethe api keys revoke <key id>...` | Revoke keys, by the id `goethe api keys` shows |
+
+| Option | Description |
+|---|---|
+| `--expires <when>` | With `create`: expiry, days from now such as `30d`, or a date such as `2027-01-31` |
+| `--rpm <N>` | With `create`: requests per minute (default 120, `0`: unlimited) |
+| `--models <a,b>` | With `create`: only these models |
+| `--admin` | With `create`: admin key, for health endpoints and every model |
+| `--raw` | With `create`: print only the key, for scripts |
+| `--json` | List as JSON |
+
+```bash
+goethe api keys create my-app
+goethe api keys create ops --expires 90d --rpm 300 --admin
+API_KEY=$(goethe api keys create ci --raw)
+goethe api keys revoke <key-id>
+```
+
+The key manager is in two columns, like ranger. The left column picks what to work on: **+ Create new key**, **Done**, then your keys. The right column shows the hovered entry and is where things change. For a key it shows `API key:` with the key itself, its name and id (fixed), then what can change: the allowed models (**Every model**, or ticked models), the rate limit, the expiry, **Save changes** and **Delete key**. For **+ Create new key** it is the same form with a name, ending in **Create key**.
 
 | Key | In the left column | In the right column |
 |---|---|---|
@@ -255,50 +260,99 @@ A full-screen key manager in two columns, like ranger. The left column picks wha
 | Enter | | Edit a value in place (Enter keeps it, Esc cancels), save, create, or delete (press twice) |
 | `q` | Leave | Leave at once; unsaved changes are not saved, and a note says so |
 
-On Rate limit or Expires, the bottom line shows the values they take: a whole number of requests per minute (`0` for unlimited), and `never`, days such as `30d` or a date such as `2027-01-31`. Changes apply only when saved and reach the gateway on the next request. The screen is restored on leaving, and keys created in the session are printed then. Admin keys are made with `goethe api keys --admin`; scripts use `goethe api keys`, since the menu needs a terminal (at least 64×12).
+On Rate limit or Expires, the bottom line shows the values they take: a whole number of requests per minute (`0` for unlimited), and `never`, days such as `30d` or a date such as `2027-01-31`. Changes apply only when saved and reach the gateway on the next request. The screen is restored on leaving, and keys created in the session are printed then. Scripts use the commands above, since the menu needs a terminal (at least 64×12).
 
-### `goethe api keys`
+### `goethe api expose [where]`
 
-Lists API keys with their limits and today's usage, or creates or revokes one.
+Who can reach the API. Without an argument it shows where the API listens and how many client addresses are allowed.
+
+| Command | Description |
+|---|---|
+| `goethe api expose` | Show where the API listens and who may connect (`--json` for scripts) |
+| `goethe api expose local` | This machine only |
+| `goethe api expose vpn` | A VPN or other private network (recommended) |
+| `goethe api expose public` | A public address |
+| `goethe api expose <address or interface>` | Listen on `127.0.0.1` (this machine only), `0.0.0.0` (all addresses), one IP of this machine, or an interface such as `wg0`, whose address is followed |
+
+For a VPN it lists the networks this machine is on, with the ranges each one reaches, and works with any VPN that has a network interface. It then asks whether to restrict access to specific IP addresses. The gateway follows the chosen interface: when its address changes, it moves within a few seconds, and while the interface has no address only this machine can connect.
 
 | Option | Description |
 |---|---|
-| `--create <name>` | Create a key |
-| `--expires <when>` | Expiry: days from now such as `30d`, or a date such as `2027-01-31` |
-| `--rpm <N>` | Requests per minute (default 120, `0`: unlimited) |
-| `--models <a,b>` | Only these models |
-| `--admin` | Admin key: health endpoints and every model |
-| `--raw` | Print only the key, for scripts |
-| `--revoke <key id>...` | Revoke keys, by the id `goethe api keys` shows |
-| `--json` | JSON output |
+| `--interface <name>` | With `vpn` or `public`: the network interface to serve, such as `wg0`; needed without a terminal when there are several |
+| `--ip <ip>` | With `vpn` or `public`: a fixed address of this machine instead of an interface |
+| `--allow <cidr>` | With `vpn` or `public`: a client address or range to allow; repeatable |
+| `--yes` | Apply without questions (`public` still refuses `0.0.0.0/0`) |
+| `--json` | With no argument: the status as JSON |
 
 ```bash
-goethe api keys --create my-app
-goethe api keys --create ops --expires 90d --rpm 300 --admin
-API_KEY=$(goethe api keys --create ci --raw)
+goethe api expose local
+goethe api expose vpn --interface wg0
+goethe api expose public --allow 203.0.113.7/32
+goethe api expose 0.0.0.0
 ```
 
-### `goethe api allowlist`
+### `goethe api allow`
 
 Lists the client addresses allowed to reach the API, or adds or removes one.
 
-| Option | Description |
+| Command | Description |
 |---|---|
-| `--add <cidr>...` | Allow addresses or ranges, such as `203.0.113.7` or `192.168.1.0/24` |
-| `--description <text>` | A note stored with the new entries |
-| `--remove <cidr>...` | Remove addresses or ranges |
-
-### `goethe models alias`
-
-Short model names for clients. Changing what an alias points to moves every client that uses it.
+| `goethe api allow` | List the allowed addresses |
+| `goethe api allow add <cidr>...` | Allow addresses or ranges, such as `203.0.113.7` or `192.168.1.0/24` |
+| `goethe api allow remove <cidr>...` | Remove addresses or ranges |
 
 | Option | Description |
 |---|---|
-| `--set <alias>` | The alias clients send as the model |
-| `--model <id>` | The installed model it points to |
-| `--remove <alias>...` | Remove aliases |
+| `--note <text>` | With `add`: a note stored with the new entries |
 
-### `goethe api trace [on | off]`
+### `goethe api domain`
+
+The DNS record that serves the API under your own domain name, with this machine's address filled in.
+
+| Command | Description |
+|---|---|
+| `goethe api domain check <domain>` | Check that the name points at the API and that it answers there |
+
+### `goethe api share [duration]`
+
+Opens the API on a public address for a limited time, for API keys you choose, so you can give someone outside your network a URL and a key. The normal API address, local or VPN, stays as it is.
+
+```
+goethe api share 5h --key my-app                   # share my-app for 5 hours
+goethe api share 1d --key ci --allow 203.0.113.7   # also share ci, for a day, from one address
+goethe api share                                   # status: URL, each key with its time left and addresses
+goethe api share stop --key ci                     # stop sharing one key
+goethe api share stop                              # close the public gateway
+```
+
+Every shared key uses the same public gateway, each until its own time and from its own addresses. The gateway stays open until the last key's time ends. A key whose time has ended is refused while the others keep working, and the addresses only it allowed are dropped from the gateway. Sharing a key again starts its time over (`5h` means 5 hours from now) and replaces its addresses; the other keys are not touched. Without `--key`, the keys of the last opening are shared again. Opening prints the URL, each key with the models it may use, the certificate to send along, and a `curl` command to try it. The keys stay the same, so a recipient can keep using the key you sent. Connections in progress are not interrupted. The menu's Public address page does the same with a form: the key, how long, and optional addresses. `goethe status` shows the gateway while it is open, and a node linked to the platform shows the public URL and when it closes on its page.
+
+| Option | Description |
+|---|---|
+| `<duration>` | How long to share the keys: minutes, hours or days, such as `30m`, `5h` or `1d`, at most `7d`. `stop` stops sharing; nothing shows the status |
+| `--key <name or id>` | API keys to share, each until the duration; repeatable or comma-separated. With `stop`, the keys to stop sharing |
+| `--allow <cidr>` | Only these client addresses or ranges may use the keys given, such as `203.0.113.7`; repeatable. Without it any address may, with the key |
+| `--port <port>` | The public port (default `8444`, or the last one used) |
+
+The recipient verifies the gateway with the certificate goethe prints, `GOETHE_HOME/nginx/certs/public.crt`. It holds no secret: `curl --cacert public.crt https://<address>:8444/v1/models -H "Authorization: Bearer <key>"`. Most OpenAI-compatible clients take it through `SSL_CERT_FILE` or their CA-bundle setting. If nobody can connect, forward the port to this machine on your router or allow it in your cloud firewall; goethe does not open ports on routers. The public listener uses IPv4.
+
+**Security precautions**
+
+- **Closed by default:** nothing listens on the public port unless a window is open. Shutdown or the end of the window removes the listener.
+- **Time limit checked twice:** goethed closes the listener when the time runs out (it checks every 2 seconds, and on start it never reopens an expired window). In addition, every request on the public address checks the end time, so a request after it is refused even if closing failed or goethed was stopped.
+- **Only chosen keys, each for its own time:** only shared keys work on the public address, each until its own time; every other key gets 403 there. Stopping a key, or `goethe api share stop`, applies to the next request.
+- **No admin keys:** admin keys are refused when opening and on every request. Expired keys are refused when opening, and a key that expires during the window stops working when it expires. goethe warns about a key that may use every model; a key limited with `--models` is safer to share.
+- **Model scope unchanged:** a key reaches only the models it is limited to, as on the normal address.
+- **Separate listener:** public requests reach goethe on their own internal address, so they can never be mistaken for requests from your own network, and no header can change that.
+- **API routes only:** health, readiness, admin and metrics endpoints are not served publicly.
+- **HTTPS only:** TLS 1.2 or 1.3, with its own certificate for the public listener. Plain HTTP connections are dropped.
+- **Stricter limits than the normal address:** 10 requests per second per client address (bursts of 20) and 16 connections per address, plus the same body size limit and header and body timeouts.
+- **Optional address limit per key:** a key shared with `--allow` works only from those addresses, checked on every request; nginx also admits only the addresses of the shared keys when every key has a limit.
+- **Checks before opening:** nothing changes unless every check passes: the gateway and goethed are running, the keys are valid, and the port is free and is not the normal gateway's port. If nginx does not accept the new listener, the previous state is restored.
+
+## Learning and traces
+
+### `goethe trace [on | off]`
 
 Records every generation request and reply, grouped into sessions, as a corpus for training later. `off` stops recording and keeps the chosen keys; `on` resumes with them (every key the first time). Without `on` or `off` it shows what is recorded, the folder, its size and the free disk. Changes apply to the next request. The format is in [traces.md](traces.md).
 
@@ -311,12 +365,12 @@ Records every generation request and reply, grouped into sessions, as a corpus f
 | `--json` | JSON output |
 
 ```bash
-goethe api trace on
-goethe api trace on --key my-app
-goethe api trace off
+goethe trace on
+goethe trace on --key my-app
+goethe trace off
 ```
 
-### `goethe api learn [on | off]`
+### `goethe learn [on | off]`
 
 Lets a session keep what context compaction would drop, in a small note that goes into the prompt after each compaction. Sessions are told apart by the client's `X-Session-Id` header. Without `on` or `off` it shows the scope and the sessions kept. Changes apply to the next request. `on` warns about models with a context under 100k tokens. See [learn.md](learn.md).
 
@@ -327,104 +381,52 @@ Lets a session keep what context compaction would drop, in a small note that goe
 | `--json` | JSON output |
 
 ```bash
-goethe api learn on
-goethe api learn on --model my-model
-goethe api learn off --model my-model
-goethe api learn --print my-session-id
+goethe learn on
+goethe learn on --model my-model
+goethe learn off --model my-model
+goethe learn --print my-session-id
 ```
-
-### `goethe api gateway`
-
-Where the API listens, and how many client addresses are allowed.
-
-| Option | Description |
-|---|---|
-| `--bind <address>` | Listen on `127.0.0.1` (this machine only), `0.0.0.0` (all addresses), one IP of this machine, or an interface such as `wg0`, whose address is followed |
-| `--json` | JSON output |
-
-### `goethe api domain`
-
-The DNS record that serves the API under your own domain name, with this machine's address filled in.
-
-| Option | Description |
-|---|---|
-| `--check <domain>` | Check that the name points at the API and that it answers there |
-
-### `goethe serve --public`
-
-Opens the API on a public address for a limited time, for API keys you choose, so you can give someone outside your network a URL and a key. The normal API address, local or VPN, stays as it is.
-
-```
-goethe serve --public 5h --key my-app      # open for 5 hours for the key my-app
-goethe serve --public 1d                   # open again, with the keys and port of the last opening
-goethe serve --public                      # status: URL, time left, keys
-goethe serve --public shutdown             # close now
-```
-
-Opening prints the URL, each key with the models it may use, the certificate to send along, and a `curl` command to try it. The keys stay the same every time you open the gateway, so a recipient can keep using the key you sent. Running it again while it is open keeps the gateway open and starts the timer over: `goethe serve --public 5h` means 5 hours from now, not 5 hours added to the time left. Connections in progress are not interrupted. The keys, port and address limits given that time replace the old ones. `goethe status` shows the window while it is open, and a node linked to the platform shows the public URL and when it closes on its page, within a few seconds of opening or closing.
-
-| Option | Description |
-|---|---|
-| `--public <duration>` | How long to stay open: minutes, hours or days, such as `30m`, `5h` or `1d`, at most `7d`. `shutdown` closes it; nothing shows the status |
-| `--key <name or id>` | API keys that may use the public address; repeatable or comma-separated. Remembered for the next opening |
-| `--allow <cidr>` | Only these client addresses or ranges may connect, such as `203.0.113.7`; repeatable. Without it anyone may connect, with a key |
-| `--port <port>` | The public port (default `8444`, or the last one used) |
-
-The recipient verifies the gateway with the certificate goethe prints, `GOETHE_HOME/nginx/certs/public.crt`. It holds no secret: `curl --cacert public.crt https://<address>:8444/v1/models -H "Authorization: Bearer <key>"`. Most OpenAI-compatible clients take it through `SSL_CERT_FILE` or their CA-bundle setting. If nobody can connect, forward the port to this machine on your router or allow it in your cloud firewall; goethe does not open ports on routers. The public listener uses IPv4.
-
-**Security precautions**
-
-- **Closed by default:** nothing listens on the public port unless a window is open. Shutdown or the end of the window removes the listener.
-- **Time limit checked twice:** goethed closes the listener when the time runs out (it checks every 2 seconds, and on start it never reopens an expired window). In addition, every request on the public address checks the end time, so a request after it is refused even if closing failed or goethed was stopped.
-- **Only chosen keys:** only the keys named with `--key` work on the public address. Every other key gets 403 there. Removing a key from the list, or shutdown, applies to the next request.
-- **No admin keys:** admin keys are refused when opening and on every request. Expired keys are refused when opening, and a key that expires during the window stops working when it expires. goethe warns about a key that may use every model; a key limited with `--models` is safer to share.
-- **Model scope unchanged:** a key reaches only the models it is limited to, as on the normal address.
-- **Separate listener:** public requests reach goethe on their own internal address, so they can never be mistaken for requests from your own network, and no header can change that.
-- **API routes only:** health, readiness, admin and metrics endpoints are not served publicly.
-- **HTTPS only:** TLS 1.2 or 1.3, with its own certificate for the public listener. Plain HTTP connections are dropped.
-- **Stricter limits than the normal address:** 10 requests per second per client address (bursts of 20) and 16 connections per address, plus the same body size limit and header and body timeouts.
-- **Optional address limit:** `--allow` admits only the given clients; all others get 403.
-- **Checks before opening:** nothing changes unless every check passes: the gateway and goethed are running, the keys are valid, and the port is free and is not the normal gateway's port. If nginx does not accept the new listener, the previous state is restored.
 
 ## GPUs and system
 
 ### `goethe gpu`
 
-GPUs with their memory use, whether Goethe may use them, the process ids on each (Goethe's in green, others in red) and a bar of memory bandwidth use. The bar turns blue past the line at 70 %. On a terminal the table updates every half second until you press `q`; piped or with `--json` it prints once. The JSON adds `processes` (`pid`, `goethe`) and `memory_util_percent`.
-
-| Option | Description |
-|---|---|
-| `--deny <gpuN>...` | Keep new models off these GPUs; models already on them stay |
-| `--allow <gpuN>...` | Allow these GPUs again |
-| `--json` | JSON output |
-
-### `goethe hw`
+The GPU table of the menu's Status page: per GPU the VRAM in use, a 10-block bar (Goethe's models in the theme's main color, other processes in white, free memory dotted) and the total; the processes, one per line (another program's as a red process id, a Goethe model as its process id and model, with the engine's other processes such as `└ scheduler` below it); ALLOWED or DENIED; and a bar of memory bandwidth use with its percent. A legend follows the table. On a terminal it updates every 100 ms until `q` or ←; piped or with `--json` it prints once. The JSON adds `processes` (`pid`, `goethe`) and `memory_util_percent`.
 
 | Command | Description |
 |---|---|
-| `goethe hw profile` | GPUs, CPU, memory, disk, OS, container and cloud provider. GPU links, NUMA nodes and processes are in `--json` and `hardware_state.json`; `goethe gpu` shows the processes |
-| `goethe hw pick-gpus [--model <id>] [--tp <N>]` | Where `goethe load` would place a model right now, and the memory it needs |
-
-### `goethe doctor`
-
-Checks the machine and the setup: GPU and driver, compiler, Python environment, gateway, ports and keys. Each problem comes with its fix.
+| `goethe gpu deny <gpuN>...` | Keep new models off these GPUs; models already on them stay |
+| `goethe gpu allow <gpuN>...` | Allow these GPUs again |
 
 | Option | Description |
 |---|---|
 | `--json` | JSON output |
-| `--probe-public` | Also test that the public address answers |
 
-### `goethe update`
+### `goethe doctor`
+
+Checks the machine and the setup: GPU and driver, compiler, Python environment, gateway, ports and keys. Each problem comes with its fix. With `--hardware` it prints the hardware profile instead: GPUs, CPU, memory, disk, OS, container and cloud provider. GPU links, NUMA nodes and processes are in `--json` and `hardware_state.json`; `goethe gpu` shows the processes. To see where `goethe load` would place a model right now, and the memory it needs, use `goethe load <model> --dry-run`.
+
+| Option | Description |
+|---|---|
+| `--json` | JSON output |
+| `--public` | Also test that the public address answers |
+| `--hardware` | Print the hardware profile instead of the checks |
+
+### `goethe update [engine | rollback]`
 
 Installs the latest Goethe. Loaded models keep serving. It then checks the kernel pack of each installed model against the signed index: when the pack changed, only the blocks the installed pack lacks are downloaded, the new pack is verified and swapped in, and the previous one is kept for one rollback. A loaded model keeps its old pack until reloaded. `goethe load` says once a day when a newer pack exists.
+
+| Command | Description |
+|---|---|
+| `goethe update` | Update Goethe and the kernel packs |
+| `goethe update engine` | Update only the installed engines (the ternary runtime too, when it is installed) |
+| `goethe update rollback` | Put the previous kernel pack of every model that has one back |
 
 | Option | Description |
 |---|---|
 | `--check` | Only show what's available |
-| `--engine` | Also update the inference engine |
 | `--yes` | Don't ask |
-| `--allow-downgrade` | Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries); not with `--engine` or `--ternary` |
-| `--rollback` | Put the previous kernel pack of every model that has one back |
+| `--allow-downgrade` | Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries); not with `engine` |
 
 ### `goethe uninstall`
 
@@ -437,7 +439,7 @@ Removes Goethe and the models it installed. Folders of your own that you registe
 
 ### `goethe completion [install | remove]`
 
-Tab completion for bash, zsh and fish. Commands, subcommands and flags complete, and so do live values: installed models (by full id, by the name after the organisation, in any case, and by alias), GPU names, API key ids and names, network interfaces and bind addresses. The shell asks `goethe` for them at each Tab, so they are always current.
+Tab completion for bash, zsh and fish. Commands, subcommands and flags complete, and so do live values: installed models (by full id, by the name after the organisation, in any case, and by alias), GPU names, API key ids and names, network interfaces and listen addresses. The shell asks `goethe` for them at each Tab, so they are always current.
 
 | Command | Description |
 |---|---|
@@ -453,7 +455,7 @@ Prints the version, and the upgrade command when a newer version is available. `
 
 ## Platform
 
-Linking is optional. A node that is not linked never contacts the platform. A linked node's goethed sends a health snapshot every 10 seconds, and right after a model loads or unloads: hostname, OS, environment (bare metal, VM, container, cloud), network addresses, the gateway address (and the public gateway's address and end time while [`goethe serve --public`](#goethe-serve---public) is open), GPUs with memory use, installed and loaded models, and the node's API keys (name, key, model scope, expiry; the platform stores keys encrypted and shows them only to members who may manage the node). It never sends engine keys, prompts, traces, file paths, environment variables or command lines. Inference never depends on the platform.
+Linking is optional. A node that is not linked never contacts the platform. A linked node's goethed sends a health snapshot every 10 seconds, and right after a model loads or unloads: hostname, OS, environment (bare metal, VM, container, cloud), network addresses, the gateway address (and the public gateway's address and end time while [`goethe api share`](#goethe-api-share-duration) is open), GPUs with memory use, installed and loaded models, and the node's API keys (name, key, model scope, expiry; the platform stores keys encrypted and shows them only to members who may manage the node). It never sends engine keys, prompts, traces, file paths, environment variables or command lines. Inference never depends on the platform.
 
 ### `goethe login`
 
@@ -462,6 +464,7 @@ Links this node to a workspace. Prints a link and a code, then waits until the l
 | Option | Description |
 |---|---|
 | `--authkey <msh_ak_...>` | Link without a browser, with an auth key from the platform; `--authkey -` reads it from stdin so it stays out of the process list |
+| `--lifetime <when>` | How long the login lasts: `never`, or a time such as `12h`, `30d` or `4w`. On a linked node it only changes that |
 | `--platform-url <url>` | Another platform (default: `GOETHE_PLATFORM_URL`, else `https://goethe.sh`). Must be HTTPS; plain HTTP only for `localhost` and `*.localhost` |
 
 The installer takes the same flags: `curl -fsSL .../install.sh | bash -s -- --authkey msh_ak_...` (or `GOETHE_AUTHKEY=...`).

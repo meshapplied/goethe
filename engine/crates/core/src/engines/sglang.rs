@@ -42,7 +42,7 @@ pub fn check_extra_args(args: &[String]) -> Result<(), String> {
         }
         if let Some(owned) = OWNED_FLAGS.iter().find(|o| o.starts_with(name)) {
             return Err(format!(
-                "extra SGLang arg {arg} is not allowed: Goethe sets {owned} itself (use goethe load/config options instead)"
+                "extra SGLang arg {arg} is not allowed: Goethe sets {owned} itself (use goethe load options instead)"
             ));
         }
     }

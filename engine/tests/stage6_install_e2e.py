@@ -64,15 +64,15 @@ def _install(install_sh: Path, env: dict[str, str]) -> tuple[float, str]:
     )
     if rr.returncode != 0 or "Goethe install complete" not in rr.stdout:
         raise RuntimeError(f"install.sh failed rc={rr.returncode}: {(rr.stdout + rr.stderr)[-1500:]}")
-    if not rr.stdout.endswith("\nGet started:\n\n\t\u2192 goethe start\n"):
-        raise RuntimeError(f"install.sh must end with Get started and goethe start: {rr.stdout[-300:]}")
+    if not rr.stdout.endswith("\nGet started:\n\n\t\u2192 goethe\n"):
+        raise RuntimeError(f"install.sh must end with Get started and goethe: {rr.stdout[-300:]}")
     return time.time() - t0, rr.stdout + rr.stderr
 
 
 def _up_after_install(goethe: str, env: dict[str, str]) -> None:
     """The installer leaves goethed down when it was not running; goethe up then starts it."""
     if run([goethe, "ps"], env=env, timeout=30).returncode == 0:
-        raise RuntimeError("install.sh started goethed; it must leave that to goethe start or goethe up")
+        raise RuntimeError("install.sh started goethed; it must leave that to goethe up")
     run_goethe([goethe, "up"], env=env, timeout=120)
 
 
@@ -157,9 +157,9 @@ def _check_ternary(home: Path, goethe: str, env: dict[str, str], cdn: Path, late
     got = record.read_text(encoding="utf-8").strip() if record.is_file() else None
     if got != want or not (home / "goethe" / "ternary-kernels" / "README").is_file():
         raise RuntimeError(f"ternary pack not unpacked or its sha256 not recorded: {got} != {want}")
-    upd = run([goethe, "update", "--check", "--ternary"], env=env, timeout=120)
+    upd = run([goethe, "update", "--check", "engine"], env=env, timeout=120)
     if f"ternary pack {want[:12]} is up to date" not in upd.stdout:
-        late.append(f"update --check --ternary must see the recorded pack: {(upd.stdout + upd.stderr)[-300:]}")
+        late.append(f"update --check engine must see the recorded pack: {(upd.stdout + upd.stderr)[-300:]}")
 
 
 def _port_busy(port: int) -> bool:
@@ -259,12 +259,12 @@ def _serve_and_install(cdn: Path, new: Path) -> None:
                 src.mkdir()
                 (src / "config.json").write_text(json.dumps(_CFG), encoding="utf-8")
                 (src / "model.safetensors").write_bytes(b"x" * 256)
-                install = [goethe, "install", "--model", str(src), "--name", "e2e/tiny", "--no-load"]
+                install = [goethe, "install", str(src), "--name", "e2e/tiny"]
                 run_goethe(install, env=env, timeout=120)
-                run_goethe([goethe, "load", "--model", "e2e/tiny", "--gpus", str(gpu), "--yes"], env=env, timeout=300)
-                out = run_goethe([goethe, "key", "--create", "e2e", "--raw"], env=env).stdout
+                run_goethe([goethe, "load", "e2e/tiny", "--gpu", f"gpu{gpu}", "--yes"], env=env, timeout=300)
+                out = run_goethe([goethe, "api", "keys", "create", "e2e", "--raw"], env=env).stdout
                 token = next(ln for ln in out.splitlines() if ln.startswith("goethe_sk_"))
-                run_goethe([goethe, "allowlist", "--add", "127.0.0.1/32"], env=env)
+                run_goethe([goethe, "api", "allow", "add", "127.0.0.1/32"], env=env)
                 base = f"https://127.0.0.1:{test_public_port(home)}"
                 auth = {"Authorization": f"Bearer {token}"}
                 if not wait_until(lambda: http_get(f"{base}/v1/models", headers=auth)[0] == 200, timeout=20):

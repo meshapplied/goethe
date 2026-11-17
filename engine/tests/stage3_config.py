@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 3 goethe config gate: card and installed_models defaults update in place, idempotently."""
+"""Stage 3 load --save gate: card and installed_models defaults update in place, idempotently."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def _card_int(text: str, key: str) -> int | None:
 
 
 def main() -> None:
-    """Run goethe config twice and verify the card and DB carry the new defaults."""
+    """Run goethe load --save --dry-run twice and verify the card and DB carry the new defaults."""
     goethe = require_cli("goethe")
     with temp_home(stub_python=True) as home:
         card = home / "models" / "org__demo" / "goethe_card.toml"
@@ -24,18 +24,18 @@ def main() -> None:
         card.write_text('model_id = "demo"\ncontext_length = 1024\nmax_running_requests = 4\n', encoding="utf-8")
         seed_installed_model(home, "demo", "models/org__demo", 1.0, 1000, 1024, 4, 1, max_ctx=4096)
         env = {"GOETHE_HOME": str(home)}
-        run_goethe([str(goethe), "config", "--model", "demo", "--ctx", "2048", "--max-conc", "8"], env=env)
+        run_goethe([str(goethe), "load", "demo", "--ctx", "2048", "--max-conc", "8", "--save", "--dry-run"], env=env)
         text1 = card.read_text(encoding="utf-8")
         if _card_int(text1, "context_length") != 2048 or _card_int(text1, "max_running_requests") != 8:
             raise RuntimeError(f"card not updated in place: {text1!r}")
         if 'model_id = "demo"' not in text1 and 'model_id="demo"' not in text1:
-            raise RuntimeError("config dropped model_id from the card")
+            raise RuntimeError("load --save dropped model_id from the card")
         row = sqlite_query(home / "state.db", ROW_SQL)
         if row != [(2048, 8)]:
             raise RuntimeError(f"installed_models defaults not updated: {row}")
-        run_goethe([str(goethe), "config", "--model", "demo", "--ctx", "2048", "--max-conc", "8"], env=env)
+        run_goethe([str(goethe), "load", "demo", "--ctx", "2048", "--max-conc", "8", "--save", "--dry-run"], env=env)
         if card.read_text(encoding="utf-8") != text1 or sqlite_query(home / "state.db", ROW_SQL) != [(2048, 8)]:
-            raise RuntimeError("config not idempotent")
+            raise RuntimeError("load --save not idempotent")
     print("stage3_config ok")
 
 

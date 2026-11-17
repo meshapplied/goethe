@@ -208,10 +208,10 @@ def main() -> None:
             row_a = next((r for r in rows if r.get("id") == "local/test-a"), None)
             if row_a is None or row_a.get("status") != "installed" or not row_a.get("custom"):
                 raise RuntimeError("models --installed missing seeded custom model")
-            rr_rm = run_goethe([str(goethe), "remove", "--model", "local/test-a", "--yes"], env=env, timeout=30)
+            rr_rm = run_goethe([str(goethe), "remove", "local/test-a", "--yes"], env=env, timeout=30)
             if not model_path.exists():
                 raise RuntimeError("remove deleted the files of an unmanaged (in-place) model")
-            rr_m = run_goethe([str(goethe), "remove", "--model", "org/managed-b", "--yes"], env=env, timeout=30)
+            rr_m = run_goethe([str(goethe), "remove", "org/managed-b", "--yes"], env=env, timeout=30)
             if managed_path.exists():
                 raise RuntimeError(f"remove kept the files of a managed model: {rr_m.stdout}")
             if sqlite_query(home / "state.db", "SELECT COUNT(*) FROM installed_models")[0][0] != 0:

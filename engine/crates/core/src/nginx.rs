@@ -173,7 +173,7 @@ pub fn persist_gateway_limits(home: &Path) {
             .filter(|v| (1..=65535).contains(v))
             .unwrap_or(default);
         if let Err(e) = write_private(&nginx_prefix(home).join(name), format!("{value}\n").as_bytes()) {
-            eprintln!("goethe api gateway: {e}");
+            eprintln!("goethe api expose: {e}");
         }
     }
 }
@@ -186,7 +186,7 @@ pub fn persist_max_body_mb(home: &Path) -> u64 {
         .filter(|v| (1..=1024).contains(v))
         .unwrap_or(DEFAULT_MAX_BODY_MB);
     if let Err(e) = write_private(&nginx_prefix(home).join("max_body_mb"), format!("{mb}\n").as_bytes()) {
-        eprintln!("goethe api gateway: {e}");
+        eprintln!("goethe api expose: {e}");
     }
     mb
 }
@@ -320,7 +320,7 @@ fn change_bind(home: &Path, next: &BindSetting) -> Result<String, String> {
         thread::sleep(Duration::from_millis(250));
     }
     Err(format!(
-        "the gateway did not come back on {ip} within 25 s; goethed restarts it (check goethe api gateway and goethe logs --gateway)"
+        "the gateway did not come back on {ip} within 25 s; goethed restarts it (check goethe api expose and goethe logs gateway)"
     ))
 }
 
@@ -486,7 +486,7 @@ fn write_configs(home: &Path, bin: &Path) -> Result<(), String> {
     private_dir(&dir.join("logs"), true)?;
     let allow = dir.join("allowlist.conf");
     if !allow.is_file() {
-        write_private(&allow, b"# managed by goethe api allowlist\n")?;
+        write_private(&allow, b"# managed by goethe api allow\n")?;
     }
     let keys = dir.join("api_keys.conf");
     if !keys.is_file() {
@@ -599,7 +599,7 @@ pub fn log_gateway(home: &Path, msg: &str) {
     {
         let _ = f.write_all(line.as_bytes());
     }
-    eprintln!("goethe api gateway: {msg}");
+    eprintln!("goethe api expose: {msg}");
 }
 
 pub fn log_gateway_error(home: &Path, msg: &str) {

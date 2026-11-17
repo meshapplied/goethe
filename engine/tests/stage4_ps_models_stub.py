@@ -76,14 +76,14 @@ def main() -> None:
         seed_installed_model(home, "r", "models/org__r", 5.0, 512, 512, 2, 1)
         write_card(home / "models" / "org__s", "s", 512, 2)
         seed_installed_model(home, "s", "models/org__s", 5.0, 512, 512, 2, 1)
-        run_goethe([goethe, "hw", "profile"], env=env, timeout=120)
+        run_goethe([goethe, "doctor", "--hardware"], env=env, timeout=120)
         md = start_goethed(home)
         try:
-            load = [goethe, "load", "--model", "r", "--gpus", str(gpu), "--yes"]
+            load = [goethe, "load", "r", "--gpu", f"gpu{gpu}", "--yes"]
             run_goethe(load, env=env, timeout=120)
             run_goethe([*load, "--replica"], env=env, timeout=120)
-            run_goethe([goethe, "load", "--model", "s", "--gpus", str(gpu), "--yes"], env=env, timeout=120)
-            out = run_goethe([goethe, "key", "--create", "ps", "--raw"], env=env).stdout
+            run_goethe([goethe, "load", "s", "--gpu", f"gpu{gpu}", "--yes"], env=env, timeout=120)
+            out = run_goethe([goethe, "api", "keys", "create", "ps", "--raw"], env=env).stdout
             token = next(ln for ln in out.splitlines() if ln.startswith("goethe_sk_"))
             _per_instance(goethe, env, test_mux_port(home), token)
             _models_line(goethe, env, gpu)

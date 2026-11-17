@@ -44,7 +44,7 @@ enum Verdict {
 impl Verdict {
     fn label(&self) -> String {
         match self {
-            Verdict::Unknown => "unknown (run goethe hw profile)".to_string(),
+            Verdict::Unknown => "unknown (run goethe doctor --hardware)".to_string(),
             Verdict::Fits { per_gpu, .. } => format!("fits: {per_gpu:.1} GB per GPU"),
             Verdict::TooLarge => "does not fit: not enough VRAM".to_string(),
             Verdict::Unsupported => "does not fit: unsupported architecture".to_string(),
@@ -312,6 +312,94 @@ fn list_text(rows: &[ModelRow], free_gb: Option<String>) -> String {
         out.push_str(&format!("\ngated models: {}\n", crate::hf::GATED_WAYS));
     }
     out.trim_end().to_string() + "\n"
+}
+
+pub struct PickRow {
+    pub id: String,
+    pub size_gb: f64,
+    pub vram_gb: f64,
+    pub gpus: usize,
+    pub installed: bool,
+    pub gated: bool,
+    pub optimised: bool,
+}
+
+pub struct PickData {
+    pub total_vram_gb: f64,
+    pub allowed_vram_gb: f64,
+    pub allowed_gpus: Vec<u32>,
+    pub disk_total_gb: Option<f64>,
+    pub disk_free_gb: Option<f64>,
+    pub models_gb: f64,
+    pub rows: Vec<PickRow>,
+}
+
+fn disk_space_gb(path: &Path) -> Option<(f64, f64)> {
+    // Size and free space of the filesystem holding path, in GB.
+    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| {
+        let gb = |blocks: u64| blocks as f64 * st.f_frsize as f64 / 1e9;
+        (gb(st.f_blocks as u64), gb(st.f_bavail as u64))
+    })
+}
+
+pub fn picker_data(home: &Path) -> Result<PickData, String> {
+    // The install table of the goethe menu: the machine's VRAM and storage, then each model that fits all of its GPUs (installed ones always).
+    let con = db::open(home).map_err(|e| e.to_string())?;
+    let installed = installed_rows(home, &con)?;
+    let disk = disk_gb_by_model(&con);
+    let hw = crate::placement::load_hw(home).ok_or("no hardware profile yet; run goethe doctor --hardware")?;
+    let allowed = View::capacity(home, hw.clone());
+    let whole = View::whole(home, hw);
+    let reg = fetch(&registry_url()).ok();
+    let packs = crate::packs::catalog(home).map(|ix| crate::packs::offers_any(&ix, &crate::packs::local_archs(home))).unwrap_or_default();
+    let need = |id: &str, input: &ChooserInput, pinned: Option<usize>| match verdict(Some(&whole), id, input, pinned) {
+        Verdict::Fits { total, .. } => whole.fit(id, input, pinned).ok().map(|f| (total, f.tp)),
+        _ => None,
+    };
+    let mut rows = Vec::new();
+    for m in &installed {
+        let pinned = (m.default_tp > 0).then_some(m.default_tp as usize);
+        let (vram, gpus) = need(&m.id, &m.input, pinned).unwrap_or((m.input.static_vram_gb, pinned.unwrap_or(1)));
+        rows.push(PickRow {
+            id: m.id.clone(),
+            size_gb: disk.get(&m.id).copied().unwrap_or(m.input.static_vram_gb),
+            vram_gb: vram,
+            gpus,
+            installed: true,
+            gated: false,
+            optimised: m.runtime == "goethe-engine",
+        });
+    }
+    for m in reg.iter().flat_map(|r| r.models.iter()).filter(|m| !m.manual_download.unwrap_or(false)) {
+        if installed.iter().any(|i| i.id == m.id) {
+            continue;
+        }
+        let pinned = m.default_tp.filter(|t| *t > 0).map(|t| t as usize);
+        if let Some((vram, gpus)) = need(&m.id, &registry_input(m), pinned) {
+            rows.push(PickRow {
+                id: m.id.clone(),
+                size_gb: m.download_gb.unwrap_or(m.static_vram_gb),
+                vram_gb: vram,
+                gpus,
+                installed: false,
+                gated: m.gated.unwrap_or(false),
+                optimised: packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id)),
+            });
+        }
+    }
+    rows.sort_by(|a, b| a.vram_gb.total_cmp(&b.vram_gb).then_with(|| a.id.cmp(&b.id)));
+    let space = disk_space_gb(&home.join("models")).or_else(|| disk_space_gb(home));
+    Ok(PickData {
+        total_vram_gb: whole.free_allowed_gb(),
+        allowed_vram_gb: allowed.free_allowed_gb(),
+        allowed_gpus: allowed.gpus.iter().map(|g| g.index).collect(),
+        disk_total_gb: space.map(|s| s.0),
+        disk_free_gb: space.map(|s| s.1),
+        models_gb: disk.values().sum(),
+        rows,
+    })
 }
 
 pub fn disk_gb_by_model(con: &Connection) -> HashMap<String, f64> {

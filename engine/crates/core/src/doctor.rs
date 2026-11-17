@@ -251,7 +251,7 @@ fn probe_public_reachability(home: &Path) {
 
 fn print_public_security_advisory() {
     println!(
-        "Public mode exposes the gateway to the internet. Keep the allowlist tight (goethe api allowlist --add/--remove), use API keys with scopes and rpm limits, and rotate keys."
+        "Public mode exposes the gateway to the internet. Keep the allowlist tight (goethe api allow add and remove), use API keys with scopes and rpm limits, and rotate keys."
     );
 }
 
@@ -315,7 +315,7 @@ fn check_hardware(home: &Path) -> Check {
 fn deny_hint(gpus: &[(u32, usize, u64, u64)]) -> Option<String> {
     // One line when a GPU has foreign processes or under a fifth of its memory free: how to keep a card for other workloads. (index, foreign processes, free MB, total MB)
     let (index, ..) = gpus.iter().find(|(_, foreign, free, total)| *foreign > 0 || *free * 5 < *total)?;
-    Some(format!("goethe gpu --deny gpu{index} keeps a card free for other workloads"))
+    Some(format!("goethe gpu deny gpu{index} keeps a card free for other workloads"))
 }
 
 fn mixed_arch_note(gpus: &[(u32, &str)]) -> Option<String> {
@@ -493,7 +493,7 @@ fn check_pyenv(home: &Path) -> Check {
         let release = std::env::current_exe().ok().and_then(|e| crate::paths::home_of_binary(&e)).is_some();
         return match release {
             true => check("py-env", "FAIL", "run the installer"),
-            false => check("py-env", "INFO", "created on first goethe install (or goethe update --engine)"),
+            false => check("py-env", "INFO", "created on first goethe install (or goethe update engine)"),
         };
     }
     let (python, sglang) = pyenv_versions(&env);
@@ -631,7 +631,7 @@ fn check_network(home: &Path) -> Check {
     let allowed: Vec<crate::netif::Net> = crate::security::allowlist_list().unwrap_or_default().iter().filter_map(|c| crate::netif::Net::parse(c)).collect();
     let shown = ranges.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ");
     if !ranges.is_empty() && !ranges.iter().any(|r| allowed.iter().any(|a| a.overlaps(r))) {
-        return check("network", "WARN", format!("{name} reaches {shown}, but no allowlist entry covers it, so its clients are refused; run goethe api configure"));
+        return check("network", "WARN", format!("{name} reaches {shown}, but no allowlist entry covers it, so its clients are refused; run goethe api expose vpn --interface {name}"));
     }
     check("network", "OK", format!("gateway follows {name} at {ip}"))
 }
@@ -775,8 +775,8 @@ mod tests {
     #[test]
     fn a_busy_gpu_gets_one_hint_how_to_keep_it_free() {
         assert_eq!(deny_hint(&[(0, 0, 90_000, 96_000), (1, 0, 90_000, 96_000)]), None, "idle cards need no hint");
-        assert_eq!(deny_hint(&[(0, 0, 90_000, 96_000), (1, 2, 90_000, 96_000)]).unwrap(), "goethe gpu --deny gpu1 keeps a card free for other workloads");
-        assert_eq!(deny_hint(&[(0, 0, 10_000, 96_000), (3, 1, 1, 96_000)]).unwrap(), "goethe gpu --deny gpu0 keeps a card free for other workloads", "little free memory counts, one line");
+        assert_eq!(deny_hint(&[(0, 0, 90_000, 96_000), (1, 2, 90_000, 96_000)]).unwrap(), "goethe gpu deny gpu1 keeps a card free for other workloads");
+        assert_eq!(deny_hint(&[(0, 0, 10_000, 96_000), (3, 1, 1, 96_000)]).unwrap(), "goethe gpu deny gpu0 keeps a card free for other workloads", "little free memory counts, one line");
     }
 
     #[test]
@@ -796,7 +796,7 @@ mod tests {
     fn a_source_install_without_a_py_env_is_told_when_it_comes() {
         let home = tempfile::tempdir().unwrap();
         let c = check_pyenv(home.path());
-        assert_eq!((c.status.as_str(), c.hint.as_str()), ("INFO", "created on first goethe install (or goethe update --engine)"), "the test binary is not a release install");
+        assert_eq!((c.status.as_str(), c.hint.as_str()), ("INFO", "created on first goethe install (or goethe update engine)"), "the test binary is not a release install");
     }
 
     #[test]

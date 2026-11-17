@@ -92,7 +92,7 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
         let _lock = pyenv::lock(home)?;
         for (what, layer) in [("SGLang", Layer::Sglang), ("goethe-engine", Layer::Engine)] {
             if differs(what) && !(bins && layer == Layer::Engine) {
-                pyenv::install_from(home, pkg, &sums, tmp, layer).map_err(|e| format!("{e}; goethe update --engine retries"))?;
+                pyenv::install_from(home, pkg, &sums, tmp, layer).map_err(|e| format!("{e}; goethe update engine retries"))?;
             }
         }
     }
@@ -103,7 +103,7 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
             .map(|s| s.success())
             .unwrap_or(false);
         if !ok {
-            eprintln!("note: goethe-engine was not brought to the new pin; run goethe update --engine");
+            eprintln!("note: goethe-engine was not brought to the new pin; run goethe update engine");
         }
     }
     if let Some(t) = ternary {
@@ -168,6 +168,11 @@ fn published_label(version: &str, commit: Option<&str>, local_commit: &str, rebu
 
 const TERNARY_REL: &str = "goethe/ternary-kernels.tar.zst";
 const TERNARY_RECORD: &str = "goethe/ternary-kernels.sha256";
+
+pub fn ternary_installed(home: &Path) -> bool {
+    // Whether the ternary runtime was ever installed here, so goethe update engine refreshes it too.
+    home.join(TERNARY_RECORD).exists()
+}
 
 struct Delta {
     installed: Option<String>,

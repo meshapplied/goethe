@@ -93,7 +93,7 @@ if [[ "$(grep -v '^}' <<<"${MAIN}" | tail -n 1)" != "  get_started" ]]; then
   exit 1
 fi
 GOT="$(LC_ALL=C bash -c "$(sed -n '/^get_started() {/,/^}/p' "${INSTALL}")"$'\n'get_started)"
-if [[ "${GOT}" != $'\nGet started:\n\n\t→ goethe start' ]]; then
+if [[ "${GOT}" != $'\nGet started:\n\n\t→ goethe' ]]; then
   echo "install.sh Get started block is wrong: ${GOT}"
   exit 1
 fi
@@ -177,7 +177,7 @@ fi
 printf '[Service]\nEnvironment="GOETHE_HOME=/srv/my home/.goethe"\nEnvironmentFile=-/srv/x/goethe.env\n' \
   >"${UNITS}/goethed.service"
 if [[ "$(unit_home)" != "/srv/my home/.goethe" ]]; then
-  echo "system_unit_home misread goethe service enable's quoted unit: $(unit_home)"
+  echo "system_unit_home misread goethe up's quoted unit: $(unit_home)"
   exit 1
 fi
 

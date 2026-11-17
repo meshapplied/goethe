@@ -46,7 +46,7 @@ docker run --rm --name "${NAME}" -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
     fi
     echo "install took $(( $(date +%s) - t0 ))s"
     grep -q "Goethe install complete" /workspace/install.log
-    test "$(tail -n 1 /workspace/install.log)" = "$(printf "\t\342\206\222 goethe start")"
+    test "$(tail -n 1 /workspace/install.log)" = "$(printf "\t\342\206\222 goethe")"
     grep -qx "Get started:" /workspace/install.log
     "${H}/nginx-root/usr/sbin/nginx" -v
     if goethe ps >/dev/null 2>&1; then
@@ -60,8 +60,8 @@ docker run --rm --name "${NAME}" -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
     test "$(stat -c %a "${H}/goethe.env")" = 600
     port=$(cat "${H}/nginx/public_port")
     test "$(curl -sk -o /dev/null -w "%{http_code}" "https://127.0.0.1:${port}/v1/models")" = 403
-    goethe allowlist --add 127.0.0.1/32 >/dev/null
-    token=$(goethe key --create c --raw | grep "^goethe_sk_")
+    goethe api allow add 127.0.0.1/32 >/dev/null
+    token=$(goethe api keys create c --raw | grep "^goethe_sk_")
     test "$(curl -sk -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${token}" "https://127.0.0.1:${port}/v1/models")" = 200
     goethe down >/dev/null
     echo "container gateway ok on ${port}"

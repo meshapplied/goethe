@@ -1,4 +1,4 @@
-// goethe api configure: a guided choice between local, VPN and public access to the gateway.
+// goethe api expose: a guided choice between local, VPN and public access to the gateway.
 
 use crate::netif::{self, Iface, Net};
 use crate::nginx::{self, InterfaceAddr};
@@ -71,7 +71,7 @@ fn network_label(n: &Network, width: usize) -> String {
 
 const PUBLIC_WARNING: &str = "exposing the API on a public network is not recommended.
   - Anyone who can reach this machine can attempt to connect; only the allowlist and API keys stop them.
-  - Allow only the client IPs you trust (goethe api allowlist --add <ip>/32) and give every client its own key.
+  - Allow only the client IPs you trust (goethe api allow add <ip>/32) and give every client its own key.
   - Open the gateway port in your firewall or router yourself; Goethe does not change them.
   - The certificate is self-signed, so clients must trust it or skip verification.";
 
@@ -364,7 +364,7 @@ fn configure_public(opts: &ApiOpts) -> Result<String, String> {
         println!("{line}");
     }
     if !confirm("Expose the API on every network interface anyway?", false, opts.yes)? {
-        return Err("nothing changed (goethe api configure again to pick local or VPN)".to_string());
+        return Err("nothing changed (goethe api expose local or goethe api expose vpn to pick one)".to_string());
     }
     let mut ranges = opts.allow.clone();
     let mut everyone_chosen = false;
@@ -393,7 +393,7 @@ fn configure_public(opts: &ApiOpts) -> Result<String, String> {
         allow(r, "public client")?;
     }
     if ranges.is_empty() {
-        println!("No client addresses were added: only addresses already on the allowlist can connect (goethe api allowlist --add <ip>/32).");
+        println!("No client addresses were added: only addresses already on the allowlist can connect (goethe api allow add <ip>/32).");
     }
     Ok(public_host.unwrap_or_else(|| "0.0.0.0".to_string()))
 }
@@ -422,11 +422,11 @@ fn public_ip_lines(ip: Result<IpAddr, String>, port: u16, local: &[InterfaceAddr
 fn offer_key(yes: bool) -> Result<(), String> {
     // Without any API key no client can call the API, so offer one; goethe api shows it again later.
     if !security::key_list_detailed()?.is_empty() {
-        println!("API keys: {} exist (goethe api keys; goethe api keys --create <client> for each new client)", security::key_list_detailed()?.len());
+        println!("API keys: {} exist (goethe api keys; goethe api keys create <client> for each new client)", security::key_list_detailed()?.len());
         return Ok(());
     }
     if !interactive() && !yes {
-        println!("No API keys yet: goethe api keys --create <client>");
+        println!("No API keys yet: goethe api keys create <client>");
         return Ok(());
     }
     if !confirm("No API keys exist yet. Create one now?", true, yes)? {
@@ -462,7 +462,7 @@ pub fn apply_access(opts: &ApiOpts) -> Result<String, String> {
 }
 
 pub fn run_api(opts: ApiOpts) -> Result<(), String> {
-    // goethe api configure: who can reach the API, then a key if none exists, then the URL.
+    // goethe api expose: who can reach the API, then a key if none exists, then the URL.
     let api = apply_access(&opts)?;
     offer_key(opts.yes)?;
     println!("\nAPI: {api}\n\n{}", crate::term::commands("For the models and keys run:", &["goethe api"]));

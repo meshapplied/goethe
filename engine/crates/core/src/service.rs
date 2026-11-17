@@ -202,7 +202,7 @@ pub fn wait_goethed(timeout: std::time::Duration) -> Result<(), String> {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    Err(format!("goethed did not come up within {} s (see goethe logs --daemon)", timeout.as_secs()))
+    Err(format!("goethed did not come up within {} s (see goethe logs goethed)", timeout.as_secs()))
 }
 
 pub fn refresh_unit(home: &Path) {
@@ -397,8 +397,8 @@ fn refuse_other_home(path: &Path, home: &Path) -> Result<(), String> {
     };
     let how = other
         .as_deref()
-        .map(|h| format!("GOETHE_HOME={} goethe service disable", shell_quote(&h.display().to_string())))
-        .unwrap_or_else(|| format!("goethe service disable from that home, or remove {}", path.display()));
+        .map(|h| format!("GOETHE_HOME={} goethe down", shell_quote(&h.display().to_string())))
+        .unwrap_or_else(|| format!("goethe down from that home, or remove {}", path.display()));
     Err(format!(
         "{} already starts goethed for {}; this home ({}) cannot get a unit too. Disable the other one first ({how})",
         path.display(),
@@ -640,7 +640,7 @@ mod tests {
         assert!(matches!(unit_owner(&unit, mine), UnitOwner::Other(Some(_))));
         assert!(!unit_is_ours(&unit, mine));
         let err = refuse_other_home(&unit, mine).unwrap_err();
-        assert!(err.contains("GOETHE_HOME='/other/.goethe' goethe service disable"), "{err}");
+        assert!(err.contains("GOETHE_HOME='/other/.goethe' goethe down"), "{err}");
         fs::write(&unit, unit_text(mine, "default.target")).unwrap();
         assert!(matches!(unit_owner(&unit, mine), UnitOwner::Ours));
         assert!(refuse_other_home(&unit, mine).is_ok());
