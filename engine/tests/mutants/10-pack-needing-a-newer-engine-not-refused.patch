@@ -1,0 +1,14 @@
+diff --git a/engine/crates/core/src/packs.rs b/engine/crates/core/src/packs.rs
+index 3477a64..63eeac3 100644
+--- a/engine/crates/core/src/packs.rs
++++ b/engine/crates/core/src/packs.rs
+@@ -276,7 +276,8 @@ fn dedup(v: Vec<Offer>) -> Vec<Offer> {
+ 
+ pub fn runnable(e: &Entry) -> bool {
+     // The pinned goethe-engine (the one goethe installs) is at least the pack's min_engine.
+-    Some(e.min_engine) <= version(crate::pyenv::ENGINE_VERSION)
++    let _ = e;
++    true
+ }
+ 
+ pub fn engine_too_old(index: &[u8], model_id: &str, archs: &[String]) -> Option<String> {

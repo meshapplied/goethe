@@ -65,6 +65,7 @@ pub fn line(label: &str, done: u64, total: Option<u64>, bytes_per_s: f64) -> Str
     // "model: 1.2 GB of 4.7 GB, 85 MB/s, about 41 s left".
     let rate = format!("{:.0} MB/s", bytes_per_s / (1u64 << 20) as f64);
     match total {
+        Some(t) if done >= t => format!("{label}: {} complete, finishing up", size(t)),
         Some(t) if bytes_per_s >= 1.0 && t > done => {
             format!("{label}: {} of {}, {rate}, about {} left", size(done), size(t), span(((t - done) as f64 / bytes_per_s).ceil() as u64))
         }
@@ -107,9 +108,7 @@ impl Drop for Ticker {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
-        if UPDATING.swap(false, Ordering::Relaxed) {
-            eprintln!();
-        }
+        end_line();
     }
 }
 
@@ -137,6 +136,13 @@ pub fn eprint_line(text: String) {
 }
 
 static UPDATING: AtomicBool = AtomicBool::new(false);
+
+pub fn end_line() {
+    // Ends an updating line left on a terminal, so the next line starts clean.
+    if UPDATING.swap(false, Ordering::Relaxed) {
+        eprintln!();
+    }
+}
 
 fn warmup_file(home: &Path) -> std::path::PathBuf {
     home.join("warmup.json")
@@ -173,7 +179,8 @@ mod tests {
         assert_eq!(line("model", gb, Some(3 * gb), 100.0 * mb as f64), "model: 1.0 GB of 3.0 GB, 100 MB/s, about 21 s left");
         assert_eq!(line("pack", 10 * mb, Some(12 * gb), 1.0 * mb as f64), "pack: 10 MB of 12.0 GB, 1 MB/s, about 4 h left");
         assert_eq!(line("pack", 5 * mb, None, 0.0), "pack: 5 MB, 0 MB/s");
-        assert_eq!(line("pack", 9 * gb, Some(3 * gb), 0.0), "pack: 3.0 GB of 3.0 GB, 0 MB/s");
+        assert_eq!(line("pack", 9 * gb, Some(3 * gb), 0.0), "pack: 3.0 GB complete, finishing up");
+        assert_eq!(line("pack", 3 * gb, Some(3 * gb), 5.0 * mb as f64), "pack: 3.0 GB complete, finishing up");
     }
 
     #[test]

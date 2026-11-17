@@ -290,20 +290,27 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     let mut pack_refused = false;
     let declined = match pack_decision(home, opts)? {
         PackDecision::Use(mut choice) => 'packed: {
-            // Only the files the pack was built for, at its pinned revision; the engine layer once, on first use.
-            crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
+            // Only the files the pack was built for, at its pinned revision; a pack no allowed GPU runs is refused from its manifest before anything is installed, the engine layer once, on first use.
             let login = crate::packs::Login(choice.creds.clone());
             let broker = crate::packs::HttpBroker::new(&choice.creds.platform_url, &login);
+            let refuse = |why: String| match pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why, fallback_allowed(opts.fallback)) {
+                Ok(line) => line,
+                Err(refusal) => {
+                    eprintln!("{refusal}");
+                    std::process::exit(3);
+                }
+            };
+            let early = crate::packs::unverified_prefix(&opts.model_id, &choice.offer.arch, &broker).ok().flatten().and_then(|(_, prefix)| sku_refused(home, &prefix));
+            if let Some(why) = early {
+                println!("{}", refuse(why));
+                pack_refused = true;
+                break 'packed false;
+            }
+            crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
             let plan = crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home))?
                 .ok_or_else(|| format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch))?;
             if let Some(why) = refused_before_download(home, &plan, &crate::packs::python_runner(home)) {
-                match pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why, fallback_allowed(opts.fallback)) {
-                    Ok(line) => println!("{line}"),
-                    Err(refusal) => {
-                        eprintln!("{refusal}");
-                        std::process::exit(3);
-                    }
-                }
+                println!("{}", refuse(why));
                 pack_refused = true;
                 break 'packed false;
             }
@@ -1129,11 +1136,22 @@ fn local_devices(home: &Path) -> Vec<crate::packs::Device> {
         .collect()
 }
 
+static NO_REQUIREMENTS_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn say_once(said: &std::sync::atomic::AtomicBool, line: &str) -> bool {
+    // Print a note the first time only; true when it was printed now.
+    let first = !said.swap(true, std::sync::atomic::Ordering::SeqCst);
+    if first {
+        eprintln!("{line}");
+    }
+    first
+}
+
 fn sku_refused(home: &Path, prefix: &[u8]) -> Option<String> {
     // goethe's own check from the pack's manifest (the signed index fixes its hash): no variant runs on any allowed GPU. A manifest that lists no variant requirements is said so once and left to the engine.
     let reqs = crate::packs::sku_reqs(&crate::packs::manifest_of(prefix)?);
     if reqs.is_empty() {
-        eprintln!("note: this pack's manifest lists no per-variant requirements (buckets[].requires: arch, sms), so this GPU is not checked before the download");
+        say_once(&NO_REQUIREMENTS_SAID, "note: this pack's manifest lists no per-variant requirements (buckets[].requires: arch, sms), so this GPU is not checked before the download");
         return None;
     }
     crate::packs::sku_refusal(&reqs, &local_devices(home))
@@ -2173,6 +2191,13 @@ mod tests {
             },
         );
         (got, calls.into_inner())
+    }
+
+    #[test]
+    fn a_note_about_a_pack_without_requirements_is_said_once_per_install() {
+        let said = std::sync::atomic::AtomicBool::new(false);
+        assert!(say_once(&said, "note: first"));
+        assert!(!say_once(&said, "note: first"), "the second check of the same install stays quiet");
     }
 
     #[test]

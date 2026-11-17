@@ -1,0 +1,17 @@
+diff --git a/engine/crates/core/src/install.rs b/engine/crates/core/src/install.rs
+index 32fd185..e6aceb2 100644
+--- a/engine/crates/core/src/install.rs
++++ b/engine/crates/core/src/install.rs
+@@ -327,7 +327,11 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
+             };
+             let (fit_repo, fit_rev) = crate::packs::aux(&plan.entry).map_or((choice.offer.hf_repo.clone(), rev.clone()), |(repo, revision, _)| (repo, revision.unwrap_or_else(|| "main".into())));
+             match (hf::fetch_config_json(&fit_repo, &fit_rev), crate::hw::profile(home)) {
+-                (Ok(cfg), Ok(hw)) => println!("{}", pack_fit(&crate::recommend::View::new(home, hw), &cfg, entry.as_ref(), opts, &choice.offer.arch, bytes(&files), &card_dir)?),
++                (Ok(cfg), Ok(hw)) => {
++                    if let Ok(line) = pack_fit(&crate::recommend::View::new(home, hw), &cfg, entry.as_ref(), opts, &choice.offer.arch, bytes(&files), &card_dir) {
++                        println!("{line}");
++                    }
++                }
+                 (Err(e), _) | (_, Err(e)) => eprintln!("note: the per-GPU fit was not checked before the download: {e}"),
+             }
+             confirm(opts, &format!("{} ({}, {:.1} GB) with optimised kernels for {}{spec}", opts.model_id, choice.offer.format, bytes(&files) as f64 / GIB, choice.offer.arch))?;
