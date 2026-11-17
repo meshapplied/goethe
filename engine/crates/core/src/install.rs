@@ -2088,7 +2088,6 @@ mod tests {
 
     #[test]
     fn the_pack_lookup_runs_in_the_engine_layer_that_was_installed_a_moment_before() {
-        // Real order and layout: the runner exists before the layer, the layer appears as a py-env python, the lookup must reach it.
         use std::os::unix::fs::PermissionsExt;
         let home = tempfile::tempdir().unwrap();
         let run = crate::packs::python_runner(home.path());
@@ -2108,7 +2107,7 @@ mod tests {
                 },
                 by_structure: &|_| {
                     let (_, out) = run(&["pack".to_string(), "match".to_string()])?;
-                    *seen.borrow_mut() = out;
+                    seen.replace(out);
                     Ok(None)
                 },
             },
