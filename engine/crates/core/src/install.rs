@@ -2087,6 +2087,37 @@ mod tests {
     }
 
     #[test]
+    fn the_pack_lookup_runs_in_the_engine_layer_that_was_installed_a_moment_before() {
+        // Real order and layout: the runner exists before the layer, the layer appears as a py-env python, the lookup must reach it.
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let run = crate::packs::python_runner(home.path());
+        let opts = InstallOpts { yes: true, ..Default::default() };
+        let seen = std::cell::RefCell::new(String::new());
+        let got = offer_for(
+            &opts,
+            OfferDeps {
+                creds: Ok(Some(login())),
+                archs: vec!["sm_120a".to_string()],
+                index: &|| Some(offer_index()),
+                ensure_engine: &|| {
+                    let bin = home.path().join("py-env/bin");
+                    fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
+                    fs::write(bin.join("python"), "#!/bin/sh\necho \"py-env python: $*\"\n").map_err(|e| e.to_string())?;
+                    fs::set_permissions(bin.join("python"), fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())
+                },
+                by_structure: &|_| {
+                    let (_, out) = run(&["pack".to_string(), "match".to_string()])?;
+                    *seen.borrow_mut() = out;
+                    Ok(None)
+                },
+            },
+        );
+        assert!(got.unwrap().is_none());
+        assert_eq!(seen.borrow().trim(), "py-env python: -m goethe_engine pack match", "the lookup used the python of the layer just installed");
+    }
+
+    #[test]
     fn a_logged_in_fresh_home_installs_the_engine_first_and_then_takes_the_pack() {
         let opts = InstallOpts { yes: true, ..Default::default() };
         let (got, calls) = offered(&opts, Some(login()), &["sm_120a"], matched(), Ok(()));
