@@ -1114,11 +1114,22 @@ fn local_devices(home: &Path) -> Vec<crate::packs::Device> {
         .collect()
 }
 
+static NO_REQUIREMENTS_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn say_once(said: &std::sync::atomic::AtomicBool, line: &str) -> bool {
+    // Print a note the first time only; true when it was printed now.
+    let first = !said.swap(true, std::sync::atomic::Ordering::SeqCst);
+    if first {
+        eprintln!("{line}");
+    }
+    first
+}
+
 fn sku_refused(home: &Path, prefix: &[u8]) -> Option<String> {
     // goethe's own check from the pack's manifest (the signed index fixes its hash): no variant runs on any allowed GPU. A manifest that lists no variant requirements is said so once and left to the engine.
     let reqs = crate::packs::sku_reqs(&crate::packs::manifest_of(prefix)?);
     if reqs.is_empty() {
-        eprintln!("note: this pack's manifest lists no per-variant requirements (buckets[].requires: arch, sms), so this GPU is not checked before the download");
+        say_once(&NO_REQUIREMENTS_SAID, "note: this pack's manifest lists no per-variant requirements (buckets[].requires: arch, sms), so this GPU is not checked before the download");
         return None;
     }
     crate::packs::sku_refusal(&reqs, &local_devices(home))
@@ -2139,6 +2150,13 @@ mod tests {
             },
         );
         (got, calls.into_inner())
+    }
+
+    #[test]
+    fn a_note_about_a_pack_without_requirements_is_said_once_per_install() {
+        let said = std::sync::atomic::AtomicBool::new(false);
+        assert!(say_once(&said, "note: first"));
+        assert!(!say_once(&said, "note: first"), "the second check of the same install stays quiet");
     }
 
     #[test]
