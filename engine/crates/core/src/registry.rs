@@ -6,7 +6,7 @@ use crate::paths::goethe_home;
 use crate::sglang_infer;
 use crate::sglang_validate;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Registry {
@@ -173,48 +173,9 @@ fn finish_registry(url: &str, body: String, sig: Option<&[u8]>) -> Result<Regist
     }
 }
 
-fn registry_pubkey(scratch: &Path) -> Result<PathBuf, String> {
-    if let Some(p) = std::env::var_os("GOETHE_RELEASE_PUB") {
-        return Ok(PathBuf::from(p));
-    }
-    let installed = goethe_home().join("release_pub.pem");
-    if installed.is_file() {
-        return Ok(installed);
-    }
-    let embedded = scratch.join("release_pub.pem");
-    std::fs::write(&embedded, include_str!("../../../packaging/release_pub.pem")).map_err(|e| e.to_string())?;
-    Ok(embedded)
-}
-
 fn verify_registry(body: &[u8], sig: &[u8]) -> Result<(), String> {
-    verify_registry_in(&std::env::temp_dir(), body, sig)
-}
-
-fn verify_registry_in(tmp: &Path, body: &[u8], sig: &[u8]) -> Result<(), String> {
-    // Same openssl check as the package SHA256SUMS. A bad signature never becomes engine flags.
-    let dir = crate::paths::private_dir_in(tmp, "goethe-reg")?;
-    let status = (|| {
-        let data = dir.join("body");
-        let sigp = dir.join("body.sig");
-        std::fs::write(&data, body).map_err(|e| e.to_string())?;
-        std::fs::write(&sigp, sig).map_err(|e| e.to_string())?;
-        std::process::Command::new("openssl")
-            .args(["dgst", "-sha256", "-verify"])
-            .arg(registry_pubkey(&dir)?)
-            .arg("-signature")
-            .arg(&sigp)
-            .arg(&data)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(|e| format!("openssl verify: {e}"))
-    })();
-    let _ = std::fs::remove_dir_all(&dir);
-    if status?.success() {
-        Ok(())
-    } else {
-        Err("registry signature verification failed".into())
-    }
+    // The same release-key check as the package list. A bad signature never becomes engine flags.
+    crate::release_key::verify("the registry", body, sig)
 }
 
 const MISS_TTL_SECS: u64 = 300;
@@ -896,27 +857,11 @@ mod validate_tests {
         let sig = std::path::PathBuf::from(format!("{}.sig", reg.display()));
         run(&["dgst".into(), "-sha256".into(), "-sign".into(), key.into(), "-out".into(), sig.clone().into(), reg.into()]);
 
-        let prev = std::env::var_os("GOETHE_RELEASE_PUB");
-        std::env::set_var("GOETHE_RELEASE_PUB", &wrong);
-        assert!(fetch(&url).is_err(), "wrong key");
-        std::env::set_var("GOETHE_RELEASE_PUB", &pubk);
+        let held = crate::release_key::test_key::set(&std::fs::read_to_string(&wrong).unwrap());
+        assert!(fetch(&url).unwrap_err().contains("release key"), "wrong key");
+        drop(held);
+        let _held = crate::release_key::test_key::set(&std::fs::read_to_string(&pubk).unwrap());
         assert!(fetch(&url).is_ok(), "matching key");
-        match prev {
-            Some(v) => std::env::set_var("GOETHE_RELEASE_PUB", v),
-            None => std::env::remove_var("GOETHE_RELEASE_PUB"),
-        }
-    }
-
-    #[test]
-    fn a_planted_link_under_the_old_predictable_temp_name_is_never_written_through() {
-        let (tmp, victim) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let (file, body) = (victim.path().join("important.txt"), b"registry body");
-        std::fs::write(&file, "mine").unwrap();
-        let planted = tmp.path().join(format!("goethe-reg-{}-{}", std::process::id(), body.len()));
-        std::fs::create_dir(&planted).unwrap();
-        std::os::unix::fs::symlink(&file, planted.join("body")).unwrap();
-        let _ = verify_registry_in(tmp.path(), body, b"sig");
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "mine");
     }
 
     #[test]

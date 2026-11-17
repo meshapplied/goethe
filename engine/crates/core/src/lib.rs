@@ -33,6 +33,7 @@ pub mod chat;
 pub mod run;
 pub mod recommend;
 pub mod registry;
+pub mod release_key;
 pub mod rpc;
 pub mod safetensors;
 pub mod sglang_infer;

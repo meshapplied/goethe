@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 pub struct UpdateOpts {
@@ -38,7 +38,7 @@ pub fn run(opts: UpdateOpts) -> Result<(), String> {
 }
 
 fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<(), String> {
-    let sums = fetch_signed_sums(home, pkg, tmp)?;
+    let sums = fetch_signed_sums(pkg, tmp)?;
     let version_file = fetch_verified(pkg, &sums, "VERSION", tmp)?;
     let remote_ver = fs::read_to_string(&version_file).map_err(|e| e.to_string())?.trim().to_string();
     let local_ver = local_version();
@@ -337,32 +337,16 @@ fn fetch_pkg_file_max(base: &str, rel: &str, dest: &Path, max: u64, idle: Durati
 
 const PROPAGATING: &str = "a new release may still be propagating through the package host's cache (up to 10 minutes): run goethe update again in a few minutes, nothing was changed";
 
-pub(crate) fn fetch_signed_sums(home: &Path, pkg: &str, tmp: &Path) -> Result<PathBuf, String> {
-    // SHA256SUMS and its signature into tmp, checked against GOETHE_HOME/release_pub.pem.
+pub(crate) fn fetch_signed_sums(pkg: &str, tmp: &Path) -> Result<PathBuf, String> {
+    // SHA256SUMS and its signature into tmp, checked against the release key compiled into this goethe.
     fetch_pkg_file(pkg, "SHA256SUMS", &tmp.join("SHA256SUMS"))?;
     fetch_pkg_file(pkg, "SHA256SUMS.sig", &tmp.join("SHA256SUMS.sig"))?;
-    verify_sums_signature(home, tmp)?;
+    let (sums, sig) = (fs::read(tmp.join("SHA256SUMS")).map_err(|e| e.to_string())?, fs::read(tmp.join("SHA256SUMS.sig")).map_err(|e| e.to_string())?);
+    crate::release_key::verify("the package list", &sums, &sig).map_err(|e| {
+        let fresh = " If a release was published minutes ago, its files may still be reaching the package host's cache (up to 10 minutes): run the command again in a few minutes; nothing was changed.";
+        if e.ends_with(crate::release_key::MISMATCH) { format!("{e}.{fresh}") } else { e }
+    })?;
     Ok(tmp.join("SHA256SUMS"))
-}
-
-fn verify_sums_signature(home: &Path, tmp: &Path) -> Result<(), String> {
-    let pub_pem = home.join("release_pub.pem");
-    if !pub_pem.is_file() {
-        return Err("release_pub.pem missing; run installer first".to_string());
-    }
-    let status = Command::new("openssl")
-        .args(["dgst", "-sha256", "-verify"])
-        .arg(&pub_pem)
-        .arg("-signature")
-        .arg(tmp.join("SHA256SUMS.sig"))
-        .arg(tmp.join("SHA256SUMS"))
-        .stdout(Stdio::null())
-        .status()
-        .map_err(|e| format!("openssl verify: {e}"))?;
-    if !status.success() {
-        return Err(format!("SHA256SUMS signature verification failed; {PROPAGATING}"));
-    }
-    Ok(())
 }
 
 pub(crate) fn lookup_sum(sums_path: &Path, rel: &str) -> Result<String, String> {
