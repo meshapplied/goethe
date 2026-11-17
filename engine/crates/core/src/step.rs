@@ -86,7 +86,7 @@ fn pump(src: impl Read, tail: &Mutex<VecDeque<String>>, error: &Mutex<Option<Str
                 show(part);
             }
             if names_an_error(part) {
-                *error.lock().unwrap_or_else(|e| e.into_inner()) = Some(part.to_string());
+                error.lock().unwrap_or_else(|e| e.into_inner()).replace(part.to_string());
             }
             let mut t = tail.lock().unwrap_or_else(|e| e.into_inner());
             if t.len() == TAIL_LINES {
