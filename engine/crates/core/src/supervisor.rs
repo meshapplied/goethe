@@ -1438,7 +1438,7 @@ fn warm_up(s: &Starting) {
     let words = (s.ctx / 3).clamp(256, 3000) as usize;
     let prompt = "the engine compiles its kernels for this prompt length now ".repeat(words / 10);
     let body = serde_json::json!({"model": s.params.model_id, "prompt": prompt, "max_tokens": 8, "temperature": 0});
-    load_slot::push_instance_notice(&s.instance_id, "warming up kernels with one request");
+    load_slot::push_instance_notice(&s.instance_id, &crate::progress::warmup_notice(&s.home, &s.params.model_id));
     let started = Instant::now();
     let agent = ureq::AgentBuilder::new()
         .timeout_read(Duration::from_secs(WARM_UP_SECS))
@@ -1450,7 +1450,10 @@ fn warm_up(s: &Starting) {
         .set("Content-Type", "application/json")
         .send_string(&body.to_string());
     let outcome = match res {
-        Ok(_) => format!("warm-up request took {:.0} s", started.elapsed().as_secs_f64()),
+        Ok(_) => {
+            crate::progress::record_warmup(&s.home, &s.params.model_id, started.elapsed().as_secs());
+            format!("warm-up request took {:.0} s", started.elapsed().as_secs_f64())
+        }
         Err(e) => format!("warm-up request skipped ({e})"),
     };
     append_goethed_log(&s.home, &format!("{}: {outcome}\n", s.instance_id));

@@ -15,6 +15,7 @@ pub mod memory_spec;
 pub mod model_facts;
 pub mod messages;
 pub mod models;
+pub mod progress;
 pub mod net;
 pub mod pack_update;
 pub mod packs;
