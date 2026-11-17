@@ -154,6 +154,24 @@ jobs:
           bash tests/gate.sh 0
           bash tests/gate.sh 6 --only stage6_integrity.py
 
+  # The one check the main ruleset requires. It needs every other job (package-smoke runs only on main/nightly and is exempt),
+  # and fails when a job exists that it does not list, so a new job cannot be forgotten: add it to `needs`.
+  gate:
+    if: ${{ always() }}
+    needs: [main-in-dev, python, lint, attribution, ninfer-patch, engine-test, engine-clippy, engine-gates]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every job passed and every job is listed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          listed=$(jq -r 'keys[]' <<<"$NEEDS" | sort)
+          defined=$(awk '/^jobs:/{f=1;next} f&&/^  [a-z0-9-]+:/{gsub(/[ :]/,"");print}' .github/workflows/ci.yml | grep -vxE 'gate|package-smoke' | sort)
+          [ "$listed" = "$defined" ] || { echo "gate.needs and the jobs of ci.yml differ:"; diff <(echo "$listed") <(echo "$defined"); exit 1; }
+          jq -e 'all(.[]; .result == "success")' <<<"$NEEDS" >/dev/null || { jq -r 'to_entries[] | select(.value.result != "success") | "\(.key): \(.value.result)"' <<<"$NEEDS"; exit 1; }
+
   package-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
