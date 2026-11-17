@@ -60,10 +60,10 @@ jobs:
         python: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
         with:
-          enable-cache: false
-      - run: uv run --no-project --python ${{ matrix.python }} python -m unittest discover -s tests -t .
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -s tests -t .
 
   lint:
     runs-on: ubuntu-24.04
