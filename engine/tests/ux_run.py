@@ -10,7 +10,7 @@ import threading
 import time
 
 
-def pump(proc, sinks, stamps):
+def pump(proc, sinks, stamps, trace=None, start=0.0):
     """Copy each stream to its file as it arrives, counting lines (newlines) and noting when any bytes arrived."""
     sel = selectors.DefaultSelector()
     counts = {}
@@ -27,6 +27,9 @@ def pump(proc, sinks, stamps):
             sinks[key.data].flush()
             counts[key.data] += chunk.count(b"\n")
             stamps.append(time.monotonic())
+            for line in chunk.decode(errors="replace").replace("\r", "\n").splitlines():
+                if trace and line.strip():
+                    trace.write(f"{stamps[-1] - start:8.1f} {key.data} {line.rstrip()}\n")
     return counts
 
 
@@ -35,6 +38,7 @@ def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("--timeout", type=float, default=0)
     ap.add_argument("--interrupt", type=float, default=0, help="send SIGINT to the command after this many seconds")
+    ap.add_argument("--trace", help="write every output line with its time since the start to this file")
     ap.add_argument("out")
     ap.add_argument("err")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
@@ -49,8 +53,11 @@ def main(argv):
             timer.daemon = True
             timer.start()
     stamps = [start]
+    trace = open(a.trace, "w") if a.trace else None
     with open(a.out, "wb") as out, open(a.err, "wb") as err:
-        counts = pump(proc, {"out": out, "err": err}, stamps)
+        counts = pump(proc, {"out": out, "err": err}, stamps, trace, start)
+    if trace:
+        trace.close()
     rc = proc.wait()
     end = time.monotonic()
     stamps.append(end)

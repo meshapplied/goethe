@@ -137,6 +137,11 @@ pub fn eprint_line(text: String) {
 
 static UPDATING: AtomicBool = AtomicBool::new(false);
 
+pub fn updating() -> bool {
+    // Whether an updating line is on the terminal now.
+    UPDATING.load(Ordering::Relaxed)
+}
+
 pub fn end_line() {
     // Ends an updating line left on a terminal, so the next line starts clean.
     if UPDATING.swap(false, Ordering::Relaxed) {
