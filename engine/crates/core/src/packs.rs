@@ -154,8 +154,10 @@ fn read_exact(r: impl Read, len: u64) -> Result<Vec<u8>, String> {
 pub type Runner<'a> = &'a dyn Fn(&[String]) -> Result<(i32, String), String>;
 
 pub fn python_runner(home: &Path) -> impl Fn(&[String]) -> Result<(i32, String), String> {
-    let py = resolve_python(home);
+    // The interpreter is looked up on every call: a runner made before the engine layer is installed uses the py-env python once it exists.
+    let home = home.to_path_buf();
     move |args| {
+        let py = resolve_python(&home);
         let out = Command::new(&py).args(["-m", "goethe_engine"]).args(args).output().map_err(|e| format!("{}: {e}", py.display()))?;
         let err = String::from_utf8_lossy(&out.stderr);
         let code = out.status.code().unwrap_or(-1);
@@ -846,6 +848,24 @@ mod tests {
     fn a_platform_response_past_the_cap_is_refused() {
         assert_eq!(read_capped(std::io::repeat(b'x').take(10), 10).unwrap().len(), 10);
         assert!(read_capped(std::io::repeat(b'x'), 1 << 20).unwrap_err().contains("longer than"));
+    }
+
+    fn py_env_python(home: &Path) {
+        // A real on-disk layout: home/py-env/bin/python, a script that names itself for `-m goethe_engine ...`.
+        use std::os::unix::fs::PermissionsExt;
+        let bin = home.join("py-env/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("python"), "#!/bin/sh\necho \"py-env python: $*\"\n").unwrap();
+        std::fs::set_permissions(bin.join("python"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn a_runner_made_before_the_engine_layer_exists_uses_its_python_once_it_does() {
+        let home = tempfile::tempdir().unwrap();
+        let run = python_runner(home.path());
+        py_env_python(home.path());
+        let (code, out) = run(&["pack".to_string(), "match".to_string()]).unwrap();
+        assert_eq!((code, out.trim()), (0, "py-env python: -m goethe_engine pack match"));
     }
 
     #[test]
