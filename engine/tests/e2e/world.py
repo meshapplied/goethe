@@ -77,13 +77,14 @@ CONFIG = {
 }
 
 
-def build_pack(weights: list[str], fmt: str = "safetensors") -> tuple[bytes, bytes]:
+def build_pack(weights: list[str], fmt: str = "safetensors", arch: str = PACK_ARCH) -> tuple[bytes, bytes]:
     """A GCPACK3 container: header (manifest range and block hashes), the manifest, then the blocks."""
     blocks_data = [bytes([i + 1]) * 4096 for i in range(3)]
     manifest = json.dumps(
         {
             "model": {"weights": [{"file": w} for w in weights]},
             "variants": {"v1": {"desc": {"quant": "bf16", "format": fmt}, "weights": list(range(len(weights)))}},
+            "buckets": [{"sku": f"e2e_{arch}", "requires": {"arch": arch, "sms": 170}, "maxctx": 8192}],
         }
     ).encode()
     width = 640
@@ -154,7 +155,7 @@ class World:
         ):
             weights = ["packed-Q8_0.gguf"] if repo.endswith("gguf") else ["model.safetensors"]
             gg = repo.endswith("gguf")
-            pack, manifest = build_pack(weights, "gguf" if gg else "safetensors")
+            pack, manifest = build_pack(weights, "gguf" if gg else "safetensors", arch)
             name = f"{repo.split('/')[1]}-{arch}.gcpack"
             self.packs[name] = pack
             self.entries.append(
