@@ -11,7 +11,7 @@ pub fn require_ternary_runtime(home: &Path) -> Result<(), String> {
         return Ok(());
     }
     Err(
-        "ternary runtime not installed: run `goethe update --ternary` (needs GOETHE_PKG_TOKEN for private packages)"
+        "ternary runtime not installed: run `goethe update engine` (needs GOETHE_PKG_TOKEN for private packages)"
             .to_string(),
     )
 }

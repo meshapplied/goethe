@@ -34,10 +34,10 @@ Goethe turns a Linux machine into your own API, compatible with OpenAI, Anthropi
 ```bash
 curl -fsSL https://goethe.sh/install.sh | bash
 goethe login
-goethe start
+goethe
 ```
 
-`goethe login` links the machine to the Goethe platform, which also unlocks optimised kernels; it is optional. `goethe start` starts Goethe and walks you through three steps: install a model, serve it through the API, and configure who can reach it. You can stop after any step and continue later with `goethe start`. If you prefer plain commands:
+`goethe login` links the machine to the Goethe platform, which also unlocks optimised kernels; it is optional. `goethe` on its own starts Goethe and, while nothing is installed, walks you through three steps: install a model, serve it through the API, and configure who can reach it. You can stop after any step and continue later with `goethe`. If you prefer plain commands:
 
 ```bash
 # 1. Start Goethe and load a model
@@ -45,12 +45,12 @@ goethe up
 goethe install zai-org/GLM-5.3-Flash --load
 
 # 2. Share it
-goethe api configure                 # this machine only, your VPN (recommended), or a public address
-goethe api manage                    # add, scope or delete API keys in a menu
+goethe api expose vpn                # or local, or public: who can reach the API
+goethe api keys                      # on a terminal: add, scope or delete API keys in a menu
 goethe api                           # the address to give your apps
 ```
 
-`goethe status` tells you whether Goethe is running, with the API address and your keys. Check the machine with `goethe doctor`: each `WARN` or `FAIL` line names its fix. See the [hardware](#hardware-requirements) and [software](#software-requirements) requirements before you install.
+`goethe status` tells you whether Goethe is running, with the API address, your keys and the models it serves. Check the machine with `goethe doctor`: each `WARN` or `FAIL` line names its fix. See the [hardware](#hardware-requirements) and [software](#software-requirements) requirements before you install.
 
 ## API compatibility
 
@@ -154,33 +154,32 @@ Open WebUI, LangChain, LlamaIndex, coding assistants and any tool that takes a c
 
 ## CLI
 
-The model is a plain argument (`goethe load qwen 27b`: an id, an alias, or words from its name, with a menu when several match); every other value goes after its flag (`goethe gpu --allow gpu0`). API settings are under `goethe api`, model housekeeping under `goethe models`. Listing commands accept `--json`. Exit codes: `0` success, `1` error, `2` wrong usage, `3` a confirmation was needed without a terminal (add `--yes`). The [command reference](cli.md) lists every command and option.
+The model is a plain argument (`goethe load qwen 27b`: an id, an alias, or words from its name, with a menu when several match); every action is a word and flags only change how it runs (`goethe gpu allow gpu0`). API settings are under `goethe api`, model housekeeping under `goethe models`. Listing commands accept `--json`. Exit codes: `0` success, `1` error, `2` wrong usage, `3` a confirmation was needed without a terminal (add `--yes`). The [command reference](cli.md) lists every command and option.
 
 ### Everyday
 
 ```bash
 goethe up          # start; also starts at boot from now on
-goethe status      # running or not, API address and keys
+goethe status      # running or not, API address, keys and models
 goethe down        # stop; won't start at boot until the next up
 goethe ps          # what is running
-goethe api         # address, keys and loaded models
+goethe api         # address, authentication and keys
 goethe logs zai-org/GLM-5.3-Flash -f
-goethe logs --daemon
+goethe logs goethed
 goethe doctor
-goethe hw profile
+goethe doctor --hardware
 ```
 
-Models that were loaded when Goethe stopped come back when it starts again, including after a reboot. `goethe service restore --off` turns that off.
+Models that were loaded when Goethe stopped come back when it starts again, including after a reboot.
 
 ### Start and stop
 
 | Command | What it does |
 |---|---|
-| `goethe start` | Start, and guided setup: model, serve, API access |
+| `goethe` | The menu on a terminal: quick setup, install models, API keys and gateway, live status; 1 2 3 pick a color theme |
 | `goethe up` | Start Goethe and the API, and start at boot (`--no-boot` to skip) |
 | `goethe status` | Running state, address and keys |
 | `goethe down` | Stop Goethe and its models, and stop starting at boot |
-| `goethe service` | `enable`, `disable`, `status`, `restore --on`/`--off` |
 
 ### Models
 
@@ -190,46 +189,42 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 | `goethe install …` | Download from Hugging Face (`org/name:Q8_0` picks one quantization: a GGUF file or a kernel pack variant), or register a local folder |
 | `goethe models scan` | Add folders you placed in the models directory |
 | `goethe models` | Installed and catalog models, and whether each fits |
-| `goethe models config …` | Default context, concurrency and GPUs for a model |
+| `goethe load … --save` | Keep the context, concurrency and GPUs you give as the model's defaults (`--dry-run` to only store them) |
 | `goethe remove …` | Unload and delete (or unregister a folder) |
 
 ### Running
 
 | Command | What it does |
 |---|---|
-| `goethe load …` | Load and wait until ready (`--gpu`, `--tp`, `--ctx`, `--max-conc`, `--replica`) |
+| `goethe load …` | Load and wait until ready (`--gpu`, `--tp`, `--ctx`, `--max-conc`, `--replica`, `--dry-run`) |
 | `goethe unload …` | Stop a model (`--all`, `--force`) |
 | `goethe run [MODEL] [INPUT]` | Try a loaded model by hand: text to a text model (a chat without INPUT, else one reply) or an embedding model (dims, norm, first values); an audio file (.wav, .flac, .mp3, .ogg, .m4a) to a speech model (its transcript; without INPUT it records from the microphone until Enter, with arecord, parecord or ffmpeg) |
 | `goethe ps` | Running instances, GPUs and speed |
-| `goethe logs [model]` | `--daemon`, `--gateway`, `-f`, `-n` |
+| `goethe logs <target>` | A model, `goethed` or `gateway`; `-f`, `-n` |
 
 ### Sharing
 
 | Command | What it does |
 |---|---|
-| `goethe api configure` | Local, VPN or public access |
-| `goethe api` | Address, authentication, models, keys and a curl example |
-| `goethe api manage` | Add, scope, show or delete API keys in a menu |
-| `goethe api keys` | `--create`, `--revoke`, `--rpm`, `--expires`, `--models`, `--admin` |
-| `goethe api allowlist` | `--add` / `--remove` client addresses |
-| `goethe models alias` | Short model names for clients (`--set`, `--remove`) |
-| `goethe api trace` | Record requests and replies as training traces (`on`, `off`, `--key`); see [traces.md](traces.md) |
-| `goethe api learn` | Let a session keep what compaction would drop (`on`, `off`, `--model`); see [learn.md](learn.md) |
-| `goethe api gateway` | Where the API listens (`--bind 127.0.0.1`, `0.0.0.0` or an IP) |
-| `goethe api domain` | DNS record for your own hostname (`--check <name>`) |
-| `goethe serve --public 5h --key <name>` | Open the API on a public address for a while for chosen keys (`shutdown` closes it) |
+| `goethe api expose` | Local, VPN or public access, or one address to listen on (`local`, `vpn`, `public`, `0.0.0.0`, `wg0`) |
+| `goethe api` | Address, authentication, keys and a curl example |
+| `goethe api keys` | List keys; `create`, `revoke`, `--rpm`, `--expires`, `--models`, `--admin`; on a terminal alone, a menu |
+| `goethe api allow` | `add` / `remove` client addresses |
+| `goethe models alias` | Short model names for clients (`set`, `remove`) |
+| `goethe trace` | Record requests and replies as training traces (`on`, `off`, `--key`); see [traces.md](traces.md) |
+| `goethe learn` | Let a session keep what compaction would drop (`on`, `off`, `--model`); see [learn.md](learn.md) |
+| `goethe api domain` | DNS record for your own hostname (`check <name>`) |
+| `goethe api share 5h --key <name>` | Open the API on a public address for a while for chosen keys (`stop` closes it) |
 
 ### GPUs and system
 
 | Command | What it does |
 |---|---|
-| `goethe gpu` | Memory, processes and bandwidth use, live until `q`; allow/deny (`--deny`, `--allow`) |
-| `goethe hw profile` | GPUs, CPU, memory, disk and cloud provider |
-| `goethe doctor` | Setup check with a fix for each problem |
-| `goethe update` | Install the latest Goethe (`--check` to only look) |
+| `goethe gpu` | VRAM, processes and bandwidth per GPU, live until `q`; `allow` / `deny` GPUs |
+| `goethe doctor` | Setup check with a fix for each problem; `--hardware` prints GPUs, CPU, memory, disk and cloud provider |
+| `goethe update` | Install the latest Goethe (`--check` to only look; `engine`, `rollback`) |
 | `goethe uninstall` | Remove Goethe and its models (`--keep-models` to keep them) |
 | `goethe completion install` | Tab completion for bash, zsh or fish: commands, models, keys, GPUs |
-| `goethe` | The home screen (on a terminal) |
 | `goethe login` | Optional: link this node to the Goethe platform to see its health there (`--authkey` without a browser) |
 | `goethe logout` | Unlink it again |
 
@@ -247,7 +242,7 @@ The model id is the Hugging Face repo name. Any [supported model](#supported-mod
 
 **GGUF models:** a Hugging Face GGUF repo (`org/model-GGUF`, or `org/model-GGUF:Q8_0` for one quant) is served by llama.cpp on one GPU; a GGUF with a mean, cls or last pooling type is served as an embedding model (`goethe run <model> "text"`). If a model's kernel pack cannot open or does not run on your GPU, goethe stops with one line naming the reason; `--fallback` on `goethe install` or `goethe load` (or `GOETHE_ALLOW_FALLBACK=1`) serves the GGUF with llama.cpp instead. A model that has only a pack, and none for your GPU, is refused before anything is downloaded, with or without `--fallback`.
 
-**Gated or private models:** accept the license on the model's Hugging Face page, create a read token at huggingface.co/settings/tokens, then run `goethe install <org>/<model> --hf-token` and type the token when asked. It is used for that download only and never stored. In `goethe start`, choose "A private or gated model".
+**Gated or private models:** accept the license on the model's Hugging Face page, create a read token at huggingface.co/settings/tokens, then run `goethe install <org>/<model> --hf-token` and type the token when asked. It is used for that download only and never stored. In the guided `goethe` setup, choose "A private or gated model".
 
 **Models you already have:** move the folder into Goethe's `models` folder and run `goethe models scan`; it checks each folder and asks before adding it. A folder named `<org>__<model>` gets the id `<org>/<model>`. To register a folder where it is:
 
@@ -276,7 +271,7 @@ Goethe picks the GPUs, sizes the memory and waits until the model answers:
 RUNNING: zai-org/GLM-5.3-Flash instance inst-... on GPU 0 port 30001 (45.2 s)
 ```
 
-The first load on a new machine takes a few extra minutes; later loads are faster. `goethe load` shows how the GPU memory is used, and `goethe hw pick-gpus --model <model>` shows the same without loading.
+The first load on a new machine takes a few extra minutes; later loads are faster. `goethe load` shows how the GPU memory is used, and `goethe load <model> --dry-run` shows the same without loading.
 
 ```bash
 goethe load zai-org/GLM-5.3-Flash --gpu gpu1                    # a specific GPU
@@ -285,7 +280,7 @@ goethe load zai-org/GLM-5.3-Flash --gpu gpu0 gpu1               # split across G
 goethe load zai-org/GLM-5.3-Flash --ctx 65536 --max-conc 32     # longer context, more parallel requests
 goethe load zai-org/GLM-5.3-Flash --replica                     # another copy, for more traffic
 goethe load zai-org/GLM-5.3-Flash -- --chunked-prefill-size 4096   # extra engine options after --
-goethe models config zai-org/GLM-5.3-Flash --ctx 65536 --max-conc 32   # make settings the default
+goethe load zai-org/GLM-5.3-Flash --ctx 65536 --max-conc 32 --save --dry-run   # make settings the default, load nothing
 ```
 
 Model names are forgiving: `zai-org/glm-5.3-flash` and `zai-org__GLM-5.3-Flash` mean the same model, and a mistyped name gets a suggestion.
@@ -298,43 +293,43 @@ goethe unload --all                                   # every model
 goethe unload zai-org/GLM-5.3-Flash --force   # stop now
 ```
 
-**Sharing a GPU with other software:** if a GPU is already used by other programs, Goethe lists them and asks before loading next to them. It never stops processes it did not start. Add `--yes` in scripts. To keep Goethe off a GPU, use `goethe gpu --deny gpu0`; `goethe gpu --allow gpu0` allows it again.
+**Sharing a GPU with other software:** if a GPU is already used by other programs, Goethe lists them and asks before loading next to them. It never stops processes it did not start. Add `--yes` in scripts. To keep Goethe off a GPU, use `goethe gpu deny gpu0`; `goethe gpu allow gpu0` allows it again.
 
 ## Share the API
 
 ```bash
-goethe api configure
+goethe api expose vpn      # or local, or public; asks who may connect
 ```
 
 - **Local only:** programs on this machine.
-- **VPN or private network (recommended):** connect your VPN first, then pick it from the list. Any VPN with a network interface works, and so does a cloud VM's private network. Goethe lists tunnels and interfaces on private addresses, leaves out container bridges and public network cards, and shows the range each one reaches, taken from the system's routes. When a VPN routes each device separately, the private block its address is in (such as `100.64.0.0/10` or `10.0.0.0/8`) is used, so devices added later can connect too; you can narrow it to specific addresses. Default routes are never allowed. The gateway follows the interface: a new address after a reconnect or a reboot is picked up within a few seconds, and while the interface is down only this machine can connect (`goethe status` says so). The allowlist itself only changes when you run `goethe api configure` again; `goethe doctor` warns if it no longer lets the network's clients in. A VPN without an interface (userspace mode) can't be listened on directly: use local mode and the VPN's own port forwarding.
+- **VPN or private network (recommended):** connect your VPN first, then pick it from the list. Any VPN with a network interface works, and so does a cloud VM's private network. Goethe lists tunnels and interfaces on private addresses, leaves out container bridges and public network cards, and shows the range each one reaches, taken from the system's routes. When a VPN routes each device separately, the private block its address is in (such as `100.64.0.0/10` or `10.0.0.0/8`) is used, so devices added later can connect too; you can narrow it to specific addresses. Default routes are never allowed. The gateway follows the interface: a new address after a reconnect or a reboot is picked up within a few seconds, and while the interface is down only this machine can connect (`goethe status` says so). The allowlist itself only changes when you run `goethe api expose` again; `goethe doctor` warns if it no longer lets the network's clients in. A VPN without an interface (userspace mode) can't be listened on directly: use local mode and the VPN's own port forwarding.
 - **Public network:** any address that can reach this machine. You open the port in your firewall yourself.
 
-It then asks whether to restrict access to specific IP addresses, and offers to create the first key. In scripts: `goethe api configure --mode vpn --yes`, or `--mode public --allow 203.0.113.7 --yes`.
+It then asks whether to restrict access to specific IP addresses, and offers to create the first key. In scripts: `goethe api expose vpn --yes`, or `goethe api expose public --allow 203.0.113.7 --yes`.
 
 ### Keys
 
 ```bash
-goethe api manage                                               # full-screen: create, scope, limit or delete keys
-goethe api keys --create my-laptop                                   # shows the key once
-goethe api keys --create ci --rpm 600 --expires 30d
-goethe api keys --create chat-only --models zai-org/GLM-5.3-Flash
+goethe api keys                                                 # on a terminal, full-screen: create, scope, limit or delete keys
+goethe api keys create my-laptop                                   # shows the key once
+goethe api keys create ci --rpm 600 --expires 30d
+goethe api keys create chat-only --models zai-org/GLM-5.3-Flash
 goethe api keys                                                      # keys, limits and today's usage
-goethe api keys --revoke <key-id>                                    # takes effect immediately
-KEY=$(goethe api keys --create ci --raw)                             # only the key, for scripts
+goethe api keys revoke <key-id>                                    # takes effect immediately
+KEY=$(goethe api keys create ci --raw)                             # only the key, for scripts
 ```
 
 Every request needs a valid key; without one the API answers `401`. A key can expire (`--expires 30d` or a date), have its own rate limit (`--rpm`, default 120 per minute, `0` for unlimited), be limited to some models (`--models`), or be an admin key that can read the health endpoints (`--admin`).
 
 ### Allowed addresses
 
-On top of keys, only allowed client addresses can connect. `goethe api configure` sets this up; to change it by hand:
+On top of keys, only allowed client addresses can connect. `goethe api expose` sets this up; to change it by hand:
 
 ```bash
-goethe api allowlist
-goethe api allowlist --add 192.168.1.0/24 --description "office LAN"
-goethe api allowlist --add 203.0.113.7
-goethe api allowlist --remove 192.168.1.0/24
+goethe api allow
+goethe api allow add 192.168.1.0/24 --note "office LAN"
+goethe api allow add 203.0.113.7
+goethe api allow remove 192.168.1.0/24
 ```
 
 ### Share for a while on a public address
@@ -342,20 +337,21 @@ goethe api allowlist --remove 192.168.1.0/24
 To give someone outside your network access for a limited time, without changing how the API is normally reached:
 
 ```bash
-goethe serve --public 5h --key my-app      # prints the URL, the key and the certificate to send
-goethe serve --public 1d                   # later: the same keys again
-goethe serve --public shutdown             # close early
+goethe api share 5h --key my-app      # prints the URL, the key and the certificate to send
+goethe api share 1d --key ci          # another key on the same address, for a day
+goethe api share stop --key ci        # stop sharing one key
+goethe api share stop                 # close early
 ```
 
-The public address exists only while it is open, accepts only the keys you chose (never admin keys) and closes by itself when the time runs out. Keys stay the same every time. Details and the full list of security precautions: [`goethe serve --public`](cli.md#goethe-serve---public).
+The public address exists only while some key is shared, accepts only the keys you chose (never admin keys), each until its own time, and closes by itself when the last one ends. Keys stay the same every time. The menu's Public address page does the same with a form. Details and the full list of security precautions: [`goethe api share`](cli.md#goethe-api-share-duration).
 
 ### Address, aliases and your own domain
 
 ```bash
-goethe api                                            # the address, models, keys and a curl command
-goethe models alias --set chat --model zai-org/GLM-5.3-Flash  # clients can send "model": "chat"
+goethe api                                            # the address, keys and a curl command
+goethe models alias set chat zai-org/GLM-5.3-Flash  # clients can send "model": "chat"
 goethe api domain                                         # the DNS record for your own hostname
-goethe api domain --check api.example.com                 # check that the name points at the API
+goethe api domain check api.example.com                 # check that the name points at the API
 ```
 
 Change the model behind an alias at any time and every client follows. For a hostname such as `api.example.com`, add the DNS A record `goethe api domain` shows; clients then use `https://api.example.com:8443/v1` with the same certificate settings as for the IP address.
@@ -459,12 +455,12 @@ Optional. Set them in your shell, or in `goethe.env` inside Goethe's folder so t
 | `GOETHE_PUBLIC_PORT` | API port (default 8443; another is used if it's taken) |
 | `GOETHE_NO_AUTOSTART=1` | Never set up start at boot |
 | `GOETHE_NO_COMPLETION=1` | Don't turn on Tab completion at install |
-| `GOETHE_PUBLIC_IP` | Public IP shown by `goethe api configure` in public mode |
+| `GOETHE_PUBLIC_IP` | Public IP shown by `goethe api expose public`  |
 | `GOETHE_MAX_BODY_MB` | Largest request size in MB (default 10) |
 | `GOETHE_GATEWAY_RATE_PER_IP` | Requests per second one client address may send (default 100, bursts up to twice that) |
 | `GOETHE_GATEWAY_CONN_PER_IP` | Open API connections one client address may hold (default 512) |
 | `GOETHE_PLATFORM_URL` | Platform `goethe login` links to (default `https://goethe.sh`) |
-| `GOETHE_PUBLIC_IP_URL` | Where `goethe api configure`, `goethe api domain` and `goethe doctor` look up the public IP (default: the platform's `/api/ip`; a plain-text or `{"ip": ...}` answer both work) |
+| `GOETHE_PUBLIC_IP_URL` | Where `goethe api expose`, `goethe api domain` and `goethe doctor` look up the public IP (default: the platform's `/api/ip`; a plain-text or `{"ip": ...}` answer both work) |
 | `GOETHE_PUBLIC_IP_LOOKUP=0` | Never look up the public IP (set `GOETHE_PUBLIC_IP` to name it) |
 | `NO_COLOR=1` | Turn off colored output |
 
@@ -485,10 +481,10 @@ Optional. Set them in your shell, or in `goethe.env` inside Goethe's folder so t
 | Answer | Meaning | Fix |
 |---|---|---|
 | No connection | Wrong address or port, `http` instead of `https`, or a firewall | Use the address from `goethe api` |
-| `403` | Your address isn't allowed | `goethe api allowlist --add <your-ip>` |
+| `403` | Your address isn't allowed | `goethe api allow add <your-ip>` |
 | `401` | Missing or wrong key | Send the key, for example `Authorization: Bearer <key>` |
 | `404 Model Not Found` | Unknown model, or the key isn't allowed that model | Use a name from `goethe api` |
 | `429` | Too many requests | Slow down, or raise the key's `--rpm` |
 | `503` | The model isn't ready, or is unloading | Wait, or check `goethe ps` |
 
-**Anything else.** Run `goethe doctor`, then `goethe logs --daemon`.
+**Anything else.** Run `goethe doctor`, then `goethe logs goethed`.

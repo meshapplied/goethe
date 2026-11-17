@@ -321,7 +321,7 @@ pub fn parse_lifetime(raw: &str) -> Result<Option<u64>, String> {
 }
 
 pub fn token_lifetime(raw: &str) -> Result<(), String> {
-    // Hidden goethe token-lifetime: limit how long this node's login lasts (the workspace's setting still applies).
+    // goethe login --lifetime: limit how long this node's login lasts (the workspace's setting still applies).
     let ttl = parse_lifetime(raw)?;
     let home = goethe_home();
     let c = platform::load_credentials(&home)?.ok_or("this node is not logged in (goethe login)")?;

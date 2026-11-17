@@ -614,9 +614,9 @@ fn pack_fit(view: &crate::recommend::View, cfg: &Value, entry: Option<&RegistryM
     let fit = view.fit_as(id, &input, pinned, crate::engine_overhead::PACK_RUNTIME).map_err(|why| {
         let cards: Vec<String> = view.gpus.iter().map(|g| format!("gpu{} {} {:.1} GB {memory}", g.index, view.hw.gpus.iter().find(|h| h.index == g.index).map_or("", |h| h.name.as_str()), g.free_vram_mb as f64 / 1024.0)).collect();
         if loading {
-            format!("{id} does not fit the allowed GPUs now ({}), so {NOTHING_DOWNLOADED}: {why}. Stop what is using the GPU (goethe gpu shows what), or use --no-load to download without loading; --ctx with a smaller value or goethe gpu --deny or --allow also change the fit", cards.join(", "))
+            format!("{id} does not fit the allowed GPUs now ({}), so {NOTHING_DOWNLOADED}: {why}. Stop what is using the GPU (goethe gpu shows what), or install without --load to download only; --ctx with a smaller value or goethe gpu deny or allow also change the fit", cards.join(", "))
         } else {
-            format!("{id} does not fit the allowed GPUs even when they are empty ({}), so {NOTHING_DOWNLOADED}: {why}. Options: --ctx with a smaller value, or more cards with goethe gpu --allow", cards.join(", "))
+            format!("{id} does not fit the allowed GPUs even when they are empty ({}), so {NOTHING_DOWNLOADED}: {why}. Options: --ctx with a smaller value, or more cards with goethe gpu allow", cards.join(", "))
         }
     })?;
     let free = fit.gpus.iter().filter_map(|g| view.gpus.iter().find(|x| x.index == *g)).map(|g| g.free_vram_mb as f64 / 1024.0).fold(f64::INFINITY, f64::min);
@@ -1463,7 +1463,7 @@ fn plan_engine(
 }
 
 fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> {
-    // Compute the card (merged with an existing one unless --reset), facts and VRAM; write nothing.
+    // Compute the card (merged with an existing one unless --force), facts and VRAM; write nothing.
     let dir = &t.card_dir;
     if crate::engines::ninfer::ninfer_in(dir).is_some() {
         return plan_ninfer(home, opts, t);
@@ -1500,12 +1500,12 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
     let mut inferred = Vec::new();
     for (flag, value, why) in sgl::infer_parsers(&cfg, dir) {
         if [&base_args, &old_args, &cli_args].iter().all(|a| !sgl::has_flag(a, &flag)) {
-            notes.push(format!("{flag} {value} inferred: {why} (change it with goethe models config --sglang-arg)"));
+            notes.push(format!("{flag} {value} inferred: {why} (change it with goethe load <model> --save -- <flag>)"));
             inferred.extend([flag, value]);
         }
     }
     let ordered = sgl::merge_extra_args(&sgl::merge_extra_args(&inferred, &base_args)?, &old_args)?;
-    let extra = sgl::merge_extra_args(&ordered, &cli_args).map_err(|e| format!("{e} (use --reset to rebuild the card)"))?;
+    let extra = sgl::merge_extra_args(&ordered, &cli_args).map_err(|e| format!("{e} (use --force to rebuild the card)"))?;
     let kv_dtype = cli_kv
         .or_else(|| old("kv_cache_dtype").and_then(|v| v.as_str()).map(String::from))
         .or_else(|| t.entry.as_ref().and_then(|e| e.kv_cache_dtype.clone()))
@@ -2310,7 +2310,7 @@ mod tests {
         assert!(line.contains("of 32.0 GB on the card"), "{line}");
         let loading = InstallOpts { model_id: "org/Transcribe-GGUF".into(), load: true, ..Default::default() };
         let err = pack_fit(&view_of(home.path(), busy), &llama_cfg(), None, &loading, "sm_120a", weights(), home.path()).unwrap_err();
-        assert!(err.contains("9.0 GB free now") && err.contains("Stop what is using the GPU") && err.contains("--no-load"), "{err}");
+        assert!(err.contains("9.0 GB free now") && err.contains("Stop what is using the GPU") && err.contains("--load"), "{err}");
         let tiny = InstallOpts { model_id: "org/Huge".into(), ..Default::default() };
         let never = pack_fit(&capacity, &llama_cfg(), None, &tiny, "sm_120a", PackWeights { bytes: 60 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path()).unwrap_err();
         assert!(never.contains("does not fit the allowed GPUs even when they are empty") && never.contains("32.0 GB in total"), "{never}");
@@ -2323,7 +2323,7 @@ mod tests {
         let line = pack_fit(&view_of(home.path(), card(31)), &llama_cfg(), None, &opts, "sm_120a", PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path()).unwrap();
         assert!(line.starts_with("fit: tp=1 on GPU 0") && line.contains("GB per GPU (weights 20.0 + KV") && line.contains("of 31.0 GB free") && line.contains("GB spare"), "{line}");
         let err = pack_fit(&view_of(home.path(), card(21)), &llama_cfg(), None, &opts, "sm_120a", PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path()).unwrap_err();
-        for part in ["does not fit the allowed GPUs now", "gpu0 NVIDIA GeForce RTX 5090 21.0 GB free", "nothing was downloaded", "safety margin", "missing", "--ctx", "goethe gpu --deny"] {
+        for part in ["does not fit the allowed GPUs now", "gpu0 NVIDIA GeForce RTX 5090 21.0 GB free", "nothing was downloaded", "safety margin", "missing", "--ctx", "goethe gpu deny"] {
             assert!(err.contains(part), "{part}: {err}");
         }
     }

@@ -155,7 +155,7 @@ class Matrix(unittest.TestCase):
     def test_each_gpu_model_is_read_through_the_driver_library(self) -> None:
         for gpu, name in (("pro6000", "RTX PRO 6000"), ("5090", "RTX 5090"), ("gtx1080", "GTX 1080")):
             with self.cell(gpu=gpu) as c:
-                r = c.run("hw", "profile")
+                r = c.run("doctor", "--hardware")
                 clean(self, r)
                 self.assertIn(name, r.out)
         with self.cell(gpu="none") as c:
@@ -264,7 +264,7 @@ class Matrix(unittest.TestCase):
         try:
             c = Cell(old)
             try:
-                for args in (["update", "--check", "--yes"], ["update", "--yes"], ["update", "--engine", "--yes"]):
+                for args in (["update", "--check", "--yes"], ["update", "--yes"], ["update", "engine", "--yes"]):
                     r = c.run(*args)
                     clean(self, r)
                     self.assertLessEqual(r.lines, 3, r.out + r.err)

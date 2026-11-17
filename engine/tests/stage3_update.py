@@ -69,7 +69,7 @@ def _local_newer(goethe: Path, cdn: Path, key: Path, pub: Path, base: str) -> No
     (cdn / "wheels/LATEST").write_text("sglang-test.whl\n", encoding="utf-8")
     (cdn / "wheels/sglang-test.whl").write_bytes(b"wheel")
     sign_cdn_tree(cdn, key, "0.0.1")
-    cases = (([], False), (["--check"], False), (["--engine"], False), (["--engine", "--allow-downgrade"], False))
+    cases = (([], False), (["--check"], False), (["engine"], False), (["engine", "--allow-downgrade"], False))
     for flags, downgrade in (*cases, (["--allow-downgrade"], True)):
         with temp_home(stub_python=True, tag="upd4") as home:
             mine = {name: b"my-newer-" + name.encode() for name in ("goethe", "goethed")}
@@ -81,7 +81,7 @@ def _local_newer(goethe: Path, cdn: Path, key: Path, pub: Path, base: str) -> No
             env = {"GOETHE_HOME": str(home), "GOETHE_PKG_URL": base}
             rr = run([str(goethe), "update", *flags, "--yes"], env=env, timeout=120)
             out = rr.stdout + rr.stderr
-            if "--engine" in flags and "SGLang" not in out:
+            if "engine" in flags and "SGLang" not in out:
                 raise RuntimeError(f"update {flags}: the engine layers are still looked at: {out}")
             if downgrade:
                 if rr.returncode != 0 or (home / "bin" / "goethe").read_bytes() != b"goethe-test-bin-old":

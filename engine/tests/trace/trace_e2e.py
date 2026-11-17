@@ -239,9 +239,10 @@ def main() -> int:
     gw = Gateway(args.url, args.model)
     folder = Path(args.dir)
     failures: list[str] = []
-    key_a = goethe("key", "--create", "trace-a", "--rpm", "0", "--raw").strip()
-    key_b = goethe("key", "--create", "trace-b", "--rpm", "0", "--raw").strip()
-    ids = {k["name"]: k["id"] for k in json.loads(goethe("key", "--json")) if k["name"] in ("trace-a", "trace-b")}
+    key_a = goethe("api", "keys", "create", "trace-a", "--rpm", "0", "--raw").strip()
+    key_b = goethe("api", "keys", "create", "trace-b", "--rpm", "0", "--raw").strip()
+    rows = json.loads(goethe("api", "keys", "--json"))
+    ids = {k["name"]: k["id"] for k in rows if k["name"] in ("trace-a", "trace-b")}
     expect: list[tuple[str, list]] = []
     try:
         goethe("trace", "on", "--key", "trace-a", "--dir", str(folder))
@@ -342,7 +343,7 @@ def main() -> int:
     finally:
         goethe("trace", "off")
         for kid in ids.values():
-            goethe("key", "--revoke", kid)
+            goethe("api", "keys", "revoke", kid)
 
     turns = trace_reader.load_turns(folder)
     st = status()

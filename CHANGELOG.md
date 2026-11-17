@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- The command line is regrouped: every action is a word (`goethe api keys create NAME`, `goethe gpu deny gpu2`, `goethe models alias set A M`, `goethe api allow add CIDR`, `goethe api domain check D`, `goethe update engine`), and flags only change how it runs. The older forms are removed rather than kept as hidden aliases; docs/cli.md has the full tree.
+- `goethe` alone on a terminal is the entry point: the guided setup while nothing is installed, the home screen after. `goethe start` is gone.
+- Network access lives under `goethe api`: `expose` (local, vpn, public, or an address or interface; replaces `api configure` and `api gateway --bind`), `allow` (was `allowlist`), `domain`, and `share` (was `goethe serve --public`; `share stop` closes it).
+- `goethe learn` and `goethe trace` are top-level again.
+- `goethe status` lists the served models too; `goethe api` is the address, keys and how to connect.
+- `goethe load M --save` stores `--gpu`, `--ctx`, `--max-conc` and the engine flags after `--` as the model's defaults (replaces `models config`); `--dry-run` shows the placement without loading (replaces `hw pick-gpus`). `--force` and `--yes` on load are one flag (`--yes`); `--tp` is only for "split over N GPUs goethe picks".
+- Extra engine flags are always given after `--` (`--sglang-arg` is gone). `goethe logs goethed|gateway|MODEL`; `goethe doctor --hardware` (was `hw profile`), `--public` (was `--probe-public`); `goethe login --lifetime` (was `token-lifetime`); `goethe remove --traces keep|delete`. Removed: `service`, `get`, `configure`, `logs --prune`, `install --no-load/--no-verify/--reset/--tp`, `--model` and `--gpus` everywhere.
+
 ## 0.3.3 (2026-11-17)
 
 - A model with a kernel pack that cannot open or run on this machine now stops with one reason line and the opt-in (`--fallback`, or `GOETHE_ALLOW_FALLBACK=1`). Nothing silently serves it with llama.cpp or SGLang any more. A model without a pack for this card still uses its plain runtime.

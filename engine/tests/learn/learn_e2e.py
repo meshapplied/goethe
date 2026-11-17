@@ -465,7 +465,7 @@ def test_other_runtime(args_url: str, model: str, key: str, failures: list[str])
     busy = f"e2e-unload-{uuid.uuid4().hex[:8]}"
     grow_session(gw, key, busy)
     started = time.time()
-    goethe("unload", "--model", model)
+    goethe("unload", model)
     took = time.time() - started
     print(f"  unload during an update took {took:.1f} s", flush=True)
     check(took < 60, "an update does not hold up an unload", failures)
@@ -475,7 +475,7 @@ def test_other_runtime(args_url: str, model: str, key: str, failures: list[str])
     left = waiting(busy)
     print(f"  after the unload: {updates} updates, {left} waiting", flush=True)
     check(bool(rows) and (updates >= 1 or left > 0), "the messages survive the unload", failures)
-    goethe("load", "--model", model, "--gpu", "gpu3")
+    goethe("load", model, "--gpu", "gpu3")
     if left > 0:
         check(
             wait_for(lambda: waiting(busy) == 0, 420),
@@ -532,9 +532,9 @@ def main() -> int:
     args = ap.parse_args()
     gw = Gateway(args.url, args.model[0])
     failures: list[str] = []
-    key_a = goethe("key", "--create", "learn-a", "--rpm", "0", "--raw").strip()
-    key_b = goethe("key", "--create", "learn-b", "--rpm", "0", "--raw").strip()
-    ids = [k["id"] for k in json.loads(goethe("key", "--json")) if k["name"] in ("learn-a", "learn-b")]
+    key_a = goethe("api", "keys", "create", "learn-a", "--rpm", "0", "--raw").strip()
+    key_b = goethe("api", "keys", "create", "learn-b", "--rpm", "0", "--raw").strip()
+    ids = [k["id"] for k in json.loads(goethe("api", "keys", "--json")) if k["name"] in ("learn-a", "learn-b")]
     folder_before = json.loads(goethe("trace", "--json"))["dir"]
     WORK.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="goethe-learn-trace-", dir=WORK) as tmp:
@@ -553,7 +553,7 @@ def main() -> int:
         finally:
             goethe("learn", "off")
             goethe("trace", "off", "--dir", folder_before)
-            goethe("key", "--revoke", *ids)
+            goethe("api", "keys", "revoke", *ids)
     print(f"\n{len(failures)} failures" if failures else "\nall checks passed")
     for f in failures:
         print("  -", f)

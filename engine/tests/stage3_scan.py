@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 3 goethe scan: register folders moved into GOETHE_HOME/models, load, remove; gated-repo guidance."""
+"""Stage 3 goethe models scan: register folders moved into GOETHE_HOME/models, load, remove; gated-repo guidance."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ def _check_scan(goethe: Path, home: Path, env: dict[str, str]) -> tuple[Path, Pa
     good = _model(models, "tinyscan", True)
     bad = _model(models, "binonly", False)
     proc = subprocess.run(
-        [str(goethe), "scan"],
+        [str(goethe), "models", "scan"],
         env={**os.environ, **env},
         stdin=subprocess.DEVNULL,
         capture_output=True,
@@ -73,13 +73,13 @@ def _check_scan(goethe: Path, home: Path, env: dict[str, str]) -> tuple[Path, Pa
         raise RuntimeError(f"unsupported folder not reported with its reason: {out[-500:]}")
     if sqlite_query(home / "state.db", "SELECT COUNT(*) FROM installed_models")[0][0] != 0:
         raise RuntimeError("scan without --yes registered a model")
-    run_goethe([str(goethe), "scan", "--yes"], env=env, timeout=120)
+    run_goethe([str(goethe), "models", "scan", "--yes"], env=env, timeout=120)
     rows = sqlite_query(home / "state.db", "SELECT model_id, local_path, managed FROM installed_models")
     if rows != [("local/tinyscan", "models/tinyscan", 1)]:
         raise RuntimeError(f"scan --yes registered {rows}")
     if not (good / "goethe_card.toml").is_file():
         raise RuntimeError("scan did not write the card next to the weights")
-    rr = run_goethe([str(goethe), "scan", "--json"], env=env, timeout=120)
+    rr = run_goethe([str(goethe), "models", "scan", "--json"], env=env, timeout=120)
     status = {Path(r["dir"]).name: (r["status"], r.get("reason")) for r in json.loads(rr.stdout)}
     if status.get("tinyscan", ("", None))[0] != "registered":
         raise RuntimeError(f"second scan should report tinyscan as registered: {status}")
@@ -100,16 +100,16 @@ def main() -> None:
         good, bad = _check_scan(goethe, home, env)
         daemon = start_goethed(home)
         try:
-            load = [str(goethe), "load", "--model", "local/tinyscan", "--gpus", str(gpu), *yes]
+            load = [str(goethe), "load", "local/tinyscan", "--gpu", f"gpu{gpu}", *yes]
             run_goethe(load, env=env, timeout=180)
             rows = json.loads(run_goethe([str(goethe), "ps", "--json"], env=env).stdout)
             if not any(r.get("model_id") == "local/tinyscan" and r.get("status") == "RUNNING" for r in rows):
                 raise RuntimeError(f"scanned model is not RUNNING after load: {rows}")
-            run_goethe([str(goethe), "unload", "--model", "local/tinyscan"], env=env, timeout=120)
+            run_goethe([str(goethe), "unload", "local/tinyscan"], env=env, timeout=120)
         finally:
             daemon.stop()
         assert_no_stub_engines(home)
-        run_goethe([str(goethe), "remove", "--model", "local/tinyscan", "--yes"], env=env, timeout=60)
+        run_goethe([str(goethe), "remove", "local/tinyscan", "--yes"], env=env, timeout=60)
         if good.exists():
             raise RuntimeError("remove kept the scanned (managed) model folder")
         if not bad.is_dir():
@@ -121,7 +121,7 @@ def main() -> None:
                 f"then goethe install {GATED} --hf-token, "
                 f"or goethe install DIR --name {GATED} for weights you already have"
             )
-            rr = run([str(goethe), "install", "--model", GATED, "--no-load"], env=env, timeout=120)
+            rr = run([str(goethe), "install", GATED], env=env, timeout=120)
             if rr.returncode != 1 or want not in rr.stderr:
                 raise RuntimeError(f"gated install guidance missing: rc={rr.returncode} {rr.stderr[-500:]}")
             if target.exists():

@@ -259,7 +259,7 @@ pub fn run_all(check_only: bool) -> Result<(), String> {
         }
         match refresh(&home, &id, &dir, &arch, &broker, &run) {
             Ok(Outcome::Unchanged) => println!("{id}: kernel pack is current"),
-            Ok(Outcome::Updated(d)) => println!("{id}: kernel pack updated ({} bytes fetched, {} reused from the installed pack); updated: reload to use (goethe update --rollback undoes it)", d.fetched, d.reused),
+            Ok(Outcome::Updated(d)) => println!("{id}: kernel pack updated ({} bytes fetched, {} reused from the installed pack); updated: reload to use (goethe update rollback undoes it)", d.fetched, d.reused),
             Ok(Outcome::Overlaid(n)) => println!("{id}: kernel pack patched ({n} bytes fetched); updated: reload to use"),
             Ok(Outcome::Skipped(why)) => println!("{id}: {why}"),
             Err(e) => {

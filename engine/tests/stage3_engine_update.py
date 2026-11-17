@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""goethe update --engine refreshes the py-env layers that are present (verified wheel to bootstrap.sh), no others."""
+"""goethe update engine refreshes the py-env layers that are present (verified wheel to bootstrap.sh), no others."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def _cdn_tree(dist: Path) -> None:
 
 
 def main() -> None:
-    """Run update --engine against a signed local CDN and check bootstrap received the verified wheel."""
+    """Run update engine against a signed local CDN and check bootstrap received the verified wheel."""
     goethe = require_cli("goethe")
     work = Path(tempfile.mkdtemp(prefix=run_temp_prefix("eng"), dir="/tmp"))
     srv: ThreadingHTTPServer | None = None
@@ -55,7 +55,7 @@ def main() -> None:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         with temp_home(stub_python=True, tag="engine") as home:
             rr = run(
-                [str(goethe), "update", "--engine", "--yes"],
+                [str(goethe), "update", "engine", "--yes"],
                 env={"GOETHE_HOME": str(home), "GOETHE_PKG_URL": f"http://127.0.0.1:{srv.server_address[1]}"},
                 timeout=120,
             )
@@ -73,14 +73,14 @@ def main() -> None:
         with temp_home(stub_python=True, tag="engine") as home:
             shutil.rmtree(home / "py-env/lib/python3.11/site-packages/sglang-0.0.0+stub.dist-info")
             rr = run(
-                [str(goethe), "update", "--engine", "--yes"],
+                [str(goethe), "update", "engine", "--yes"],
                 env={"GOETHE_HOME": str(home), "GOETHE_PKG_URL": f"http://127.0.0.1:{srv.server_address[1]}"},
                 timeout=120,
             )
             if rr.returncode != 0 or "SGLang is not installed" not in rr.stdout:
                 raise RuntimeError(rr.stderr or rr.stdout)
             if (home / "pyenv" / "bootstrap.env").exists() or (home / "pyenv" / "wheel.whl").exists():
-                raise RuntimeError("update --engine installed SGLang into a py-env that did not have it")
+                raise RuntimeError("update engine installed SGLang into a py-env that did not have it")
         print("stage3_engine_update ok")
     finally:
         if srv is not None:

@@ -61,12 +61,12 @@ def main() -> None:
         env = home_goethe_env(home)
 
         def key(*args: str) -> str:
-            out = run_goethe([str(goethe), "key", "--create", *args], env=env).stdout
+            out = run_goethe([str(goethe), "api", "keys", "create", *args], env=env).stdout
             return next(ln for ln in out.splitlines() if ln.startswith("goethe_sk_"))
 
         late: list[str] = []
         try:
-            run_goethe([str(goethe), "load", "--model", "k", "--gpus", str(gpu), "--yes"], env=env, timeout=120)
+            run_goethe([str(goethe), "load", "k", "--gpu", f"gpu{gpu}", "--yes"], env=env, timeout=120)
             tok_rpm = key("rpm", "--raw", "--rpm", "2")
             for _ in range(2):
                 st, _, _ = _mux_post(home, CHAT, tok_rpm)
@@ -83,11 +83,11 @@ def main() -> None:
             st, _, body = _mux_post(home, CHAT, key("sc", "--raw", "--models", "other"))
             if st != 404 or "Model Not Found" not in json.dumps(body):
                 raise RuntimeError(f"scope: st={st} body={body}")
-            run_goethe([str(goethe), "key", "--create", "adm", "--admin"], env=env)
-            lst_adm = run_goethe([str(goethe), "key"], env=env).stdout
+            run_goethe([str(goethe), "api", "keys", "create", "adm", "--admin"], env=env)
+            lst_adm = run_goethe([str(goethe), "api", "keys"], env=env).stdout
             if not any(ln.split()[:1] == ["adm"] and ln.split()[2:3] == ["yes"] for ln in lst_adm.splitlines()):
                 raise RuntimeError(f"admin list missing: {lst_adm}")
-            out_id = run_goethe([str(goethe), "key", "--create", "idcheck"], env=env).stdout
+            out_id = run_goethe([str(goethe), "api", "keys", "create", "idcheck"], env=env).stdout
             tok_id = re.search(r"goethe_sk_[A-Za-z0-9_-]+", out_id)
             q_id = "SELECT key_id FROM api_keys WHERE token_hash=?"
             db_id = sqlite_query(home / "state.db", q_id, (sha256_hex(tok_id.group(0)),)) if tok_id else []
@@ -101,7 +101,7 @@ def main() -> None:
             if not ids:
                 raise RuntimeError("created key has no api_keys row with its sha256")
             key_id = ids[0][0]
-            rows = json.loads(run_goethe([str(goethe), "key", "--json"], env=env).stdout)
+            rows = json.loads(run_goethe([str(goethe), "api", "keys", "--json"], env=env).stdout)
             row = next(r for r in rows if r.get("id") == key_id)
             if row.get("requests_today", 0) < 1 or row.get("tokens_total", 0) < 1:
                 raise RuntimeError(f"usage not updated: {row}")

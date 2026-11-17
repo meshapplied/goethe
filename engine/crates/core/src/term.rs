@@ -201,7 +201,7 @@ pub fn live(interval: std::time::Duration, mut frame: impl FnMut() -> Result<Str
             Ok(text) => last = text,
             Err(e) => break Err(e),
         }
-        let body = format!("{last}\n(q to quit)").replace('\n', "\x1b[K\r\n");
+        let body = format!("{last}\n\n  {}", paint("q quit", Color::Gray)).replace('\n', "\x1b[K\r\n");
         let _ = write!(out, "\x1b[H{body}\x1b[K\x1b[J");
         let _ = out.flush();
         let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
@@ -239,7 +239,7 @@ fn parse_key(bytes: &[u8]) -> Key {
         [0x1b, b'[' | b'O', b'A', ..] | [b'k', ..] => Key::Up,
         [0x1b, b'[' | b'O', b'B', ..] | [b'j', ..] => Key::Down,
         [b'\r' | b'\n', ..] => Key::Enter,
-        [0x03, ..] | [0x1b] | [b'q', ..] => Key::Cancel,
+        [0x03, ..] | [0x1b] | [b'q', ..] | [0x1b, b'[' | b'O', b'D', ..] => Key::Cancel,
         [b' ', ..] => Key::Space,
         [d @ b'1'..=b'9', ..] => Key::Digit(usize::from(d - b'1')),
         _ => Key::Other,
@@ -349,23 +349,30 @@ fn terminal_width() -> usize {
     }
 }
 
+pub const MENU_KEYS: &str = "\u{2191}\u{2193} move   Enter open   \u{2190} back";
+pub const CHECK_KEYS: &str = "\u{2191}\u{2193} move   Space tick   Enter confirm   \u{2190} back";
+
+fn keys_line(text: &str) -> String {
+    // The keys line under every menu, as in the goethe menu: a gap, then the keys in gray.
+    format!("\r\x1b[2K\n\r\x1b[2K  {}\n", paint(text, Color::Gray))
+}
+
 fn draw_menu(options: &[String], selected: usize, redraw: bool) {
-    // Draw the options on stderr, the selected one in light blue behind a light blue dot; a redraw first moves back up over them.
+    // Draw the options on stderr, the selected one in light blue behind the arrow, then the keys line; a redraw first moves back up over them.
     let mut out = String::new();
     if redraw {
-        out.push_str(&format!("\x1b[{}A", options.len()));
+        out.push_str(&format!("\x1b[{}A", options.len() + 2));
     }
     let width = terminal_width().saturating_sub(3).max(10);
     for (i, o) in options.iter().enumerate() {
         let o: String = if o.chars().count() > width { o.chars().take(width - 1).chain(['.']).collect() } else { o.clone() };
-        let line = if i == selected { format!("\x1b[1;38;5;117m\u{25CF} {o}\x1b[0m") } else { format!("  {o}") };
+        let line = if i == selected { format!("\x1b[1;{}m\u{27a4} {o}\x1b[0m", crate::theme::main()) } else { format!("  {o}") };
         out.push_str(&format!("\r\x1b[2K{line}\n"));
     }
+    out.push_str(&keys_line(MENU_KEYS));
     eprint!("{out}");
     std::io::stderr().flush().ok();
 }
-
-static HINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn select(options: &[String], default: usize) -> Result<Option<usize>, String> {
     // Arrow-key menu on a terminal: Ok(Some(i)) on Enter, Ok(None) when cancelled, Err when no terminal or raw mode.
@@ -373,9 +380,6 @@ pub fn select(options: &[String], default: usize) -> Result<Option<usize>, Strin
         return Err("no terminal for a menu".to_string());
     }
     let raw = RawMode::enter().ok_or("could not switch the terminal to raw mode")?;
-    if !HINTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        eprintln!("(up/down to move, Enter to select, q to go back)");
-    }
     eprint!("\x1b[?25l");
     let mut selected = default.min(options.len() - 1);
     if options[selected].is_empty() {
@@ -415,15 +419,16 @@ fn draw_checklist(options: &[String], checked: &[bool], at: usize, redraw: bool)
     // Each option behind [x] or [ ], the one under the cursor in light blue; a redraw first moves back up over them.
     let mut out = String::new();
     if redraw {
-        out.push_str(&format!("\x1b[{}A", options.len()));
+        out.push_str(&format!("\x1b[{}A", options.len() + 2));
     }
     let width = terminal_width().saturating_sub(7).max(10);
     for (i, o) in options.iter().enumerate() {
         let o: String = if o.chars().count() > width { o.chars().take(width - 1).chain(['.']).collect() } else { o.clone() };
         let mark = if checked[i] { "[x]" } else { "[ ]" };
-        let line = if i == at { format!("\x1b[1;38;5;117m\u{25CF} {mark} {o}\x1b[0m") } else { format!("  {mark} {o}") };
+        let line = if i == at { format!("\x1b[1;{}m\u{27a4} {mark} {o}\x1b[0m", crate::theme::main()) } else { format!("  {mark} {o}") };
         out.push_str(&format!("\r\x1b[2K{line}\n"));
     }
+    out.push_str(&keys_line(CHECK_KEYS));
     eprint!("{out}");
     std::io::stderr().flush().ok();
 }
@@ -435,7 +440,6 @@ pub fn select_many(options: &[String], checked: &[bool]) -> Result<Option<Vec<bo
     }
     let mut ticks: Vec<bool> = (0..options.len()).map(|i| checked.get(i).copied().unwrap_or(false)).collect();
     let raw = RawMode::enter().ok_or("could not switch the terminal to raw mode")?;
-    eprintln!("(up/down to move, Space to tick, Enter to confirm, q to go back)");
     eprint!("\x1b[?25l");
     let mut at = 0;
     draw_checklist(options, &ticks, at, false);

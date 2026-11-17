@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Goethe CDN installer: verified CDN artifacts, py-env, nginx binary, TLS material; goethe start brings goethed up.
+# Goethe CDN installer: verified CDN artifacts, py-env, nginx binary, TLS material; goethe brings goethed up.
 
 set -euo pipefail
 
@@ -936,7 +936,7 @@ restart_goethed() {
     fi
     other="$(system_unit_home)"
     echo "goethed.service already starts goethed for ${other}; this home starts now but gets no autostart." >&2
-    echo "To move autostart here: GOETHE_HOME=${other} goethe service disable, then goethe service enable." >&2
+    echo "To move autostart here: GOETHE_HOME=${other} goethe down, then goethe up." >&2
   fi
   if [[ "${GOETHE_NO_AUTOSTART:-0}" != "1" ]] && "${GOETHE_HOME}/bin/goethe" up >/dev/null; then
     return
@@ -1064,7 +1064,7 @@ done_line() {
 }
 
 get_started() {
-  printf '\nGet started:\n\n\t→ goethe start\n'
+  printf '\nGet started:\n\n\t→ goethe\n'
 }
 
 parse_args() {
@@ -1231,7 +1231,7 @@ main() {
     echo "${UPGRADE_NOTE}"
   fi
   local profile
-  if ! profile="$(goethe hw profile 2>&1)"; then
+  if ! profile="$(goethe doctor --hardware 2>&1)"; then
     echo "note: no GPU profile yet (${profile##*$'\n'}); goethe doctor shows the state once the GPU is usable" >&2
   fi
   summary

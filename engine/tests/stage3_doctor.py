@@ -79,15 +79,15 @@ def main() -> None:
         if rr.returncode not in (0, 1):
             raise RuntimeError(f"unexpected exit {rr.returncode}")
         _seed_doctor_ok(home)
-        run([str(goethe), "hw", "profile"], env=base_env, timeout=120)
+        run([str(goethe), "doctor", "--hardware"], env=base_env, timeout=120)
         _seed_public_bind(home, "0.0.0.0")
         probe_env = {
             **base_env,
             "GOETHE_PUBLIC_IP": "203.0.113.7",
         }
-        rr_u = run([str(goethe), "doctor", "--probe-public"], env=probe_env, timeout=60)
+        rr_u = run([str(goethe), "doctor", "--public"], env=probe_env, timeout=60)
         if rr_u.returncode != 0:
-            raise RuntimeError(f"probe-public unknown exit {rr_u.returncode}")
+            raise RuntimeError(f"doctor --public unknown exit {rr_u.returncode}")
         out_u = rr_u.stdout + rr_u.stderr
         if "reachability unknown" not in out_u:
             raise RuntimeError(f"missing reachability unknown: {out_u[-500:]}")
@@ -100,9 +100,9 @@ def main() -> None:
                 **probe_env,
                 "GOETHE_CANARY_URL": f"http://127.0.0.1:{port}/probe",
             }
-            rr_o = run([str(goethe), "doctor", "--probe-public"], env=canary_env, timeout=30)
+            rr_o = run([str(goethe), "doctor", "--public"], env=canary_env, timeout=30)
             if rr_o.returncode != 0:
-                raise RuntimeError(f"probe-public open exit {rr_o.returncode}")
+                raise RuntimeError(f"doctor --public open exit {rr_o.returncode}")
             if "public probe: OPEN" not in (rr_o.stdout + rr_o.stderr):
                 raise RuntimeError(f"missing OPEN: {rr_o.stdout}")
             qs = _CanaryHandler.last_qs

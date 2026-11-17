@@ -22,10 +22,10 @@ Goethe turns a Linux machine into your own API, compatible with OpenAI, Anthropi
 
 ```bash
 curl -fsSL https://goethe.sh/install.sh | bash
-goethe start
+goethe
 ```
 
-`goethe start` starts Goethe and walks you through three steps: install a model, serve it through the API, and configure who can reach it. If you prefer plain commands, these do the same:
+`goethe` on its own starts Goethe and, the first time, walks you through three steps: install a model, serve it through the API, and configure who can reach it. If you prefer plain commands, these do the same:
 
 ```bash
 # 1. Start Goethe and load a model
@@ -33,8 +33,8 @@ goethe up
 goethe install nvidia/Llama-3.1-8B-Instruct-NVFP4 --load
 
 # 2. Share it
-goethe api configure                 # this machine only, your VPN (recommended), or a public address
-goethe api keys --create my-laptop        # one key per app or person
+goethe api expose vpn                # or local, or public: this machine only, your VPN (recommended), or a public address
+goethe api keys create my-laptop         # one key per app or person
 goethe api                           # the address to give your apps
 ```
 
@@ -58,7 +58,7 @@ print(reply.choices[0].message.content)
 - **Easy to serve.** Every model you load is served at the same URL; a request picks its model by name.
 - **Fast.** Use the custom kernel attachments to accelerate and optimise model capability.
 - **Private by default.** Nothing reaches the API until you allow it. Rate-limit, expire, scope or revoke keys at any time.
-- **Fits your network.** This machine only, a VPN, or a public IP. `goethe api configure` walks you through the choice.
+- **Fits your network.** This machine only, a VPN, or a public IP. `goethe api expose` sets it.
 - **Many models, many GPUs.** Run several models side by side, split large models across GPUs, and keep other GPU software running next to Goethe.
 - **Always on.** Loaded models come back after a reboot or a crash.
 

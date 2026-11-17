@@ -71,8 +71,8 @@ def _routing(goethe: str, home: Path, env: dict[str, str], gpu: int) -> None:
     _plant_alias(home, "b", "a")
     seed_installed_model(home, "b", "models/org__b", 5.0, 512, 512, 2, 1)
     for mid in ("a", "b"):
-        run_goethe([goethe, "load", "--model", mid, "--gpus", str(gpu), "--yes"], env=env, timeout=120)
-    out = run_goethe([goethe, "key", "--create", "prec", "--raw"], env=env).stdout
+        run_goethe([goethe, "load", mid, "--gpu", f"gpu{gpu}", "--yes"], env=env, timeout=120)
+    out = run_goethe([goethe, "api", "keys", "create", "prec", "--raw"], env=env).stdout
     token = next(ln for ln in out.splitlines() if ln.startswith("goethe_sk_"))
     body = json.dumps({"model": "b", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 2}).encode()
     url = f"http://127.0.0.1:{test_mux_port(home)}/v1/chat/completions"
@@ -97,12 +97,12 @@ def main() -> None:
             _routing(goethe, home, env, gpu)
             _plant_alias(home, "c", "a")
             src = _weights(home / "src-c")
-            rr = run([goethe, "install", "--model", str(src), "--name", "c", "--no-load"], env=env, timeout=120)
+            rr = run([goethe, "install", str(src), "--name", "c"], env=env, timeout=120)
             _drops_alias(home, "c", rr.stdout + rr.stderr, rr.returncode, "goethe install")
             _plant_alias(home, "local/scanned", "a")
             _weights(home / "models" / "scanned")
-            rr = run([goethe, "scan", "--yes"], env=env, timeout=120)
-            _drops_alias(home, "local/scanned", rr.stdout + rr.stderr, rr.returncode, "goethe scan --yes")
+            rr = run([goethe, "models", "scan", "--yes"], env=env, timeout=120)
+            _drops_alias(home, "local/scanned", rr.stdout + rr.stderr, rr.returncode, "goethe models scan --yes")
         finally:
             run([goethe, "unload", "--all"], env=env, timeout=60)
             md.stop()

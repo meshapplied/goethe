@@ -982,7 +982,7 @@ def ensure_schema(home: Path) -> None:
     db = home / "state.db"
     if db.is_file() and sqlite_query(db, "PRAGMA user_version")[0][0] > 0:
         return
-    rr = run([str(require_cli("goethe")), "alias"], env={"GOETHE_HOME": str(home)}, timeout=60)
+    rr = run([str(require_cli("goethe")), "models", "alias"], env={"GOETHE_HOME": str(home)}, timeout=60)
     if rr.returncode != 0 or not db.is_file():
         raise RuntimeError(f"goethe could not create state.db: {_goethe_error_snippet(rr)}")
 
@@ -1146,12 +1146,14 @@ def isolated_real_home(work: Path, scrub: Sequence[str]) -> dict[str, str]:
 
 
 def _profile_hardware(work: Path, src: Path, env: dict[str, str]) -> None:
-    """hardware_state.json for a real-engine home (budgets need it): goethe hw profile, else the dev home's copy."""
-    rr = run([str(require_cli("goethe")), "hw", "profile"], env={**os.environ, **env}, timeout=120)
+    """hardware_state.json for a real-engine home (budgets need it): doctor --hardware, else the dev home's copy."""
+    rr = run([str(require_cli("goethe")), "doctor", "--hardware"], env={**os.environ, **env}, timeout=120)
     if rr.returncode == 0 and (work / "hardware_state.json").is_file():
         return
     if not (src / "hardware_state.json").is_file():
-        raise RuntimeError(f"no hardware profile for {work}: goethe hw profile exit {rr.returncode} {rr.stderr[-200:]}")
+        raise RuntimeError(
+            f"no hardware profile for {work}: goethe doctor --hardware exit {rr.returncode} {rr.stderr[-200:]}"
+        )
     shutil.copy2(src / "hardware_state.json", work / "hardware_state.json")
 
 

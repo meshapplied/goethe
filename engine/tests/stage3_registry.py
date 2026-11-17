@@ -140,8 +140,8 @@ def main() -> None:
             env = {"GOETHE_HOME": str(home), "HF_HUB_OFFLINE": "1"}
             rr_inst = run(
                 [
-                    str(goethe), "install", "--model", str(model_src), "--name", "local/test-model",
-                    "--sglang-arg", "--disable-shared-experts-fusion",
+                    str(goethe), "install", str(model_src), "--name", "local/test-model",
+                    "--", "--disable-shared-experts-fusion",
                 ],
                 env=env,
                 timeout=60,
@@ -161,7 +161,7 @@ def main() -> None:
             ]:
                 raise RuntimeError("in-place install modified the user's source folder")
             managed = sqlite_query(home / "state.db", "SELECT managed FROM installed_models")
-            rr_rm = run([str(goethe), "remove", "--model", "local/test-model", "--yes"], env=env, timeout=30)
+            rr_rm = run([str(goethe), "remove", "local/test-model", "--yes"], env=env, timeout=30)
             if rr_rm.returncode != 0:
                 raise RuntimeError(rr_rm.stderr or rr_rm.stdout)
             if not (model_src / "w.safetensors").is_file() or not (model_src / "config.json").is_file():

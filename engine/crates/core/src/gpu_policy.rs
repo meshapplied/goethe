@@ -67,7 +67,7 @@ pub fn list_rows(con: &Connection, home: &Path) -> Result<Vec<GpuListRow>, Strin
     let usage = hw::gpu_usage(&managed)?;
     let mut out = Vec::new();
     for gpu in &state.gpus {
-        let live = usage.iter().find(|u| u.index == gpu.index).ok_or(format!("gpu{} is gone; run `goethe hw profile`", gpu.index))?;
+        let live = usage.iter().find(|u| u.index == gpu.index).ok_or(format!("gpu{} is gone; run `goethe doctor --hardware`", gpu.index))?;
         let managed_mb = live.managed_mb;
         let foreign_mb = live.used_mb.saturating_sub(managed_mb);
         let is_denied = denied.contains(&gpu.index);
@@ -98,7 +98,7 @@ pub fn validate_gpu_index(home: &Path, index: u32) -> Result<(), String> {
     if indices.contains(&index) {
         Ok(())
     } else {
-        Err(format!("gpu{index} is not in the hardware profile; run `goethe hw profile`"))
+        Err(format!("gpu{index} is not in the hardware profile; run `goethe doctor --hardware`"))
     }
 }
 

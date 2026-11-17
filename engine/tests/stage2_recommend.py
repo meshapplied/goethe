@@ -91,7 +91,7 @@ def main() -> None:
         reg_path.write_text(json.dumps(registry), encoding="utf-8")
         (home / "hardware_state.json").write_text(json.dumps(hw), encoding="utf-8")
         rr = run_goethe(
-            [str(goethe), "recommend", "--json"],
+            [str(goethe), "models", "recommend", "--json"],
             env={
                 "GOETHE_HOME": str(home),
                 "GOETHE_REGISTRY_URL": f"file://{reg_path}",

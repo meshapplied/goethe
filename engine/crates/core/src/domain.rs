@@ -25,7 +25,7 @@ pub fn explain() -> Result<String, String> {
         Err(why) => {
             return Ok(format!(
                 "To use a domain name, other machines must reach the API first: {why}.\n\n{}",
-                crate::term::commands("Choose how they reach it:", &["goethe api configure"])
+                crate::term::commands("Choose how they reach it:", &["goethe api expose vpn", "goethe api expose public"])
             ))
         }
     };
@@ -35,7 +35,7 @@ pub fn explain() -> Result<String, String> {
          \tapi.example.com  A  {ip}\n\n\
          This works for public and private addresses alike; a VPN or LAN address only resolves to clients on that network.\n\
          Clients then use https://api.example.com:{port}/v1, with the same certificate settings as for the IP address.\n\n{}",
-        crate::term::commands("Check that it worked:", &["goethe api domain --check api.example.com"])
+        crate::term::commands("Check that it worked:", &["goethe api domain check api.example.com"])
     ))
 }
 

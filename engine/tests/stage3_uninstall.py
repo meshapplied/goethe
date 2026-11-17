@@ -105,10 +105,6 @@ def main() -> None:
         kept_models = (keep / "models" / "org__m" / "w.safetensors").is_file()
         if rr.returncode != 0 or not kept_models or (keep / "state.db").exists():
             raise RuntimeError(f"--keep-models must keep models and remove the rest: {rr.stderr or rr.stdout}")
-        old = _fake_install(root / "old-flag")
-        rr = run([str(goethe), "uninstall", "--purge-models", "--yes"], env={**env, "GOETHE_HOME": str(old)})
-        if rr.returncode != 0 or (old / "models").exists():
-            raise RuntimeError(f"the old --purge-models flag must still work: {rr.stderr or rr.stdout}")
         _registered_models(goethe, root, env)
         models_only = root / "models-only"
         (models_only / "models").mkdir(parents=True)

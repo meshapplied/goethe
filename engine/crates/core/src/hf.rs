@@ -69,6 +69,10 @@ pub fn set_token(token: Option<String>) {
     TOKEN.lock().unwrap_or_else(|e| e.into_inner()).clone_from(&value);
 }
 
+pub fn token_set() -> bool {
+    token().is_some()
+}
+
 fn token() -> Option<String> {
     TOKEN.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }

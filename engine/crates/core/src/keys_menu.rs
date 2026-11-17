@@ -1,4 +1,4 @@
-// goethe api manage: a full-screen, two-column key manager in the style of ranger; the left picks what to act on, the right shows and changes it.
+// goethe api keys: a full-screen, two-column key manager in the style of ranger; the left picks what to act on, the right shows and changes it.
 
 use crate::paths::goethe_home;
 use crate::security;
@@ -6,9 +6,9 @@ use serde_json::Value;
 use std::io::{IsTerminal, Write};
 
 const SCRIPT_HINT: &[&str] = &[
-    "goethe api keys --create my-app",
-    "goethe api keys --create my-app --models <model-id>",
-    "goethe api keys --revoke <key-id>",
+    "goethe api keys create my-app",
+    "goethe api keys create my-app --models <model-id>",
+    "goethe api keys revoke <key-id>",
 ];
 const DEFAULT_RPM: i64 = 120;
 const MIN_WIDTH: usize = 64;
@@ -255,8 +255,8 @@ impl App {
     fn fields(&self) -> Vec<Field> {
         let models = (0..self.form.models.len()).map(Field::Model);
         match self.item() {
-            LeftItem::Create => [Field::Name, Field::Every].into_iter().chain(models).chain([Field::Rpm, Field::Expires, Field::Apply]).collect(),
-            LeftItem::Key(_) => [Field::Every].into_iter().chain(models).chain([Field::Rpm, Field::Expires, Field::Apply, Field::Delete]).collect(),
+            LeftItem::Create => [Field::Name, Field::Rpm, Field::Expires, Field::Every].into_iter().chain(models).chain([Field::Apply]).collect(),
+            LeftItem::Key(_) => [Field::Rpm, Field::Expires, Field::Every].into_iter().chain(models).chain([Field::Apply, Field::Delete]).collect(),
             LeftItem::Done => Vec::new(),
         }
     }
@@ -267,6 +267,46 @@ impl App {
 
     fn dirty(&self) -> bool {
         self.form != self.base
+    }
+
+    fn changed(&self) -> bool {
+        // A saved change, or a value being typed that differs from the stored one.
+        self.dirty() || self.editing.as_ref().is_some_and(|(f, t)| t.trim() != self.text_of(*f).trim())
+    }
+
+    fn text_of(&self, field: Field) -> String {
+        match field {
+            Field::Name => self.form.name.clone(),
+            Field::Rpm => self.form.rpm.to_string(),
+            Field::Expires => self.form.expires.clone().unwrap_or_else(|| "never".to_string()),
+            _ => String::new(),
+        }
+    }
+
+    fn settle(&mut self) {
+        // Landing on Name, Rate limit or Expiry starts typing there at once.
+        match self.field() {
+            Some(f @ (Field::Name | Field::Rpm | Field::Expires)) if self.focus_right && self.editing.is_none() => {
+                self.editing = Some((f, self.text_of(f)));
+            }
+            _ => {}
+        }
+    }
+
+    fn move_right(&mut self, to: usize) {
+        self.right = to.min(self.fields().len().saturating_sub(1));
+        self.settle();
+    }
+
+    fn back(&mut self, armed: Option<Armed>) {
+        // The left arrow on the right column: back to the list, after a second press when something is unsaved.
+        if self.changed() && armed != Some(Armed::Discard) {
+            self.armed = Some(Armed::Discard);
+            self.status = "Unsaved changes. Save them, or press \u{2190} again to discard them.".to_string();
+        } else {
+            self.form = self.base.clone();
+            self.focus_right = false;
+        }
     }
 
     fn unsaved_note(&self) -> Option<String> {
@@ -286,11 +326,10 @@ impl App {
             return Effect::Quit;
         }
         if self.editing.is_some() {
-            self.edit(input);
-            return Effect::Nothing;
+            return self.edit(input);
         }
         let armed = self.armed.take();
-        if input == Input::Char('q') || (!self.focus_right && input == Input::Esc) {
+        if input == Input::Char('q') || (!self.focus_right && matches!(input, Input::Esc | Input::Left | Input::Char('h'))) {
             return Effect::Quit;
         }
         self.status.clear();
@@ -306,11 +345,11 @@ impl App {
         match input {
             Input::Up | Input::Char('k') => self.hover(self.left.saturating_sub(1)),
             Input::Down | Input::Char('j') => self.hover((self.left + 1).min(n - 1)),
-            Input::Right | Input::Enter | Input::Char('l') => match self.item() {
+            Input::Enter => match self.item() {
                 LeftItem::Done => return Effect::Quit,
                 _ => {
                     self.focus_right = true;
-                    self.right = 0;
+                    self.move_right(0);
                 }
             },
             _ => {}
@@ -321,17 +360,9 @@ impl App {
     fn handle_right(&mut self, input: Input, armed: Option<Armed>) -> Effect {
         let last = self.fields().len().saturating_sub(1);
         match input {
-            Input::Up | Input::Char('k') => self.right = self.right.saturating_sub(1),
-            Input::Down | Input::Char('j') => self.right = (self.right + 1).min(last),
-            Input::Left | Input::Esc | Input::Char('h') => {
-                if self.dirty() && armed != Some(Armed::Discard) {
-                    self.armed = Some(Armed::Discard);
-                    self.status = "Unsaved changes. Save them, or press \u{2190} again to discard them.".to_string();
-                } else {
-                    self.form = self.base.clone();
-                    self.focus_right = false;
-                }
-            }
+            Input::Up | Input::Char('k') => self.move_right(self.right.saturating_sub(1)),
+            Input::Down | Input::Char('j') => self.move_right((self.right + 1).min(last)),
+            Input::Left | Input::Esc | Input::Char('h') => self.back(armed),
             Input::Space | Input::Enter => return self.activate(input, armed),
             _ => {}
         }
@@ -355,11 +386,7 @@ impl App {
                 }
                 self.form.ticks[i] = !self.form.ticks[i];
             }
-            Field::Name => self.editing = Some((Field::Name, self.form.name.clone())),
-            Field::Rpm => self.editing = Some((Field::Rpm, self.form.rpm.to_string())),
-            Field::Expires => {
-                self.editing = Some((Field::Expires, self.form.expires.clone().unwrap_or_else(|| "never".to_string())))
-            }
+            Field::Name | Field::Rpm | Field::Expires => self.settle(),
             Field::Apply => return self.apply(),
             Field::Delete => {
                 let LeftItem::Key(i) = self.item() else { return Effect::Nothing };
@@ -386,13 +413,13 @@ impl App {
             LeftItem::Create => {
                 let name = self.form.name.trim().to_string();
                 if name.is_empty() {
+                    self.move_right(0);
                     self.status = "Give the key a name first.".to_string();
-                    self.right = 0;
                     return Effect::Nothing;
                 }
                 if self.keys.iter().any(|k| k.name == name) {
+                    self.move_right(0);
                     self.status = format!("A key named {name} already exists; pick another name.");
-                    self.right = 0;
                     return Effect::Nothing;
                 }
                 Effect::Create { name, scope, rpm, expires }
@@ -406,34 +433,53 @@ impl App {
         }
     }
 
-    fn edit(&mut self, input: Input) {
-        // Typing into Name, Rate limit or Expires; Enter keeps a valid value, Esc drops the edit.
-        let Some((field, mut text)) = self.editing.take() else { return };
+    fn edit(&mut self, input: Input) -> Effect {
+        // Typing into Name, Rate limit or Expiry; moving away keeps a valid value, Esc or the left arrow drops the edit and goes back.
+        let Some((field, mut text)) = self.editing.take() else { return Effect::Nothing };
+        let leave = |app: &mut App, text: &str, to: usize| match app.commit(field, text) {
+            Ok(()) => {
+                app.status.clear();
+                app.move_right(to);
+            }
+            Err(e) => {
+                app.status = e;
+                app.editing = Some((field, text.to_string()));
+            }
+        };
         match input {
             Input::Char(c) if text.chars().count() < TEXT_MAX => text.push(c),
             Input::Space if field == Field::Name && text.chars().count() < TEXT_MAX => text.push(' '),
             Input::Backspace => {
                 text.pop();
             }
-            Input::Esc => {
+            Input::Esc | Input::Left => {
                 self.status.clear();
-                return;
-            }
-            Input::Enter => match self.commit(field, &text) {
-                Ok(()) => {
-                    self.status.clear();
-                    return;
+                self.editing = Some((field, text));
+                let armed = self.armed.take();
+                self.back(armed);
+                if !self.focus_right {
+                    self.editing = None;
                 }
-                Err(e) => self.status = e,
-            },
+                return Effect::Nothing;
+            }
+            Input::Enter | Input::Down => {
+                leave(self, &text, self.right + 1);
+                return Effect::Nothing;
+            }
+            Input::Up => {
+                leave(self, &text, self.right.saturating_sub(1));
+                return Effect::Nothing;
+            }
             _ => {}
         }
         self.editing = Some((field, text));
+        Effect::Nothing
     }
 
     fn commit(&mut self, field: Field, text: &str) -> Result<(), String> {
         let text = text.trim();
         match field {
+            Field::Name if text.is_empty() => self.form.name.clear(),
             Field::Name => {
                 security::key_name_check(text).map_err(|_| "Names are 1 to 64 letters, digits, spaces or punctuation.".to_string())?;
                 self.form.name = text.to_string();
@@ -473,20 +519,34 @@ pub(crate) enum Style {
 pub(crate) struct Line {
     pub(crate) text: String,
     pub(crate) style: Style,
+    pub(crate) tail: String,
 }
 
 pub(crate) fn line(text: impl Into<String>, style: Style) -> Line {
-    Line { text: text.into(), style }
+    Line { text: text.into(), style, tail: String::new() }
+}
+
+fn cell(l: &Line, w: usize) -> String {
+    // The line cut to the column, its gray tail (an example) after the text.
+    if l.tail.is_empty() {
+        return paint(&fit(&l.text, w), l.style);
+    }
+    let whole = fit(&format!("{}{}", l.text, l.tail), w);
+    let at = l.text.chars().count().min(w);
+    let head: String = whole.chars().take(at).collect();
+    let rest: String = whole.chars().skip(at).collect();
+    let pad = rest.len() - rest.trim_end().len();
+    format!("{}{}{}", paint(&head, l.style), paint(rest.trim_end(), Style::Dim), " ".repeat(pad))
 }
 
 pub(crate) fn paint(text: &str, style: Style) -> String {
     let code = match style {
         Style::Plain => return text.to_string(),
-        Style::Bold | Style::Hovered => "1",
-        Style::Dim => "2",
-        Style::Red => "31",
-        Style::Yellow => "33",
-        Style::Selected => "1;38;5;117",
+        Style::Bold | Style::Hovered => "1".to_string(),
+        Style::Dim => "2".to_string(),
+        Style::Red => "31".to_string(),
+        Style::Yellow => "33".to_string(),
+        Style::Selected => format!("1;{}", crate::theme::main()),
     };
     format!("\x1b[{code}m{text}\x1b[0m")
 }
@@ -509,7 +569,7 @@ fn left_lines(app: &App) -> (Vec<Line>, usize) {
     }
     let hovered = if app.left < 2 { app.left } else { app.left + 1 };
     let style = if app.focus_right { Style::Hovered } else { Style::Selected };
-    let marker = if app.focus_right { "\u{203A} " } else { "\u{25CF} " };
+    let marker = if app.focus_right { "\u{203A} " } else { "\u{27a4} " };
     for (i, l) in lines.iter_mut().enumerate() {
         if i == hovered {
             l.text = format!("{marker}{}", l.text);
@@ -521,26 +581,26 @@ fn left_lines(app: &App) -> (Vec<Line>, usize) {
     (lines, hovered)
 }
 
-fn field_text(app: &App, field: Field) -> (String, Style) {
+fn field_text(app: &App, field: Field) -> (String, Style, String) {
+    // The field's text, its style when not hovered, and a gray example after it.
     let f = &app.form;
     let editing = app.editing.as_ref().filter(|(e, _)| *e == field).map(|(_, t)| format!("{t}\u{2588}"));
     let value = |shown: String| editing.clone().unwrap_or(shown);
+    let new = app.item() == LeftItem::Create;
+    let limit = if new { Style::Plain } else { Style::Dim };
     match field {
-        Field::Name => {
-            let shown = if f.name.is_empty() { "(Enter to type a name)".to_string() } else { f.name.clone() };
-            (format!("Name:        {}", value(shown)), Style::Plain)
-        }
-        Field::Every => (format!("[{}] Every model", if f.every { "x" } else { " " }), Style::Plain),
+        Field::Name => (format!("Name:        {}", value(f.name.clone())), Style::Plain, if f.name.is_empty() && editing.as_deref().is_none_or(|t| t == "\u{2588}") { "my-app".to_string() } else { String::new() }),
+        Field::Every => (format!("[{}] Every model", if f.every { "x" } else { " " }), Style::Plain, String::new()),
         Field::Model(i) => {
             let tick = if f.ticks[i] && !f.every { "x" } else { " " };
-            (format!("[{tick}] {}", f.models[i]), if f.every { Style::Dim } else { Style::Plain })
+            (format!("[{tick}] {}", f.models[i]), if f.every { Style::Dim } else { Style::Plain }, String::new())
         }
-        Field::Rpm => (format!("Rate limit:  {}", value(rpm_text(f.rpm))), Style::Plain),
-        Field::Expires => (format!("Expires:     {}", value(f.expires.clone().unwrap_or_else(|| "never".to_string()))), Style::Plain),
-        Field::Apply if app.item() == LeftItem::Create => ("Create key".to_string(), Style::Bold),
-        Field::Apply if app.dirty() => ("Save changes (unsaved)".to_string(), Style::Yellow),
-        Field::Apply => ("Save changes".to_string(), Style::Dim),
-        Field::Delete => ("Delete key".to_string(), Style::Red),
+        Field::Rpm => (format!("Rate limit:  {}", value(rpm_text(f.rpm))), limit, "   e.g. 60; 0 = unlimited".to_string()),
+        Field::Expires => (format!("Expiry:      {}", value(f.expires.clone().unwrap_or_else(|| "never".to_string()))), limit, "   e.g. 30d, 2027-01-31 or never".to_string()),
+        Field::Apply if new => ("Create key".to_string(), Style::Bold, String::new()),
+        Field::Apply if app.changed() => ("Save changes".to_string(), Style::Bold, String::new()),
+        Field::Apply => ("Save changes".to_string(), Style::Dim, String::new()),
+        Field::Delete => ("Delete key".to_string(), Style::Red, String::new()),
     }
 }
 
@@ -549,42 +609,49 @@ fn right_lines(app: &App) -> (Vec<Line>, usize) {
     let mut lines = Vec::new();
     match app.item() {
         LeftItem::Done => {
-            lines.push(line("Leave goethe api manage.", Style::Bold));
+            lines.push(line("Leave goethe api keys.", Style::Bold));
             lines.push(line("Saved changes already apply; goethe api lists the keys.", Style::Dim));
             return (lines, 0);
         }
-        LeftItem::Create => lines.push(line("New key", Style::Bold)),
+        LeftItem::Create => lines.push(line("New key:", Style::Bold)),
         LeftItem::Key(i) => {
             let k = &app.keys[i];
             lines.push(line("API key:", Style::Bold));
             lines.push(match &k.token {
-                Some(t) => line(format!("  {t}"), Style::Plain),
-                None => line(format!("  {}... (made before keys were stored)", k.prefix), Style::Dim),
+                Some(t) => line(format!("    {t}"), Style::Plain),
+                None => line(format!("    {}... (made before keys were stored)", k.prefix), Style::Dim),
             });
-            lines.push(line(format!("  Name:        {}", k.name), Style::Dim));
-            lines.push(line(format!("  ID:          {}{}", k.id, if k.admin { "  (admin)" } else { "" }), Style::Dim));
+            lines.push(line(format!("    Name:        {}", k.name), Style::Dim));
+            lines.push(line(format!("    ID:          {}{}", k.id, if k.admin { "  (admin)" } else { "" }), Style::Dim));
         }
     }
+    let new = app.item() == LeftItem::Create;
     let mut at = 0;
     for (n, field) in app.fields().iter().enumerate() {
         match field {
             Field::Every => {
                 lines.push(line("", Style::Plain));
-                lines.push(line("Allowed models", Style::Bold));
+                lines.push(line(if new { "Scope:" } else { "Allowed models:" }, Style::Bold));
             }
-            Field::Rpm | Field::Apply => lines.push(line("", Style::Plain)),
+            Field::Apply => lines.push(line("", Style::Plain)),
             _ => {}
         }
-        let (text, style) = field_text(app, *field);
-        let indent = if matches!(field, Field::Every | Field::Model(_)) { "  " } else { "" };
-        if app.focus_right && n == app.right {
+        let (text, style, tail) = field_text(app, *field);
+        let hovered = app.focus_right && n == app.right;
+        if hovered {
             at = lines.len();
-            lines.push(line(format!("\u{25CF} {indent}{text}"), Style::Selected));
-        } else {
-            lines.push(line(format!("  {indent}{text}"), style));
         }
+        let style = if hovered { Style::Selected } else { style };
+        let mut l = match field {
+            Field::Apply | Field::Delete => line(text, style),
+            _ => line(format!("{}   {text}", if hovered { "\u{27a4}" } else { " " }), style),
+        };
+        if hovered || new {
+            l.tail = tail;
+        }
+        lines.push(l);
         if *field == Field::Every && app.form.models.is_empty() {
-            lines.push(line("    (no models installed yet)", Style::Dim));
+            lines.push(line("     (no models installed yet)", Style::Dim));
         }
     }
     (lines, at)
@@ -610,16 +677,16 @@ fn help(app: &App) -> String {
             Field::Expires => EXPIRES_FORMAT,
             _ => NAME_FORMAT,
         };
-        return format!("{format}.  Enter keeps, Esc cancels");
+        return format!("{format}.  \u{2191}\u{2193} or Enter keeps it, \u{2190} back");
     }
     if !app.focus_right {
-        return "\u{2191}\u{2193} move   \u{2192} open   q quit".to_string();
+        return crate::term::MENU_KEYS.to_string();
     }
     match app.field() {
         Some(Field::Rpm) => format!("Rate limit: {RPM_FORMAT}.  Enter to change"),
         Some(Field::Expires) => format!("Expires: {EXPIRES_FORMAT}.  Enter to change"),
         Some(Field::Name) => format!("Name: {NAME_FORMAT}.  Enter to type"),
-        _ => "\u{2191}\u{2193} move   Space tick   Enter change   \u{2190} back   q quit".to_string(),
+        _ => "\u{2191}\u{2193} move   Space tick   Enter open   \u{2190} back".to_string(),
     }
 }
 
@@ -634,18 +701,23 @@ fn render(app: &App, width: usize, height: usize) -> Vec<String> {
     let (right, right_at) = right_lines(app);
     let lw = left.iter().map(|l| l.text.chars().count()).max().unwrap_or(0).clamp(16, LEFT_MAX).min(width - GAP - KEY_WIDTH);
     let rw = width - lw - GAP;
-    let rows = height - 4;
+    let rows = (height - 4).min(left.len().max(right.len()));
     let (l0, r0) = (window(left.len(), left_at, rows), window(right.len(), right_at, rows));
-    let mut out = vec![paint(&fit("API keys", width), Style::Bold), String::new()];
+    let mut out = vec![paint(&fit("  API keys", width), Style::Bold), String::new()];
     for r in 0..rows {
         let cell = |lines: &[Line], start: usize, w: usize| match lines.get(start + r) {
-            Some(l) => paint(&fit(&l.text, w), l.style),
+            Some(l) => cell(l, w),
             None => " ".repeat(w),
         };
         out.push(format!("{}{}{}", cell(&left, l0, lw), " ".repeat(GAP), cell(&right, r0, rw)).trim_end().to_string());
     }
     out.push(String::new());
-    out.push(if app.status.is_empty() { paint(&fit(&help(app), width), Style::Dim) } else { paint(&fit(&app.status, width), Style::Yellow) });
+    out.push(if app.status.is_empty() {
+        format!("  {}", crate::term::paint(fit(&help(app), width - 2).trim_end(), crate::term::Color::Gray))
+    } else {
+        format!("  {}", paint(fit(&app.status, width - 2).trim_end(), Style::Yellow))
+    });
+    out.resize(height, String::new());
     out
 }
 
@@ -660,10 +732,13 @@ pub(crate) fn screen_size() -> (usize, usize) {
 
 pub(crate) struct Screen;
 
+static SCREENS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl Screen {
     pub(crate) fn open() -> Screen {
-        // The alternate screen, cleared, cursor hidden; the user's scrollback comes back on close.
-        print!("\x1b[?1049h\x1b[H\x1b[2J\x1b[?25l");
+        // The alternate screen, cleared, cursor hidden; scrollback returns when the outermost closes, so a page opened from the menu stays on its screen.
+        let outer = SCREENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+        print!("{}\x1b[H\x1b[2J\x1b[?25l", if outer { "\x1b[?1049h" } else { "" });
         let _ = std::io::stdout().flush();
         Screen
     }
@@ -671,7 +746,8 @@ impl Screen {
 
 impl Drop for Screen {
     fn drop(&mut self) {
-        print!("\x1b[?25h\x1b[?1049l");
+        let outer = SCREENS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1;
+        print!("{}", if outer { "\x1b[?25h\x1b[?1049l" } else { "\x1b[H\x1b[2J" });
         let _ = std::io::stdout().flush();
     }
 }
@@ -756,7 +832,7 @@ impl Session {
 }
 
 pub fn run() -> Result<(), String> {
-    // goethe api manage: the session, then what it made or left unsaved.
+    // goethe api keys: the session, then what it made or left unsaved.
     let session = session()?;
     if let Some(text) = session.summary() {
         println!("{text}");
@@ -767,7 +843,7 @@ pub fn run() -> Result<(), String> {
 pub fn session() -> Result<Session, String> {
     // Full screen until q or Done; the keys made here come back to the caller, since the screen they were shown on goes away.
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
-        return Err(format!("goethe api manage needs a terminal. {}", crate::term::commands("In scripts:", SCRIPT_HINT).trim_end()));
+        return Err(format!("goethe api keys needs a terminal. {}", crate::term::commands("In scripts:", SCRIPT_HINT).trim_end()));
     }
     let mut app = App::new(keys()?, installed_models());
     let mut made: Vec<(String, String)> = Vec::new();
@@ -871,52 +947,49 @@ mod tests {
         assert_eq!(a.item(), LeftItem::Key(1), "the cursor stops at the last key");
         press(&mut a, &[Input::Up, Input::Up, Input::Up, Input::Up]);
         assert_eq!(a.item(), LeftItem::Create);
-        assert_eq!(press(&mut a, &[Input::Down, Input::Right]), Effect::Quit, "Done leaves");
+        assert_eq!(press(&mut a, &[Input::Down, Input::Enter]), Effect::Quit, "Done leaves");
     }
 
     #[test]
-    fn a_new_key_is_named_scoped_and_created_on_the_right() {
+    fn a_new_key_is_named_limited_then_scoped_and_typing_starts_on_arrival() {
         let mut a = app();
-        press(&mut a, &[Input::Right, Input::Enter]);
-        assert!(a.editing.is_some(), "Enter on Name starts typing");
+        press(&mut a, &[Input::Enter]);
+        assert_eq!(a.editing, Some((Field::Name, String::new())), "landing on Name starts typing, no Enter needed");
         press(&mut a, &typed("my laptop"));
-        press(&mut a, &[Input::Enter]);
+        press(&mut a, &[Input::Down]);
         assert_eq!(a.form.name, "my laptop");
-        press(&mut a, &[Input::Down, Input::Down, Input::Space]);
-        assert_eq!((a.form.every, a.form.ticks.clone()), (false, vec![true, false]), "ticking a model ends Every model");
-        press(&mut a, &[Input::Down, Input::Down, Input::Enter]);
-        press(&mut a, &typed("0"));
-        press(&mut a, &[Input::Backspace, Input::Char('6'), Input::Char('0'), Input::Enter]);
-        assert_eq!(a.form.rpm, 12060, "an edit starts from the current value");
-        press(&mut a, &[Input::Enter]);
-        press(&mut a, &[Input::Backspace; 5]);
-        press(&mut a, &[Input::Char('6'), Input::Char('0'), Input::Enter]);
+        assert_eq!(a.editing, Some((Field::Rpm, "120".into())), "the rate limit comes next, typed into at once");
+        press(&mut a, &[Input::Backspace, Input::Backspace, Input::Backspace, Input::Char('6'), Input::Char('0'), Input::Down]);
         assert_eq!(a.form.rpm, 60);
-        press(&mut a, &[Input::Down, Input::Enter]);
+        assert_eq!(a.field(), Some(Field::Expires));
         press(&mut a, &[Input::Backspace; 5]);
         press(&mut a, &typed("2099-01-31"));
         press(&mut a, &[Input::Enter]);
         assert_eq!(a.form.expires.as_deref(), Some("2099-01-31"));
-        let made = press(&mut a, &[Input::Down, Input::Enter]);
+        assert_eq!((a.field(), a.editing.is_none()), (Some(Field::Every), true), "then the scope");
+        press(&mut a, &[Input::Down, Input::Space]);
+        assert_eq!((a.form.every, a.form.ticks.clone()), (false, vec![true, false]), "ticking a model ends Every model");
+        let made = press(&mut a, &[Input::Down, Input::Down, Input::Enter]);
         assert_eq!(made, Effect::Create { name: "my laptop".into(), scope: Some("m/alpha".into()), rpm: 60, expires: Some("2099-01-31".into()) });
     }
 
     #[test]
     fn bad_values_are_refused_where_they_are_typed() {
         let mut a = app();
-        press(&mut a, &[Input::Right, Input::Down, Input::Down, Input::Down, Input::Down, Input::Enter]);
+        press(&mut a, &[Input::Enter, Input::Down, Input::Char('x'), Input::Down]);
         assert_eq!(a.field(), Some(Field::Rpm));
-        press(&mut a, &[Input::Char('x'), Input::Enter]);
         assert!(a.editing.is_some() && a.status.contains("whole number"), "{}", a.status);
-        press(&mut a, &[Input::Esc]);
-        assert_eq!((a.editing.is_none(), a.form.rpm), (true, 120), "Esc drops the edit");
-        press(&mut a, &[Input::Down, Input::Down, Input::Enter]);
+        press(&mut a, &[Input::Left]);
+        assert!(a.focus_right && a.status.contains("again to discard"), "a value being typed holds the first back");
+        press(&mut a, &[Input::Left]);
+        assert_eq!((a.focus_right, a.form.rpm), (false, 120), "the second drops the edit and goes back");
+        press(&mut a, &[Input::Enter, Input::Down, Input::Down, Input::Down, Input::Down, Input::Down, Input::Down]);
+        assert_eq!(a.field(), Some(Field::Apply));
+        press(&mut a, &[Input::Enter]);
         assert!(a.status.contains("name first"), "{}", a.status);
-        assert_eq!(a.field(), Some(Field::Name), "the cursor goes to the missing name");
-        press(&mut a, &[Input::Enter]);
+        assert_eq!((a.field(), a.editing.is_some()), (Some(Field::Name), true), "the cursor goes to the missing name, typing");
         press(&mut a, &typed("dev"));
-        press(&mut a, &[Input::Enter]);
-        press(&mut a, &[Input::Down, Input::Space, Input::Down, Input::Down, Input::Down, Input::Down, Input::Down, Input::Enter]);
+        press(&mut a, &[Input::Down, Input::Down, Input::Down, Input::Space, Input::Down, Input::Down, Input::Down, Input::Enter]);
         assert_eq!(a.field(), Some(Field::Apply));
         assert!(a.status.contains("at least one model"), "{}", a.status);
         press(&mut a, &[Input::Up, Input::Up, Input::Up, Input::Space, Input::Down, Input::Down, Input::Down, Input::Enter]);
@@ -926,18 +999,23 @@ mod tests {
     #[test]
     fn an_existing_key_is_changed_saved_and_deleted_from_the_right() {
         let mut a = app();
-        press(&mut a, &[Input::Down, Input::Down, Input::Down, Input::Right]);
-        assert_eq!((a.item(), a.field()), (LeftItem::Key(1), Some(Field::Every)));
+        press(&mut a, &[Input::Down, Input::Down, Input::Down, Input::Enter]);
+        assert_eq!((a.item(), a.field()), (LeftItem::Key(1), Some(Field::Rpm)));
+        assert!(a.editing.is_some(), "the rate limit is typed into at once");
         assert_eq!((a.form.every, a.form.ticks.clone()), (false, vec![false, true]), "the key's scope is ticked");
-        press(&mut a, &[Input::Down, Input::Space]);
+        assert_eq!(field_text(&a, Field::Apply).1, Style::Dim, "Save changes is gray while nothing changed");
+        press(&mut a, &[Input::Char('0')]);
+        assert_eq!(field_text(&a, Field::Apply).1, Style::Bold, "and turns white as soon as a value differs");
+        press(&mut a, &[Input::Backspace, Input::Down, Input::Down, Input::Down, Input::Space]);
         assert!(a.dirty());
         let left = press(&mut a, &[Input::Left]);
         assert_eq!((left, a.focus_right), (Effect::Nothing, true), "unsaved changes hold the first back");
         assert!(a.status.contains("again to discard"));
-        let saved = press(&mut a, &[Input::Down, Input::Down, Input::Down, Input::Down, Input::Enter]);
+        let saved = press(&mut a, &[Input::Down, Input::Down, Input::Enter]);
         assert_eq!(saved, Effect::Save { id: "id-b".into(), scope: Some("m/alpha,m/beta".into()), rpm: 120, expires: None });
         press(&mut a, &[Input::Down, Input::Enter]);
         assert!(a.status.contains("Press Enter again"));
+        assert_eq!(field_text(&a, Field::Delete).1, Style::Red);
         assert_eq!(press(&mut a, &[Input::Enter]), Effect::Delete { id: "id-b".into(), name: "chat".into() });
         press(&mut a, &[Input::Enter]);
         press(&mut a, &[Input::Up]);
@@ -945,22 +1023,22 @@ mod tests {
     }
 
     #[test]
-    fn q_leaves_at_once_and_saves_nothing() {
+    fn the_left_arrow_and_q_leave_and_save_nothing() {
         let mut a = app();
-        press(&mut a, &[Input::Down, Input::Down, Input::Right, Input::Space]);
+        press(&mut a, &[Input::Down, Input::Down, Input::Enter, Input::Down, Input::Down, Input::Space]);
         assert!(a.dirty());
-        assert_eq!(press(&mut a, &[Input::Char('q')]), Effect::Quit, "no Save effect, so nothing is written");
-        assert_eq!(a.unsaved_note().as_deref(), Some("Unsaved changes to dev were not saved."));
+        press(&mut a, &[Input::Left, Input::Left]);
+        assert!(!a.focus_right && !a.dirty(), "a second left arrow discards and goes back");
+        assert_eq!(press(&mut a, &[Input::Left]), Effect::Quit, "the left arrow on the list leaves");
         let mut c = app();
-        press(&mut c, &[Input::Right, Input::Enter, Input::Char('x'), Input::Enter]);
-        assert_eq!(press(&mut c, &[Input::Char('q')]), Effect::Quit);
-        assert_eq!(c.unsaved_note().as_deref(), Some("The new key was not created."));
+        press(&mut c, &[Input::Enter, Input::Char('x'), Input::Down]);
+        assert_eq!(press(&mut c, &[Input::Esc, Input::Esc, Input::Char('q')]), Effect::Quit);
+        assert_eq!(c.unsaved_note(), None, "discarded on the way out");
         let mut e = app();
-        press(&mut e, &[Input::Right, Input::Enter]);
+        press(&mut e, &[Input::Enter]);
         assert_eq!(press(&mut e, &[Input::Char('q')]), Effect::Nothing, "while typing, q is a letter");
         assert_eq!(e.editing.as_ref().map(|(_, t)| t.as_str()), Some("q"));
-        let mut b = app();
-        assert_eq!(press(&mut b, &[Input::Char('q')]), Effect::Quit, "nothing changed: q leaves at once");
+        assert_eq!(press(&mut app(), &[Input::Char('q')]), Effect::Quit);
         assert_eq!(press(&mut app(), &[Input::Interrupt]), Effect::Quit);
     }
 
@@ -972,40 +1050,58 @@ mod tests {
         assert_eq!(screen.len(), 24);
         assert!(screen.iter().all(|l| l.chars().count() <= 100));
         assert!(screen[2].starts_with("  + Create new key") && screen[2].contains("    API key:"), "{}", screen[2]);
-        assert!(screen.iter().all(|l| !l.contains('\u{2502}') && !l.contains('\u{2500}')), "no table lines");
-        assert!(screen[3].starts_with("  Done") && screen[3].contains("goethe_sk_id-a"), "{}", screen[3]);
-        assert!(screen[5].starts_with("\u{25CF} dev   id-a"), "{}", screen[5]);
-        assert!(screen.iter().any(|l| l.contains("    Name:        dev")) && screen.iter().any(|l| l.contains("    ID:          id-a")));
-        assert!(screen.iter().any(|l| l.contains("[x] Every model")) && screen.iter().any(|l| l.contains("Delete key")));
-        assert!(screen[23].contains("\u{2192} open"));
+        assert!(screen[3].starts_with("  Done") && screen[3].contains("    goethe_sk_id-a"), "{}", screen[3]);
+        assert!(screen[5].starts_with("\u{27a4} dev   id-a"), "{}", screen[5]);
+        let at = |t: &str| screen.iter().position(|l| l.contains(t)).unwrap_or_else(|| panic!("{t} missing: {screen:#?}"));
+        assert!(at("Name:        dev") < at("ID:          id-a") && at("ID:") < at("Rate limit:") && at("Rate limit:") < at("Expiry:"));
+        assert!(at("Expiry:") < at("Allowed models:") && at("Allowed models:") < at("[x] Every model"));
+        assert!(at("[x] Every model") < at("Save changes") && at("Save changes") < at("Delete key"));
+        let keys = screen.iter().position(|l| l.contains("Enter open")).unwrap();
+        assert!(screen[keys].contains("\u{2190} back") && screen[keys - 1].is_empty() && !screen[keys - 2].is_empty(), "the keys line sits right under the columns: {screen:#?}");
         let tiny: Vec<String> = render(&a, 40, 10);
         assert_eq!(tiny.len(), 10);
         assert!(tiny[0].contains("at least 64x12"));
         let narrow: Vec<String> = render(&a, 64, 16).iter().map(|l| plain(l)).collect();
         assert!(narrow[3].ends_with("goethe_sk_id-a"), "the key is never cut: {}", narrow[3]);
-        let long = App::new(vec![KeyRow { token: Some(format!("goethe_sk_{}", "f".repeat(32))), ..key("id-a", "dev", None) }], Vec::new());
-        let mut long = long;
-        press(&mut long, &[Input::Down, Input::Down]);
-        let narrow: Vec<String> = render(&long, 64, 16).iter().map(|l| plain(l)).collect();
-        assert!(narrow[3].contains(&"f".repeat(32)), "a full 42-character key fits at the minimum width: {}", narrow[3]);
+    }
+
+    #[test]
+    fn a_new_key_reads_new_key_then_scope_with_gray_examples() {
+        let a = app();
+        let screen: Vec<String> = render(&a, 120, 24).iter().map(|l| plain(l)).collect();
+        let at = |t: &str| screen.iter().position(|l| l.contains(t)).unwrap_or_else(|| panic!("{t} missing: {screen:#?}"));
+        assert!(at("New key:") < at("Name:") && at("Name:") < at("Rate limit:") && at("Rate limit:") < at("Expiry:"));
+        assert!(at("Expiry:") < at("Scope:") && at("Scope:") < at("[x] Every model") && at("[ ] m/beta") < at("Create key"));
+        assert!(screen[at("Rate limit:")].contains("e.g. 60; 0 = unlimited") && screen[at("Expiry:")].contains("e.g. 30d"));
+        let bare = App::new(Vec::new(), Vec::new());
+        let screen: Vec<String> = render(&bare, 120, 24).iter().map(|l| plain(l)).collect();
+        assert!(screen.iter().any(|l| l.contains("(no models installed yet)")), "{screen:#?}");
+    }
+
+    #[test]
+    fn actions_start_at_the_column_edge_and_the_empty_note_sits_under_the_x() {
+        let bare = App::new(Vec::new(), Vec::new());
+        let screen: Vec<String> = render(&bare, 120, 30).iter().map(|l| plain(l)).collect();
+        let col = |t: &str| screen.iter().find_map(|l| l.find(t).map(|b| l[..b].chars().count())).unwrap_or_else(|| panic!("{t}: {screen:#?}"));
+        assert_eq!(col("Create key"), col("New key:"), "Create key starts where the headings do");
+        assert_eq!(col("(no models"), col("[x] Every") + 1, "under the x of Every model");
+        let mut a = app();
+        press(&mut a, &[Input::Down, Input::Down]);
+        let screen: Vec<String> = render(&a, 120, 30).iter().map(|l| plain(l)).collect();
+        let col = |t: &str| screen.iter().find_map(|l| l.find(t).map(|b| l[..b].chars().count())).unwrap();
+        assert!(col("Save changes") == col("API key:") && col("Delete key") == col("API key:"));
     }
 
     #[test]
     fn the_info_bar_names_the_formats_for_limits() {
         let mut a = app();
-        press(&mut a, &[Input::Down, Input::Down, Input::Right, Input::Down, Input::Down, Input::Down]);
+        press(&mut a, &[Input::Down, Input::Down, Input::Enter]);
         assert_eq!(a.field(), Some(Field::Rpm));
         assert!(help(&a).contains("0 means unlimited"), "{}", help(&a));
         press(&mut a, &[Input::Down]);
         assert!(help(&a).contains("30d") && help(&a).contains("2027-01-31") && help(&a).contains("never"), "{}", help(&a));
-        press(&mut a, &[Input::Enter]);
-        assert!(help(&a).contains("30d") && help(&a).contains("Esc cancels"), "editing keeps the formats in view: {}", help(&a));
-        let shown = plain(render(&a, 100, 24).last().unwrap());
-        assert!(shown.contains("2027-01-31") && shown.contains("Esc cancels"), "the whole hint fits at 100 columns: {shown}");
-        press(&mut a, &[Input::Esc, Input::Up]);
-        let shown = plain(render(&a, 80, 24).last().unwrap());
-        assert!(shown.contains("0 means unlimited"), "the format fits at 80 columns: {shown}");
-        assert!(shown.starts_with("Rate limit: requests per minute"), "{shown}");
+        let shown = render(&a, 100, 24).iter().map(|l| plain(l)).rfind(|l| l.contains("2027-01-31")).unwrap_or_default();
+        assert!(shown.contains("2027-01-31") && shown.contains("back"), "the whole hint fits at 100 columns: {shown}");
     }
 
     #[test]
@@ -1033,11 +1129,11 @@ mod tests {
     fn long_lists_scroll_with_the_cursor() {
         let models: Vec<String> = (0..40).map(|i| format!("org/model-{i:02}")).collect();
         let mut a = App::new(vec![key("id-a", "dev", None)], models);
-        press(&mut a, &[Input::Down, Input::Down, Input::Right]);
-        for _ in 0..39 {
+        press(&mut a, &[Input::Down, Input::Down, Input::Enter]);
+        for _ in 0..41 {
             press(&mut a, &[Input::Down]);
         }
         let screen: Vec<String> = render(&a, 90, 20).iter().map(|l| plain(l)).collect();
-        assert!(screen.iter().any(|l| l.contains("\u{25CF}   [ ] org/model-38")), "the hovered model is on screen: {screen:#?}");
+        assert!(screen.iter().any(|l| l.contains("\u{27a4}   [ ] org/model-38")), "the hovered model is on screen: {screen:#?}");
     }
 }

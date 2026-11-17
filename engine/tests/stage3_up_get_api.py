@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""goethe api (and the hidden get api) with goethed down, then goethe up, goethe api (text and JSON), goethe down."""
+"""goethe api with goethed down, then goethe up, goethe api (text and JSON), goethe status, goethe down."""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ from lib.goethe_test import ensure_nginx, home_goethe_env, main_exit, require_cl
 
 
 def main() -> None:
-    """The API line always prints; up starts goethed once; goethe api lists no models; down stops it."""
+    """The API line always prints; up starts goethed once; goethe status lists no models; down stops it."""
     goethe = str(require_cli("goethe"))
     with temp_home(stub_python=True, tag="upapi") as home:
         env = {**home_goethe_env(home), "NGINX_BIN": str(ensure_nginx(home))}
-        for cmd in (["api"], ["get", "api"]):
+        for cmd in (["api"],):
             rr = run([goethe, *cmd], env=env)
             out = rr.stdout
             if rr.returncode != 0 or "API endpoint: https://" not in out or "goethed is not running" not in out:
@@ -25,9 +25,9 @@ def main() -> None:
             again = run([goethe, "up"], env=env, timeout=30)
             if again.returncode != 0 or "goethe: running" not in again.stdout:
                 raise RuntimeError(f"a second goethe up must say goethe is running: {again.stdout} {again.stderr}")
-            api = run([goethe, "api"], env=env)
-            if "No models loaded" not in api.stdout:
-                raise RuntimeError(f"goethe api with nothing loaded: {api.stdout} {api.stderr}")
+            status = run([goethe, "status"], env=env)
+            if "No models loaded" not in status.stdout:
+                raise RuntimeError(f"goethe status with nothing loaded: {status.stdout} {status.stderr}")
             data = json.loads(run([goethe, "api", "--json"], env=env).stdout)
             if not data["goethed_running"] or data["models"] != [] or not data["api"].endswith("/v1"):
                 raise RuntimeError(f"goethe api --json: {data}")

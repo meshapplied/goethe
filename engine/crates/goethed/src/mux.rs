@@ -127,7 +127,7 @@ fn upstream_client() -> Upstream {
 }
 
 async fn serve(m: MuxRef, listener: TcpListener, public: bool) {
-    // Accept forever (public: the listener behind goethe serve --public); transient accept errors back off 50 ms instead of ending the mux.
+    // Accept forever (public: the listener behind goethe api share); transient accept errors back off 50 ms instead of ending the mux.
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
@@ -240,8 +240,15 @@ async fn api(m: MuxRef, req: Request<Incoming>, path: &str, rid: &str, public: b
         Err((message, code)) => return error(StatusCode::UNAUTHORIZED, message, "auth_error", code),
     };
     if public {
-        match public_share::check(&goethe_home(), &key.key_id, key.is_admin) {
+        let client = req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok());
+        match public_share::check(&goethe_home(), &key.key_id, key.is_admin, client) {
             public_share::Access::Allowed => {}
+            public_share::Access::KeyExpired => {
+                return error(StatusCode::FORBIDDEN, "This key's public sharing has ended", "forbidden", "key_public_ended")
+            }
+            public_share::Access::NotFromHere => {
+                return error(StatusCode::FORBIDDEN, "This key may not be used from this address", "forbidden", "address_not_allowed")
+            }
             public_share::Access::Closed => {
                 return error(StatusCode::FORBIDDEN, "The public gateway is closed", "forbidden", "public_gateway_closed")
             }

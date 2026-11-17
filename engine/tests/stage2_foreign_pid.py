@@ -19,7 +19,7 @@ FOREIGN_MB = 3072
 
 
 def main() -> None:
-    """goethe hw profile lists an unmanaged GPU process with its VRAM, written into a temp home."""
+    """goethe doctor --hardware lists an unmanaged GPU process with its VRAM, written into a temp home."""
     goethe = require_cli("goethe")
     gpu = roomiest_test_gpu(8.0)
     with temp_home(stub_python=True, tag="foreign") as home:
@@ -27,7 +27,7 @@ def main() -> None:
         try:
             if not wait_gpu_pid(gpu, foreign.popen.pid, int(FOREIGN_MB * 0.9), timeout=60):
                 raise RuntimeError(f"foreign allocation of {FOREIGN_MB} MiB never became visible on GPU {gpu}")
-            run_goethe([str(goethe), "hw", "profile", "--json"], env={"GOETHE_HOME": str(home)})
+            run_goethe([str(goethe), "doctor", "--hardware", "--json"], env={"GOETHE_HOME": str(home)})
             state = json.loads((home / "hardware_state.json").read_text(encoding="utf-8"))
             entry = next((g for g in state.get("gpus", []) if int(g["index"]) == gpu), None)
             if entry is None:

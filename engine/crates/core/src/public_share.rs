@@ -1,4 +1,4 @@
-// Temporary public gateway (goethe serve --public): a second nginx listener that exists only while a window is open, for chosen existing keys.
+// Temporary public gateway (goethe api share): a second nginx listener that exists only while a window is open, for chosen existing keys.
 
 use crate::{db, nginx, security};
 use serde::{Deserialize, Serialize};
@@ -24,11 +24,47 @@ pub struct Share {
     pub keys: Vec<String>,
     #[serde(default)]
     pub allow: Vec<String>,
+    #[serde(default)]
+    pub grants: Vec<Grant>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Grant {
+    pub key: String,
+    pub until: i64,
+    #[serde(default)]
+    pub allow: Vec<String>,
 }
 
 impl Share {
     pub fn active_at(&self, now: i64) -> bool {
         self.open && now < self.until
+    }
+
+    fn settle(&mut self) {
+        // One gateway for every shared key: open until the last key's time ends; nginx admits the union of their addresses, or anyone when a key has none.
+        self.keys = self.grants.iter().map(|g| g.key.clone()).collect();
+        self.until = self.grants.iter().map(|g| g.until).max().unwrap_or(self.until);
+        self.allow = if self.grants.iter().all(|g| !g.allow.is_empty()) {
+            let mut all: Vec<String> = Vec::new();
+            for c in self.grants.iter().flat_map(|g| g.allow.iter()) {
+                if !all.contains(c) {
+                    all.push(c.clone());
+                }
+            }
+            all
+        } else {
+            Vec::new()
+        };
+    }
+
+    fn grant(&self, key: &str) -> Option<Grant> {
+        // A window written before grants existed shares every listed key until its end, from its addresses.
+        match self.grants.iter().find(|g| g.key == key) {
+            Some(g) => Some(g.clone()),
+            None if self.grants.is_empty() && self.keys.iter().any(|k| k == key) => Some(Grant { key: key.to_string(), until: self.until, allow: self.allow.clone() }),
+            None => None,
+        }
     }
 }
 
@@ -37,6 +73,30 @@ pub enum Access {
     Allowed,
     Closed,
     KeyNotShared,
+    KeyExpired,
+    NotFromHere,
+}
+
+fn cidr_contains(cidr: &str, ip: IpAddr) -> bool {
+    // Whether a client address falls in an allowlist entry (a.b.c.d/n or an IPv6 prefix).
+    let (addr, bits) = match cidr.split_once('/') {
+        Some((a, b)) => (a, b.parse::<u32>().ok()),
+        None => (cidr, None),
+    };
+    match (addr.parse::<IpAddr>(), ip) {
+        (Ok(IpAddr::V4(net)), IpAddr::V4(ip)) => {
+            let n = bits.unwrap_or(32).min(32);
+            let mask = if n == 0 { 0 } else { u32::MAX << (32 - n) };
+            u32::from(net) & mask == u32::from(ip) & mask
+        }
+        (Ok(IpAddr::V6(net)), IpAddr::V6(ip)) => {
+            let n = bits.unwrap_or(128).min(128);
+            let mask = if n == 0 { 0 } else { u128::MAX << (128 - n) };
+            u128::from(net) & mask == u128::from(ip) & mask
+        }
+        (Ok(IpAddr::V4(net)), IpAddr::V6(ip)) => ip.to_ipv4_mapped().is_some_and(|v4| cidr_contains(&format!("{net}/{}", bits.unwrap_or(32)), IpAddr::V4(v4))),
+        _ => false,
+    }
 }
 
 pub struct SharedKey {
@@ -104,7 +164,7 @@ fn stamp(home: &Path) -> Stamp {
     fs::metadata(path(home)).ok().map(|m| (m.modified().unwrap_or(UNIX_EPOCH), m.len(), m.ino()))
 }
 
-pub fn check(home: &Path, key_id: &str, is_admin: bool) -> Access {
+pub fn check(home: &Path, key_id: &str, is_admin: bool, client: Option<IpAddr>) -> Access {
     // The router's check on the public listener: an open, unexpired window listing this key (never admin); re-read whenever the file changes.
     let now_stamp = stamp(home);
     let share = {
@@ -118,20 +178,20 @@ pub fn check(home: &Path, key_id: &str, is_admin: bool) -> Access {
             }
         }
     };
-    decide(share.as_ref(), key_id, is_admin, now())
+    decide(share.as_ref(), key_id, is_admin, now(), client)
 }
 
-fn decide(share: Option<&Share>, key_id: &str, is_admin: bool, now: i64) -> Access {
-    match share {
-        Some(s) if s.active_at(now) => {
-            if !is_admin && s.keys.iter().any(|k| k == key_id) {
-                Access::Allowed
-            } else {
-                Access::KeyNotShared
-            }
-        }
-        _ => Access::Closed,
+fn decide(share: Option<&Share>, key_id: &str, is_admin: bool, now: i64, client: Option<IpAddr>) -> Access {
+    // Each shared key has its own end and addresses; one that ended is refused while the gateway stays open for the others.
+    let Some(s) = share.filter(|s| s.active_at(now)) else { return Access::Closed };
+    let Some(g) = s.grant(key_id).filter(|_| !is_admin) else { return Access::KeyNotShared };
+    if now >= g.until {
+        return Access::KeyExpired;
     }
+    if !g.allow.is_empty() && !client.is_some_and(|ip| g.allow.iter().any(|c| cidr_contains(c, ip))) {
+        return Access::NotFromHere;
+    }
+    Access::Allowed
 }
 
 type KeyRow = (String, String, bool, Option<String>, Option<String>, Option<String>);
@@ -159,7 +219,7 @@ fn resolve_keys(home: &Path, wanted: &[String], until: i64, warnings: &mut Vec<S
         let hits: Vec<_> = rows.iter().filter(|r| r.0 == *w || r.1 == *w).collect();
         let row = match hits.as_slice() {
             [one] => *one,
-            [] => return Err(format!("no API key named {w:?}; keys: {}", if names().is_empty() { "none (create one with goethe api keys --create <name> --models <model>)".into() } else { names() })),
+            [] => return Err(format!("no API key named {w:?}; keys: {}", if names().is_empty() { "none (create one with goethe api keys create <name> --models <model>)".into() } else { names() })),
             _ => return Err(format!("several keys are named {w:?}; use the key id from goethe api keys")),
         };
         let (id, name, admin, expires, models, token) = row.clone();
@@ -167,7 +227,7 @@ fn resolve_keys(home: &Path, wanted: &[String], until: i64, warnings: &mut Vec<S
             return Err(format!("{name} is an admin key; admin keys never work on the public gateway"));
         }
         if security::key_expired(&expires) {
-            return Err(format!("{name} expired on {}; pick another key or change its expiry in goethe api manage", expires.unwrap_or_default()));
+            return Err(format!("{name} expired on {}; pick another key or change its expiry in goethe api keys", expires.unwrap_or_default()));
         }
         if expires.as_deref().is_some_and(|e| e < until_day.as_str()) {
             warnings.push(format!("{name} expires on {}, before the public gateway closes", expires.clone().unwrap_or_default()));
@@ -231,6 +291,16 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
     let keys = resolve_keys(home, &wanted, until, &mut warnings)?;
     let allow = a.allow.iter().map(|c| security::canonical_cidr(c)).collect::<Result<Vec<_>, _>>()?;
     let port = a.port.or(previous.as_ref().map(|p| p.port)).unwrap_or(DEFAULT_PORT);
+    let mut grants: Vec<Grant> = previous
+        .as_ref()
+        .filter(|p| p.active_at(now()))
+        .map(|p| p.keys.iter().filter_map(|k| p.grant(k)).filter(|g| g.until > now()).collect())
+        .unwrap_or_default();
+    for k in &keys {
+        let kept = previous.as_ref().and_then(|p| p.grant(&k.id)).map(|g| g.allow).unwrap_or_default();
+        grants.retain(|g| g.key != k.id);
+        grants.push(Grant { key: k.id.clone(), until, allow: if a.allow.is_empty() && a.keys.is_empty() { kept } else { allow.clone() } });
+    }
     let gateway_port = nginx::public_port_u16(home);
     let mux_port = nginx::persisted_mux_port(home)?;
     if port == gateway_port || port == mux_port || port < 1024 {
@@ -244,7 +314,8 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
     if public_ip.is_none() {
         warnings.push("could not look up this machine's public address; set GOETHE_PUBLIC_IP to name it".to_string());
     }
-    let share = Share { open: true, until, port, keys: keys.iter().map(|k| k.id.clone()).collect(), allow };
+    let mut share = Share { open: true, until, port, grants, ..Share::default() };
+    share.settle();
     ensure_cert(home, public_ip)?;
     store(home, &share)?;
     let applied = nginx::apply_locked(home).and_then(|()| {
@@ -264,6 +335,38 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
     }
     let cert = cert_path(home);
     Ok(Opened { fingerprint: fingerprint(&cert), cert, share, keys, public_ip, warnings })
+}
+
+pub fn stop_key(home: &Path, key: &str) -> Result<bool, String> {
+    // Stop sharing one key (name or id); the gateway stays open for the others, and closes when none is left.
+    let _lock = nginx::gateway_lock(home)?;
+    let Some(mut share) = active(home) else { return Ok(false) };
+    let ids: Vec<String> = key_rows(home)?.into_iter().filter(|r| r.0 == key || r.1 == key).map(|r| r.0).collect();
+    if share.grants.is_empty() {
+        share.grants = share.keys.iter().filter_map(|k| share.grant(k)).collect();
+    }
+    let before = share.grants.len();
+    share.grants.retain(|g| !ids.contains(&g.key) && g.key != key);
+    if share.grants.len() == before {
+        return Ok(false);
+    }
+    if share.grants.iter().all(|g| g.until <= now()) {
+        share.open = false;
+    } else {
+        share.settle();
+    }
+    store(home, &share)?;
+    if nginx::master_running(home) {
+        nginx::apply_locked(home)?;
+    }
+    Ok(true)
+}
+
+pub fn shared(home: &Path) -> Vec<(String, Grant)> {
+    // The keys the open gateway serves now, by name, with their own end and addresses.
+    let Some(s) = active(home) else { return Vec::new() };
+    let names = key_names(home, &s.keys);
+    s.keys.iter().zip(names).filter_map(|(k, n)| s.grant(k).filter(|g| g.until > now()).map(|g| (n, g))).collect()
 }
 
 pub fn shutdown(home: &Path) -> Result<bool, String> {
@@ -294,8 +397,27 @@ pub fn tick(home: &Path) {
     seen.replace(now_stamp);
 }
 
+fn drop_ended(home: &Path) {
+    // While the gateway stays open for some keys, a key whose time ended leaves it, and the addresses only it allowed go with it.
+    let Some(share) = active(home) else { return };
+    if !share.grants.iter().any(|g| g.until <= now()) {
+        return;
+    }
+    let Ok(_lock) = nginx::gateway_lock(home) else { return };
+    let Some(mut s) = active(home) else { return };
+    let before = s.allow.clone();
+    s.grants.retain(|g| g.until > now());
+    s.settle();
+    if store(home, &s).is_ok() && s.allow != before && nginx::master_running(home) {
+        if let Err(e) = nginx::apply_locked(home) {
+            nginx::log_gateway_error(home, &format!("public gateway update: {e}"));
+        }
+    }
+}
+
 fn close_expired(home: &Path) {
     // Mark an open window whose time ran out closed, under the gateway lock, and reload nginx without it.
+    drop_ended(home);
     let Some(share) = load(home) else { return };
     if !share.open || share.active_at(now()) {
         return;
@@ -418,7 +540,39 @@ mod tests {
     use super::*;
 
     fn share(open: bool, until: i64) -> Share {
-        Share { open, until, port: 8444, keys: vec!["k1".into()], allow: vec![] }
+        Share { open, until, port: 8444, keys: vec!["k1".into()], allow: vec![], grants: vec![] }
+    }
+
+    fn granted(grants: &[(&str, i64, &[&str])]) -> Share {
+        let mut s = Share { open: true, port: 8444, ..Share::default() };
+        s.grants = grants.iter().map(|(k, u, a)| Grant { key: k.to_string(), until: *u, allow: a.iter().map(|c| c.to_string()).collect() }).collect();
+        s.settle();
+        s
+    }
+
+    #[test]
+    fn two_keys_share_one_gateway_and_one_that_ended_is_refused_while_the_other_works() {
+        let s = granted(&[("k1", 1000, &[]), ("k4", 5000, &[])]);
+        assert_eq!((s.until, s.keys.clone()), (5000, vec!["k1".to_string(), "k4".to_string()]), "open until the last key ends");
+        assert_eq!(decide(Some(&s), "k1", false, 999, None), Access::Allowed);
+        assert_eq!(decide(Some(&s), "k1", false, 1000, None), Access::KeyExpired);
+        assert_eq!(decide(Some(&s), "k4", false, 1000, None), Access::Allowed, "the gateway stays open for the other key");
+        assert_eq!(decide(Some(&s), "k4", false, 5000, None), Access::Closed);
+    }
+
+    #[test]
+    fn each_key_is_limited_to_its_own_addresses() {
+        let ip = |s: &str| Some(s.parse::<IpAddr>().unwrap());
+        let s = granted(&[("k1", 1000, &["203.0.113.0/24"]), ("k4", 1000, &["198.51.100.7/32"])]);
+        assert_eq!(s.allow, vec!["203.0.113.0/24".to_string(), "198.51.100.7/32".to_string()], "nginx admits the union");
+        assert_eq!(decide(Some(&s), "k1", false, 0, ip("203.0.113.9")), Access::Allowed);
+        assert_eq!(decide(Some(&s), "k1", false, 0, ip("198.51.100.7")), Access::NotFromHere, "not the other key's address");
+        assert_eq!(decide(Some(&s), "k1", false, 0, None), Access::NotFromHere, "no address, no entry");
+        let open = granted(&[("k1", 1000, &["203.0.113.0/24"]), ("k4", 1000, &[])]);
+        assert!(open.allow.is_empty(), "a key without addresses opens nginx to anyone; the router still limits k1");
+        assert_eq!(decide(Some(&open), "k1", false, 0, ip("8.8.8.8")), Access::NotFromHere);
+        assert_eq!(decide(Some(&open), "k4", false, 0, ip("8.8.8.8")), Access::Allowed);
+        assert!(cidr_contains("2001:db8::/32", "2001:db8::1".parse().unwrap()) && !cidr_contains("2001:db8::/32", "2001:db9::1".parse().unwrap()));
     }
 
     #[test]
@@ -435,12 +589,12 @@ mod tests {
     #[test]
     fn only_listed_non_admin_keys_pass_while_the_window_is_open() {
         let s = share(true, 1000);
-        assert_eq!(decide(Some(&s), "k1", false, 999), Access::Allowed);
-        assert_eq!(decide(Some(&s), "k1", false, 1000), Access::Closed, "closes at the end second");
-        assert_eq!(decide(Some(&s), "k2", false, 999), Access::KeyNotShared);
-        assert_eq!(decide(Some(&s), "k1", true, 999), Access::KeyNotShared, "admin keys never");
-        assert_eq!(decide(Some(&share(false, 5000)), "k1", false, 999), Access::Closed, "shut down");
-        assert_eq!(decide(None, "k1", false, 0), Access::Closed);
+        assert_eq!(decide(Some(&s), "k1", false, 999, None), Access::Allowed);
+        assert_eq!(decide(Some(&s), "k1", false, 1000, None), Access::Closed, "closes at the end second");
+        assert_eq!(decide(Some(&s), "k2", false, 999, None), Access::KeyNotShared);
+        assert_eq!(decide(Some(&s), "k1", true, 999, None), Access::KeyNotShared, "admin keys never");
+        assert_eq!(decide(Some(&share(false, 5000)), "k1", false, 999, None), Access::Closed, "shut down");
+        assert_eq!(decide(None, "k1", false, 0, None), Access::Closed);
     }
 
     fn home_with_keys() -> tempfile::TempDir {
@@ -501,15 +655,15 @@ mod tests {
     fn the_router_sees_every_change_at_once() {
         let dir = home_with_keys();
         let h = dir.path();
-        assert_eq!(check(h, "k1", false), Access::Closed);
+        assert_eq!(check(h, "k1", false, None), Access::Closed);
         store(h, &share(true, now() + 600)).unwrap();
-        assert_eq!(check(h, "k1", false), Access::Allowed);
+        assert_eq!(check(h, "k1", false, None), Access::Allowed);
         store(h, &Share { keys: vec!["k4".into()], ..share(true, now() + 600) }).unwrap();
-        assert_eq!(check(h, "k1", false), Access::KeyNotShared, "a replaced key stops at the next request");
+        assert_eq!(check(h, "k1", false, None), Access::KeyNotShared, "a replaced key stops at the next request");
         store(h, &Share { open: false, ..share(true, now() + 600) }).unwrap();
-        assert_eq!(check(h, "k1", false), Access::Closed);
+        assert_eq!(check(h, "k1", false, None), Access::Closed);
         fs::remove_file(path(h)).unwrap();
-        assert_eq!(check(h, "k1", false), Access::Closed);
+        assert_eq!(check(h, "k1", false, None), Access::Closed);
     }
 
     #[test]

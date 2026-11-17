@@ -50,7 +50,7 @@ def main() -> None:
         t0 = time.time()
         for attempt in range(3):
             try:
-                first_rr = run_goethe([str(goethe), "install", "--model", tiny, "--no-load"], env=env, timeout=600)
+                first_rr = run_goethe([str(goethe), "install", tiny], env=env, timeout=600)
                 break
             except RuntimeError as exc:
                 if attempt >= 2 or "cannot reach" not in str(exc).lower():
@@ -65,19 +65,19 @@ def main() -> None:
             raise RuntimeError(f"install did not place config and weights under {mdir}")
         t1 = time.time()
         offline = {**env, "HF_HUB_OFFLINE": "1"}
-        run_goethe([str(goethe), "install", "--model", tiny, "--no-load"], env=offline, timeout=120)
+        run_goethe([str(goethe), "install", tiny], env=offline, timeout=120)
         second = time.time() - t1
         if second > max(15.0, first * 0.5):
             raise RuntimeError(f"second install not fast enough ({second:.1f}s vs first {first:.1f}s)")
         for repo, run_env in (("meta-llama/Llama-3.2-1B", env), ("no-such-org/no-such-model-xyz", base)):
-            rr = run([str(goethe), "install", "--model", repo, "--no-load"], env=run_env, timeout=60)
-            hint = f"goethe install --model {repo} --hf-token"
+            rr = run([str(goethe), "install", repo], env=run_env, timeout=60)
+            hint = f"goethe install {repo} --hf-token"
             if rr.returncode != 1 or GATED not in _msg(rr) or hint.lower() not in _msg(rr):
                 raise RuntimeError(f"{repo}: expected exit 1 with the --hf-token guidance: {_msg(rr)[-300:]}")
             if any((home / "models").glob(repo.replace("/", "__") + "*")):
                 raise RuntimeError(f"{repo}: a refused install left files under models/")
         rr_net = run(
-            [str(goethe), "install", "--model", tiny, "--no-load", "--force"],
+            [str(goethe), "install", tiny, "--force"],
             env={**env, "HF_ENDPOINT": "http://127.0.0.1:9"},
             timeout=60,
         )
@@ -88,7 +88,7 @@ def main() -> None:
         for p in (home / "models").glob("*distil*"):
             shutil.rmtree(p, ignore_errors=True)
         rr_disk = run(
-            [str(goethe), "install", "--model", disk_model, "--no-load"],
+            [str(goethe), "install", disk_model],
             env={**base, "GOETHE_REGISTRY_URL": f"file://{reg2}", "GOETHE_TEST_FREE_BYTES": "1"},
             timeout=120,
         )

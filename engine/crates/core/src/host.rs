@@ -418,7 +418,7 @@ pub fn parse_nvidia_proc_version(text: &str) -> Option<String> {
 }
 
 pub fn summary_lines(host: &HostInfo, env: &EnvironmentInfo, bind: &str) -> Vec<String> {
-    // Human-readable host and environment lines for goethe hw profile.
+    // Human-readable host and environment lines for goethe doctor --hardware.
     let c = &host.cpu;
     let m = &host.memory;
     let gb = |mb: u64| mb as f64 / 1024.0;
@@ -482,10 +482,10 @@ pub fn public_access_hint(bind: &str) -> String {
     // What remote clients still need before the gateway lets them in.
     if bind.parse::<std::net::IpAddr>().map_or(true, |ip| ip.is_loopback()) {
         format!(
-            "the gateway listens on {bind} only: run `goethe api gateway --bind 0.0.0.0`, then allow clients with `goethe api allowlist --add <client-ip>/32`"
+            "the gateway listens on {bind} only: run `goethe api expose 0.0.0.0`, then allow clients with `goethe api allow add <client-ip>/32`"
         )
     } else {
-        format!("the gateway listens on {bind}; allow clients with `goethe api allowlist --add <client-ip>/32` (all other addresses are refused)")
+        format!("the gateway listens on {bind}; allow clients with `goethe api allow add <client-ip>/32` (all other addresses are refused)")
     }
 }
 

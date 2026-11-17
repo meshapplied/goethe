@@ -80,7 +80,7 @@ def main() -> None:
             encoding="utf-8",
         )
         run_goethe(
-            [str(goethe), "install", "--model", model, "--no-load", "--ctx", "512", "--max-conc", "2"],
+            [str(goethe), "install", model, "--ctx", "512", "--max-conc", "2"],
             env={
                 "GOETHE_HOME": str(home),
                 "GOETHE_REGISTRY_URL": f"file://{reg_hit}",
@@ -90,7 +90,7 @@ def main() -> None:
         post = gpu_mem_snapshot(test_gpus())
         for idx in test_gpus():
             if post[idx] - pre[idx] > 300:
-                raise RuntimeError(f"VRAM grew on GPU {idx} during --no-load install")
+                raise RuntimeError(f"VRAM grew on GPU {idx} during an install without --load")
         db = home / "state.db"
         if str(sqlite_query(db, "PRAGMA journal_mode")[0][0]).lower() != "wal":
             raise RuntimeError("state.db not WAL")
@@ -116,7 +116,7 @@ def main() -> None:
         reg_miss.write_text(json.dumps({"version": 1, "models": []}), encoding="utf-8")
         miss_model = "hf-internal-testing/tiny-random-gpt2"
         run_goethe(
-            [str(goethe), "install", "--model", miss_model, "--no-load"],
+            [str(goethe), "install", miss_model],
             env={"GOETHE_HOME": str(home), "GOETHE_REGISTRY_URL": f"file://{reg_miss}"},
             timeout=600,
         )

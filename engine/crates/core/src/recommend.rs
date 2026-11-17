@@ -109,6 +109,18 @@ impl View {
         view
     }
 
+    pub fn whole(home: &Path, hw: HardwareState) -> View {
+        // Every GPU as if empty, denied ones too: what the whole machine could run.
+        let mut view = View::capacity(home, hw);
+        view.gpus = view
+            .hw
+            .gpus
+            .iter()
+            .map(|g| GpuPlacementInput { index: g.index, cc: g.compute_capability.clone(), foreign_process: false, free_vram_mb: total_mb(g) })
+            .collect();
+        view
+    }
+
     pub fn free_allowed_gb(&self) -> f64 {
         self.gpus.iter().map(|g| g.free_vram_mb as f64 / 1024.0).sum()
     }
@@ -194,7 +206,7 @@ pub fn banded(header: &[&str], mut rows: Vec<(f64, Vec<String>)>) -> String {
 pub fn run(json_out: bool) -> Result<(), String> {
     // Models the allowed GPUs can run when empty, grouped by the VRAM they take; --json keeps the full plan.
     let home = goethe_home();
-    let hw = crate::placement::load_hw(&home).ok_or("hardware_state.json missing; run goethe hw profile first")?;
+    let hw = crate::placement::load_hw(&home).ok_or("hardware_state.json missing; run goethe doctor --hardware first")?;
     let reg = fetch(&registry_url())?;
     let view = View::capacity(&home, hw);
     let out = recommend(&home, &view, &reg);

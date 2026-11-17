@@ -136,11 +136,11 @@ def _topo_map() -> dict[tuple[int, int], str]:
 
 
 def main() -> None:
-    """Run goethe hw profile into a temp home and compare hardware_state.json with nvidia-smi."""
+    """Run goethe doctor --hardware into a temp home and compare hardware_state.json with nvidia-smi."""
     goethe = require_cli("goethe")
     with temp_home(stub_python=True, tag="hwprof") as home:
         samples = [_smi_pcie_snapshot() for _ in range(3)]
-        run_goethe([str(goethe), "hw", "profile"], env={"GOETHE_HOME": str(home)})
+        run_goethe([str(goethe), "doctor", "--hardware"], env={"GOETHE_HOME": str(home)})
         samples += [_smi_pcie_snapshot() for _ in range(3)]
         path = home / "hardware_state.json"
         if not path.is_file():
