@@ -209,7 +209,10 @@ accept_one() {
   rc=$?
   cp "${WORK}/xg.out" "${WORK}/inst"
   if [[ ${rc} -ne 0 ]]; then
-    if grep -qE "${PACKFAIL}" "${WORK}/inst" "${WORK}/err"; then
+    if grep -q "nothing was downloaded" "${WORK}/err" && ! grep -qE "${BAD}" "${WORK}/err"; then
+      VERDICT=SKIP
+      REASON="refused before any download (no kernel pack variant for this card, or no memory free)"
+    elif grep -qE "${PACKFAIL}" "${WORK}/inst" "${WORK}/err"; then
       VERDICT=FAIL
       REASON="the kernel pack does not work here ($(grep -ohE "${PACKFAIL}" "${WORK}/inst" "${WORK}/err" | head -n 1))"
     elif grep -qE "${REFUSED}" "${WORK}/err" && ! grep -qE "${BAD}" "${WORK}/err"; then
