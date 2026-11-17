@@ -418,10 +418,11 @@ pub fn status_lines(home: &Path, daemon_running: bool) -> Vec<String> {
         Link::NotLinked => vec![format!("Platform: Not linked ({})", "goethe login")],
         Link::Unreadable(e) => vec![format!("Platform: {} ({e})", paint("credentials not usable", Color::Red))],
         Link::Linked { revoked: true, .. } => vec![format!("Platform: {} (goethe login)", paint("Revoked or expired", Color::Red))],
-        Link::Linked { workspace, heartbeat, ok, .. } => vec![
-            format!("Platform: {} (workspace {workspace})", paint("Linked", Color::Green)),
-            format!("Heartbeat: {}", if ok { paint(&heartbeat, Color::Green) } else { paint(&heartbeat, Color::Yellow) }),
-        ],
+        Link::Linked { workspace, heartbeat, ok, .. } => vec![format!(
+            "Platform: {} (workspace {workspace}, heartbeat {})",
+            paint("Linked", Color::Green),
+            if ok { paint(&heartbeat, Color::Green) } else { paint(&heartbeat, Color::Yellow) }
+        )],
     }
 }
 
