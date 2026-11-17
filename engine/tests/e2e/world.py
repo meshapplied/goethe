@@ -28,6 +28,7 @@ GPUS = {
     "pro6000": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition|12.0|97887|600",
     "5090": "NVIDIA GeForce RTX 5090|12.0|32607|15",
     "gtx1080": "NVIDIA GeForce GTX 1080|6.1|8192|0",
+    "4060": "NVIDIA GeForce RTX 4060|8.9|8188|0",
     "none": "",
 }
 PACK_ARCH = "sm_120a"
@@ -101,6 +102,7 @@ class Repo:
     files: dict[str, bytes]
     gated: bool = False
     slow: float = 0.0
+    claimed: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -112,6 +114,9 @@ class World:
     packs: dict[str, bytes] = field(default_factory=dict)
     entries: list[dict] = field(default_factory=list)
     pkg_version: str = "9.9.9"
+    serial: int = 7
+    bad_sig: bool = False
+    pack_401: bool = False
     polls: int = 0
     heartbeats: int = 0
     requests: list[str] = field(default_factory=list)
@@ -145,16 +150,20 @@ class World:
         self.repos["nvidia/Qwen3.8-27B-NVFP4"] = Repo(dict(packed))
         self.repos["e2e/plain-gguf"] = Repo({"plain-Q8_0.gguf": gguf()})
         self.repos["e2e/packed-gguf"] = Repo({"packed-Q8_0.gguf": gguf()})
+        self.repos["e2e/toobig"] = Repo(dict(packed), claimed={"model.safetensors": 7 << 30})
+        self.repos["e2e/newer-engine"] = Repo({"newer-Q8_0.gguf": gguf()})
         self.repos["e2e/gated"] = Repo({"plain-Q8_0.gguf": gguf()}, gated=True)
         self.repos["e2e/slow-gguf"] = Repo({"slow-Q8_0.gguf": gguf() + b"\0" * (6 << 20)}, slow=0.05)
         for repo, arch in (
+            ("e2e/toobig", "sm_89"),
+            ("e2e/newer-engine", PACK_ARCH),
             ("e2e/packed", PACK_ARCH),
             ("e2e/packed-only", PACK_ARCH),
             ("nvidia/Qwen3.8-27B-NVFP4", "sm_100a"),
             ("e2e/packed-gguf", PACK_ARCH),
         ):
-            weights = ["packed-Q8_0.gguf"] if repo.endswith("gguf") else ["model.safetensors"]
-            gg = repo.endswith("gguf")
+            weights = [n for n in self.repos[repo].files if n.endswith((".gguf", ".safetensors"))]
+            gg = weights[0].endswith(".gguf")
             pack, manifest = build_pack(weights, "gguf" if gg else "safetensors", arch)
             name = f"{repo.split('/')[1]}-{arch}.gcpack"
             self.packs[name] = pack
@@ -167,7 +176,7 @@ class World:
                     "file": name,
                     "manifest_sha256": sha(manifest),
                     "size": len(pack),
-                    "min_engine": "0.1.0",
+                    "min_engine": "9.0.0" if repo == "e2e/newer-engine" else "0.1.0",
                     "sig": {"alg": "test"},
                     "aux": {"repo": "e2e/packed", "files": ["config.json", "tokenizer.json", "tokenizer_config.json"]}
                     if gg
@@ -178,7 +187,8 @@ class World:
             )
 
     def index(self) -> bytes:
-        return json.dumps({"schema": "gc-pack-index", "version": 3, "serial": 7, "entries": self.entries}).encode()
+        doc = {"schema": "gc-pack-index", "version": 3, "serial": self.serial, "entries": self.entries}
+        return json.dumps(doc).encode()
 
     def write_registry(self) -> None:
         models = [
@@ -290,7 +300,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/packs/v2/index.json":
             return self.reply(200, w.index())
         if path == "/packs/v2/index.sig":
-            return self.reply(200, sha(w.index()).encode(), "text/plain")
+            return self.reply(200, (b"0" * 64 if w.bad_sig else sha(w.index()).encode()), "text/plain")
+        if w.pack_401 and path.startswith("/packs/v2/pack/"):
+            return self.reply(401, {"error": "unauthorized"})
         if m := re.fullmatch(r"/packs/v2/pack/(.+)", path):
             return (
                 self.reply(302, b"", extra={"Location": f"{w.url}/blob/{m.group(1)}"})
@@ -315,7 +327,11 @@ class Handler(BaseHTTPRequestHandler):
         if r is None:
             return self.reply(404, {"error": "Repository not found"})
         siblings = [
-            {"rfilename": n, "size": len(d), "lfs": {"sha256": sha(d), "size": len(d)}}
+            {
+                "rfilename": n,
+                "size": r.claimed.get(n, len(d)),
+                "lfs": {"sha256": sha(d), "size": r.claimed.get(n, len(d))},
+            }
             if n.endswith((".gguf", ".safetensors"))
             else {"rfilename": n, "size": len(d)}
             for n, d in r.files.items()

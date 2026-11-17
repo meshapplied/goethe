@@ -1,0 +1,12 @@
+diff --git a/engine/crates/core/src/hf.rs b/engine/crates/core/src/hf.rs
+index 1c2adf3..1fbfb16 100644
+--- a/engine/crates/core/src/hf.rs
++++ b/engine/crates/core/src/hf.rs
+@@ -435,7 +435,6 @@ extern "C" fn on_interrupt(sig: libc::c_int) {
+     let group = DOWNLOAD_PGID.load(Ordering::SeqCst);
+     unsafe {
+         if group > 0 {
+-            libc::kill(-group, libc::SIGTERM);
+             libc::write(2, INTERRUPTED.as_ptr().cast(), INTERRUPTED.len());
+             libc::_exit(128 + sig);
+         }

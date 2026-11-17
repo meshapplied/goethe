@@ -1,0 +1,15 @@
+diff --git a/engine/crates/core/src/install.rs b/engine/crates/core/src/install.rs
+index 32fd185..93e08fe 100644
+--- a/engine/crates/core/src/install.rs
++++ b/engine/crates/core/src/install.rs
+@@ -495,9 +495,7 @@ fn offer_for(opts: &InstallOpts, deps: OfferDeps) -> Result<Option<PackChoice>,
+     if crate::packs::offers_any(&index, &deps.archs).is_empty() {
+         return Ok(None);
+     }
+-    if let Err(e) = (deps.ensure_engine)() {
+-        return miss(format!("optimised kernels exist for this GPU but goethe-engine could not be installed to look for them: {e}"));
+-    }
++    let _ = &deps.ensure_engine;
+     let plan = match (deps.by_structure)(&creds) {
+         Ok(Some((_, plan))) => plan,
+         Ok(None) => {

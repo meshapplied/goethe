@@ -1,0 +1,12 @@
+diff --git a/engine/crates/core/src/update.rs b/engine/crates/core/src/update.rs
+index 9c545d7..43e4357 100644
+--- a/engine/crates/core/src/update.rs
++++ b/engine/crates/core/src/update.rs
+@@ -126,6 +126,7 @@ fn binaries_due(order: Ordering, opts: &UpdateOpts, local: &str, remote: &str, d
+     match order {
+         Ordering::Equal => Ok((differ()?, None)),
+         Ordering::Greater => Ok((true, None)),
++        Ordering::Less if opts.engine => Err(format!("goethe {local} is newer than the published {remote}; not updating")),
+         Ordering::Less if opts.allow_downgrade && !opts.engine && !opts.ternary => Ok((true, None)),
+         Ordering::Less => Ok((false, Some(format!("goethe {local} is newer than the published {remote}; keeping it")))),
+     }
