@@ -290,20 +290,27 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     let mut pack_refused = false;
     let declined = match pack_decision(home, opts)? {
         PackDecision::Use(mut choice) => 'packed: {
-            // Only the files the pack was built for, at its pinned revision; the engine layer once, on first use.
-            crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
+            // Only the files the pack was built for, at its pinned revision; a pack no allowed GPU runs is refused from its manifest before anything is installed, the engine layer once, on first use.
             let login = crate::packs::Login(choice.creds.clone());
             let broker = crate::packs::HttpBroker::new(&choice.creds.platform_url, &login);
+            let refuse = |why: String| match pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why, fallback_allowed(opts.fallback)) {
+                Ok(line) => line,
+                Err(refusal) => {
+                    eprintln!("{refusal}");
+                    std::process::exit(3);
+                }
+            };
+            let early = crate::packs::unverified_prefix(&opts.model_id, &choice.offer.arch, &broker).ok().flatten().and_then(|(_, prefix)| sku_refused(home, &prefix));
+            if let Some(why) = early {
+                println!("{}", refuse(why));
+                pack_refused = true;
+                break 'packed false;
+            }
+            crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
             let plan = crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home))?
                 .ok_or_else(|| format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch))?;
             if let Some(why) = refused_before_download(home, &plan, &crate::packs::python_runner(home)) {
-                match pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why, fallback_allowed(opts.fallback)) {
-                    Ok(line) => println!("{line}"),
-                    Err(refusal) => {
-                        eprintln!("{refusal}");
-                        std::process::exit(3);
-                    }
-                }
+                println!("{}", refuse(why));
                 pack_refused = true;
                 break 'packed false;
             }
