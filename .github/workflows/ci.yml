@@ -60,19 +60,19 @@ jobs:
         python: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
-          python-version: ${{ matrix.python }}
-      - run: python -m unittest discover -s tests -t .
+          enable-cache: false
+      - run: uv run --no-project --python ${{ matrix.python }} python -m unittest discover -s tests -t .
 
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - run: pipx run ruff check goethe tests
-      - run: shellcheck -S warning install.sh engine/tests/accept.sh engine/tests/main_in_dev.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
       - uses: astral-sh/setup-uv@v6
+      - run: uvx ruff@0.17.0 check goethe tests
+      - run: shellcheck -S warning install.sh engine/tests/accept.sh engine/tests/main_in_dev.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
       - name: Style lint (headers, function comments, no dashes or emojis, leak guard, pinned ruff with the repo rules)
         working-directory: engine
         run: python3 tests/lint_style.py
