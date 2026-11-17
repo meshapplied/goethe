@@ -96,15 +96,19 @@ impl MemorySpec {
 
 pub fn installed(dir: &std::path::Path, card: &toml::Value, load_extra: &[String]) -> Option<MemorySpec> {
     // An installed model's spec for its card's KV dtype and the engine flags it runs with (card plus this load's extras).
-    let cfg = model_facts::read_config(dir).ok()?;
+    installed_from_config(&model_facts::read_config(dir).ok()?, card, load_extra)
+}
+
+pub fn installed_from_config(cfg: &Value, card: &toml::Value, load_extra: &[String]) -> Option<MemorySpec> {
+    // The same spec from a model's config.json alone: what a load will use, known before the weights are downloaded.
     let kv_dtype = card.get("kv_cache_dtype").and_then(|v| v.as_str()).filter(|d| !d.eq_ignore_ascii_case("auto"));
-    let mut spec = from_config(&cfg, kv_dtype).ok()?;
-    let facts = model_facts::facts_from_config(&cfg, 0.0, None, "installed").ok()?;
-    let elem = crate::install::kv_element_bytes(kv_dtype.unwrap_or("auto"), &cfg);
+    let mut spec = from_config(cfg, kv_dtype).ok()?;
+    let facts = model_facts::facts_from_config(cfg, 0.0, None, "installed").ok()?;
+    let elem = crate::install::kv_element_bytes(kv_dtype.unwrap_or("auto"), cfg);
     spec.static_state_bytes = (facts.swa_kv_elems_per_request * elem + facts.linear_state_bytes_per_request) * 4;
     let mut args = crate::engines::sglang::card_extra_args(card);
     args.extend_from_slice(load_extra);
-    apply_engine_args(&mut spec, Some(&cfg), &args);
+    apply_engine_args(&mut spec, Some(cfg), &args);
     Some(spec)
 }
 

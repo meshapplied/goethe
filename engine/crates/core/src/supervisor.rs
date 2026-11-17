@@ -1313,19 +1313,15 @@ fn kv_bytes_per_token(row: &InstRow, card: &toml::Value) -> u64 {
 fn chooser_input(req: &LoadReq, ctx: u64, max_conc: u64) -> ChooserInput {
     // Budget inputs from the card: KV bytes for its dtype, its Marlin copy and the compute capabilities it lists.
     let row = &req.row;
-    ChooserInput {
+    let facts = crate::chooser::CardFacts {
         static_vram_gb: row.static_vram_gb,
         kv_bytes_per_token: kv_bytes_per_token(row, &req.card),
         num_attention_heads: row.num_attention_heads.unwrap_or(1) as u64,
         num_kv_heads: row.num_kv_heads.unwrap_or(1) as u64,
         attention: row.attention.clone().unwrap_or_else(|| "gqa".to_string()),
         max_ctx: row.max_ctx.unwrap_or(row.default_ctx) as u64,
-        ctx,
-        max_conc,
-        marlin_extra_gb: crate::install::card_marlin_extra_gb(&req.card),
-        supported_sm: crate::install::card_supported_sm(&req.card),
-        memory: crate::memory_spec::installed(&req.model_path, &req.card, &req.params.extra_sglang_args),
-    }
+    };
+    ChooserInput::from_card(facts, &req.card, crate::memory_spec::installed(&req.model_path, &req.card, &req.params.extra_sglang_args), ctx, max_conc)
 }
 
 fn gpu_name(snap: &[GpuLive], idx: u32) -> String {

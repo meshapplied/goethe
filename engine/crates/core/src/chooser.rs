@@ -24,6 +24,34 @@ pub struct ChooserInput {
     pub memory: Option<MemorySpec>,
 }
 
+pub struct CardFacts {
+    pub static_vram_gb: f64,
+    pub kv_bytes_per_token: u64,
+    pub num_attention_heads: u64,
+    pub num_kv_heads: u64,
+    pub attention: String,
+    pub max_ctx: u64,
+}
+
+impl ChooserInput {
+    pub fn from_card(f: CardFacts, card: &toml::Value, memory: Option<MemorySpec>, ctx: u64, max_conc: u64) -> ChooserInput {
+        // The one way a card and its installed figures become a budget input: goethe load and the install-time fit both use it.
+        ChooserInput {
+            static_vram_gb: f.static_vram_gb,
+            kv_bytes_per_token: f.kv_bytes_per_token,
+            num_attention_heads: f.num_attention_heads,
+            num_kv_heads: f.num_kv_heads,
+            attention: f.attention,
+            max_ctx: f.max_ctx,
+            ctx,
+            max_conc,
+            marlin_extra_gb: crate::install::card_marlin_extra_gb(card),
+            supported_sm: crate::install::card_supported_sm(card),
+            memory,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadPlan {
     pub tp: usize,
