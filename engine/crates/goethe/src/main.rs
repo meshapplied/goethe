@@ -1971,7 +1971,7 @@ fn left(secs: i64) -> String {
 
 fn print_platform_lines(home: &std::path::Path, running: bool) {
     // The platform link and the last heartbeat, after the rest of goethe status.
-    println!("\n{}", goethe_core::platform_cli::status_lines(home, running).join("\n"));
+    println!("{}", goethe_core::platform_cli::status_lines(home, running).join("\n"));
 }
 
 fn status_text(api: Option<&str>, keys: &[(String, String)]) -> String {
