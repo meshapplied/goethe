@@ -154,6 +154,101 @@ fn read_exact(r: impl Read, len: u64) -> Result<Vec<u8>, String> {
 
 pub type Runner<'a> = &'a dyn Fn(&[String]) -> Result<(i32, String), String>;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkuReq {
+    pub sku: String,
+    pub arch: String,
+    pub sms: u64,
+    pub smem_block: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct Device {
+    pub name: String,
+    pub cc: String,
+    pub sms: Option<u64>,
+    pub smem_block: Option<u64>,
+}
+
+pub fn manifest_of(prefix: &[u8]) -> Option<Value> {
+    // The manifest of a pack from its first bytes (16-byte head, container header, manifest); None when they are not all there.
+    let n = usize::try_from(u64::from_le_bytes(prefix.get(8..16)?.try_into().ok()?)).ok()?;
+    let header: Value = serde_json::from_slice(prefix.get(16..16usize.checked_add(n)?)?).ok()?;
+    let (off, len) = (usize::try_from(header["manifest"][0].as_u64()?).ok()?, usize::try_from(header["manifest"][1].as_u64()?).ok()?);
+    let start = 16usize.checked_add(n)?.checked_add(off)?;
+    serde_json::from_slice(prefix.get(start..start.checked_add(len)?)?).ok()
+}
+
+pub fn sku_reqs(manifest: &Value) -> Vec<SkuReq> {
+    // The variants the manifest builds: per SKU the arch, SM count and shared memory its grid needs (buckets[].requires), once each.
+    let mut out: Vec<SkuReq> = Vec::new();
+    for b in manifest["buckets"].as_array().into_iter().flatten() {
+        let (Some(sku), Some(arch), Some(sms)) = (b["sku"].as_str(), b["requires"]["arch"].as_str(), b["requires"]["sms"].as_u64()) else { continue };
+        if !out.iter().any(|r| r.sku == sku) {
+            out.push(SkuReq { sku: sku.to_string(), arch: arch.to_string(), sms, smem_block: b["requires"]["smem_block"].as_u64().unwrap_or(0) });
+        }
+    }
+    out
+}
+
+fn arch_runs(arch: &str, cc: &str) -> String {
+    // Why code built for `arch` cannot run on compute capability `cc` ("" when it can): sm_XYa only on cc X.Y, sm_XY[f] on X.Z with Z >= Y, compute_XY PTX on any cc >= X.Y.
+    let (kind, digits) = match arch.split_once('_') {
+        Some((k @ ("sm" | "compute"), d)) => (k, d),
+        _ => return format!("bucket arch {arch:?} is not sm_XY[a|f] or compute_XY"),
+    };
+    let (num, suffix) = match digits.strip_suffix(['a', 'f']) {
+        Some(n) => (n, digits.chars().last()),
+        None => (digits, None),
+    };
+    let Some((major, minor)) = (num.len() >= 2 && num.bytes().all(|b| b.is_ascii_digit())).then(|| num.split_at(num.len() - 1)) else {
+        return format!("bucket arch {arch:?} is not sm_XY[a|f] or compute_XY");
+    };
+    let (Ok(w0), Ok(w1)) = (major.parse::<u64>(), minor.parse::<u64>()) else {
+        return format!("bucket arch {arch:?} is not sm_XY[a|f] or compute_XY");
+    };
+    let Some(have) = cc.split_once('.').and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?))) else {
+        return format!("cannot read compute capability {cc:?}");
+    };
+    let want = (w0, w1);
+    match (kind, suffix) {
+        ("compute", _) if have >= want => String::new(),
+        ("compute", _) => format!("PTX {arch} needs cc >= {}.{}", want.0, want.1),
+        ("sm", Some('a')) if have == want => String::new(),
+        ("sm", Some('a')) => format!("{arch} SASS runs only on cc {}.{} (arch-specific targets are not forward compatible)", want.0, want.1),
+        ("sm", _) if have.0 == want.0 && have.1 >= want.1 => String::new(),
+        _ => format!("{arch} SASS runs only on cc {}.Z with Z >= {}", want.0, want.1),
+    }
+}
+
+pub fn sku_why(dev: &Device, req: &SkuReq) -> String {
+    // Why one GPU cannot run one variant ("" when it can), by goethe-engine's rule: the arch on the compute capability, the grid's SMs co-resident, the shared memory per block; an unknown SM count or shared memory never refuses.
+    let why = arch_runs(&req.arch, &dev.cc);
+    if !why.is_empty() {
+        return format!("device cc {}: {why}", dev.cc);
+    }
+    match (dev.sms, dev.smem_block) {
+        (Some(have), _) if req.sms > have => format!("the plan's grid needs {} SMs co-resident, the device has {have}", req.sms),
+        (_, Some(have)) if req.smem_block > have => format!("the plan needs {} B shared memory per block, the device allows {have}", req.smem_block),
+        _ => String::new(),
+    }
+}
+
+pub fn sku_refusal(reqs: &[SkuReq], devices: &[Device]) -> Option<String> {
+    // None when some allowed GPU runs some variant (or there is nothing to compare); else one line: what the pack is built for, what this machine has, and why each variant misses.
+    if reqs.is_empty() || devices.is_empty() || devices.iter().any(|d| reqs.iter().any(|r| sku_why(d, r).is_empty())) {
+        return None;
+    }
+    let built: Vec<String> = reqs.iter().map(|r| format!("{} ({}, {} SMs)", r.sku, r.arch, r.sms)).collect();
+    let have: Vec<String> = devices
+        .iter()
+        .map(|d| format!("{} (cc {}{})", d.name, d.cc, d.sms.map_or(String::new(), |s| format!(", {s} SMs"))))
+        .collect();
+    let first = &devices[0];
+    let reasons: Vec<String> = reqs.iter().map(|r| format!("{}: {}", r.sku, sku_why(first, r))).collect();
+    Some(format!("the kernel pack is built for {}; none runs on {} ({})", built.join(", "), have.join(", "), reasons.join("; ")))
+}
+
 pub fn python_runner(home: &Path) -> impl Fn(&[String]) -> Result<(i32, String), String> {
     // The interpreter is looked up on every call: a runner made before the engine layer is installed uses the py-env python once it exists.
     let home = home.to_path_buf();
@@ -875,6 +970,52 @@ mod tests {
         py_env_python(home.path());
         let (code, out) = run(&["pack".to_string(), "match".to_string()]).unwrap();
         assert_eq!((code, out.trim()), (0, "py-env python: -m goethe_engine pack match"));
+    }
+
+    fn bucket(sku: &str, arch: &str, sms: u64) -> Value {
+        serde_json::json!({"sku": sku, "requires": {"arch": arch, "sms": sms, "name": sku, "smem_block": 99_000}})
+    }
+
+    fn gpu(name: &str, cc: &str, sms: Option<u64>) -> Device {
+        Device { name: name.into(), cc: cc.into(), sms, smem_block: Some(101_376) }
+    }
+
+    #[test]
+    fn a_pack_built_for_a_bigger_card_is_refused_before_a_byte_on_a_smaller_one_of_the_same_arch() {
+        let m = serde_json::json!({"buckets": [bucket("rtx_pro_6000_maxq", "sm_120a", 188), bucket("rtx_pro_6000_maxq", "sm_120a", 188)]});
+        let reqs = sku_reqs(&m);
+        assert_eq!(reqs.len(), 1, "one entry per SKU");
+        let line = sku_refusal(&reqs, &[gpu("NVIDIA GeForce RTX 5090", "12.0", Some(170))]).unwrap();
+        assert_eq!(line, "the kernel pack is built for rtx_pro_6000_maxq (sm_120a, 188 SMs); none runs on NVIDIA GeForce RTX 5090 (cc 12.0, 170 SMs) (rtx_pro_6000_maxq: the plan's grid needs 188 SMs co-resident, the device has 170)");
+        assert_eq!(sku_refusal(&reqs, &[gpu("NVIDIA RTX PRO 6000 Blackwell Max-Q", "12.0", Some(188))]), None, "the card it was built for runs it");
+        assert_eq!(sku_refusal(&reqs, &[gpu("a card CUDA does not show", "12.0", None)]), None, "an unknown SM count never refuses");
+        assert!(sku_refusal(&reqs, &[gpu("an Ada card", "8.9", Some(128))]).unwrap().contains("sm_120a SASS runs only on cc 12.0"));
+    }
+
+    #[test]
+    fn a_variant_for_this_card_is_found_among_others_and_any_allowed_gpu_may_run_it() {
+        let m = serde_json::json!({"buckets": [bucket("rtx_pro_6000_maxq", "sm_120a", 188), bucket("rtx_5090", "sm_120a", 170)]});
+        let reqs = sku_reqs(&m);
+        assert_eq!(sku_refusal(&reqs, &[gpu("NVIDIA GeForce RTX 5090", "12.0", Some(170))]), None);
+        let two = [gpu("NVIDIA GeForce RTX 5080", "12.0", Some(84)), gpu("NVIDIA GeForce RTX 5090", "12.0", Some(170))];
+        assert_eq!(sku_refusal(&reqs, &two), None, "one GPU that runs a variant is enough");
+        assert!(sku_refusal(&reqs, &two[..1]).is_some());
+        assert_eq!((arch_runs("sm_90", "9.0"), arch_runs("sm_90", "8.9").is_empty(), arch_runs("compute_80", "9.0")), (String::new(), false, String::new()));
+        assert_eq!(arch_runs("sm_100f", "10.3"), "");
+        assert!(arch_runs("ptx", "9.0").contains("not sm_XY"));
+    }
+
+    #[test]
+    fn the_manifest_is_read_from_the_first_bytes_of_a_pack() {
+        let manifest = serde_json::json!({"buckets": [bucket("rtx_5090", "sm_120a", 170)]}).to_string();
+        let header = serde_json::json!({"manifest": [3, manifest.len()]}).to_string();
+        let mut pack = b"GCPACK3\n".to_vec();
+        pack.extend((header.len() as u64).to_le_bytes());
+        pack.extend(header.as_bytes());
+        pack.extend(b"xyz");
+        pack.extend(manifest.as_bytes());
+        assert_eq!(sku_reqs(&manifest_of(&pack).unwrap())[0].sms, 170);
+        assert!(manifest_of(&pack[..pack.len() - 5]).is_none() && manifest_of(b"short").is_none());
     }
 
     #[test]

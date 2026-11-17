@@ -82,7 +82,7 @@ pub fn is_nvfp4_compressed_model(config: &serde_json::Value) -> bool {
         == Some("nvfp4")
 }
 
-fn tensor_counts_marlin_extra(name: &str) -> bool {
+pub fn tensor_counts_marlin_extra(name: &str) -> bool {
     if name.contains(".experts.") {
         return false;
     }
