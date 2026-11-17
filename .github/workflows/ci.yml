@@ -240,7 +240,7 @@ jobs:
         run: |
           engine/dist/cdn/bin/linux-x86_64/goethe --version
           engine/dist/cdn/bin/linux-x86_64/goethe --help >/dev/null
-      - name: The portable binary refuses a foreign release key planted in the environment (a test-release-key build would accept it)
+      - name: The portable binary refuses a foreign release key planted in the environment (a build trusting the test key would accept it)
         run: |
           d="$(mktemp -d)"
           mkdir "${d}/pkg"
