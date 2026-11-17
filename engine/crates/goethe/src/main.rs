@@ -86,6 +86,8 @@ goethe api trace alone shows what is recorded and how much space it takes. The f
 struct Cli {
     #[arg(short = 'V', long = "version", help = "Print the version, and how to upgrade when a newer one is out (--build-info adds commit and build date).")]
     version: bool,
+    #[arg(short = 'v', long, global = true, help = "Show the output of every underlying process (also GOETHE_VERBOSE=1); it is always kept in <home>/logs.")]
+    verbose: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -854,6 +856,8 @@ fn main() {
         print_version();
         return;
     }
+    goethe_core::step::set_verbose(cli.verbose);
+    goethe_core::step::begin(&goethe_core::paths::goethe_home(), args.iter().skip(1).find(|a| !a.starts_with('-')).map_or("goethe", String::as_str));
     let result = match route(cli.command) {
         Commands::Hw {
             cmd: HwCommands::Profile { json },
@@ -1971,14 +1975,14 @@ fn print_platform_lines(home: &std::path::Path, running: bool) {
 }
 
 fn status_text(api: Option<&str>, keys: &[(String, String)]) -> String {
-    // goethe up and goethe status: the state word in color, then the API, its keys and where to read more.
-    use goethe_core::term::{commands, paint, Color, Table};
+    // goethe up and goethe status: the state word in color, the API, and its keys or how to create one.
+    use goethe_core::term::{paint, Color, Table};
     let Some(api) = api else {
-        return format!("goethe: {}\n\n{}", paint("not running", Color::Red), commands("Start it with:", &["goethe up"]));
+        return format!("goethe: {} (goethe up starts it)\n", paint("not running", Color::Red));
     };
-    let mut out = format!("goethe: {}\n\nAPI: {api}\n\n", paint("running", Color::Green));
+    let mut out = format!("goethe: {}\nAPI: {api}\n", paint("running", Color::Green));
     if keys.is_empty() {
-        out.push_str(&create_first_key());
+        out.push_str("keys: none, create one with: goethe api keys --create my-app\n");
     } else {
         let mut table = Table::new(&["API KEY NAME", "KEY ID"]);
         for (name, id) in keys {
@@ -1986,8 +1990,6 @@ fn status_text(api: Option<&str>, keys: &[(String, String)]) -> String {
         }
         out.push_str(&table.render());
     }
-    out.push('\n');
-    out.push_str(&commands("For more details run:", &["goethe api"]));
     out
 }
 
@@ -2149,10 +2151,10 @@ mod tests {
     fn status_says_running_with_the_api_and_keys_or_how_to_start() {
         let stopped = status_text(None, &[]);
         assert!(stopped.starts_with("goethe: ") && stopped.contains("not running"), "{stopped}");
-        assert!(stopped.ends_with("Start it with:\n\n\t→ goethe up\n"), "{stopped}");
+        assert!(stopped.ends_with("(goethe up starts it)\n"), "{stopped}");
         let fresh = status_text(Some("https://10.0.0.2:8443/v1"), &[]);
-        assert!(fresh.contains("running\n\nAPI: https://10.0.0.2:8443/v1\n\nCreate your first API key:\n\n\t→ goethe api manage\n\t→ goethe api keys --create my-app\n"), "{fresh}");
-        assert!(fresh.ends_with("\nFor more details run:\n\n\t→ goethe api\n"), "{fresh}");
+        assert!(fresh.contains("running\nAPI: https://10.0.0.2:8443/v1\nkeys: none, create one with: goethe api keys --create my-app\n"), "{fresh}");
+        assert_eq!(fresh.lines().count(), 3, "{fresh}");
         let keyed = status_text(Some("https://h/v1"), &[("ops".into(), "a1b2c3d4e5f6".into())]);
         assert!(keyed.contains("ops") && keyed.contains("a1b2c3d4e5f6") && !keyed.contains("Create your first"), "{keyed}");
     }

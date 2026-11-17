@@ -213,7 +213,6 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         return Err(format!("{}: no such directory", opts.model_id));
     }
     validate_model_id(&opts.model_id)?;
-    println!("looking up {} ...", opts.model_id);
     let entry = fetch(&registry_url())
         .ok()
         .and_then(|r| find_model(&r, &opts.model_id).cloned());
@@ -333,7 +332,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             }
             confirm(opts, &format!("{} ({}, {:.1} GB) with optimised kernels for {}{spec}", opts.model_id, choice.offer.format, bytes(&files) as f64 / GIB, choice.offer.arch))?;
             let pack_dl = DownloadOpts { revision: Some(rev), force: opts.force, no_verify: opts.no_verify, only: Some(files.clone()) };
-            hf::ensure_model(home, &choice.offer.hf_repo, &card_dir, &pack_dl)?;
+            fetch_weights(home, &choice.offer.hf_repo, &card_dir, &pack_dl)?;
             if let Some((repo, revision, only)) = crate::packs::aux(&plan.entry) {
                 fetch_aux(home, &repo, &card_dir, DownloadOpts { revision, force: opts.force, no_verify: opts.no_verify, only: Some(only) })?;
             }
@@ -379,7 +378,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             confirm(opts, &format!("{} ({fmt}, {:.1} GB) with {engine} (no kernel pack: {why})", opts.model_id, bytes as f64 / GIB))?;
         }
     }
-    hf::ensure_model(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf.clone(), ..dl })?;
+    fetch_weights(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf.clone(), ..dl })?;
     let pack = readable(structure_offer(home, opts, &card_dir)?, |c| config_for_pack(home, opts, &card_dir, c, gguf.as_deref().unwrap_or_default()), fallback_allowed(opts.fallback))?;
     Ok(Target {
         model_id: opts.model_id.clone(),
@@ -390,6 +389,15 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         ternary: None,
         pack,
     })
+}
+
+fn fetch_weights(home: &Path, repo: &str, dir: &Path, dl: &DownloadOpts) -> Result<(), String> {
+    // The model files, with one line for the result: how many, how big, and how long when that was over 3 s.
+    let started = std::time::Instant::now();
+    hf::ensure_model(home, repo, dir, dl)?;
+    let (files, bytes) = crate::progress::weights_in(dir);
+    println!("{}", crate::step::row("weights", &format!("{files} files {}{}", crate::progress::size(bytes), crate::step::took(started.elapsed()))));
+    Ok(())
 }
 
 fn readable<T>(choice: Option<T>, meta: impl FnOnce(&T) -> Result<(), String>, allow: bool) -> Result<Option<T>, String> {
@@ -1196,8 +1204,9 @@ fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) 
     let broker = crate::packs::HttpBroker::new(&c.creds.platform_url, &login);
     let run = crate::packs::python_runner(home);
     let plan = c.plan.as_ref().ok_or("no kernel pack plan")?;
-    println!("installing the optimised kernels for {} ...", c.offer.arch);
+    let started = std::time::Instant::now();
     let variant = crate::packs::finish(home, &p.dir, &c.offer.arch, plan, &broker, &run)?;
+    println!("{}", crate::step::row("kernels", &format!("{} verified{}", c.offer.arch, crate::step::took(started.elapsed()))));
     pack_card(home, p, &c.offer.arch, &variant, cli_ctx)
 }
 
@@ -1505,38 +1514,24 @@ pub fn commit(home: &Path, p: &Planned, verb: &str, out: &mut dyn Write) -> Resu
     if let Some(note) = drop_shadowing_alias(&con, &p.model_id)? {
         eprintln!("warning: {note}");
     }
-    let mut lines = vec![format!("{verb} {}", p.model_id), format!("  path      {}", p.dir.display())];
-    lines.push(match &p.source_dir {
-        Some(src) => format!("  files     kept in {} (goethe remove only unregisters)", src.display()),
-        None => "  files     managed by goethe (goethe remove deletes them)".to_string(),
-    });
-    let state_note = if p.vram.state_gb > 0.0 {
-        format!(" + {:.1} GB per-request state for 4 requests", p.vram.state_gb)
-    } else {
-        String::new()
-    };
-    lines.push(format!("  vram      {:.1} GB weights{state_note}", p.vram.weights_gb));
+    let runtime = crate::engines::of_card(&toml::Value::Table(p.table.clone())).map_or("sglang", |e| e.id);
+    let per_request = crate::progress::size((p.vram.kv_bytes_per_token as f64 * p.ctx as f64 + p.vram.state_gb / 4.0 * GIB) as u64);
+    let quant = p.quant.as_deref().map_or(String::new(), |q| format!("  {q}"));
+    let said = if verb == "installed" { String::new() } else { format!("{verb} ") };
+    let mut lines = vec![format!("{said}{}  {runtime}  ctx {}  {:.1} GB + {per_request}/req{quant}", p.model_id, p.ctx, p.vram.weights_gb)];
+    if let Some(src) = &p.source_dir {
+        lines.push(format!("files stay in {} (goethe remove only unregisters)", src.display()));
+    }
     if p.vram.host_offload_gb > 0.0 {
-        lines.push(format!("  host ram  {:.1} GB offloaded weights in pinned memory", p.vram.host_offload_gb));
+        lines.push(format!("{:.1} GB of weights are offloaded to pinned host memory", p.vram.host_offload_gb));
     }
-    lines.push(format!(
-        "  kv cache  {:.1} KB per token ({}, {} attention)",
-        p.vram.kv_bytes_per_token as f64 / 1024.0,
-        p.kv_dtype,
-        p.facts.attention
-    ));
-    if let Some(e) = &p.engine {
-        lines.push(format!("  engine    {e}"));
-    }
-    if let Some(q) = &p.quant {
-        lines.push(format!("  quant     {q}, detected by SGLang"));
-    }
-    let tp_s = if p.tp == 0 { "auto".to_string() } else { p.tp.to_string() };
-    lines.push(format!("  defaults  ctx {}, max-conc {}, tp {tp_s}", p.ctx, p.max_conc));
     if !p.extra.is_empty() {
-        lines.push(format!("  sglang    {}", p.extra.join(" ")));
+        lines.push(format!("sglang args: {}", p.extra.join(" ")));
     }
-    lines.extend(p.notes.iter().map(|n| format!("  note      {n}")));
+    lines.extend(p.notes.iter().map(|n| format!("note: {n}")));
+    if verb == "installed" {
+        lines.push(format!("run: goethe run {}", p.model_id));
+    }
     writeln!(out, "{}", lines.join("\n")).map_err(|e| e.to_string())
 }
 
