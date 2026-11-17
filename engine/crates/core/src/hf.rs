@@ -812,6 +812,30 @@ fn fetch_repo_json(model_id: &str, revision: &str, file: &str) -> Result<serde_j
     serde_json::from_str(&resp.body).map_err(|e| format!("{file} parse: {e}"))
 }
 
+pub fn safetensors_header(model_id: &str, revision: &str, file: &str) -> Result<Vec<u8>, String> {
+    // The JSON header of one safetensors file of a repo by two small ranged requests, no weight read; the 8-byte length first.
+    let url = format!("{}/{model_id}/resolve/{revision}/{file}", hf_endpoint());
+    let get = |range: String, cap: u64| -> Result<(u16, Vec<u8>), String> {
+        let mut req = crate::net::agent().get(&url).set("Range", &range).timeout(Duration::from_secs(30));
+        if let Some(t) = token() {
+            req = req.set("Authorization", &format!("Bearer {t}"));
+        }
+        let resp = req.call().map_err(|e| format!("{file}: {e}"))?;
+        let status = resp.status();
+        let mut body = Vec::new();
+        resp.into_reader().take(cap).read_to_end(&mut body).map_err(|e| format!("{file}: {e}"))?;
+        Ok((status, body))
+    };
+    let (_, head) = get("bytes=0-7".into(), 8)?;
+    let n = u64::from_le_bytes(head.get(..8).and_then(|b| b.try_into().ok()).ok_or_else(|| format!("{file}: no safetensors length"))?);
+    if n == 0 || n > 64 << 20 {
+        return Err(format!("{file}: safetensors header of {n} bytes"));
+    }
+    let (status, body) = get(format!("bytes=8-{}", 7 + n), 8 + n)?;
+    let header = if status == 206 { body } else { body.get(8..).unwrap_or_default().to_vec() };
+    (header.len() as u64 == n).then_some(header).ok_or_else(|| format!("{file}: short safetensors header"))
+}
+
 pub fn fetch_config_json(model_id: &str, revision: &str) -> Result<serde_json::Value, String> {
     fetch_repo_json(model_id, revision, "config.json")
 }

@@ -34,7 +34,7 @@ pub fn pending(index: &[u8], model_id: &str, arch: &str, installed: &str, have_o
     (e.manifest_sha256 != installed || new_overlays).then_some(e)
 }
 
-fn read_prefix(pack: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn read_prefix(pack: &Path) -> Result<Vec<u8>, String> {
     // Header and manifest of an installed pack: its first 16 + header + manifest bytes.
     use std::io::Read;
     let mut f = std::fs::File::open(pack).map_err(|e| format!("{}: {e}", pack.display()))?;

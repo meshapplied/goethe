@@ -105,8 +105,17 @@ pub fn failure_report(home: &std::path::Path, instance_id: &str) -> String {
     if let Some(cause) = likely_cause(&engine) {
         out.push(format!("  likely cause: {cause}"));
     }
-    let errors: Vec<&String> = engine.iter().filter(|l| ERROR_MARKERS.iter().any(|m| l.contains(m))).collect();
-    let picked: Vec<&String> = if errors.is_empty() { engine.iter().rev().take(15).rev().collect() } else { errors.into_iter().rev().take(12).rev().collect() };
+    let mut in_traceback = false;
+    let kept: Vec<&String> = engine
+        .iter()
+        .filter(|l| {
+            let t = l.trim_start();
+            in_traceback = t.starts_with("Traceback") || (in_traceback && l.starts_with(char::is_whitespace));
+            !in_traceback
+        })
+        .collect();
+    let errors: Vec<&String> = kept.iter().copied().filter(|l| ERROR_MARKERS.iter().any(|m| l.contains(m))).collect();
+    let picked: Vec<&String> = if errors.is_empty() { kept[kept.len().saturating_sub(15)..].to_vec() } else { errors.into_iter().rev().take(12).rev().collect() };
     if !picked.is_empty() {
         out.push("  engine log:".to_string());
         out.extend(picked.into_iter().map(|l| format!("    {}", l.trim_end())));
@@ -131,7 +140,10 @@ const COMPILER_MARKERS: &[&str] = &[
 ];
 
 fn likely_cause(engine: &[String]) -> Option<String> {
-    // A plain reason for the engine failures Goethe can name: no compiler, no kernels for this GPU, an old driver.
+    // A plain reason for the engine failures Goethe can name: a pack that does not run on this GPU, no compiler, no kernels for this GPU, an old driver.
+    if let Some(refusal) = crate::install::load_refusal(&engine.join("\n")) {
+        return Some(refusal);
+    }
     let has = |markers: &[&str]| engine.iter().any(|l| markers.iter().any(|m| l.contains(m)));
     if has(COMPILER_MARKERS) {
         let distro = crate::nvidia_driver::probe().distro;
@@ -172,6 +184,19 @@ mod tests {
         assert!(likely_cause(&lines(&["Error building extension 'x'", "ninja: build stopped"])).unwrap().contains("kernel build failed"));
         assert!(likely_cause(&lines(&["error -- unsupported GNU version! gcc versions later than 15"])).is_some());
         assert_eq!(likely_cause(&lines(&["Traceback", "ValueError: bad config"])), None);
+    }
+
+    #[test]
+    fn a_failure_report_never_shows_a_python_traceback_and_names_a_pack_that_does_not_run() {
+        let td = tempfile::tempdir().unwrap();
+        let logs = td.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let log = "starting\nTraceback (most recent call last):\n  File \"/py-env/lib/x.py\", line 9, in open\n    raise RuntimeError(why)\nRuntimeError: device NVIDIA GeForce RTX 5090 cc 12.0 (170 SMs) runs no variant of this pack: rtx_pro_6000_maxq (sm_120a, 188 SMs): the plan\'s grid needs 188 SMs co-resident, the device has 170. Fallback: serve this model with llama.cpp\n";
+        std::fs::write(logs.join("inst-y.log"), log).unwrap();
+        let r = failure_report(td.path(), "inst-y");
+        assert!(!r.contains("Traceback") && !r.contains("File \"") && !r.contains("raise RuntimeError"), "{r}");
+        assert!(r.contains("likely cause: kernel pack for rtx_pro_6000_maxq (sm_120a, 188 SMs) does not run on NVIDIA GeForce RTX 5090 cc 12.0 (170 SMs)"), "{r}");
+        assert!(r.contains("RuntimeError: device NVIDIA GeForce RTX 5090") && r.ends_with("goethe logs inst-y -n 200"), "{r}");
     }
 
     #[test]
