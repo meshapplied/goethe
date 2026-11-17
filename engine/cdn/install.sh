@@ -717,7 +717,7 @@ install_pyenv() {
     done_line "Python environment already set up at ${GOETHE_HOME}/py-env; left as it is"
     return 0
   fi
-  echo "  Setting up the base Python environment (about 30 MB); SGLang installs with the first model that needs it"
+  echo "  Setting up the base Python environment (about 30 MB). The first install of a model then downloads the engine environment: about 5 GB, once (SGLang is about 8 GB more, only for models that need it)"
   GOETHE_ARCH="${ARCH}" UV="${GOETHE_HOME}/bin/uv" bash "${GOETHE_HOME}/pyenv/bootstrap.sh" base
 }
 
@@ -1037,7 +1037,7 @@ summary() {
     echo "Reboot to load the new NVIDIA driver, then check it with goethe doctor"
   fi
   if [[ -n "${LINK_DIR}" && ":${PATH}:" != *":${LINK_DIR}:"* ]]; then
-    echo "Add ${LINK_DIR} to PATH to use goethe"
+    echo "Add ${LINK_DIR} to PATH to use goethe: export PATH=\"${LINK_DIR}:\$PATH\" (put the line in ~/.profile or your shell's rc file to keep it)"
   fi
   if [[ "${GOETHE_HOME}" == "$(default_home)" && "${GOETHE_NO_COMPLETION:-0}" != "1" ]]; then
     "${GOETHE_HOME}/bin/goethe" completion install >/dev/null 2>&1 || true

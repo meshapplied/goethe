@@ -240,7 +240,12 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
     }
     let started = with_retries(|| client.auth_start(&hostname, &fingerprint)).map_err(|e| format!("{e}; nothing was changed"))?;
     replace_old_link(&home, old)?;
-    println!("\nTo link this node ({hostname}), open:\n\n{}\n\nand enter the code {}\n", command(&started.verification_uri_complete), paint(&started.user_code, Color::Bold));
+    println!(
+        "\nTo link this node ({hostname}), open:\n\n{}\n\nand enter the code {} (it is valid for {})\n",
+        command(&started.verification_uri_complete),
+        paint(&started.user_code, Color::Bold),
+        lifetime(started.expires_in)
+    );
     println!("Waiting for approval (Ctrl-C cancels)...");
     let mut blips = 0u32;
     let result = wait_for_approval(
@@ -354,6 +359,15 @@ pub enum Link {
     Linked { workspace: String, revoked: bool, heartbeat: String, ok: bool },
 }
 
+fn lifetime(seconds: u64) -> String {
+    // A code's lifetime in the unit people count it in.
+    match seconds {
+        s if s >= 120 => format!("{} minutes", s.div_ceil(60)),
+        s if s >= 60 => "1 minute".to_string(),
+        s => format!("{s} seconds"),
+    }
+}
+
 pub fn link_state(home: &Path, daemon_running: bool) -> Link {
     // The saved link and the last heartbeat goethed recorded for it.
     let creds = match platform::load_credentials(home) {
@@ -414,6 +428,13 @@ pub fn status_lines(home: &Path, daemon_running: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_login_code_says_how_long_it_lives() {
+        assert_eq!(lifetime(900), "15 minutes");
+        assert_eq!(lifetime(90), "1 minute");
+        assert_eq!(lifetime(45), "45 seconds");
+    }
 
     #[test]
     fn token_lifetimes_parse_never_hours_days_weeks() {

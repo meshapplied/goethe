@@ -1725,7 +1725,6 @@ fn do_ps(json: bool) -> Result<(), String> {
         if let Ok(Value::Array(rows)) = serde_json::from_str(reply.stdout.trim()) {
             print_ps_table(&rows);
         }
-        print_gateway_line();
     }
     Ok(())
 }
@@ -2058,13 +2057,6 @@ fn curl_example(api: &str) -> String {
          -d '{{\"model\": \"<model_name>\", \"messages\": [{{\"role\": \"user\", \"content\": \"Hello!\"}}]}}'",
         cert_path()
     )
-}
-
-fn print_gateway_line() {
-    // On stderr, so stdout stays the data rows.
-    if let Some(line) = nginx::format_gateway_line(&goethe_home()) {
-        eprintln!("{line}");
-    }
 }
 
 fn do_registry_entry(
