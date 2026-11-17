@@ -170,12 +170,34 @@ jobs:
           shared-key: engine-clippy
       - run: cargo clippy --locked --all-targets -- -D warnings
 
+  fresh-user:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          shared-key: engine-dev
+      - name: nginx, which goethe up starts
+        run: sudo apt-get install -y -qq nginx >/dev/null
+      - run: cargo build --locked --features goethe/test-release-key
+      - name: The real binaries as a pristine user, no GPU (fake driver library, package host, platform, Hub mirror, packs and engines)
+        run: python3 tests/e2e_cli.py
+
   # The one check the main ruleset requires. It needs every other job (package-smoke runs only on main/nightly and is exempt),
   # fails when a job exists that it does not list (a new job cannot be forgotten: add it to `needs`), and accepts a skipped job
   # only when the `changes` flag that gates it is false; a failed `changes` job or any other skip fails it.
   gate:
     if: ${{ always() }}
-    needs: [changes, main-in-dev, python, lint, attribution, ninfer-patch, engine-test, engine-clippy]
+    needs: [changes, main-in-dev, python, lint, attribution, ninfer-patch, engine-test, engine-clippy, fresh-user]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -191,7 +213,7 @@ jobs:
             .changes.outputs as $f
             | to_entries[]
             | select(.value.result != "success")
-            | select((.value.result == "skipped" and ((.key == "python" and $f.python != "true") or (.key | IN("engine-test", "engine-clippy") and $f.rust != "true"))) | not)
+            | select((.value.result == "skipped" and ((.key == "python" and $f.python != "true") or (.key | IN("engine-test", "engine-clippy", "fresh-user") and $f.rust != "true"))) | not)
             | "\(.key): \(.value.result)"' <<<"$NEEDS")
           [ -z "$bad" ] || { echo "$bad"; exit 1; }
 
@@ -218,3 +240,20 @@ jobs:
         run: |
           engine/dist/cdn/bin/linux-x86_64/goethe --version
           engine/dist/cdn/bin/linux-x86_64/goethe --help >/dev/null
+      - name: The portable binary refuses a foreign release key planted in the environment (a test-release-key build would accept it)
+        run: |
+          d="$(mktemp -d)"
+          mkdir "${d}/pkg"
+          openssl ecparam -name prime256v1 -genkey -noout -out "${d}/foreign.key"
+          openssl ec -in "${d}/foreign.key" -pubout -out "${d}/foreign_pub.pem" 2>/dev/null
+          echo 9.9.9 >"${d}/pkg/VERSION"
+          (cd "${d}/pkg" && sha256sum VERSION >SHA256SUMS)
+          openssl dgst -sha256 -sign "${d}/foreign.key" -out "${d}/pkg/SHA256SUMS.sig" "${d}/pkg/SHA256SUMS"
+          python3 -m http.server 18765 --bind 127.0.0.1 --directory "${d}/pkg" >/dev/null 2>&1 &
+          server=$!
+          sleep 1
+          out="$(GOETHE_HOME="${d}/home" GOETHE_RELEASE_PUB="${d}/foreign_pub.pem" GOETHE_PKG_URL=http://127.0.0.1:18765 \
+            engine/dist/cdn/bin/linux-x86_64/goethe update --check 2>&1)" && rc=0 || rc=$?
+          kill "${server}"
+          echo "${out}"
+          [[ "${rc}" -ne 0 && "${out}" == *"never takes its release key from the environment"* ]]

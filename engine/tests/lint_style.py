@@ -258,10 +258,30 @@ def lint_leaks() -> None:
                 problems.append(f"{name}:{i}: {kind}")
 
 
+def lint_test_key() -> None:
+    """The test-release-key feature never reaches a shipped binary: not a default, not in a release script or job."""
+    name = "test-release-key"
+    for toml in sorted(ROOT.rglob("Cargo.toml")):
+        if any(p in SKIP_DIRS for p in toml.relative_to(ROOT).parts):
+            continue
+        for m in re.finditer(r"^default\s*=\s*\[([^\]]*)\]", toml.read_text(encoding="utf-8"), re.M):
+            if name in m.group(1):
+                problems.append(f"{toml.relative_to(ROOT)}: {name} is a default feature")
+    workflows = ROOT.parent / ".github" / "workflows"
+    shipped = [*sorted((ROOT / "packaging").glob("*")), ROOT / "cdn" / "install.sh", workflows / "release.yml"]
+    for path in shipped:
+        if path.is_file() and name in path.read_text(encoding="utf-8", errors="replace"):
+            problems.append(f"{path.relative_to(ROOT.parent)}: passes {name}")
+    ci = workflows / "ci.yml"
+    if ci.is_file() and name in ci.read_text(encoding="utf-8").partition("\n  package-smoke:")[2]:
+        problems.append(f".github/workflows/ci.yml: the package-smoke job passes {name}")
+
+
 def main() -> int:
     """Walk the package tree and print style violations."""
     leaks_selftest()
     lint_leaks()
+    lint_test_key()
     py_files: list[Path] = []
     for path in sorted(ROOT.rglob("*")):
         rel = path.relative_to(ROOT)
