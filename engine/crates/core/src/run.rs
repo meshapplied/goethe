@@ -4,6 +4,8 @@ use crate::gateway_cache::GatewayCache;
 use crate::paths::goethe_home;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Mutex, Once};
 
 pub struct Opts {
     pub keep: bool,
@@ -20,11 +22,22 @@ pub(crate) struct Loaded {
 
 impl Loaded {
     fn new(keep: bool) -> Loaded {
+        if !keep {
+            watch_signals();
+        }
         Loaded { models: Vec::new(), keep, unload: Box::new(unload_model) }
     }
 
     pub(crate) fn add(&mut self, model: &str) {
         self.models.push(model.to_string());
+        if !self.keep {
+            lock(&BY_THIS_RUN).push(model.to_string());
+        }
+    }
+
+    fn forget(&mut self, model: &str) {
+        self.models.retain(|m| m != model);
+        lock(&BY_THIS_RUN).retain(|m| m != model);
     }
 }
 
@@ -32,8 +45,53 @@ impl Drop for Loaded {
     fn drop(&mut self) {
         if !self.keep {
             self.models.iter().for_each(|m| (self.unload)(m));
+            lock(&BY_THIS_RUN).clear();
         }
     }
+}
+
+static BY_THIS_RUN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static SIGNAL_FD: AtomicI32 = AtomicI32::new(-1);
+static WATCH: Once = Once::new();
+
+fn lock(list: &Mutex<Vec<String>>) -> std::sync::MutexGuard<'_, Vec<String>> {
+    list.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+extern "C" fn on_signal(sig: libc::c_int) {
+    // Async-signal-safe: one byte down the pipe; a thread does the unloading.
+    let byte = sig as u8;
+    unsafe { libc::write(SIGNAL_FD.load(Ordering::SeqCst), (&byte as *const u8).cast(), 1) };
+}
+
+fn watch_signals() {
+    // SIGINT, SIGTERM and SIGHUP of goethe run unload what this run loaded, then leave with the shell's code for the signal.
+    WATCH.call_once(|| {
+        let mut fds = [0; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return;
+        }
+        SIGNAL_FD.store(fds[1], Ordering::SeqCst);
+        let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            unsafe { libc::signal(sig, handler) };
+        }
+        let read_end = fds[0];
+        std::thread::spawn(move || signal_worker(read_end, &BY_THIS_RUN, &unload_model, &|code| std::process::exit(code)));
+    });
+}
+
+fn signal_worker(read_end: i32, models: &Mutex<Vec<String>>, unload: &dyn Fn(&str), leave: &dyn Fn(i32)) {
+    let mut byte = 0u8;
+    while unsafe { libc::read(read_end, (&mut byte as *mut u8).cast(), 1) } != 1 {
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return;
+        }
+    }
+    eprintln!("\ninterrupted; unloading what this run loaded");
+    let list = std::mem::take(&mut *lock(models));
+    list.iter().for_each(|m| unload(m));
+    leave(128 + byte as i32);
 }
 
 fn unload_model(model: &str) {
@@ -91,8 +149,11 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
     let (model, input) = route(&args, &snap.serving_models(), &installed.iter().map(String::as_str).collect::<Vec<_>>())?;
     let mut loaded = Loaded::new(opts.keep);
     if load_need(snap.routes(&model).iter().any(|r| !r.draining), installed.contains(&model), &model)? {
-        crate::install::run_load(json!({"model_id": model, "gpus": null, "ctx": null, "max_conc": null, "tp": null, "force": false, "yes": false, "extra_sglang_args": [], "async_finish": true}), false, false)?;
         loaded.add(&model);
+        if let Err(e) = crate::install::run_load(json!({"model_id": model, "gpus": null, "ctx": null, "max_conc": null, "tp": null, "force": false, "yes": false, "extra_sglang_args": [], "async_finish": true}), false, false) {
+            loaded.forget(&model);
+            return Err(e);
+        }
         snap = GatewayCache::open(&home).exact();
     }
     drop(snap);
@@ -316,6 +377,20 @@ fn fail(e: ureq::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_signal_unloads_what_this_run_loaded_and_leaves_with_the_shell_code() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let models = Mutex::new(vec!["org/a".to_string(), "org/b".to_string()]);
+        let (unloaded, left) = (Mutex::new(Vec::new()), AtomicI32::new(0));
+        let byte = libc::SIGTERM as u8;
+        unsafe { libc::write(fds[1], (&byte as *const u8).cast(), 1) };
+        signal_worker(fds[0], &models, &|m| unloaded.lock().unwrap().push(m.to_string()), &|c| left.store(c, Ordering::SeqCst));
+        assert_eq!(*unloaded.lock().unwrap(), ["org/a", "org/b"]);
+        assert_eq!(left.load(Ordering::SeqCst), 143);
+        assert!(models.lock().unwrap().is_empty(), "nothing is unloaded twice");
+    }
 
     #[test]
     fn words_route_to_a_model_and_an_input() {
