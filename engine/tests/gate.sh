@@ -121,7 +121,7 @@ build_step() {
     record "step0 sources" FAIL 0 "no Cargo.toml in ${GOETHE_PKG}"
     return 1
   fi
-  cargo_step "cargo build" cargo build -j 12 --release --locked || return 1
+  cargo_step "cargo build" cargo build -j 12 --release --locked --features goethe/test-release-key || return 1
   cargo_step "cargo test" cargo test -j 12 --workspace --release --locked -- --test-threads 4 || true
   cargo_step "cargo clippy" cargo clippy -j 12 --workspace --release --all-targets --locked -- -D warnings || true
   export GOETHE_BIN_DIR="${GOETHE_BIN_DIR:-${GOETHE_PKG}/target/release}"

@@ -161,7 +161,7 @@ pub fn ensure(home: &Path, layer: Layer) -> Result<(), String> {
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
     let pkg = pkg_base_url();
-    let result = fetch_signed_sums(home, &pkg, &tmp)
+    let result = fetch_signed_sums(&pkg, &tmp)
         .map_err(|e| format!("could not get the signed package list from {pkg} ({e}); nothing was changed, run the command again"))
         .and_then(|sums| install_from(home, &pkg, &sums, &tmp, layer));
     let _ = fs::remove_dir_all(&tmp);

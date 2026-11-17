@@ -15,6 +15,9 @@ clap_complete = { version = "4", features = ["unstable-dynamic"] }
 goethe-core = { path = "../core" }
 serde_json = "1"
 
+[features]
+test-release-key = ["goethe-core/test-release-key"]
+
 [dev-dependencies]
 libc = "0.2"
 tempfile = "3"

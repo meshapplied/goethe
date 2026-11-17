@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import re
 import shutil
@@ -33,7 +34,6 @@ def _same_version(goethe: Path, cdn: Path, key: Path, pub: Path, base: str) -> N
     version, commit = found.group(1), found.group(2)
     sign_cdn_tree(cdn, key, version)
     with temp_home(stub_python=True, tag="upd3") as home:
-        shutil.copy(pub, home / "release_pub.pem")
         for name in ("goethe", "goethed"):
             shutil.copy2(cdn / f"bin/linux-{ARCH}" / name, home / "bin" / name)
         env = {"GOETHE_HOME": str(home), "GOETHE_PKG_URL": base}
@@ -72,7 +72,6 @@ def _local_newer(goethe: Path, cdn: Path, key: Path, pub: Path, base: str) -> No
     cases = (([], False), (["--check"], False), (["--engine"], False), (["--engine", "--allow-downgrade"], False))
     for flags, downgrade in (*cases, (["--allow-downgrade"], True)):
         with temp_home(stub_python=True, tag="upd4") as home:
-            shutil.copy(pub, home / "release_pub.pem")
             mine = {name: b"my-newer-" + name.encode() for name in ("goethe", "goethed")}
             for name, data in mine.items():
                 (home / "bin" / name).write_bytes(data)
@@ -104,6 +103,7 @@ def main() -> None:
     srv: ThreadingHTTPServer | None = None
     try:
         key, pub = make_release_key(work / "keys")
+        os.environ["GOETHE_RELEASE_PUB"] = str(pub)
         cdn = work / "cdn"
         _binaries(cdn, b"v2")
         sign_cdn_tree(cdn, key, "9.9.9-test")
@@ -111,7 +111,6 @@ def main() -> None:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         base = f"http://127.0.0.1:{srv.server_address[1]}"
         with temp_home(stub_python=True, tag="upd") as home:
-            shutil.copy(pub, home / "release_pub.pem")
             env = {"GOETHE_HOME": str(home), "GOETHE_PKG_URL": base}
             rr = run([str(goethe), "update", "--check", "--yes"], env=env, timeout=60)
             if rr.returncode != 0 or "update available" not in rr.stdout + rr.stderr:
@@ -130,7 +129,6 @@ def main() -> None:
                 raise RuntimeError("goethe binary not updated")
         (cdn / "SHA256SUMS.sig").write_bytes(b"broken")
         with temp_home(stub_python=True, tag="upd2") as home2:
-            shutil.copy(pub, home2 / "release_pub.pem")
             env2 = {"GOETHE_HOME": str(home2), "GOETHE_PKG_URL": base}
             if run([str(goethe), "update", "--check", "--yes"], env=env2).returncode == 0:
                 raise RuntimeError("bad signature should fail")
