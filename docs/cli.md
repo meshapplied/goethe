@@ -423,7 +423,7 @@ Installs the latest Goethe. Loaded models keep serving. It then checks the kerne
 | `--check` | Only show what's available |
 | `--engine` | Also update the inference engine |
 | `--yes` | Don't ask |
-| `--allow-downgrade` | Install the published version even if it's older |
+| `--allow-downgrade` | Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries); not with `--engine` or `--ternary` |
 | `--rollback` | Put the previous kernel pack of every model that has one back |
 
 ### `goethe uninstall`
