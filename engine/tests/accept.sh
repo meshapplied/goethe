@@ -12,7 +12,7 @@ PACKED=(
 )
 PROMPT="Say hello in one short sentence."
 BAD='Illegal instruction|cannot open shared object|Traceback'
-REFUSED='is not supported|larger than the allowed GPUs|not supported here|gated or private|no placement fits'
+REFUSED='is not supported|larger than the allowed GPUs|not supported here|gated or private|no placement fits|not enough free GPU memory now'
 PACKFAIL='does not run on|a host library is missing|crashed at open|does not fit this GPU|failed to open|runs only with its kernel pack'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GOETHE="${GOETHE_BIN:-goethe}"
