@@ -2,7 +2,7 @@
 
 use std::io::Read;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -84,6 +84,7 @@ impl Ticker {
         // One line per interval until dropped, with the rate over the last interval.
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
+        ACTIVE.fetch_add(1, Ordering::Relaxed);
         let label = label.to_string();
         let handle = thread::spawn(move || {
             let (mut last, mut at) = (done(), Instant::now());
@@ -102,9 +103,30 @@ impl Ticker {
     }
 }
 
+impl Ticker {
+    pub fn start_with(every: Duration, value: impl Fn() -> u64 + Send + 'static, say: impl Fn(u64) + Send + 'static) -> Ticker {
+        // Calls `say` with `value()` every interval until dropped.
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        ACTIVE.fetch_add(1, Ordering::Relaxed);
+        let handle = thread::spawn(move || {
+            let mut at = Instant::now();
+            while !flag.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(20).min(every));
+                if at.elapsed() >= every {
+                    say(value());
+                    at = Instant::now();
+                }
+            }
+        });
+        Ticker { stop, handle: Some(handle) }
+    }
+}
+
 impl Drop for Ticker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        ACTIVE.fetch_sub(1, Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
@@ -125,6 +147,27 @@ fn cadence(tty: bool) -> Duration {
     }
 }
 
+pub struct Beat(#[allow(dead_code)] Ticker);
+
+impl Beat {
+    pub fn start(label: &str, say: impl Fn(String) + Send + 'static) -> Beat {
+        // Silent while a byte counter is already talking (the counters and this beat are all counted in ACTIVE).
+        Beat::every(label, every(), move |l| {
+            if ACTIVE.load(Ordering::Relaxed) <= 1 {
+                say(l);
+            }
+        })
+    }
+
+    pub fn every(label: &str, interval: Duration, say: impl Fn(String) + Send + 'static) -> Beat {
+        // "starting the engine, 12 s" every interval until dropped, for a step with no byte count; silent while a byte counter is already talking.
+        let began = Instant::now();
+        let label = label.to_string();
+        let value = move || began.elapsed().as_secs();
+        Beat(Ticker::start_with(interval, value, move |s| say(format!("{label}, {s} s"))))
+    }
+}
+
 pub fn eprint_line(text: String) {
     // Rewrites the line in place on a terminal; the Ticker ends it with a newline.
     if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
@@ -136,6 +179,7 @@ pub fn eprint_line(text: String) {
 }
 
 static UPDATING: AtomicBool = AtomicBool::new(false);
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 pub fn updating() -> bool {
     // Whether an updating line is on the terminal now.
@@ -192,6 +236,17 @@ mod tests {
     fn off_a_terminal_a_line_comes_every_5_seconds() {
         assert_eq!(cadence(false), Duration::from_secs(5));
         assert_eq!(cadence(true), Duration::from_secs(1), "a terminal's single line updates each second");
+    }
+
+    #[test]
+    fn a_beat_says_how_long_a_step_has_run() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = lines.clone();
+        let beat = Beat::every("starting the engine", Duration::from_millis(60), move |l| sink.lock().unwrap().push(l));
+        thread::sleep(Duration::from_millis(300));
+        drop(beat);
+        let seen = lines.lock().unwrap().clone();
+        assert!(seen.len() >= 3 && seen[0] == "starting the engine, 0 s", "{seen:?}");
     }
 
     #[test]
