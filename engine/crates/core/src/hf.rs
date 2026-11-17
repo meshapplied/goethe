@@ -413,14 +413,14 @@ pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: 
     let base = crate::progress::dir_bytes(local_dir);
     let watched = local_dir.to_path_buf();
     let ticker = (total > 0).then(|| {
-        eprintln!("downloading {model_id}: {} to fetch", crate::progress::size(total));
-        crate::progress::Ticker::start(model_id, Some(total), crate::progress::INTERVAL, move || crate::progress::dir_bytes(&watched).saturating_sub(base), crate::progress::eprint_line)
+        crate::progress::Ticker::start(model_id, Some(total), crate::progress::every(), move || crate::progress::dir_bytes(&watched).saturating_sub(base), crate::progress::eprint_line)
     });
     let outcome = run_guarded(&mut cmd);
     drop(ticker);
     let (status, tail) = outcome.map_err(|e| format!("hf download failed to start: {e}"))?;
     if !status.success() {
-        return Err(download_failure(&status, &tail));
+        let log = crate::step::log_path().map_or(String::new(), |p| format!("\nfull log: {}", p.display()));
+        return Err(format!("{}{log}", download_failure(&status, &tail)));
     }
     Ok(())
 }
@@ -457,7 +457,7 @@ impl Drop for Reaper {
 
 fn run_guarded(cmd: &mut Command) -> std::io::Result<(ExitStatus, Vec<u8>)> {
     // The downloader in its own process group, killed with goethe: SIGINT and SIGTERM stop the group, a SIGKILL of goethe stops the child (parent-death signal). Its stderr is shown live up to a Python traceback, which is kept for one line instead.
-    cmd.stderr(Stdio::piped()).stdin(Stdio::null());
+    cmd.stderr(Stdio::piped()).stdout(Stdio::null()).stdin(Stdio::null());
     cmd.process_group(0);
     unsafe {
         cmd.pre_exec(|| {
@@ -485,7 +485,7 @@ fn run_guarded(cmd: &mut Command) -> std::io::Result<(ExitStatus, Vec<u8>)> {
 }
 
 fn tee_stderr(mut r: std::process::ChildStderr) -> Vec<u8> {
-    // Pass the downloader's stderr (progress) through until a Python traceback starts; return the last bytes of everything.
+    // The downloader's stderr (bars, lock notices) goes to the log, and to the screen with -v until a Python traceback starts; return the last bytes of everything.
     let (mut tail, mut buf, mut live) = (Vec::new(), [0u8; 4096], true);
     let mut err = std::io::stderr();
     loop {
@@ -495,11 +495,16 @@ fn tee_stderr(mut r: std::process::ChildStderr) -> Vec<u8> {
         };
         let before = tail.len().min(TRACEBACK.len());
         tail.extend_from_slice(&buf[..n]);
+        for line in String::from_utf8_lossy(&buf[..n]).split(['\n', '\r']).filter(|l| !l.trim().is_empty()) {
+            crate::step::log_line(line.trim_end());
+        }
         if live {
             let from = tail.len() - n - before;
             let cut = tail[from..].windows(TRACEBACK.len()).position(|w| w == TRACEBACK).map(|p| (from + p).saturating_sub(tail.len() - n));
-            let _ = err.write_all(&buf[..cut.unwrap_or(n)]);
-            let _ = err.flush();
+            if crate::step::verbose() {
+                let _ = err.write_all(&buf[..cut.unwrap_or(n)]);
+                let _ = err.flush();
+            }
             live = cut.is_none();
         }
         if tail.len() > TAIL_BYTES {
@@ -654,7 +659,7 @@ fn verify_model(
     write_verified_cache(local_dir, &cache)?;
     write_revision(local_dir, revision)?;
     if count > 0 {
-        println!("verified {count} files ({:.2} GB)", bytes as f64 / 1e9);
+        crate::step::log_line(&format!("verified {count} files ({:.2} GB)", bytes as f64 / 1e9));
     }
     Ok(())
 }
