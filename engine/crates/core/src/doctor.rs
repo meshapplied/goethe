@@ -31,11 +31,15 @@ pub fn run(json: bool, probe_public: bool) -> Result<(), String> {
     if json {
         println!("{}", serde_json::to_string_pretty(&checks).map_err(|e| e.to_string())?);
     } else {
+        let (shown, folded) = fold_ok(&checks, crate::step::verbose());
         let mut table = crate::term::Table::new(&["CHECK", "STATUS", "DETAIL"]);
-        for c in &checks {
+        for c in &shown {
             table.row(vec![c.name.clone(), crate::term::status(&c.status), c.hint.clone()]);
         }
         table.print();
+        if !folded.is_empty() {
+            println!("also OK: {} (goethe -v doctor lists them)", folded.join(", "));
+        }
         println!("\nGPU architectures goethe supports: {}", crate::gpu_arch::microarchitectures_text());
         println!("Architectures of this machine: {}", crate::packs::local_archs(&home).join(", "));
     }
@@ -46,6 +50,15 @@ pub fn run(json: bool, probe_public: bool) -> Result<(), String> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn fold_ok(checks: &[Check], all: bool) -> (Vec<&Check>, Vec<&str>) {
+    // The rows that need a look (and the hardware row, which says what goethe sees), with the names of the plain OK rows folded away.
+    if all {
+        return (checks.iter().collect(), Vec::new());
+    }
+    let (shown, folded): (Vec<&Check>, Vec<&Check>) = checks.iter().partition(|c| c.status != "OK" || c.name == "hardware");
+    (shown, folded.iter().map(|c| c.name.as_str()).collect())
 }
 
 fn spawn_check<F: FnOnce() -> Check + Send + 'static>(f: F) -> mpsc::Receiver<Check> {
@@ -735,6 +748,15 @@ fn available_gb(path: &Path) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_ok_rows_fold_into_one_line_unless_everything_is_asked_for() {
+        let rows = vec![check("hardware", "OK", "x"), check("glibc", "OK", "y"), check("disk", "WARN", "low"), check("ram", "OK", "z")];
+        let (shown, folded) = fold_ok(&rows, false);
+        assert_eq!((shown.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), folded), (vec!["hardware", "disk"], vec!["glibc", "ram"]));
+        let (all, none) = fold_ok(&rows, true);
+        assert_eq!((all.len(), none.len()), (4, 0));
+    }
 
     #[test]
     fn the_driver_and_the_platform_get_their_own_rows() {

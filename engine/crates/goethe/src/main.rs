@@ -174,6 +174,8 @@ enum Commands {
         installed: bool,
         #[arg(long, help = "Only registry models.")]
         available: bool,
+        #[arg(long, help = "Every line; the default stops after 40.")]
+        all: bool,
     },
     #[command(display_order = 7, about = "Unload and delete an installed model (a folder of your own is only unregistered).")]
     Remove {
@@ -967,8 +969,9 @@ fn main() {
             json,
             installed,
             available,
+            all,
             cmd: None,
-        } => models::run_list(json, installed, available),
+        } => models::run_list(json, installed, available, all),
         Commands::Models { cmd: Some(_), .. } => unreachable!("goethe models subcommands are routed first"),
         Commands::Remove {
             model,
