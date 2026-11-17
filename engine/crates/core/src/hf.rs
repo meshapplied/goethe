@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
@@ -620,7 +620,14 @@ fn verify_model(
             Some(e.sha256.as_str()) == s.lfs_sha256.as_deref() && unchanged(local_dir, &s.rfilename, e)
         })
     });
+    let total: u64 = lfs.iter().map(|s| s.size).sum();
+    let base = HASHED.load(Ordering::Relaxed);
+    let hashing = (total >= 256 << 20).then(|| {
+        let done = move || HASHED.load(Ordering::Relaxed).saturating_sub(base);
+        crate::progress::Ticker::start("verifying", Some(total), crate::progress::every(), done, crate::progress::eprint_line)
+    });
     let mut results = hash_all(local_dir, &lfs);
+    drop(hashing);
     if let Some(prev) = &previous {
         for s in &reused {
             if let Some(e) = prev.files.get(&s.rfilename) {
@@ -674,6 +681,8 @@ fn verify_one_file(path: &Path, expect_sha: &str) -> Result<VerifiedEntry, Strin
     Ok(VerifiedEntry { size, mtime_ns, sha256: got })
 }
 
+static HASHED: AtomicU64 = AtomicU64::new(0);
+
 fn sha256_file(path: &Path) -> Result<String, String> {
     let mut f = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut h = Sha256::new();
@@ -684,6 +693,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
             break;
         }
         h.update(&buf[..n]);
+        HASHED.fetch_add(n as u64, Ordering::Relaxed);
     }
     Ok(format!("{:x}", h.finalize()))
 }

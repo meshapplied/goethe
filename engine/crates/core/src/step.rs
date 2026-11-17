@@ -66,9 +66,15 @@ pub fn log_line(line: &str) {
 pub struct Captured {
     pub status: ExitStatus,
     pub tail: Vec<String>,
+    pub error: Option<String>,
 }
 
-fn pump(src: impl Read, tail: &Mutex<VecDeque<String>>, echo: Option<&(dyn Fn(&str) + Sync)>) {
+fn names_an_error(line: &str) -> bool {
+    let low = line.to_lowercase();
+    ["error", "failed", "cannot", "could not", "timed out", "refused", "no such", "not found"].iter().any(|w| low.contains(w))
+}
+
+fn pump(src: impl Read, tail: &Mutex<VecDeque<String>>, error: &Mutex<Option<String>>, echo: Option<&(dyn Fn(&str) + Sync)>) {
     // Lines (a carriage return ends one too, as progress bars use it) go to the log, to the screen with -v, and into the tail.
     let mut reader = BufReader::new(src);
     let mut buf = Vec::new();
@@ -78,6 +84,9 @@ fn pump(src: impl Read, tail: &Mutex<VecDeque<String>>, echo: Option<&(dyn Fn(&s
             log_line(part);
             if let Some(show) = echo {
                 show(part);
+            }
+            if names_an_error(part) {
+                *error.lock().unwrap_or_else(|e| e.into_inner()) = Some(part.to_string());
             }
             let mut t = tail.lock().unwrap_or_else(|e| e.into_inner());
             if t.len() == TAIL_LINES {
@@ -97,34 +106,41 @@ pub fn run(cmd: &mut Command) -> std::io::Result<Captured> {
 pub fn run_with(cmd: &mut Command, echo: Option<&(dyn Fn(&str) + Sync)>) -> std::io::Result<Captured> {
     // Into the log, the last lines kept for a failure, each line also handed to `echo` when there is one.
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    let tail = Mutex::new(VecDeque::new());
+    let (tail, error) = (Mutex::new(VecDeque::new()), Mutex::new(None));
     let (out, err) = (child.stdout.take(), child.stderr.take());
     let status = std::thread::scope(|s| {
         if let Some(o) = out {
-            s.spawn(|| pump(o, &tail, echo));
+            s.spawn(|| pump(o, &tail, &error, echo));
         }
         if let Some(e) = err {
-            s.spawn(|| pump(e, &tail, echo));
+            s.spawn(|| pump(e, &tail, &error, echo));
         }
         child.wait()
     })?;
     let tail = tail.into_inner().unwrap_or_else(|e| e.into_inner()).into_iter().collect();
-    Ok(Captured { status, tail })
+    let error = error.into_inner().unwrap_or_else(|e| e.into_inner());
+    Ok(Captured { status, tail, error })
 }
 
 pub fn failure(what: &str, c: &Captured, next: &str) -> String {
-    // The one-line reason, the last lines of the log, where the rest is, and what to do.
+    // The step and its exit code, the last line of the output that names an error, where the whole log is, and what to do; with -v the output was already on screen.
     let code = c.status.code().map_or("killed by a signal".to_string(), |n| format!("exit {n}"));
     let mut out = format!("{what} failed ({code})");
-    for l in &c.tail {
-        out.push_str("\n  ");
-        out.push_str(l);
+    if !verbose() {
+        if let Some(line) = headline(c) {
+            out.push_str(&format!(": {line}"));
+        }
     }
     if let Some(p) = log_path() {
         out.push_str(&format!("\nfull log: {}", p.display()));
     }
     out.push_str(&format!("\n{next}"));
     out
+}
+
+fn headline(c: &Captured) -> Option<String> {
+    // The last line that says something went wrong, else the last line there is.
+    c.error.as_ref().or(c.tail.last()).map(|l| l.trim().chars().take(200).collect())
 }
 
 pub fn took(spent: Duration) -> String {
@@ -160,7 +176,7 @@ mod tests {
 
     fn fake() -> Command {
         let mut c = Command::new("bash");
-        c.arg("-c").arg("for i in $(seq 300); do echo \"noise $i\"; done; echo broke >&2; exit ${FAKE_EXIT:-0}");
+        c.arg("-c").arg("for i in $(seq 300); do echo \"noise $i\"; done; echo \"error: broke\" >&2; exit ${FAKE_EXIT:-0}");
         c
     }
 
@@ -197,8 +213,9 @@ mod tests {
         c.env("FAKE_EXIT", "3");
         let got = run(&mut c).unwrap();
         let text = failure("installing the Python environment", &got, "run the command again");
-        assert_eq!(text.lines().count(), 1 + TAIL_LINES + 2, "{text}");
-        assert!(text.starts_with("installing the Python environment failed (exit 3)") && text.contains("noise 300") && !text.contains("noise 100"));
+        assert_eq!(text.lines().count(), 3, "{text}");
+        assert!(text.starts_with("installing the Python environment failed (exit 3): error: broke"), "{text}");
+        assert!(!text.contains("noise"), "the noise stays in the log");
         assert!(text.contains("full log: ") && text.contains(&home.path().display().to_string()) && text.ends_with("run the command again"));
     }
 
