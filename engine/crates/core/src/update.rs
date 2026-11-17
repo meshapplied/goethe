@@ -43,19 +43,13 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     let remote_ver = fs::read_to_string(&version_file).map_err(|e| e.to_string())?.trim().to_string();
     let local_ver = local_version();
     let order = compare_versions(&remote_ver, &local_ver);
-    if order == Ordering::Less && !opts.allow_downgrade {
-        if opts.check_only {
-            println!("goethe {local_ver} is newer than the published {remote_ver}");
-            return Ok(());
-        }
-        return Err(format!(
-            "published version {remote_ver} is older than goethe {local_ver}; re-run with --allow-downgrade to install it"
-        ));
-    }
     let arch = normalize_arch();
+    let (bins, kept) = binaries_due(order, opts, &local_ver, &remote_ver, || binaries_differ(home, &sums, &arch))?;
+    if let Some(note) = &kept {
+        println!("{note}");
+    }
     let (sglang, engine) = if opts.engine { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
     let ternary = if opts.ternary { ternary_delta(home, &sums) } else { None };
-    let bins = order != Ordering::Equal || binaries_differ(home, &sums, &arch)?;
     let local_commit = option_env!("GOETHE_GIT_COMMIT").unwrap_or("unknown");
     let remote_commit = fetch_verified(pkg, &sums, "BUILDINFO", tmp)
         .ok()
@@ -64,7 +58,7 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     let published = published_label(&remote_ver, remote_commit.as_deref(), local_commit, bins && order == Ordering::Equal);
     let installed = if bins { build_label(&local_ver, Some(local_commit)) } else { published.clone() };
     let parts = [
-        ("goethe", Some(Delta::of(&installed, &published, bins))),
+        ("goethe", kept.is_none().then(|| Delta::of(&installed, &published, bins))),
         ("SGLang", sglang),
         ("goethe-engine", engine),
         ("ternary pack", ternary),
@@ -76,7 +70,9 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     if opts.check_only || pending.iter().all(|(_, d)| !d.differs) {
         return Ok(());
     }
-    crate::host::confirm(&format!("Update goethe {installed} -> {published}?"), opts.yes)?;
+    let what = pending.iter().filter(|(_, d)| d.differs).map(|(w, _)| *w).collect::<Vec<_>>().join(", ");
+    let question = if bins { format!("Update goethe {installed} -> {published}?") } else { format!("Update {what}?") };
+    crate::host::confirm(&question, opts.yes)?;
     let mut staged = Vec::new();
     for bin in ["goethe", "goethed"].into_iter().filter(|_| bins) {
         let rel = format!("bin/linux-{arch}/{bin}");
@@ -115,12 +111,24 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
         let sha = lookup_sum(&sums, TERNARY_REL)?;
         fs::write(home.join(TERNARY_RECORD), format!("{sha}\n")).map_err(|e| e.to_string())?;
     }
-    fs::copy(&version_file, home.join("VERSION")).map_err(|e| e.to_string())?;
+    if bins {
+        fs::copy(&version_file, home.join("VERSION")).map_err(|e| e.to_string())?;
+    }
     if was_running && bins {
         restart_goethed(home)?;
     }
-    println!("updated to goethe {published}");
+    println!("{}", if bins { format!("updated to goethe {published}") } else { format!("updated {what}") });
     Ok(())
+}
+
+fn binaries_due(order: Ordering, opts: &UpdateOpts, local: &str, remote: &str, differ: impl FnOnce() -> Result<bool, String>) -> Result<(bool, Option<String>), String> {
+    // Whether goethe and goethed are replaced, and the note when they are kept. The version guard is theirs alone: a published goethe older than this build is kept, and only --allow-downgrade without a component flag installs it; --engine, --ternary and the pack refresh go on whatever the binaries do.
+    match order {
+        Ordering::Equal => Ok((differ()?, None)),
+        Ordering::Greater => Ok((true, None)),
+        Ordering::Less if opts.allow_downgrade && !opts.engine && !opts.ternary => Ok((true, None)),
+        Ordering::Less => Ok((false, Some(format!("goethe {local} is newer than the published {remote}; keeping it")))),
+    }
 }
 
 fn binaries_differ(home: &Path, sums: &Path, arch: &str) -> Result<bool, String> {
@@ -558,6 +566,25 @@ mod tests {
         fetch_pkg_file_max(&url, "f", &dest, 1 << 20, Duration::from_secs(1)).unwrap();
         assert_eq!(fs::metadata(&dest).unwrap().len(), 40, "1.8 s in total with a 1 s idle limit");
         assert!(fetch_pkg_file_max(&url, "f", &dest, 1 << 20, Duration::from_secs(1)).is_err(), "3 s of silence");
+    }
+
+    fn opts(engine: bool, ternary: bool, allow_downgrade: bool) -> UpdateOpts {
+        UpdateOpts { check_only: false, engine, ternary, yes: true, allow_downgrade }
+    }
+
+    #[test]
+    fn a_build_ahead_of_the_published_release_keeps_its_binaries_and_still_updates_what_was_asked() {
+        let due = |o: &UpdateOpts, order| binaries_due(order, o, "0.3.3", "0.3.2", || panic!("only an equal version compares the binaries")).map(|(bins, note)| (bins, note.is_some()));
+        assert_eq!(due(&opts(false, false, false), Ordering::Less), Ok((false, true)), "no flags: the note, nothing replaced, no error");
+        assert_eq!(due(&opts(true, false, false), Ordering::Less), Ok((false, true)), "--engine: the binaries stay, the engine layer is still looked at");
+        assert_eq!(due(&opts(false, true, false), Ordering::Less), Ok((false, true)), "--ternary likewise");
+        assert_eq!(due(&opts(true, false, true), Ordering::Less), Ok((false, true)), "--allow-downgrade never turns --engine into a binary downgrade");
+        assert_eq!(due(&opts(false, false, true), Ordering::Less), Ok((true, false)), "--allow-downgrade alone installs the older published binaries");
+        assert_eq!(due(&opts(true, false, false), Ordering::Greater), Ok((true, false)), "an older build still updates");
+        let note = binaries_due(Ordering::Less, &opts(false, false, false), "0.3.3", "0.3.2", || Ok(false)).unwrap().1.unwrap();
+        assert_eq!(note, "goethe 0.3.3 is newer than the published 0.3.2; keeping it");
+        assert_eq!(binaries_due(Ordering::Equal, &opts(true, false, false), "0.3.3", "0.3.3", || Ok(true)), Ok((true, None)), "another build at the same version");
+        assert_eq!(binaries_due(Ordering::Equal, &opts(false, false, false), "0.3.3", "0.3.3", || Ok(false)), Ok((false, None)));
     }
 
     #[test]

@@ -330,7 +330,7 @@ enum Commands {
         ternary: bool,
         #[arg(long, help = "Skip confirmation.")]
         yes: bool,
-        #[arg(long = "allow-downgrade", help = "Install the published version even if it is older.")]
+        #[arg(long = "allow-downgrade", help = "Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries; not with --engine or --ternary).")]
         allow_downgrade: bool,
         #[arg(long, help = "Put the previous kernel pack of every model that has one back (an update keeps it for one rollback).")]
         rollback: bool,
@@ -1117,14 +1117,20 @@ fn main() {
             rollback,
         } => match rollback {
             true => goethe_core::pack_update::run_rollback(),
-            false => goethe_core::update::run(goethe_core::update::UpdateOpts {
-                check_only: check,
-                engine,
-                ternary,
-                yes,
-                allow_downgrade,
-            })
-            .and_then(|()| goethe_core::pack_update::run_all(check)),
+            false => {
+                let update = goethe_core::update::run(goethe_core::update::UpdateOpts {
+                    check_only: check,
+                    engine,
+                    ternary,
+                    yes,
+                    allow_downgrade,
+                });
+                match (update, goethe_core::pack_update::run_all(check)) {
+                    (Err(a), Err(b)) => Err(format!("{a}; {b}")),
+                    (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+                    (Ok(()), Ok(())) => Ok(()),
+                }
+            }
         },
         Commands::Uninstall {
             keep_models,
