@@ -93,14 +93,14 @@ pub fn preflight_model(model_id: &str, revision: Option<&str>) -> Result<ModelPr
 pub const GATED_WAYS: &str = "accept the license, then goethe install ID --hf-token, or goethe install DIR --name ID for weights you already have";
 
 pub fn gated_guidance(model_id: &str) -> String {
-    format!("{model_id} is gated or private on Hugging Face: {}", GATED_WAYS.replace("ID", model_id))
+    format!("{model_id} {}: {}", crate::messages::GATED, GATED_WAYS.replace("ID", model_id))
 }
 
 fn status_refusal(model_id: &str, status: u16, has_token: bool) -> Option<String> {
     // An unauthenticated 401, 403 or 404 means no such repo or a private one (a gated repo answers 200 with its gated flag); with a token, no access.
     match (status, has_token) {
         (401 | 403 | 404, true) => Some(format!("{model_id}: not found, or this Hugging Face token has no access (accept the license at {}/{model_id})", hf_endpoint())),
-        (401 | 403 | 404, false) => Some(format!("{model_id}: not found on Hugging Face, or private (check the id; add --hf-token for a private model)")),
+        (401 | 403 | 404, false) => Some(format!("{model_id}: {} (check the id; add --hf-token for a private model)", crate::messages::NOT_FOUND)),
         _ => None,
     }
 }
@@ -374,7 +374,7 @@ fn download_with_retries(home: &Path, model_id: &str, local_dir: &Path, revision
 }
 
 fn is_auth_error(msg: &str) -> bool {
-    msg.contains("gated or private") || msg.contains("401") || msg.contains("403")
+    msg.contains(crate::messages::GATED) || msg.contains("401") || msg.contains("403")
 }
 
 pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: &str, excludes: &[String]) -> Result<(), String> {

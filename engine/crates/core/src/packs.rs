@@ -1,6 +1,7 @@
 // Gated kernel-pack pull. goethe does network and auth; goethe-engine decides trust (signature, rollback, identity, arch).
 
 use crate::engines::{goethe_engine::{PACK_FILE, PACK_VERIFY}, resolve_python};
+use crate::messages::{NOTHING_DOWNLOADED, ONLY_PACK};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
@@ -309,7 +310,7 @@ pub fn unsupported_here(index: &[u8], model_id: &str, archs: &[String], local: &
     }
     let built = built_for(index, model_id);
     let here = if local.is_empty() { archs.join(", ") } else { format!("{local} ({})", archs.join(", ")) };
-    Some(format!("It runs only with a kernel pack, built for {built}; this machine has {here}, so it is not supported here and nothing was downloaded"))
+    Some(format!("It {ONLY_PACK}, built for {built}; this machine has {here}, so it is not supported here and {NOTHING_DOWNLOADED}"))
 }
 
 pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> Vec<Entry> {

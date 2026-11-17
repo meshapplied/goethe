@@ -57,7 +57,7 @@ fn allowed(flag: bool, env: Option<&str>) -> bool {
     flag || env == Some("1")
 }
 
-const FALLBACK_HINT: &str = "pass --fallback (or set GOETHE_ALLOW_FALLBACK=1) to serve it with the plain runtime instead";
+use crate::messages::{FALLBACK_HINT, LOGIN_FIRST, NOTHING_DOWNLOADED, ONLY_PACK};
 
 pub const PACK_SKIPPED: &str = "pack_skipped";
 
@@ -204,7 +204,7 @@ fn is_installed(home: &Path, model_id: &str) -> bool {
 
 fn gated_but_installed(err: &str, installed: bool, force: bool) -> bool {
     // Hugging Face answers a gated or private repo without a token as not found: for a model already installed that is no failure, unless --force asks for the download.
-    installed && !force && (err.contains("is gated or private on Hugging Face") || err.contains("not found on Hugging Face, or private"))
+    installed && !force && (err.contains(crate::messages::GATED) || err.contains(crate::messages::NOT_FOUND))
 }
 
 fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
@@ -515,7 +515,7 @@ fn confirm(opts: &InstallOpts, plan: &str) -> Result<(), String> {
     }
     match crate::term::ask(&format!("{plan}: download? [Y/n]"), "y")?.to_ascii_lowercase().starts_with('y') {
         true => Ok(()),
-        false => Err("nothing was downloaded".into()),
+        false => Err(NOTHING_DOWNLOADED.into()),
     }
 }
 
@@ -526,7 +526,7 @@ fn vram_preflight(home: &Path, bytes: u64) -> Result<(), String> {
     let total = hw.gpus.iter().filter(|g| !denied.contains(&g.index)).map(|g| g.vram_total_mb as f64 / 1024.0).sum::<f64>();
     let gb = bytes as f64 / GIB;
     if total > 0.0 && gb > total {
-        return Err(format!("the weights ({gb:.1} GB) are larger than the allowed GPUs together ({total:.1} GB); nothing was downloaded"));
+        return Err(format!("the weights ({gb:.1} GB) are larger than the allowed GPUs together ({total:.1} GB); {NOTHING_DOWNLOADED}"));
     }
     Ok(())
 }
@@ -553,7 +553,7 @@ fn pack_fit(view: &crate::recommend::View, cfg: &Value, entry: Option<&RegistryM
     let pinned = opts.tp.or(entry.and_then(|e| e.default_tp)).filter(|t| *t > 0).map(|t| t as usize);
     let fit = view.fit_as(id, &input, pinned, crate::engine_overhead::PACK_RUNTIME).map_err(|why| {
         let cards: Vec<String> = view.gpus.iter().map(|g| format!("gpu{} {} {:.1} GB free", g.index, view.hw.gpus.iter().find(|h| h.index == g.index).map_or("", |h| h.name.as_str()), g.free_vram_mb as f64 / 1024.0)).collect();
-        format!("{id} does not fit the allowed GPUs now ({}), so nothing was downloaded: {why}. Options: --ctx with a smaller value, free the GPU (goethe gpu shows what uses it), or change which cards are used with goethe gpu --deny or --allow", cards.join(", "))
+        format!("{id} does not fit the allowed GPUs now ({}), so {NOTHING_DOWNLOADED}: {why}. Options: --ctx with a smaller value, free the GPU (goethe gpu shows what uses it), or change which cards are used with goethe gpu --deny or --allow", cards.join(", "))
     })?;
     let free = fit.gpus.iter().filter_map(|g| view.gpus.iter().find(|x| x.index == *g)).map(|g| g.free_vram_mb as f64 / 1024.0).fold(f64::INFINITY, f64::min);
     let total = fit.need.total();
@@ -1102,7 +1102,7 @@ fn pack_only_gate(model_id: &str, pack_only: bool, declined: bool, no_pack_gpu: 
     }
     if declined {
         let cards = if built.is_empty() { String::new() } else { format!(" (packs are built for {built})") };
-        return Err(format!("{model_id} runs only on its kernel pack: run goethe login first{cards}; nothing was downloaded"));
+        return Err(format!("{model_id} {ONLY_PACK}: {LOGIN_FIRST}{cards}; {NOTHING_DOWNLOADED}"));
     }
     match no_pack_gpu {
         Some(why) => Err(format!("{model_id}: {why}")),
@@ -1113,10 +1113,10 @@ fn pack_only_gate(model_id: &str, pack_only: bool, declined: bool, no_pack_gpu: 
 fn pack_only_refusal(model_id: &str, pack_only: bool, why: &str, allow: bool) -> Result<String, String> {
     // A pack that cannot run here before any download: a pack-only model is refused with the cards its pack is built for; any other is refused too unless the user opted into its plain runtime.
     if pack_only {
-        return Err(format!("{model_id} runs only with its kernel pack, and {why}; nothing was downloaded"));
+        return Err(format!("{model_id} {ONLY_PACK}, and {why}; {NOTHING_DOWNLOADED}"));
     }
     if !allow {
-        return Err(format!("{why}; nothing was downloaded; {FALLBACK_HINT}"));
+        return Err(format!("{why}; {NOTHING_DOWNLOADED}; {FALLBACK_HINT}"));
     }
     Ok(format!("{why}; using its plain runtime"))
 }
@@ -1896,8 +1896,8 @@ mod tests {
         let built = "sm_120a, Blackwell (RTX 5090, RTX PRO 6000)";
         let out = pack_only_gate("nvidia/Qwen3.8-27B-NVFP4", true, true, None, built).unwrap_err();
         assert!(out.contains("goethe login first") && out.contains("sm_120a") && out.ends_with("nothing was downloaded"), "{out}");
-        let card = pack_only_gate("nvidia/Qwen3.8-27B-NVFP4", true, false, Some("It runs only with a kernel pack, built for sm_120a; this machine has sm_89"), built).unwrap_err();
-        assert!(card.starts_with("nvidia/Qwen3.8-27B-NVFP4: It runs only with a kernel pack") && card.contains("sm_89"), "{card}");
+        let card = pack_only_gate("nvidia/Qwen3.8-27B-NVFP4", true, false, Some("It runs only with its kernel pack, built for sm_120a; this machine has sm_89"), built).unwrap_err();
+        assert!(card.starts_with("nvidia/Qwen3.8-27B-NVFP4: It runs only with its kernel pack") && card.contains("sm_89"), "{card}");
         assert_eq!(pack_only_gate("nvidia/Qwen3.8-27B-NVFP4", true, false, None, built), Ok(()), "logged in with a pack for the card: on to the download plan");
         for gguf in [(true, None), (false, Some("no variant"))] {
             assert_eq!(pack_only_gate("ggml-org/embeddinggemma-2-GGUF", false, gguf.0, gguf.1, built), Ok(()), "a plain GGUF route keeps its own not-logged-in note");

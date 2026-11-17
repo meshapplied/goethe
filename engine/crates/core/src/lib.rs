@@ -13,6 +13,7 @@ pub mod install;
 pub mod load_wait;
 pub mod memory_spec;
 pub mod model_facts;
+pub mod messages;
 pub mod models;
 pub mod net;
 pub mod pack_update;
