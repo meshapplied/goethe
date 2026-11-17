@@ -36,7 +36,8 @@ pub fn run(json: bool, probe_public: bool) -> Result<(), String> {
             table.row(vec![c.name.clone(), crate::term::status(&c.status), c.hint.clone()]);
         }
         table.print();
-        println!("\nSupported microarchitectures: {}", crate::gpu_arch::microarchitectures_text());
+        println!("\nGPU architectures goethe supports: {}", crate::gpu_arch::microarchitectures_text());
+        println!("Architectures of this machine: {}", crate::packs::local_archs(&home).join(", "));
     }
     if probe_public {
         probe_public_reachability(&home);
@@ -67,6 +68,8 @@ type CheckFn = fn(&Path) -> Check;
 
 const CHECKS: &[(&str, CheckFn)] = &[
     ("hardware", check_hardware),
+    ("driver", check_driver),
+    ("platform", check_platform),
     ("glibc", |_| check_glibc()),
     ("nginx", check_nginx),
     ("goethe_home", check_goethe_home),
@@ -105,6 +108,42 @@ fn collect_checks(home: &Path) -> Vec<Check> {
             c
         })
         .collect()
+}
+
+fn driver_note(driver: &str) -> (&'static str, String) {
+    // The NVIDIA driver against goethe's floors: 580 and newer run every supported GPU, 535 to 579 only data-center GPUs (CUDA forward compatibility), older ones nothing.
+    match driver.split('.').next().and_then(|m| m.parse::<u32>().ok()) {
+        Some(580..) => ("OK", format!("NVIDIA driver {driver}: every supported GPU")),
+        Some(535..=579) => ("WARN", format!("NVIDIA driver {driver}: data-center GPUs only (GeForce and TITAN need 580 or newer)")),
+        Some(_) => ("FAIL", format!("NVIDIA driver {driver} is older than 535 and not supported: goethe install offers to update it")),
+        None => ("WARN", "the NVIDIA driver version could not be read".to_string()),
+    }
+}
+
+fn check_driver(home: &Path) -> Check {
+    match crate::hw::profile(home) {
+        Ok(hw) => {
+            let (status, note) = driver_note(&hw.driver);
+            check("driver", status, note)
+        }
+        Err(_) => check("driver", "WARN", "no driver answered (see the hardware row)"),
+    }
+}
+
+fn platform_note(link: crate::platform_cli::Link) -> (&'static str, String) {
+    // Whether this node is linked to the Goethe platform, which also decides whether optimised kernels install.
+    use crate::platform_cli::Link;
+    match link {
+        Link::NotLinked => ("INFO", "not logged in: optional; goethe login links this node and unlocks optimised kernels".to_string()),
+        Link::Unreadable(e) => ("WARN", format!("login not usable ({e}); goethe login again")),
+        Link::Linked { revoked: true, workspace, .. } => ("WARN", format!("revoked (workspace {workspace}); goethe login again")),
+        Link::Linked { workspace, heartbeat, .. } => ("OK", format!("logged in, workspace {workspace}, heartbeat {heartbeat}")),
+    }
+}
+
+fn check_platform(home: &Path) -> Check {
+    let (status, note) = platform_note(crate::platform_cli::link_state(home, crate::service::goethed_running()));
+    check("platform", status, note)
 }
 
 fn check(name: &str, status: &str, hint: impl Into<String>) -> Check {
@@ -234,6 +273,12 @@ fn check_hardware(home: &Path) -> Check {
             g.vram_total_mb as f64 / 1024.0
         ));
     }
+    let busy: Vec<(u32, usize, u64, u64)> = hw
+        .gpus
+        .iter()
+        .map(|g| (g.index, g.running_processes.iter().filter(|p| !managed.contains(&(p.pid as i32))).count(), g.vram_free_mb, g.vram_total_mb))
+        .collect();
+    lines.extend(deny_hint(&busy));
     let ccs: Vec<(u32, &str)> = hw.gpus.iter().map(|g| (g.index, g.compute_capability.as_str())).collect();
     lines.extend(mixed_arch_note(&ccs));
     lines.extend(hw.unavailable.iter().map(|u| format!("{u} (not answering; skipped)")));
@@ -252,6 +297,12 @@ fn check_hardware(home: &Path) -> Check {
         "OK"
     };
     check("hardware", status, lines.join("\n"))
+}
+
+fn deny_hint(gpus: &[(u32, usize, u64, u64)]) -> Option<String> {
+    // One line when a GPU has foreign processes or under a fifth of its memory free: how to keep a card for other workloads. (index, foreign processes, free MB, total MB)
+    let (index, ..) = gpus.iter().find(|(_, foreign, free, total)| *foreign > 0 || *free * 5 < *total)?;
+    Some(format!("goethe gpu --deny gpu{index} keeps a card free for other workloads"))
 }
 
 fn mixed_arch_note(gpus: &[(u32, &str)]) -> Option<String> {
@@ -610,7 +661,7 @@ fn check_hf(_home: &Path) -> Check {
     }
     let url = format!("{}/api/models?limit=1", hf::hf_endpoint());
     match crate::net::agent().get(&url).timeout(Duration::from_secs(3)).call() {
-        Ok(_) | Err(ureq::Error::Status(..)) => check("huggingface", "OK", "reachable (anonymous; gated repos need a manual download)"),
+        Ok(_) | Err(ureq::Error::Status(..)) => check("huggingface", "OK", format!("reachable (anonymous; gated repos: {})", hf::GATED_WAYS)),
         Err(e) => check("huggingface", "WARN", format!("unreachable: {e}")),
     }
 }
@@ -684,6 +735,33 @@ fn available_gb(path: &Path) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_driver_and_the_platform_get_their_own_rows() {
+        assert_eq!(driver_note("580.126.09").0, "OK");
+        assert_eq!(driver_note("570.1").0, "WARN");
+        assert_eq!(driver_note("525.60").0, "FAIL");
+        assert_eq!(driver_note("").0, "WARN");
+        use crate::platform_cli::Link;
+        assert_eq!(platform_note(Link::NotLinked).0, "INFO");
+        assert!(platform_note(Link::NotLinked).1.contains("goethe login"));
+        assert_eq!(platform_note(Link::Linked { workspace: "w".into(), revoked: false, heartbeat: "OK".into(), ok: true }).0, "OK");
+        assert_eq!(platform_note(Link::Linked { workspace: "w".into(), revoked: true, heartbeat: String::new(), ok: false }).0, "WARN");
+        assert!(CHECKS.iter().any(|(n, _)| *n == "driver") && CHECKS.iter().any(|(n, _)| *n == "platform"));
+    }
+
+    #[test]
+    fn a_busy_gpu_gets_one_hint_how_to_keep_it_free() {
+        assert_eq!(deny_hint(&[(0, 0, 90_000, 96_000), (1, 0, 90_000, 96_000)]), None, "idle cards need no hint");
+        assert_eq!(deny_hint(&[(0, 0, 90_000, 96_000), (1, 2, 90_000, 96_000)]).unwrap(), "goethe gpu --deny gpu1 keeps a card free for other workloads");
+        assert_eq!(deny_hint(&[(0, 0, 10_000, 96_000), (3, 1, 1, 96_000)]).unwrap(), "goethe gpu --deny gpu0 keeps a card free for other workloads", "little free memory counts, one line");
+    }
+
+    #[test]
+    fn the_hugging_face_check_uses_the_gated_wording_of_install() {
+        assert!(hf::GATED_WAYS.contains("goethe install DIR --name ID"));
+        assert!(hf::gated_guidance("org/m").contains(&hf::GATED_WAYS.replace("ID", "org/m")));
+    }
 
     #[test]
     fn mixed_architecture_hosts_get_one_note() {

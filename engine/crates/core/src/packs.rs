@@ -1,6 +1,7 @@
 // Gated kernel-pack pull. goethe does network and auth; goethe-engine decides trust (signature, rollback, identity, arch).
 
 use crate::engines::{goethe_engine::{PACK_FILE, PACK_VERIFY}, resolve_python};
+use crate::messages::{NOTHING_DOWNLOADED, ONLY_PACK};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
@@ -36,6 +37,7 @@ pub struct HttpBroker<'a> {
 const LINK_REUSE: Duration = Duration::from_secs(240);
 const MAX_HEADER: u64 = 64 << 20;
 const MAX_MANIFEST: u64 = 16 << 20;
+const MAX_INDEX: u64 = 64 << 20;
 const MERGE_GAP: u64 = 1 << 20;
 
 impl<'a> HttpBroker<'a> {
@@ -106,6 +108,9 @@ impl Broker for HttpBroker<'_> {
         self.bytes("/packs/v2/index.sig")
     }
     fn range(&self, file: &str, off: u64, len: u64) -> Result<Vec<u8>, String> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
         let mut fresh = false;
         loop {
             let url = self.link(file, fresh)?;
@@ -124,15 +129,23 @@ impl Broker for HttpBroker<'_> {
     }
 }
 
-fn read_all(mut r: impl Read) -> Result<Vec<u8>, String> {
+fn read_all(r: impl Read) -> Result<Vec<u8>, String> {
+    read_capped(r, MAX_INDEX)
+}
+
+fn read_capped(r: impl Read, max: u64) -> Result<Vec<u8>, String> {
+    // A platform response (index, signature) read whole, refused past `max` bytes.
     let mut v = Vec::new();
-    r.read_to_end(&mut v).map_err(|e| e.to_string())?;
+    r.take(max + 1).read_to_end(&mut v).map_err(|e| e.to_string())?;
+    if v.len() as u64 > max {
+        return Err(format!("the platform's response is longer than {max} bytes; refused"));
+    }
     Ok(v)
 }
 
 fn read_exact(r: impl Read, len: u64) -> Result<Vec<u8>, String> {
     let mut v = Vec::with_capacity(len.min(1 << 26) as usize);
-    r.take(len).read_to_end(&mut v).map_err(|e| format!("pack download: {e}"))?;
+    crate::progress::Counted(r).take(len).read_to_end(&mut v).map_err(|e| format!("pack download: {e}"))?;
     if v.len() as u64 != len {
         return Err(format!("pack download: {} of {len} bytes", v.len()));
     }
@@ -142,8 +155,10 @@ fn read_exact(r: impl Read, len: u64) -> Result<Vec<u8>, String> {
 pub type Runner<'a> = &'a dyn Fn(&[String]) -> Result<(i32, String), String>;
 
 pub fn python_runner(home: &Path) -> impl Fn(&[String]) -> Result<(i32, String), String> {
-    let py = resolve_python(home);
+    // The interpreter is looked up on every call: a runner made before the engine layer is installed uses the py-env python once it exists.
+    let home = home.to_path_buf();
     move |args| {
+        let py = resolve_python(&home);
         let out = Command::new(&py).args(["-m", "goethe_engine"]).args(args).output().map_err(|e| format!("{}: {e}", py.display()))?;
         let err = String::from_utf8_lossy(&out.stderr);
         let code = out.status.code().unwrap_or(-1);
@@ -168,6 +183,15 @@ pub struct Offer {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Overlay {
+    pub file: String,
+    pub base: String,
+    pub size: u64,
+    pub sha256: String,
+    pub sig: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     pub offer: Offer,
     pub file: String,
@@ -177,6 +201,7 @@ pub struct Entry {
     pub aux: Value,
     pub drafter: Value,
     pub min_engine: (u64, u64, u64),
+    pub overlays: Vec<Overlay>,
 }
 
 pub fn platform_base(home: &Path) -> Result<String, String> {
@@ -249,7 +274,7 @@ fn dedup(v: Vec<Offer>) -> Vec<Offer> {
     out
 }
 
-fn runnable(e: &Entry) -> bool {
+pub fn runnable(e: &Entry) -> bool {
     // The pinned goethe-engine (the one goethe installs) is at least the pack's min_engine.
     Some(e.min_engine) <= version(crate::pyenv::ENGINE_VERSION)
 }
@@ -274,15 +299,20 @@ pub fn pack_archs(index: &[u8], model_id: &str) -> Vec<String> {
     out
 }
 
+pub fn built_for(index: &[u8], model_id: &str) -> String {
+    // The GPU architectures (with their families) the index has a pack of `model_id` for.
+    pack_archs(index, model_id).iter().map(|a| crate::gpu_arch::SUPPORTED.iter().find(|x| &x.tag() == a).map_or(a.clone(), |x| format!("{a}, {}", x.family))).collect::<Vec<_>>().join("; ")
+}
+
 pub fn unsupported_here(index: &[u8], model_id: &str, archs: &[String], local: &str) -> Option<String> {
     // One line when the index has packs of `model_id` but none for this machine's GPUs: which GPUs the packs are built for, and that this one is not among them.
     let theirs = pack_archs(index, model_id);
     if theirs.is_empty() || theirs.iter().any(|a| archs.contains(a)) {
         return None;
     }
-    let built = theirs.iter().map(|a| crate::gpu_arch::SUPPORTED.iter().find(|x| &x.tag() == a).map_or(a.clone(), |x| format!("{a}, {}", x.family))).collect::<Vec<_>>().join("; ");
+    let built = built_for(index, model_id);
     let here = if local.is_empty() { archs.join(", ") } else { format!("{local} ({})", archs.join(", ")) };
-    Some(format!("It runs only with a kernel pack, built for {built}; this machine has {here}, so it is not supported here and nothing was downloaded"))
+    Some(format!("It {ONLY_PACK}, built for {built}; this machine has {here}, so it is not supported here and {NOTHING_DOWNLOADED}"))
 }
 
 pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> Vec<Entry> {
@@ -323,10 +353,25 @@ pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> 
                 aux: e["aux"].clone(),
                 drafter: e["drafter"].clone(),
                 min_engine,
+                overlays: overlays_of(e),
             });
         }
     }
     out
+}
+
+fn overlays_of(e: &Value) -> Vec<Overlay> {
+    // The overlays an index entry lists: a small signed file per base manifest, with its size and sha256; a malformed one is left out.
+    e["overlays"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| {
+            let (file, base, sha256) = (o["file"].as_str()?, o["base"].as_str()?, o["sha256"].as_str()?);
+            (safe_name(file) && is_sha256(base) && is_sha256(sha256) && o["size"].as_u64().is_some_and(|n| n > 0 && n < (64 << 20))).then_some(())?;
+            Some(Overlay { file: file.to_string(), base: base.to_string(), size: o["size"].as_u64()?, sha256: sha256.to_string(), sig: o["sig"].clone() })
+        })
+        .collect()
 }
 
 fn version(s: &str) -> Option<(u64, u64, u64)> {
@@ -428,11 +473,20 @@ pub fn model_gb(home: &Path, o: &Offer) -> Option<f64> {
     gb
 }
 
+pub fn store_serial(home: &Path, serial: u64) -> Result<(), String> {
+    // Remember the newest index serial installed, so an older index is refused.
+    let path = serial_path(home);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, format!("{serial}\n")).map_err(|e| e.to_string())
+}
+
 fn serial_path(home: &Path) -> PathBuf {
     home.join("packs").join("serial")
 }
 
-fn last_serial(home: &Path) -> u64 {
+pub fn last_serial(home: &Path) -> u64 {
     std::fs::read_to_string(serial_path(home)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
 }
 
@@ -445,7 +499,7 @@ pub struct Plan {
     pub entry: Entry,
     pub prefix: Vec<u8>,
     pub variants: Vec<Vec<String>>,
-    serial: u64,
+    pub serial: u64,
 }
 
 pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &dyn Broker, run: Runner) -> Result<Option<Plan>, String> {
@@ -471,7 +525,8 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
     let header = broker.range(&entry.file, 16, n)?;
     let h: Value = serde_json::from_slice(&header).map_err(|e| format!("{}: container header: {e}", entry.file))?;
     let (off, len) = (h["manifest"][0].as_u64().ok_or("container header: manifest")?, h["manifest"][1].as_u64().ok_or("container header: manifest")?);
-    if len == 0 || len > MAX_MANIFEST || 16 + n + off + len > entry.size {
+    let end = off.checked_add(len).and_then(|x| x.checked_add(16 + n));
+    if len == 0 || len > MAX_MANIFEST || !end.is_some_and(|e| e <= entry.size) {
         return Err(format!("{}: bad manifest range", entry.file));
     }
     let body = broker.range(&entry.file, 16 + n, off + len)?;
@@ -540,8 +595,47 @@ fn merged(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
 
 pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Broker, run: Runner) -> Result<String, String> {
     // Match the downloaded model files, fetch only the byte ranges of the pack they need, verify, store the serial; the variant id.
+    let (variant, _) = finish_as(home, dir, arch, plan, broker, run, Next { suffix: "", donor: None })?;
+    store_serial(home, plan.serial)?;
+    Ok(variant)
+}
+
+pub struct Donor {
+    pub pack: PathBuf,
+    pub ranges: Vec<(u64, u64, String)>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Delta {
+    pub fetched: u64,
+    pub reused: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct Next<'a> {
+    pub suffix: &'a str,
+    pub donor: Option<&'a Donor>,
+}
+
+pub fn finish_as(
+    home: &Path,
+    dir: &Path,
+    arch: &str,
+    plan: &Plan,
+    broker: &dyn Broker,
+    run: Runner,
+    next: Next,
+) -> Result<(String, Delta), String> {
+    // finish into files named with `suffix` (an update builds the next pack beside the installed one); blocks the donor pack already holds by hash are copied, only the rest is fetched.
+    let Next { suffix, donor } = next;
     let e = &plan.entry;
-    let (pack, psig, pv, pre) = (dir.join(PACK_FILE), dir.join(format!("{PACK_FILE}.sig")), dir.join(PACK_VERIFY), dir.join("pack.prefix"));
+    let (pack, psig, pv, pre) = (
+        dir.join(format!("{PACK_FILE}{suffix}")),
+        dir.join(format!("{PACK_FILE}.sig{suffix}")),
+        dir.join(format!("{PACK_VERIFY}{suffix}")),
+        dir.join(format!("pack.prefix{suffix}")),
+    );
+    let mut delta = Delta::default();
     let undo = |err: String| {
         for p in [&pack, &psig, &pv, &pre] {
             let _ = std::fs::remove_file(p);
@@ -571,7 +665,7 @@ pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Bro
     let ranges: Vec<(u64, u64, String, bool)> = need["ranges"].as_array().into_iter().flatten()
         .filter_map(|r| Some((r["off"].as_u64()?, r["len"].as_u64()?, r["sha256"].as_str()?.to_string(), matches!(r["codec"].as_str(), None | Some("none") | Some("raw")))))
         .collect();
-    if ranges.iter().any(|(o, l, h, _)| o + l > e.size || !is_sha256(h)) {
+    if ranges.iter().any(|(o, l, h, _)| !o.checked_add(*l).is_some_and(|end| end <= e.size) || !is_sha256(h)) {
         return Err(undo("pack need: a range lies outside the pack".into()));
     }
     let sig = serde_json::to_vec(&e.sig).map_err(|err| undo(err.to_string()))?;
@@ -582,9 +676,37 @@ pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Bro
         let mut f = std::fs::File::create(&pack).map_err(|err| undo(format!("{}: {err}", pack.display())))?;
         f.set_len(e.size).map_err(|err| undo(err.to_string()))?;
         f.write_all(&plan.prefix).map_err(|err| undo(err.to_string()))?;
-        for (o, l) in merged(ranges.iter().map(|(o, l, ..)| (*o, *l)).collect()) {
+        let mut missing = Vec::new();
+        for r in &ranges {
+            let held = donor.and_then(|d| d.ranges.iter().find(|(_, l, h)| *l == r.1 && *h == r.2).map(|(from, ..)| (d, *from)));
+            let copied = match held {
+                Some((d, from)) if r.3 => {
+                    let mut bytes = vec![0u8; r.1 as usize];
+                    let read = std::fs::File::open(&d.pack).and_then(|mut old| old.seek(SeekFrom::Start(from)).and_then(|_| std::io::Read::read_exact(&mut old, &mut bytes)));
+                    let good = read.is_ok() && format!("{:x}", Sha256::digest(&bytes)) == r.2;
+                    if good {
+                        f.seek(SeekFrom::Start(r.0)).and_then(|_| f.write_all(&bytes)).map_err(|err| undo(err.to_string()))?;
+                        delta.reused += r.1;
+                    }
+                    good
+                }
+                _ => false,
+            };
+            if !copied {
+                missing.push(r.clone());
+            }
+        }
+        let runs = merged(missing.iter().map(|(o, l, ..)| (*o, *l)).collect());
+        let total: u64 = runs.iter().map(|(_, l)| *l).sum();
+        let started_at = crate::progress::NET_BYTES.load(std::sync::atomic::Ordering::Relaxed);
+        let ticker = (total > 0).then(|| {
+            let counted = move || crate::progress::NET_BYTES.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(started_at);
+            crate::progress::Ticker::start("kernel pack", Some(total), crate::progress::every(), counted, crate::progress::eprint_line)
+        });
+        for (o, l) in runs {
+            delta.fetched += l;
             let bytes = broker.range(&e.file, o, l).map_err(undo)?;
-            for (ro, rl, h, _) in ranges.iter().filter(|(ro, rl, _, stored)| *stored && *ro >= o && ro + rl <= o + l) {
+            for (ro, rl, h, _) in missing.iter().filter(|(ro, rl, _, stored)| *stored && *ro >= o && ro + rl <= o + l) {
                 let part = &bytes[(ro - o) as usize..(ro - o + rl) as usize];
                 if format!("{:x}", Sha256::digest(part)) != *h {
                     return Err(undo(format!("pack download: a block of {} does not hash to its name", e.file)));
@@ -592,6 +714,7 @@ pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Bro
             }
             f.seek(SeekFrom::Start(o)).and_then(|_| f.write_all(&bytes)).map_err(|err| undo(err.to_string()))?;
         }
+        drop(ticker);
         f.sync_all().map_err(|err| undo(err.to_string()))?;
     }
     let mut ok = verify().map_err(undo)?.1;
@@ -607,8 +730,7 @@ pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Bro
     }
     std::fs::write(&pv, ok).map_err(|err| undo(err.to_string()))?;
     let _ = std::fs::remove_file(&pre);
-    std::fs::write(serial_path(home), format!("{}\n", plan.serial)).map_err(|err| undo(err.to_string()))?;
-    Ok(variant)
+    Ok((variant, delta))
 }
 
 pub fn max_ctx(dir: &Path, variant: &str, run: Runner) -> Result<u64, String> {
@@ -732,6 +854,30 @@ mod tests {
     }
 
     #[test]
+    fn a_platform_response_past_the_cap_is_refused() {
+        assert_eq!(read_capped(std::io::repeat(b'x').take(10), 10).unwrap().len(), 10);
+        assert!(read_capped(std::io::repeat(b'x'), 1 << 20).unwrap_err().contains("longer than"));
+    }
+
+    fn py_env_python(home: &Path) {
+        // A real on-disk layout: home/py-env/bin/python, a script that names itself for `-m goethe_engine ...`.
+        use std::os::unix::fs::PermissionsExt;
+        let bin = home.join("py-env/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("python"), "#!/bin/sh\necho \"py-env python: $*\"\n").unwrap();
+        std::fs::set_permissions(bin.join("python"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn a_runner_made_before_the_engine_layer_exists_uses_its_python_once_it_does() {
+        let home = tempfile::tempdir().unwrap();
+        let run = python_runner(home.path());
+        py_env_python(home.path());
+        let (code, out) = run(&["pack".to_string(), "match".to_string()]).unwrap();
+        assert_eq!((code, out.trim()), (0, "py-env python: -m goethe_engine pack match"));
+    }
+
+    #[test]
     fn a_plan_reads_the_manifest_and_names_the_files_of_each_variant() {
         let (home, _) = dirs();
         let b = fake();
@@ -757,6 +903,57 @@ mod tests {
         assert_eq!((arch.as_str(), p.entry.file.as_str(), p.entry.offer.hf_repo.as_str()), ("sm_120a", "m.gcpack", "org/M-GGUF"), "sm_90a has no entry");
         assert!(by_structure(home.path(), dir.path(), &archs, &b, &engine(&b.pack, &[("pack match", 3)])).unwrap().is_none());
         assert!(by_structure(home.path(), dir.path(), &archs, &b, &engine(&b.pack, &[("pack match", 1)])).is_err());
+    }
+
+    struct Spy(Fake);
+
+    impl Broker for Spy {
+        fn index(&self) -> Result<Vec<u8>, String> {
+            self.0.index()
+        }
+        fn index_sig(&self) -> Result<Vec<u8>, String> {
+            self.0.index_sig()
+        }
+        fn range(&self, file: &str, off: u64, len: u64) -> Result<Vec<u8>, String> {
+            if off <= 16 {
+                return self.0.range(file, off, len);
+            }
+            Err(format!("asked for {len} bytes at {off}"))
+        }
+    }
+
+    #[test]
+    fn a_container_header_whose_manifest_range_overflows_is_refused_before_any_request() {
+        let (home, _) = dirs();
+        let header = serde_json::json!({"manifest": [u64::MAX - 100, 200]}).to_string().into_bytes();
+        let mut bytes = b"GCPACK3\n".to_vec();
+        bytes.extend((header.len() as u64).to_le_bytes());
+        bytes.extend(&header);
+        let pack = Pack { manifest: b"{}".to_vec(), blob_off: 0, bytes };
+        let index = index_of(&pack, &sha(&pack.manifest));
+        let b = Spy(Fake { pack, index, tamper: false, refuse: false, ranges: RefCell::new(Vec::new()) });
+        let e = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.0.pack, &[])).unwrap_err();
+        assert!(e.contains("bad manifest range"), "{e}");
+    }
+
+    #[test]
+    fn a_needed_range_that_overflows_is_refused_not_wrapped() {
+        let (home, dir) = dirs();
+        let b = fake();
+        let inner = engine(&b.pack, &[]);
+        let run = move |a: &[String]| {
+            let (c, out) = inner(a)?;
+            if a[0] == "pack" && a[1] == "need" {
+                let mut v: Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+                v["ranges"] = serde_json::json!([{"off": u64::MAX - 5, "len": 10, "sha256": sha(BLOB)}]);
+                return Ok((c, v.to_string()));
+            }
+            Ok((c, out))
+        };
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &run).unwrap().unwrap();
+        let e = finish(home.path(), dir.path(), "sm_120a", &p, &b, &run).unwrap_err();
+        assert!(e.contains("outside the pack"), "{e}");
+        nothing_left(dir.path());
     }
 
     #[test]

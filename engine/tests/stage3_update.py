@@ -62,6 +62,41 @@ def _same_version(goethe: Path, cdn: Path, key: Path, pub: Path, base: str) -> N
             raise RuntimeError(f"another build of the same commit must read {want!r}: {rr.stdout} {rr.stderr}")
 
 
+def _local_newer(goethe: Path, cdn: Path, key: Path, pub: Path, base: str) -> None:
+    """A build ahead of the release keeps its binaries without an error; only a bare --allow-downgrade swaps them."""
+    _binaries(cdn, b"old")
+    (cdn / "wheels").mkdir(exist_ok=True)
+    (cdn / "wheels/LATEST").write_text("sglang-test.whl\n", encoding="utf-8")
+    (cdn / "wheels/sglang-test.whl").write_bytes(b"wheel")
+    sign_cdn_tree(cdn, key, "0.0.1")
+    cases = (([], False), (["--check"], False), (["--engine"], False), (["--engine", "--allow-downgrade"], False))
+    for flags, downgrade in (*cases, (["--allow-downgrade"], True)):
+        with temp_home(stub_python=True, tag="upd4") as home:
+            shutil.copy(pub, home / "release_pub.pem")
+            mine = {name: b"my-newer-" + name.encode() for name in ("goethe", "goethed")}
+            for name, data in mine.items():
+                (home / "bin" / name).write_bytes(data)
+            (home / "pyenv").mkdir(exist_ok=True)
+            (home / "pyenv/LATEST").write_text("sglang-test.whl\n", encoding="utf-8")
+            (home / "pyenv/sglang-test.whl").write_bytes(b"wheel")
+            env = {"GOETHE_HOME": str(home), "GOETHE_PKG_URL": base}
+            rr = run([str(goethe), "update", *flags, "--yes"], env=env, timeout=120)
+            out = rr.stdout + rr.stderr
+            if "--engine" in flags and "SGLang" not in out:
+                raise RuntimeError(f"update {flags}: the engine layers are still looked at: {out}")
+            if downgrade:
+                if rr.returncode != 0 or (home / "bin" / "goethe").read_bytes() != b"goethe-test-bin-old":
+                    raise RuntimeError(f"update {flags}: the bare --allow-downgrade must install the older ones: {out}")
+                continue
+            note = "is newer than the published 0.0.1; keeping it"
+            if rr.returncode != 0 or note not in out or "--allow-downgrade to install" in out:
+                raise RuntimeError(f"update {flags}: a newer build is a note, not an error: {rr.returncode} {out}")
+            if any((home / "bin" / name).read_bytes() != data for name, data in mine.items()):
+                raise RuntimeError(f"update {flags}: the newer binaries were replaced")
+            if (home / "VERSION").exists():
+                raise RuntimeError(f"update {flags}: VERSION was written although the binaries were kept")
+
+
 def main() -> None:
     """update --check, tamper rejection, verified binary swap, bad signature, same version and another build."""
     goethe = require_cli("goethe")
@@ -100,6 +135,7 @@ def main() -> None:
             if run([str(goethe), "update", "--check", "--yes"], env=env2).returncode == 0:
                 raise RuntimeError("bad signature should fail")
         _same_version(goethe, cdn, key, pub, base)
+        _local_newer(goethe, cdn, key, pub, base)
         print("stage3_update ok")
     finally:
         if srv is not None:

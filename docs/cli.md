@@ -189,9 +189,21 @@ Stops a model. Requests in progress finish first.
 | `--all` | Every loaded model |
 | `--force` | Stop right away |
 
+### `goethe run [MODEL] [INPUT]`
+
+Tries a model by hand. With text it prints one reply (a text model), an embedding summary (`dims= norm= [first 4]`) or, for an audio file, its transcript. With no INPUT on a terminal it opens an ephemeral chat screen; with no terminal, or `--plain`, a plain `> ` prompt (a speech model records from the microphone). An installed model that is not loaded is loaded first, like `goethe load`, and unloaded when run ends unless `--keep`; run never installs. It talks to the model's own engine on 127.0.0.1 with its engine key, not through the gateway, and creates no API key.
+
+| Option | Description |
+|---|---|
+| `--keep` | Leave a model loaded that run loaded |
+| `--plain` | No chat screen |
+| `--thinking` | Show the model's reasoning, dimmed, with the answer (hidden by default) |
+
+Chat screen: the model on the top line, the conversation from the top row down (it follows the reply as it streams), your line and the keys at the bottom. Typing: Enter sends, Esc opens the command keys. Commands: `m` pick or load another model (starts a new conversation), `e` export, `r` record (speech models), `i` or Enter back to typing, `q` quit (Enter confirms, `q` goes back; Ctrl-C asks the same). Up and Down or `k` and `j` scroll a line, Page Up and Page Down (or Ctrl-U and Ctrl-D, also while typing) a page, `g` and `G` jump to the top and the end; the screen follows the stream again at the end or on the next send. `/audio PATH` sends an audio file to a speech model; an embedding model shows `dims=` and `norm=` for each line. Nothing is written when you close it. `e` writes `goethe-chat-<UTC time>/` here in the [trace format](traces.md) (`0700` folder, `0600` files; embeddings as `embeddings.json`), with the model's raw text, reasoning included.
+
 ### `goethe ps`
 
-Running models with their GPUs, port, memory, restarts, requests in progress and speed.
+Running models with the runtime serving each (goethe-engine runs a kernel pack; llama.cpp and sglang are the plain runtimes), their GPUs, port, memory, restarts, requests in progress and speed. `goethe models --json` gives installed models the same `runtime`.
 
 | Option | Description |
 |---|---|
@@ -404,14 +416,15 @@ Checks the machine and the setup: GPU and driver, compiler, Python environment, 
 
 ### `goethe update`
 
-Installs the latest Goethe. Loaded models keep serving.
+Installs the latest Goethe. Loaded models keep serving. It then checks the kernel pack of each installed model against the signed index: when the pack changed, only the blocks the installed pack lacks are downloaded, the new pack is verified and swapped in, and the previous one is kept for one rollback. A loaded model keeps its old pack until reloaded. `goethe load` says once a day when a newer pack exists.
 
 | Option | Description |
 |---|---|
 | `--check` | Only show what's available |
 | `--engine` | Also update the inference engine |
 | `--yes` | Don't ask |
-| `--allow-downgrade` | Install the published version even if it's older |
+| `--allow-downgrade` | Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries); not with `--engine` or `--ternary` |
+| `--rollback` | Put the previous kernel pack of every model that has one back |
 
 ### `goethe uninstall`
 

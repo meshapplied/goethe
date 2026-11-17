@@ -288,9 +288,10 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
     let base = chooser_input(req, req.ctx, req.max_conc);
     let pinned = (!req.pinned.is_empty()).then_some(req.pinned.as_slice());
     let tp = req.pinned_tp.or(req.default_tp);
+    let runtime = crate::engine_overhead::card_runtime(&req.card);
     let learned_at =
-        |t: usize, first: u32| crate::engine_overhead::read_learned(con, model_id, &gpu_name(&snap, first), t as u64);
-    let plan = match chooser::plan_with(&base, &netted, req.hw.as_ref(), tp, pinned, &learned_at) {
+        |t: usize, first: u32| crate::engine_overhead::read_learned(con, model_id, &gpu_name(&snap, first), t as u64, &runtime);
+    let mut plan = match chooser::plan_with(&base, &netted, req.hw.as_ref(), tp, pinned, &learned_at) {
         Ok(plan) => plan,
         Err(e) => chooser::plan_with(&base, &raw, req.hw.as_ref(), tp, pinned, &learned_at)
             .map_err(|_| missing_error(e.message, &foreign::foreign_on(&snap, &e.gpus, &managed, &live)))?,
@@ -305,8 +306,13 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
         })
         .collect();
     let gpu_name = gpu_name(&snap, plan.gpus[0]);
+    let fit_ctx = plan.ctx;
+    let min_free = free.values().copied().fold(f64::INFINITY, f64::min);
+    if req.params.ctx.is_none() {
+        plan.ctx = chooser::cap_default_ctx(&chooser_input(req, plan.ctx, plan.max_conc), plan.tp, &plan.cc, min_free);
+    }
     let input = chooser_input(req, plan.ctx, plan.max_conc);
-    let learned = crate::engine_overhead::read_learned(con, model_id, &gpu_name, plan.tp as u64);
+    let learned = crate::engine_overhead::read_learned(con, model_id, &gpu_name, plan.tp as u64, &runtime);
     let need = chooser::with_learned(chooser::need(&input, plan.tp, &plan.cc), learned);
     let found = foreign::foreign_on(&snap, &plan.gpus, &managed, &live);
     let short = plan.gpus.iter().find_map(|g| shortfall(&need, *g, free[g]));
@@ -328,8 +334,8 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
         calc::describe(&need)
     );
     let mut reduced = Vec::new();
-    if plan.ctx < req.ctx {
-        reduced.push(format!("context {} (asked {})", plan.ctx, req.ctx));
+    if fit_ctx < req.ctx {
+        reduced.push(format!("context {fit_ctx} (asked {})", req.ctx));
     }
     if plan.max_conc < req.max_conc {
         reduced.push(format!("{} parallel requests (asked {})", plan.max_conc, req.max_conc));
@@ -350,7 +356,12 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
             notices.push('\n');
         }
     }
-    let min_free = free.values().copied().fold(f64::INFINITY, f64::min);
+    if plan.ctx < fit_ctx {
+        notices.push_str(&format!(
+            "context capped to {} (the KV cache would take over 40% of the {min_free:.1} GB free); --ctx raises it\n",
+            plan.ctx
+        ));
+    }
     let starting = start_engine(req, con, &plan, need, learned, min_free, gpu_name)?;
     Ok(Step::Started(Box::new(starting), notices))
 }
@@ -591,7 +602,7 @@ fn startup(s: &mut Starting) {
             s.learned.static_gb += extra;
             if let Ok(con) = db::open(&s.home) {
                 let (model, learned) = (&s.params.model_id, s.learned.static_gb);
-                let _ = crate::engine_overhead::store_learned(&con, model, &s.gpu_name, s.tp, Kind::Static, learned);
+                let _ = crate::engine_overhead::store_learned(&con, model, &s.gpu_name, s.tp, Kind::Static, learned, &crate::engine_overhead::card_runtime(&s.card));
             }
             if mem_retries < 2 {
                 match refit(s) {
@@ -681,7 +692,7 @@ fn learn_overhead(s: &Starting) {
     };
     if let Ok(con) = db::open(&s.home) {
         let model = &s.params.model_id;
-        let _ = crate::engine_overhead::store_learned(&con, model, &s.gpu_name, s.tp, Kind::Overhead, overhead);
+        let _ = crate::engine_overhead::store_learned(&con, model, &s.gpu_name, s.tp, Kind::Overhead, overhead, &crate::engine_overhead::card_runtime(&s.card));
     }
     append_goethed_log(
         &s.home,
@@ -711,7 +722,7 @@ fn learn_weights(s: &Starting) {
     }
     if let Ok(con) = db::open(&s.home) {
         let learned = s.learned.static_gb + extra;
-        let _ = crate::engine_overhead::store_learned(&con, &s.params.model_id, &s.gpu_name, s.tp, Kind::Static, learned);
+        let _ = crate::engine_overhead::store_learned(&con, &s.params.model_id, &s.gpu_name, s.tp, Kind::Static, learned, &crate::engine_overhead::card_runtime(&s.card));
     }
     append_goethed_log(
         &s.home,
@@ -1187,6 +1198,7 @@ pub fn handle_ps() -> Result<Value, (i32, String)> {
         }
         if let Some(mid) = v.get("model_id").and_then(|x| x.as_str()).map(str::to_string) {
             v["tokens_per_s_1m"] = json!(crate::metrics::model_tokens_per_s_1m(&mid));
+            v["runtime"] = json!(crate::engine_overhead::model_runtime(&home, &mid));
         }
         if let Some(id) = v.get("instance_id").and_then(|x| x.as_str()) {
             let path = home.join("logs").join(format!("{id}.requests.jsonl"));
@@ -1426,7 +1438,7 @@ fn warm_up(s: &Starting) {
     let words = (s.ctx / 3).clamp(256, 3000) as usize;
     let prompt = "the engine compiles its kernels for this prompt length now ".repeat(words / 10);
     let body = serde_json::json!({"model": s.params.model_id, "prompt": prompt, "max_tokens": 8, "temperature": 0});
-    load_slot::push_instance_notice(&s.instance_id, "warming up kernels with one request");
+    load_slot::push_instance_notice(&s.instance_id, &crate::progress::warmup_notice(&s.home, &s.params.model_id));
     let started = Instant::now();
     let agent = ureq::AgentBuilder::new()
         .timeout_read(Duration::from_secs(WARM_UP_SECS))
@@ -1438,7 +1450,10 @@ fn warm_up(s: &Starting) {
         .set("Content-Type", "application/json")
         .send_string(&body.to_string());
     let outcome = match res {
-        Ok(_) => format!("warm-up request took {:.0} s", started.elapsed().as_secs_f64()),
+        Ok(_) => {
+            crate::progress::record_warmup(&s.home, &s.params.model_id, started.elapsed().as_secs());
+            format!("warm-up request took {:.0} s", started.elapsed().as_secs_f64())
+        }
         Err(e) => format!("warm-up request skipped ({e})"),
     };
     append_goethed_log(&s.home, &format!("{}: {outcome}\n", s.instance_id));
@@ -1717,6 +1732,23 @@ fn uuid_simple() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ps_names_the_runtime_the_card_serves_with() {
+        let home = tempfile::tempdir().unwrap();
+        let card = |id: &str, text: &str| {
+            let d = crate::paths::model_dir(home.path(), id);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(crate::install::CARD_FILE), text).unwrap();
+        };
+        card("org/pack", "runtime = \"goethe-engine\"\n");
+        card("org/gguf", "runtime = \"llama.cpp\"\n");
+        card("org/plain", "model_id = \"org/plain\"\n");
+        assert_eq!(crate::engine_overhead::model_runtime(home.path(), "org/pack"), "goethe-engine");
+        assert_eq!(crate::engine_overhead::model_runtime(home.path(), "org/gguf"), "llama.cpp");
+        assert_eq!(crate::engine_overhead::model_runtime(home.path(), "org/plain"), "sglang");
+        assert_eq!(crate::engine_overhead::model_runtime(home.path(), "org/none"), "sglang");
+    }
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::process::{Child, Command};

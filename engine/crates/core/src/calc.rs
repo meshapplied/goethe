@@ -91,9 +91,12 @@ pub fn mem_fraction_from_free(need: &Need, min_free_gb: f64, context_gb: f64) ->
 }
 
 pub fn learned_overhead(used_gb: f64, need: &Need, learned_gb: f64) -> Option<f64> {
-    // New learned overhead when real per-GPU use beats the budget by more than the slack (the excess is non-static).
+    // The learned overhead after a load: raised when real per-GPU use beats the budget by more than the slack (the excess is non-static), lowered when a learned figure overshoots the measurement by more than the slack.
     let over = used_gb - need.total();
-    (over > LEARN_SLACK_GB).then_some(learned_gb + over)
+    if over > LEARN_SLACK_GB {
+        return Some(learned_gb + over);
+    }
+    (learned_gb > 0.0 && -over > LEARN_SLACK_GB).then(|| (learned_gb + over).max(0.0))
 }
 
 #[cfg(test)]
@@ -143,6 +146,15 @@ mod tests {
         assert!((got - 4.3).abs() < 1e-9);
         let again = learned_overhead(42.0, &need(30.0, 5.7, 1.8 + 4.3), 4.3).unwrap_or(4.3);
         assert!((again - 4.3).abs() < 1e-9, "within slack keeps the old value");
+    }
+
+    #[test]
+    fn a_learned_overhead_the_engine_no_longer_needs_is_lowered() {
+        let heavy = need(30.0, 5.7, 1.8 + 4.8);
+        let lowered = learned_overhead(37.6, &heavy, 4.8).unwrap();
+        assert!(lowered < 0.5, "a load that measured near the base budget drops the old figure, got {lowered}");
+        assert_eq!(learned_overhead(42.2, &heavy, 4.8), None, "within the slack of the budget: unchanged");
+        assert_eq!(learned_overhead(30.0, &need(30.0, 5.7, 1.8), 0.0), None, "nothing learned, nothing to lower");
     }
 
     #[test]

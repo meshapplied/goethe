@@ -580,26 +580,28 @@ check_disk() {
   fi
 }
 
+auth_conf() {
+  # A curl config line with the optional private-package bearer token, read through a pipe (-K) so it never shows in the process list.
+  local t="${GOETHE_PKG_TOKEN:-}"
+  [[ -n "${t}" ]] || return 0
+  t="${t//[$'\r\n']/}"
+  t="${t//\\/\\\\}"
+  t="${t//\"/\\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "${t}"
+}
+
 curl_auth() {
   # curl with the optional private-package bearer token.
   local url="$1"
   shift
-  local auth=()
-  if [[ -n "${GOETHE_PKG_TOKEN:-}" ]]; then
-    auth=(-H "Authorization: Bearer ${GOETHE_PKG_TOKEN}")
-  fi
-  curl -fsSL "${auth[@]}" "${url}" "$@"
+  curl -fsSL -K <(auth_conf) "${url}" "$@"
 }
 
 fetch_raw() {
   # Download rel to dest; with a label ($3) on a terminal, show it and curl's progress bar.
   if [[ -n "${3:-}" && "${PROGRESS:-0}" -eq 1 ]]; then
-    local auth=()
-    if [[ -n "${GOETHE_PKG_TOKEN:-}" ]]; then
-      auth=(-H "Authorization: Bearer ${GOETHE_PKG_TOKEN}")
-    fi
     echo "  $3"
-    curl -fL --progress-bar "${auth[@]}" "${CDN}/$1" -o "$2"
+    curl -fL --progress-bar -K <(auth_conf) "${CDN}/$1" -o "$2"
     return
   fi
   curl_auth "${CDN}/$1" -o "$2"
@@ -715,7 +717,7 @@ install_pyenv() {
     done_line "Python environment already set up at ${GOETHE_HOME}/py-env; left as it is"
     return 0
   fi
-  echo "  Setting up the base Python environment (about 30 MB); SGLang installs with the first model that needs it"
+  echo "  Setting up the base Python environment (about 30 MB). The first install of a model then downloads the engine environment: about 5 GB, once (SGLang is about 8 GB more, only for models that need it)"
   GOETHE_ARCH="${ARCH}" UV="${GOETHE_HOME}/bin/uv" bash "${GOETHE_HOME}/pyenv/bootstrap.sh" base
 }
 
@@ -731,11 +733,7 @@ install_ternary() {
     return
   fi
   tar="${GOETHE_HOME}/goethe/ternary-kernels.tar.zst"
-  local auth=()
-  if [[ -n "${GOETHE_PKG_TOKEN:-}" ]]; then
-    auth=(-H "Authorization: Bearer ${GOETHE_PKG_TOKEN}")
-  fi
-  code="$(curl -sSL "${auth[@]}" -w '%{http_code}' -o "${tar}.part" "${CDN}/goethe/ternary-kernels.tar.zst" || echo 000)"
+  code="$(curl -sSL -K <(auth_conf) -w '%{http_code}' -o "${tar}.part" "${CDN}/goethe/ternary-kernels.tar.zst" || echo 000)"
   if [[ "${code}" != "200" ]]; then
     rm -f "${tar}.part"
     echo "warning: ternary pack HTTP ${code}" >&2
@@ -1039,7 +1037,7 @@ summary() {
     echo "Reboot to load the new NVIDIA driver, then check it with goethe doctor"
   fi
   if [[ -n "${LINK_DIR}" && ":${PATH}:" != *":${LINK_DIR}:"* ]]; then
-    echo "Add ${LINK_DIR} to PATH to use goethe"
+    echo "Add ${LINK_DIR} to PATH to use goethe: export PATH=\"${LINK_DIR}:\$PATH\" (put the line in ~/.profile or your shell's rc file to keep it)"
   fi
   if [[ "${GOETHE_HOME}" == "$(default_home)" && "${GOETHE_NO_COMPLETION:-0}" != "1" ]]; then
     "${GOETHE_HOME}/bin/goethe" completion install >/dev/null 2>&1 || true

@@ -81,13 +81,13 @@ goethe api trace alone shows what is recorded and how much space it takes. The f
 #[command(
     name = "goethe",
     disable_version_flag = true,
-    about = "Goethe: serve LLMs on your NVIDIA GPUs behind one OpenAI-compatible gateway",
-    after_help = "Examples:\n\n\t→ goethe up\n\t→ goethe install deepseek-ai/DeepSeek-V4.1-Flash-1017 --load\n\t→ goethe load deepseek-ai/DeepSeek-V4.1-Flash-1017 --gpu gpu0 gpu1 gpu2 gpu3 --ctx 65536\n\t→ goethe api keys --create my-app\n\t→ goethe api\n\t→ goethe down\n\n\
-                  goethe down stops goethed but keeps loaded models for the next goethe up; goethe unload stops a model for good."
+    about = "Goethe: serve LLMs on your NVIDIA GPUs behind one OpenAI-compatible gateway"
 )]
 struct Cli {
     #[arg(short = 'V', long = "version", help = "Print the version, and how to upgrade when a newer one is out (--build-info adds commit and build date).")]
     version: bool,
+    #[arg(short = 'v', long, global = true, help = "Show the output of every underlying process (also GOETHE_VERBOSE=1); it is always kept in <home>/logs.")]
+    verbose: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -148,6 +148,8 @@ enum Commands {
         name: Option<String>,
         #[arg(long, help = "Copy local tree instead of symlinking.")]
         copy: bool,
+        #[arg(long, help = "If the model's kernel pack cannot run here, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also GOETHE_ALLOW_FALLBACK=1.")]
+        fallback: bool,
         #[arg(long = "sglang-arg", allow_hyphen_values = true, help = "Extra SGLang CLI flag.")]
         sglang_arg: Vec<String>,
     },
@@ -217,6 +219,8 @@ enum Commands {
         yes: bool,
         #[arg(long, help = "Start another instance even when the model is already loaded.")]
         replica: bool,
+        #[arg(long, help = "If the model's kernel pack fails to open, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also GOETHE_ALLOW_FALLBACK=1.")]
+        fallback: bool,
         #[arg(long, help = "Return after spawn without waiting for RUNNING.")]
         no_wait: bool,
         #[arg(long, help = "Print the instance as JSON instead of status lines.")]
@@ -235,10 +239,16 @@ enum Commands {
         #[arg(long, help = "Skip connection draining and tear down immediately.")]
         force: bool,
     },
-    #[command(display_order = 5, about = "Try a loaded model by hand: give text (a chat without INPUT, else one reply or an embedding summary) or an audio file (its transcript; a speech model without INPUT records from the microphone).")]
+    #[command(display_order = 5, about = "Try a model by hand: a chat screen on a terminal without INPUT, else one reply, an embedding summary or an audio file's transcript. Loads an installed model that is not loaded and unloads it again.")]
     Run {
         #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", num_args = 0..=2, help = "[MODEL] [INPUT]: MODEL may be left out when one model is loaded.")]
         args: Vec<String>,
+        #[arg(long, help = "Leave a model loaded that this command loaded (it is unloaded when run ends otherwise).")]
+        keep: bool,
+        #[arg(long, help = "No chat screen: the plain prompt, as when input or output is not a terminal.")]
+        plain: bool,
+        #[arg(long, help = "Show the model's reasoning (dimmed) with the answer.")]
+        thinking: bool,
     },
     #[command(display_order = 5, about = "Running models: GPUs, port, memory, requests and speed.")]
     Ps {
@@ -322,8 +332,10 @@ enum Commands {
         ternary: bool,
         #[arg(long, help = "Skip confirmation.")]
         yes: bool,
-        #[arg(long = "allow-downgrade", help = "Install the published version even if it is older.")]
+        #[arg(long = "allow-downgrade", help = "Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries; not with --engine or --ternary).")]
         allow_downgrade: bool,
+        #[arg(long, help = "Put the previous kernel pack of every model that has one back (an update keeps it for one rollback).")]
+        rollback: bool,
     },
     #[command(display_order = 17, about = "Remove Goethe and the models it installed (folders of your own stay).")]
     Uninstall {
@@ -803,6 +815,15 @@ fn print_version() {
     }
 }
 
+fn top_help_footer() -> String {
+    // The examples under `goethe --help` name the model this machine would be recommended, never a fixed id.
+    let id = goethe_core::onboard::suggested(true);
+    format!(
+        "Examples:\n\n\t→ goethe up\n\t→ goethe install {id} --load\n\t→ goethe load {id} --gpu gpu0 gpu1 gpu2 gpu3 --ctx 65536\n\t→ goethe api keys --create my-app\n\t→ goethe api\n\t→ goethe down\n\n\
+         goethe down stops goethed but keeps loaded models for the next goethe up; goethe unload stops a model for good."
+    )
+}
+
 fn main() {
     clap_complete::CompleteEnv::with_factory(Cli::command).bin("goethe").complete();
     let args: Vec<String> = std::env::args().collect();
@@ -821,7 +842,9 @@ fn main() {
         }
         return;
     }
-    let cli = Cli::try_parse().unwrap_or_else(|e| {
+    let top_help = args.len() == 1 || (args.len() == 2 && matches!(args[1].as_str(), "-h" | "--help" | "help"));
+    let command = if top_help { Cli::command().after_help(top_help_footer()) } else { Cli::command() };
+    let cli = command.try_get_matches_from(&args).and_then(|m| <Cli as clap::FromArgMatches>::from_arg_matches(&m)).unwrap_or_else(|e| {
         let stray = e.get(clap::error::ContextKind::InvalidArg).map(|v| v.to_string());
         if let Some(fixed) = stray.and_then(|v| corrected_command(&args, &v)) {
             eprintln!("error: values go after a flag. Did you mean:\n\n{}\n", goethe_core::term::command(&fixed));
@@ -833,6 +856,8 @@ fn main() {
         print_version();
         return;
     }
+    goethe_core::step::set_verbose(cli.verbose);
+    goethe_core::step::begin(&goethe_core::paths::goethe_home(), args.iter().skip(1).find(|a| !a.starts_with('-')).map_or("goethe", String::as_str));
     let result = match route(cli.command) {
         Commands::Hw {
             cmd: HwCommands::Profile { json },
@@ -865,6 +890,7 @@ fn main() {
             hf_token,
             name,
             copy,
+            fallback,
             sglang_arg,
         } => {
             if hf_token {
@@ -902,6 +928,7 @@ fn main() {
                 yes,
                 reset,
                 quant,
+                fallback,
             })
         }
         Commands::Scan(ScanArgs { dir, yes, json }) => goethe_core::scan::run(goethe_core::scan::ScanOpts { yes, json, dir }),
@@ -995,6 +1022,7 @@ fn main() {
             force,
             yes,
             replica,
+            fallback,
             no_wait,
             json,
             extra,
@@ -1008,6 +1036,7 @@ fn main() {
             force,
             yes,
             replica,
+            fallback,
             extra,
             no_wait,
             json,
@@ -1020,7 +1049,7 @@ fn main() {
                 _ => each(models, |id| do_unload(Some(&installed_id(&id, false)), force)),
             }
         }
-        Commands::Run { args } => goethe_core::run::run(&args),
+        Commands::Run { args, keep, plain, thinking } => goethe_core::run::run(&args, goethe_core::run::Opts { keep, plain, thinking }),
         Commands::Ps { json } => do_ps(json),
         Commands::Up { no_boot } => do_up(!no_boot),
         Commands::Status => do_status(),
@@ -1089,13 +1118,24 @@ fn main() {
             ternary,
             yes,
             allow_downgrade,
-        } => goethe_core::update::run(goethe_core::update::UpdateOpts {
-            check_only: check,
-            engine,
-            ternary,
-            yes,
-            allow_downgrade,
-        }),
+            rollback,
+        } => match rollback {
+            true => goethe_core::pack_update::run_rollback(),
+            false => {
+                let update = goethe_core::update::run(goethe_core::update::UpdateOpts {
+                    check_only: check,
+                    engine,
+                    ternary,
+                    yes,
+                    allow_downgrade,
+                });
+                match (update, goethe_core::pack_update::run_all(check)) {
+                    (Err(a), Err(b)) => Err(format!("{a}; {b}")),
+                    (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+                    (Ok(()), Ok(())) => Ok(()),
+                }
+            }
+        },
         Commands::Uninstall {
             keep_models,
             purge_models: _,
@@ -1164,6 +1204,7 @@ struct DoLoadArgs {
     force: bool,
     yes: bool,
     replica: bool,
+    fallback: bool,
     extra: Vec<String>,
     no_wait: bool,
     json: bool,
@@ -1205,6 +1246,7 @@ fn do_load(args: DoLoadArgs) -> Result<(), String> {
         "force": args.force,
         "yes": args.yes,
         "replica": args.replica,
+        "fallback": args.fallback,
         "extra_sglang_args": extra,
         "async_finish": true,
     });
@@ -1619,11 +1661,12 @@ fn print_ps_table(rows: &[Value]) {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
     let mut table = goethe_core::term::Table::new(&[
-        "INSTANCE", "MODEL", "SLOT", "STATUS", "GPUS", "PORT", "VRAM_GB", "RESTARTS", "IN_FLIGHT", "TOK_PER_S", "PREFIX",
+        "INSTANCE", "MODEL", "RUNTIME", "SLOT", "STATUS", "GPUS", "PORT", "VRAM_GB", "RESTARTS", "IN_FLIGHT", "TOK_PER_S", "PREFIX",
     ]);
     for row in rows {
         let inst = row.get("instance_id").and_then(|v| v.as_str()).unwrap_or("");
         let model = row.get("model_id").and_then(|v| v.as_str()).unwrap_or("");
+        let runtime = row.get("runtime").and_then(|v| v.as_str()).unwrap_or("-");
         let slot = row.get("slot_key").and_then(|v| v.as_str()).unwrap_or("");
         let status = ps_status(row, now);
         let gpus = ps_gpus_csv(row);
@@ -1648,6 +1691,7 @@ fn print_ps_table(rows: &[Value]) {
         table.row(vec![
             inst.to_string(),
             model.to_string(),
+            runtime.to_string(),
             slot.to_string(),
             goethe_core::term::status(&status),
             gpus,
@@ -1685,7 +1729,6 @@ fn do_ps(json: bool) -> Result<(), String> {
         if let Ok(Value::Array(rows)) = serde_json::from_str(reply.stdout.trim()) {
             print_ps_table(&rows);
         }
-        print_gateway_line();
     }
     Ok(())
 }
@@ -1928,18 +1971,18 @@ fn left(secs: i64) -> String {
 
 fn print_platform_lines(home: &std::path::Path, running: bool) {
     // The platform link and the last heartbeat, after the rest of goethe status.
-    println!("\n{}", goethe_core::platform_cli::status_lines(home, running).join("\n"));
+    println!("{}", goethe_core::platform_cli::status_lines(home, running).join("\n"));
 }
 
 fn status_text(api: Option<&str>, keys: &[(String, String)]) -> String {
-    // goethe up and goethe status: the state word in color, then the API, its keys and where to read more.
-    use goethe_core::term::{commands, paint, Color, Table};
+    // goethe up and goethe status: the state word in color, the API, and its keys or how to create one.
+    use goethe_core::term::{paint, Color, Table};
     let Some(api) = api else {
-        return format!("goethe: {}\n\n{}", paint("not running", Color::Red), commands("Start it with:", &["goethe up"]));
+        return format!("goethe: {} (goethe up starts it)\n", paint("not running", Color::Red));
     };
-    let mut out = format!("goethe: {}\n\nAPI: {api}\n\n", paint("running", Color::Green));
+    let mut out = format!("goethe: {}\nAPI: {api}\n", paint("running", Color::Green));
     if keys.is_empty() {
-        out.push_str(&create_first_key());
+        out.push_str("keys: none, create one with: goethe api keys --create my-app\n");
     } else {
         let mut table = Table::new(&["API KEY NAME", "KEY ID"]);
         for (name, id) in keys {
@@ -1947,8 +1990,6 @@ fn status_text(api: Option<&str>, keys: &[(String, String)]) -> String {
         }
         out.push_str(&table.render());
     }
-    out.push('\n');
-    out.push_str(&commands("For more details run:", &["goethe api"]));
     out
 }
 
@@ -2018,13 +2059,6 @@ fn curl_example(api: &str) -> String {
          -d '{{\"model\": \"<model_name>\", \"messages\": [{{\"role\": \"user\", \"content\": \"Hello!\"}}]}}'",
         cert_path()
     )
-}
-
-fn print_gateway_line() {
-    // On stderr, so stdout stays the data rows.
-    if let Some(line) = nginx::format_gateway_line(&goethe_home()) {
-        eprintln!("{line}");
-    }
 }
 
 fn do_registry_entry(
@@ -2117,10 +2151,10 @@ mod tests {
     fn status_says_running_with_the_api_and_keys_or_how_to_start() {
         let stopped = status_text(None, &[]);
         assert!(stopped.starts_with("goethe: ") && stopped.contains("not running"), "{stopped}");
-        assert!(stopped.ends_with("Start it with:\n\n\t→ goethe up\n"), "{stopped}");
+        assert!(stopped.ends_with("(goethe up starts it)\n"), "{stopped}");
         let fresh = status_text(Some("https://10.0.0.2:8443/v1"), &[]);
-        assert!(fresh.contains("running\n\nAPI: https://10.0.0.2:8443/v1\n\nCreate your first API key:\n\n\t→ goethe api manage\n\t→ goethe api keys --create my-app\n"), "{fresh}");
-        assert!(fresh.ends_with("\nFor more details run:\n\n\t→ goethe api\n"), "{fresh}");
+        assert!(fresh.contains("running\nAPI: https://10.0.0.2:8443/v1\nkeys: none, create one with: goethe api keys --create my-app\n"), "{fresh}");
+        assert_eq!(fresh.lines().count(), 3, "{fresh}");
         let keyed = status_text(Some("https://h/v1"), &[("ops".into(), "a1b2c3d4e5f6".into())]);
         assert!(keyed.contains("ops") && keyed.contains("a1b2c3d4e5f6") && !keyed.contains("Create your first"), "{keyed}");
     }

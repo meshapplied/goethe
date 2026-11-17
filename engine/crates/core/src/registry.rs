@@ -173,7 +173,7 @@ fn finish_registry(url: &str, body: String, sig: Option<&[u8]>) -> Result<Regist
     }
 }
 
-fn registry_pubkey() -> Result<PathBuf, String> {
+fn registry_pubkey(scratch: &Path) -> Result<PathBuf, String> {
     if let Some(p) = std::env::var_os("GOETHE_RELEASE_PUB") {
         return Ok(PathBuf::from(p));
     }
@@ -181,33 +181,36 @@ fn registry_pubkey() -> Result<PathBuf, String> {
     if installed.is_file() {
         return Ok(installed);
     }
-    let tmp = std::env::temp_dir().join("goethe-release_pub.pem");
-    if !tmp.is_file() {
-        std::fs::write(&tmp, include_str!("../../../packaging/release_pub.pem")).map_err(|e| e.to_string())?;
-    }
-    Ok(tmp)
+    let embedded = scratch.join("release_pub.pem");
+    std::fs::write(&embedded, include_str!("../../../packaging/release_pub.pem")).map_err(|e| e.to_string())?;
+    Ok(embedded)
 }
 
 fn verify_registry(body: &[u8], sig: &[u8]) -> Result<(), String> {
+    verify_registry_in(&std::env::temp_dir(), body, sig)
+}
+
+fn verify_registry_in(tmp: &Path, body: &[u8], sig: &[u8]) -> Result<(), String> {
     // Same openssl check as the package SHA256SUMS. A bad signature never becomes engine flags.
-    let dir = std::env::temp_dir().join(format!("goethe-reg-{}-{}", std::process::id(), body.len()));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let data = dir.join("body");
-    let sigp = dir.join("body.sig");
-    std::fs::write(&data, body).map_err(|e| e.to_string())?;
-    std::fs::write(&sigp, sig).map_err(|e| e.to_string())?;
-    let status = std::process::Command::new("openssl")
-        .args(["dgst", "-sha256", "-verify"])
-        .arg(registry_pubkey()?)
-        .arg("-signature")
-        .arg(&sigp)
-        .arg(&data)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| format!("openssl verify: {e}"))?;
+    let dir = crate::paths::private_dir_in(tmp, "goethe-reg")?;
+    let status = (|| {
+        let data = dir.join("body");
+        let sigp = dir.join("body.sig");
+        std::fs::write(&data, body).map_err(|e| e.to_string())?;
+        std::fs::write(&sigp, sig).map_err(|e| e.to_string())?;
+        std::process::Command::new("openssl")
+            .args(["dgst", "-sha256", "-verify"])
+            .arg(registry_pubkey(&dir)?)
+            .arg("-signature")
+            .arg(&sigp)
+            .arg(&data)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| format!("openssl verify: {e}"))
+    })();
     let _ = std::fs::remove_dir_all(&dir);
-    if status.success() {
+    if status?.success() {
         Ok(())
     } else {
         Err("registry signature verification failed".into())
@@ -902,6 +905,18 @@ mod validate_tests {
             Some(v) => std::env::set_var("GOETHE_RELEASE_PUB", v),
             None => std::env::remove_var("GOETHE_RELEASE_PUB"),
         }
+    }
+
+    #[test]
+    fn a_planted_link_under_the_old_predictable_temp_name_is_never_written_through() {
+        let (tmp, victim) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (file, body) = (victim.path().join("important.txt"), b"registry body");
+        std::fs::write(&file, "mine").unwrap();
+        let planted = tmp.path().join(format!("goethe-reg-{}-{}", std::process::id(), body.len()));
+        std::fs::create_dir(&planted).unwrap();
+        std::os::unix::fs::symlink(&file, planted.join("body")).unwrap();
+        let _ = verify_registry_in(tmp.path(), body, b"sig");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "mine");
     }
 
     #[test]

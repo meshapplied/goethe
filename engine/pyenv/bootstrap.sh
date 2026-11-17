@@ -39,7 +39,7 @@ lock_of() {
 }
 
 install_lock() {
-  "${UV}" pip install --python "${VENV}/bin/python" --require-hashes -r "$1"
+  "${UV}" pip install --quiet --python "${VENV}/bin/python" --require-hashes -r "$1"
 }
 
 install_base() {
@@ -84,16 +84,16 @@ install_engine() {
   ENGINE_REQ="$(mktemp)"
   trap 'rm -f "${ENGINE_REQ}"' EXIT
   echo "goethe-engine @ ${ENGINE_URL} --hash=sha256:${ENGINE_SHA}" >"${ENGINE_REQ}"
-  "${UV}" pip install --python "${VENV}/bin/python" --require-hashes --no-deps -r "${ENGINE_REQ}"
+  "${UV}" pip install --quiet --python "${VENV}/bin/python" --require-hashes --no-deps -r "${ENGINE_REQ}"
 }
 
 install_sglang() {
   # The full lock, then Goethe's SGLang build: the verified wheel, else the fork checkout as an editable install.
   install_lock "$(lock_of "")"
   if [[ -n "${GOETHE_SGLANG_WHEEL:-}" ]]; then
-    "${UV}" pip install --python "${VENV}/bin/python" --no-deps "${GOETHE_SGLANG_WHEEL}"
+    "${UV}" pip install --quiet --python "${VENV}/bin/python" --no-deps "${GOETHE_SGLANG_WHEEL}"
   else
-    SGLANG_BUILD_RUST_EXTS=none "${UV}" pip install --python "${VENV}/bin/python" --no-deps -e "${FORK_ROOT}/python"
+    SGLANG_BUILD_RUST_EXTS=none "${UV}" pip install --quiet --python "${VENV}/bin/python" --no-deps -e "${FORK_ROOT}/python"
   fi
 }
 

@@ -94,13 +94,15 @@ Goethe ships its own CUDA 13 runtime and compiler, so no CUDA toolkit is needed 
 
 GeForce and TITAN cards need driver 580 or newer. Enough GPU memory for the model is the only other requirement; `goethe models recommend` lists the models that fit.
 
+The llama.cpp build goethe downloads for GGUF models uses CUDA 12.8 libraries; NVIDIA lists the minimum driver of each CUDA release in its [CUDA compatibility table](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html). Drivers older than the 580 line above are unverified with goethe.
+
 Supported [model families and quantization formats](docs/user-guide.md#supported-models) are in the user guide. GGUF models (single GPU) and GGUF embedding models are served through llama.cpp.
 
 ## Known limits
 
 - Gated models need the license accepted on Hugging Face and a read token (install with `--hf-token`). This includes `orcarouter/Qwen3.8-Flash-Next-Uncensored-NVFP4`.
 - Optimised kernel packs (the 27B NVFP4 model, the ternary models and others) need `goethe login` on the node. A model that has only a pack and none for your GPU is refused before anything is downloaded.
-- If a pack fails to open for any reason, Goethe says why and serves the model with the plain runtime when it has one.
+- If a model's kernel pack cannot run on your GPU, install or load stops with the reason. Add `--fallback` (or set `GOETHE_ALLOW_FALLBACK=1`) to serve it with the plain runtime instead.
 
 ## Documentation
 

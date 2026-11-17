@@ -43,19 +43,13 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     let remote_ver = fs::read_to_string(&version_file).map_err(|e| e.to_string())?.trim().to_string();
     let local_ver = local_version();
     let order = compare_versions(&remote_ver, &local_ver);
-    if order == Ordering::Less && !opts.allow_downgrade {
-        if opts.check_only {
-            println!("goethe {local_ver} is newer than the published {remote_ver}");
-            return Ok(());
-        }
-        return Err(format!(
-            "published version {remote_ver} is older than goethe {local_ver}; re-run with --allow-downgrade to install it"
-        ));
-    }
     let arch = normalize_arch();
+    let (bins, kept) = binaries_due(order, opts, &local_ver, &remote_ver, || binaries_differ(home, &sums, &arch))?;
+    if let Some(note) = &kept {
+        println!("{note}");
+    }
     let (sglang, engine) = if opts.engine { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
     let ternary = if opts.ternary { ternary_delta(home, &sums) } else { None };
-    let bins = order != Ordering::Equal || binaries_differ(home, &sums, &arch)?;
     let local_commit = option_env!("GOETHE_GIT_COMMIT").unwrap_or("unknown");
     let remote_commit = fetch_verified(pkg, &sums, "BUILDINFO", tmp)
         .ok()
@@ -64,7 +58,7 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     let published = published_label(&remote_ver, remote_commit.as_deref(), local_commit, bins && order == Ordering::Equal);
     let installed = if bins { build_label(&local_ver, Some(local_commit)) } else { published.clone() };
     let parts = [
-        ("goethe", Some(Delta::of(&installed, &published, bins))),
+        ("goethe", kept.is_none().then(|| Delta::of(&installed, &published, bins))),
         ("SGLang", sglang),
         ("goethe-engine", engine),
         ("ternary pack", ternary),
@@ -76,7 +70,9 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     if opts.check_only || pending.iter().all(|(_, d)| !d.differs) {
         return Ok(());
     }
-    crate::host::confirm(&format!("Update goethe {installed} -> {published}?"), opts.yes)?;
+    let what = pending.iter().filter(|(_, d)| d.differs).map(|(w, _)| *w).collect::<Vec<_>>().join(", ");
+    let question = if bins { format!("Update goethe {installed} -> {published}?") } else { format!("Update {what}?") };
+    crate::host::confirm(&question, opts.yes)?;
     let mut staged = Vec::new();
     for bin in ["goethe", "goethed"].into_iter().filter(|_| bins) {
         let rel = format!("bin/linux-{arch}/{bin}");
@@ -115,12 +111,24 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
         let sha = lookup_sum(&sums, TERNARY_REL)?;
         fs::write(home.join(TERNARY_RECORD), format!("{sha}\n")).map_err(|e| e.to_string())?;
     }
-    fs::copy(&version_file, home.join("VERSION")).map_err(|e| e.to_string())?;
+    if bins {
+        fs::copy(&version_file, home.join("VERSION")).map_err(|e| e.to_string())?;
+    }
     if was_running && bins {
         restart_goethed(home)?;
     }
-    println!("updated to goethe {published}");
+    println!("{}", if bins { format!("updated to goethe {published}") } else { format!("updated {what}") });
     Ok(())
+}
+
+fn binaries_due(order: Ordering, opts: &UpdateOpts, local: &str, remote: &str, differ: impl FnOnce() -> Result<bool, String>) -> Result<(bool, Option<String>), String> {
+    // Whether goethe and goethed are replaced, and the note when they are kept. The version guard is theirs alone: a published goethe older than this build is kept, and only --allow-downgrade without a component flag installs it; --engine, --ternary and the pack refresh go on whatever the binaries do.
+    match order {
+        Ordering::Equal => Ok((differ()?, None)),
+        Ordering::Greater => Ok((true, None)),
+        Ordering::Less if opts.allow_downgrade && !opts.engine && !opts.ternary => Ok((true, None)),
+        Ordering::Less => Ok((false, Some(format!("goethe {local} is newer than the published {remote}; keeping it")))),
+    }
 }
 
 fn binaries_differ(home: &Path, sums: &Path, arch: &str) -> Result<bool, String> {
@@ -298,20 +306,33 @@ pub(crate) fn normalize_arch() -> String {
     }
 }
 
+const MAX_PKG_FILE: u64 = 32 << 30;
+const MAX_PKG_TEXT: u64 = 16 << 20;
+
 fn fetch_pkg_file(base: &str, rel: &str, dest: &Path) -> Result<(), String> {
-    // GET one CDN file, with GOETHE_PKG_TOKEN as a bearer token when set.
+    // Package lists, versions and lock files are small text; only binaries, wheels and archives may be large.
+    let text = matches!(rel, "SHA256SUMS" | "SHA256SUMS.sig" | "VERSION" | "BUILDINFO" | "wheels/LATEST") || rel.ends_with(".lock") || rel.ends_with(".sh");
+    fetch_pkg_file_max(base, rel, dest, if text { MAX_PKG_TEXT } else { MAX_PKG_FILE }, Duration::from_secs(60))
+}
+
+fn fetch_pkg_file_max(base: &str, rel: &str, dest: &Path, max: u64, idle: Duration) -> Result<(), String> {
+    // GET one CDN file into dest, streamed (never held in memory) and refused past `max` bytes; it fails when the host goes quiet for `idle`, never for being slow. GOETHE_PKG_TOKEN goes as a bearer token when set.
     let url = format!("{base}/{rel}");
-    let mut req = crate::net::agent().get(&url).timeout(std::time::Duration::from_secs(60));
+    let mut req = crate::net::agent_builder().timeout_read(idle).build().get(&url);
     if let Some(tok) = crate::paths::setting("GOETHE_PKG_TOKEN") {
         req = req.set("Authorization", &format!("Bearer {}", tok.trim()));
     }
     let resp = req.call().map_err(|e| format!("fetch {rel}: {e}"))?;
-    let mut buf = Vec::new();
-    resp.into_reader().read_to_end(&mut buf).map_err(|e| e.to_string())?;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    fs::write(dest, buf).map_err(|e| e.to_string())
+    let mut f = fs::File::create(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    let got = std::io::copy(&mut resp.into_reader().take(max + 1), &mut f).map_err(|e| format!("fetch {rel}: {e}"))?;
+    if got > max {
+        let _ = fs::remove_file(dest);
+        return Err(format!("fetch {rel}: the response is longer than {max} bytes; refused"));
+    }
+    Ok(())
 }
 
 const PROPAGATING: &str = "a new release may still be propagating through the package host's cache (up to 10 minutes): run goethe update again in a few minutes, nothing was changed";
@@ -500,6 +521,71 @@ fn upgrade_summary(before: usize, kept: usize, running: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_response_past_the_cap_is_refused_and_not_kept() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut s = stream.unwrap();
+                let _ = s.read(&mut [0u8; 2048]);
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3000000\r\nConnection: close\r\n\r\n");
+                let _ = s.write_all(&vec![b'A'; 3_000_000]);
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("f");
+        let err = fetch_pkg_file_max(&url, "f", &dest, 1 << 20, Duration::from_secs(5)).unwrap_err();
+        assert!(err.contains("longer than"), "{err}");
+        assert!(!dest.exists());
+        fetch_pkg_file_max(&url, "f", &dest, 4 << 20, Duration::from_secs(5)).unwrap();
+        assert_eq!(fs::metadata(&dest).unwrap().len(), 3_000_000);
+    }
+
+    #[test]
+    fn a_slow_download_that_keeps_arriving_is_not_cut_off_but_a_silent_host_is() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for (i, stream) in listener.incoming().take(2).enumerate() {
+                let mut s = stream.unwrap();
+                let _ = s.read(&mut [0u8; 2048]);
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 40\r\nConnection: close\r\n\r\n");
+                for _ in 0..4 {
+                    let _ = s.write_all(&[b'A'; 10]);
+                    let _ = s.flush();
+                    std::thread::sleep(Duration::from_millis(if i == 0 { 600 } else { 3000 }));
+                }
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("f");
+        fetch_pkg_file_max(&url, "f", &dest, 1 << 20, Duration::from_secs(1)).unwrap();
+        assert_eq!(fs::metadata(&dest).unwrap().len(), 40, "1.8 s in total with a 1 s idle limit");
+        assert!(fetch_pkg_file_max(&url, "f", &dest, 1 << 20, Duration::from_secs(1)).is_err(), "3 s of silence");
+    }
+
+    fn opts(engine: bool, ternary: bool, allow_downgrade: bool) -> UpdateOpts {
+        UpdateOpts { check_only: false, engine, ternary, yes: true, allow_downgrade }
+    }
+
+    #[test]
+    fn a_build_ahead_of_the_published_release_keeps_its_binaries_and_still_updates_what_was_asked() {
+        let due = |o: &UpdateOpts, order| binaries_due(order, o, "0.3.3", "0.3.2", || panic!("only an equal version compares the binaries")).map(|(bins, note)| (bins, note.is_some()));
+        assert_eq!(due(&opts(false, false, false), Ordering::Less), Ok((false, true)), "no flags: the note, nothing replaced, no error");
+        assert_eq!(due(&opts(true, false, false), Ordering::Less), Ok((false, true)), "--engine: the binaries stay, the engine layer is still looked at");
+        assert_eq!(due(&opts(false, true, false), Ordering::Less), Ok((false, true)), "--ternary likewise");
+        assert_eq!(due(&opts(true, false, true), Ordering::Less), Ok((false, true)), "--allow-downgrade never turns --engine into a binary downgrade");
+        assert_eq!(due(&opts(false, false, true), Ordering::Less), Ok((true, false)), "--allow-downgrade alone installs the older published binaries");
+        assert_eq!(due(&opts(true, false, false), Ordering::Greater), Ok((true, false)), "an older build still updates");
+        let note = binaries_due(Ordering::Less, &opts(false, false, false), "0.3.3", "0.3.2", || Ok(false)).unwrap().1.unwrap();
+        assert_eq!(note, "goethe 0.3.3 is newer than the published 0.3.2; keeping it");
+        assert_eq!(binaries_due(Ordering::Equal, &opts(true, false, false), "0.3.3", "0.3.3", || Ok(true)), Ok((true, None)), "another build at the same version");
+        assert_eq!(binaries_due(Ordering::Equal, &opts(false, false, false), "0.3.3", "0.3.3", || Ok(false)), Ok((false, None)));
+    }
 
     #[test]
     fn sha256_lookup_and_file() {

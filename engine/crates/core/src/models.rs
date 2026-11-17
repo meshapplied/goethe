@@ -27,6 +27,8 @@ struct ModelRow {
     custom: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     optimised: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<String>,
     #[serde(skip)]
     verdict: Verdict,
 }
@@ -91,24 +93,27 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 fit,
                 custom: is_custom_model(&m.id, reg.as_ref()).then_some(true),
                 optimised: (m.runtime == "goethe-engine").then_some(true),
+                runtime: Some(m.runtime.clone()),
                 verdict,
             });
         }
     }
     if let (false, Some(r)) = (installed_only, &reg) {
-        for m in r.models.iter().filter(|m| m.manual_download_reason().is_none()) {
+        for m in r.models.iter().filter(|m| !m.manual_download.unwrap_or(false)) {
             if installed.iter().any(|i| i.id == m.id) {
                 continue;
             }
             let pinned = m.default_tp.filter(|t| *t > 0).map(|t| t as usize);
             let verdict = verdict(view.as_ref(), &m.id, &registry_input(m), pinned);
+            let gated = if m.gated.unwrap_or(false) { GATED_FIT } else { "" };
             rows.push(ModelRow {
                 id: m.id.clone(),
                 status: "available".to_string(),
                 gb: m.download_gb.unwrap_or(m.static_vram_gb),
-                fit: verdict.label(),
+                fit: format!("{}{gated}", verdict.label()),
                 custom: None,
                 optimised: packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id)).then_some(true),
+                runtime: None,
                 verdict,
             });
         }
@@ -122,6 +127,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                     fit: Verdict::Fits { per_gpu: row.vram_per_gpu_gb, total: row.vram_per_gpu_gb * row.tp as f64 }.label(),
                     custom: None,
                     optimised: None,
+                    runtime: None,
                     verdict: Verdict::Fits { per_gpu: row.vram_per_gpu_gb, total: row.vram_per_gpu_gb * row.tp as f64 },
                 });
             }
@@ -145,6 +151,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool) -> Resul
                 fit: format!("kernel pack for {}", o.arch),
                 custom: None,
                 optimised: Some(true),
+                runtime: None,
                 verdict: Verdict::Unknown,
             });
         }
@@ -235,6 +242,7 @@ fn verdict(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<u
 }
 
 const OPTIMISED: &str = " (optimised kernels available)";
+const GATED_FIT: &str = " (gated: needs your Hugging Face token or access)";
 
 fn packs_text(offers: &[(&crate::packs::Offer, Option<f64>)], linked: bool) -> String {
     // Models that run on goethe-engine with optimised kernels on this machine's GPUs, and how to get them.
@@ -288,6 +296,9 @@ fn list_text(rows: &[ModelRow], free_gb: Option<String>) -> String {
         if !table.is_empty() {
             out.push_str(&format!("{}\n{}\n", paint(title, Color::Bold), table.render()));
         }
+    }
+    if rows.iter().any(|r| r.fit.contains(GATED_FIT)) {
+        out.push_str(&format!("\ngated models: {}\n", crate::hf::GATED_WAYS));
     }
     out.trim_end().to_string() + "\n"
 }
@@ -531,7 +542,7 @@ fn removal_plan(home: &Path, con: &Connection, model_id: &str, local_path: &str,
         }
         if c == primary && !managed {
             plan.source = Some(source_of(&primary).unwrap_or_else(|| primary.display().to_string()));
-            if !is_link_or_farm(&primary) {
+            if !is_link_or_farm(&primary) && !install::is_goethe_local_install(&primary) {
                 plan.keep.push((c, "it holds files, not links; delete it yourself".to_string()));
                 continue;
             }
@@ -735,6 +746,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_gated_catalog_model_is_marked_and_explained() {
+        let row = |id: &str, fit: String| ModelRow { id: id.into(), status: "available".into(), gb: 5.0, fit, custom: None, optimised: None, runtime: None, verdict: Verdict::Fits { per_gpu: 5.0, total: 5.0 } };
+        let text = list_text(&[row("org/open", "fits: 5.0 GB per GPU".into()), row("org/closed", format!("fits: 5.0 GB per GPU{GATED_FIT}"))], None);
+        assert!(text.contains("org/closed") && text.contains("gated: needs your Hugging Face token or access"), "{text}");
+        assert!(text.contains(&format!("gated models: {}", crate::hf::GATED_WAYS)), "{text}");
+        let plain = list_text(&[row("org/open", "fits: 5.0 GB per GPU".into())], None);
+        assert!(!plain.contains("gated"), "{plain}");
+    }
+
+    #[test]
+    fn an_installed_row_names_its_runtime_in_json() {
+        let row = ModelRow { id: "org/m".into(), status: "installed".into(), gb: 1.0, fit: "fits".into(), custom: None, optimised: Some(true), runtime: Some("goethe-engine".into()), verdict: Verdict::Unknown };
+        let v = serde_json::to_value(&row).unwrap();
+        assert_eq!((v["runtime"].as_str(), v["optimised"].as_bool()), (Some("goethe-engine"), Some(true)));
+        let avail = ModelRow { runtime: None, ..row };
+        assert!(serde_json::to_value(&avail).unwrap().get("runtime").is_none(), "a catalog row has no runtime yet");
+    }
+
+    #[test]
     fn typed_ids_resolve_by_case_and_folder_or_suggest_the_nearest() {
         let rows = vec![("Qwen/Qwen3-0.6B".to_string(), "models/Qwen__Qwen3-0.6B".to_string())];
         assert_eq!(match_installed("Qwen/Qwen3-0.6B", &rows), Ok("Qwen/Qwen3-0.6B".to_string()));
@@ -824,6 +854,25 @@ mod tests {
         assert!(src.path().join("config.json").is_file());
         assert!(removal_plan(h, &con, "x", "models/..", true).is_err());
         assert!(removal_plan(h, &con, "x", "models", true).is_err());
+        let copied = h.join("models/local__c");
+        let src2 = tempfile::tempdir().unwrap();
+        fs::write(src2.path().join("config.json"), "{}").unwrap();
+        fs::write(src2.path().join("w.gguf"), b"weights").unwrap();
+        install::build_farm(src2.path(), &copied).unwrap();
+        fs::write(copied.join("pack.gcpack"), b"copied pack").unwrap();
+        fs::write(copied.join(install::CARD_FILE), format!("model_id = \"local/c\"\nsource_dir = \"{}\"\n", src2.path().display())).unwrap();
+        insert(&con, "local/c", "models/local__c", 0);
+        let plan = removal_plan(h, &con, "local/c", "models/local__c", false).unwrap();
+        assert_eq!((plan.delete.len(), plan.keep.len()), (1, 0), "links plus the pack goethe copied: all goethe's");
+        remove_owned(h, &plan.delete[0]).unwrap();
+        assert!(!copied.exists(), "the managed dir goes entirely");
+        assert!(src2.path().join("w.gguf").is_file() && src2.path().join("config.json").is_file(), "the user's folder behind the links stays");
+        let own = h.join("models/org__own");
+        fs::create_dir_all(&own).unwrap();
+        fs::write(own.join("w.safetensors"), b"mine").unwrap();
+        insert(&con, "org/own", "models/org__own", 0);
+        let plan = removal_plan(h, &con, "org/own", "models/org__own", false).unwrap();
+        assert_eq!((plan.delete.len(), plan.keep.len()), (0, 1), "a folder with the user's own files and no source_dir is kept");
     }
 
     #[test]

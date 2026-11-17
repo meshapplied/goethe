@@ -117,8 +117,9 @@ def main() -> None:
         if huggingface_reachable(3.0):
             target = home / "models" / "meta-llama__Llama-3.2-1B"
             want = (
-                f"{GATED} is gated or private on Hugging Face, so it needs your Hugging Face token. After accepting "
-                f"its license on huggingface.co, run: goethe install --model {GATED} --hf-token"
+                f"{GATED} is gated or private on Hugging Face: accept the license, "
+                f"then goethe install {GATED} --hf-token, "
+                f"or goethe install DIR --name {GATED} for weights you already have"
             )
             rr = run([str(goethe), "install", "--model", GATED, "--no-load"], env=env, timeout=120)
             if rr.returncode != 1 or want not in rr.stderr:

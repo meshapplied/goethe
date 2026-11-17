@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
@@ -88,10 +90,19 @@ pub fn preflight_model(model_id: &str, revision: Option<&str>) -> Result<ModelPr
     preflight_model_opts(model_id, revision, false)
 }
 
+pub const GATED_WAYS: &str = "accept the license, then goethe install ID --hf-token, or goethe install DIR --name ID for weights you already have";
+
 pub fn gated_guidance(model_id: &str) -> String {
-    format!(
-        "{model_id} is gated or private on Hugging Face, so it needs your Hugging Face token. After accepting its license on huggingface.co, run: goethe install {model_id} --hf-token"
-    )
+    format!("{model_id} {}: {}", crate::messages::GATED, GATED_WAYS.replace("ID", model_id))
+}
+
+fn status_refusal(model_id: &str, status: u16, has_token: bool) -> Option<String> {
+    // An unauthenticated 401, 403 or 404 means no such repo or a private one (a gated repo answers 200 with its gated flag); with a token, no access.
+    match (status, has_token) {
+        (401 | 403 | 404, true) => Some(format!("{model_id}: not found, or this Hugging Face token has no access (accept the license at {}/{model_id})", hf_endpoint())),
+        (401 | 403 | 404, false) => Some(format!("{model_id}: {} (check the id; add --hf-token for a private model)", crate::messages::NOT_FOUND)),
+        _ => None,
+    }
 }
 
 pub fn preflight_model_opts(model_id: &str, revision: Option<&str>, allow_gated: bool) -> Result<ModelPreflight, String> {
@@ -110,17 +121,10 @@ pub fn preflight_model_opts(model_id: &str, revision: Option<&str>, allow_gated:
     };
     let resp = api_get(&url)?;
     let allow_gated = allow_gated || token().is_some();
+    if let Some(e) = status_refusal(model_id, resp.status, token().is_some()) {
+        return Err(e);
+    }
     match resp.status {
-        401 | 403 | 404 if token().is_some() => {
-            return Err(format!(
-                "{model_id}: not found, or this Hugging Face token has no access (accept the license at {}/{model_id})",
-                hf_endpoint()
-            ))
-        }
-        401 | 403 | 404 if !allow_gated => return Err(gated_guidance(model_id)),
-        401 | 403 | 404 => {
-            return Err(format!("{model_id}: not found on Hugging Face, or private (add --hf-token)"))
-        }
         s if s >= 500 => return Err(format!("cannot reach {endpoint}: HTTP {s}")),
         s if s >= 400 => return Err(format!("HF API error for {model_id}: HTTP {s}")),
         _ => {}
@@ -163,9 +167,9 @@ pub fn has_weight_files(siblings: &[HfSibling]) -> bool {
 }
 
 pub fn download_excludes(siblings: &[HfSibling]) -> Vec<String> {
-    // Skip original/ checkpoints, non-safetensors duplicates, and consolidated copies of sharded weights.
+    // Skip original/ checkpoints, non-safetensors duplicates, consolidated copies of sharded weights, and goethe's own files: a repo never writes the card or the verify cache.
     let names: Vec<&str> = siblings.iter().map(|s| s.rfilename.as_str()).collect();
-    let mut ex = vec!["original/*".to_string()];
+    let mut ex = vec!["original/*".to_string(), "goethe_card.toml*".to_string(), ".goethe_*".to_string()];
     let has_st = names
         .iter()
         .any(|n| n.ends_with(".safetensors") && !n.starts_with("original/"));
@@ -269,8 +273,12 @@ pub fn ensure_model(home: &Path, model_id: &str, local_dir: &Path, opts: &Downlo
     };
     let files = wanted(&pre.siblings, &excludes);
     disk_preflight(home, bytes_needed(&files, local_dir))?;
+    let existed = local_dir.exists();
     fs::create_dir_all(local_dir).map_err(|e| format!("{}: {e}", local_dir.display()))?;
-    download_with_retries(home, model_id, local_dir, &revision, &excludes)?;
+    if let Err(e) = download_with_retries(home, model_id, local_dir, &revision, &excludes, bytes_missing(&files, local_dir)) {
+        drop_empty_new_dir(local_dir, existed);
+        return Err(e);
+    }
     check_present(local_dir, &files)?;
     if opts.no_verify {
         return write_revision(local_dir, &revision);
@@ -299,13 +307,16 @@ pub fn is_installed_fast(local_dir: &Path, revision: &str, no_verify: bool) -> b
     no_verify || verify_cache_matches(local_dir)
 }
 
-fn bytes_needed(files: &[&HfSibling], local_dir: &Path) -> u64 {
-    let need: u64 = files
+fn bytes_missing(files: &[&HfSibling], local_dir: &Path) -> u64 {
+    files
         .iter()
         .filter(|s| fs::metadata(local_dir.join(&s.rfilename)).map(|m| m.len() != s.size).unwrap_or(true))
         .map(|s| s.size)
-        .sum();
-    ((need as f64) * 1.05) as u64
+        .sum()
+}
+
+fn bytes_needed(files: &[&HfSibling], local_dir: &Path) -> u64 {
+    ((bytes_missing(files, local_dir) as f64) * 1.05) as u64
 }
 
 fn check_present(local_dir: &Path, files: &[&HfSibling]) -> Result<(), String> {
@@ -347,11 +358,11 @@ pub fn disk_preflight(home: &Path, needed: u64) -> Result<(), String> {
     Ok(())
 }
 
-fn download_with_retries(home: &Path, model_id: &str, local_dir: &Path, revision: &str, excludes: &[String]) -> Result<(), String> {
+fn download_with_retries(home: &Path, model_id: &str, local_dir: &Path, revision: &str, excludes: &[String], total: u64) -> Result<(), String> {
     let delays = [2u64, 5, 10];
     let mut last = String::new();
     for (i, delay) in delays.iter().enumerate() {
-        match run_hf_download(home, model_id, local_dir, revision, excludes) {
+        match run_hf_download(home, model_id, local_dir, revision, excludes, total) {
             Ok(()) => return Ok(()),
             Err(e) if is_auth_error(&e) => return Err(e),
             Err(e) => {
@@ -366,11 +377,11 @@ fn download_with_retries(home: &Path, model_id: &str, local_dir: &Path, revision
 }
 
 fn is_auth_error(msg: &str) -> bool {
-    msg.contains("gated or private") || msg.contains("401") || msg.contains("403")
+    msg.contains(crate::messages::GATED) || msg.contains("401") || msg.contains("403")
 }
 
-pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: &str, excludes: &[String]) -> Result<(), String> {
-    // hf download resumes partial files and is cheap when everything is already present.
+pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: &str, excludes: &[String], total: u64) -> Result<(), String> {
+    // hf download resumes partial files and is cheap when everything is already present; every 5 s a line says how far it is.
     let program = hf_binary(home)?;
     let mut cmd = match python_of_script(&program) {
         Some(python) => {
@@ -399,12 +410,140 @@ pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: 
         Some(t) => cmd.env("HF_TOKEN", t),
         None => cmd.env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1"),
     };
-    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    let status = cmd.status().map_err(|e| format!("hf download failed to start: {e}"))?;
+    let base = crate::progress::dir_bytes(local_dir);
+    let watched = local_dir.to_path_buf();
+    let ticker = (total > 0).then(|| {
+        crate::progress::Ticker::start(model_id, Some(total), crate::progress::every(), move || crate::progress::dir_bytes(&watched).saturating_sub(base), crate::progress::eprint_line)
+    });
+    let outcome = run_guarded(&mut cmd);
+    drop(ticker);
+    let (status, tail) = outcome.map_err(|e| format!("hf download failed to start: {e}"))?;
     if !status.success() {
-        return Err(format!("hf download exited with {status}"));
+        let log = crate::step::log_path().map_or(String::new(), |p| format!("\nfull log: {}", p.display()));
+        return Err(format!("{}{log}", download_failure(&status, &tail)));
     }
     Ok(())
+}
+
+static DOWNLOAD_PGID: AtomicI32 = AtomicI32::new(0);
+const INTERRUPTED: &[u8] = b"\ninterrupted; partial files kept, run the same command to resume\n";
+const TRACEBACK: &[u8] = b"Traceback (most recent call last)";
+const TAIL_BYTES: usize = 64 * 1024;
+
+extern "C" fn on_interrupt(sig: libc::c_int) {
+    // Async-signal-safe only: stop the downloader's whole process group, say so, leave with the shell's code for the signal.
+    let group = DOWNLOAD_PGID.load(Ordering::SeqCst);
+    unsafe {
+        if group > 0 {
+            libc::kill(-group, libc::SIGTERM);
+            libc::write(2, INTERRUPTED.as_ptr().cast(), INTERRUPTED.len());
+            libc::_exit(128 + sig);
+        }
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+struct Reaper(i32);
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        // Every way out of the download but a finished one (an error, a panic) takes the downloader's group with it.
+        if self.0 > 0 {
+            unsafe { libc::kill(-self.0, libc::SIGTERM) };
+        }
+    }
+}
+
+fn run_guarded(cmd: &mut Command) -> std::io::Result<(ExitStatus, Vec<u8>)> {
+    // The downloader in its own process group, killed with goethe: SIGINT and SIGTERM stop the group, a SIGKILL of goethe stops the child (parent-death signal). Its stderr is shown live up to a Python traceback, which is kept for one line instead.
+    cmd.stderr(Stdio::piped()).stdout(Stdio::null()).stdin(Stdio::null());
+    cmd.process_group(0);
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
+    let handler = on_interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    let (old_int, old_term) = unsafe { (libc::signal(libc::SIGINT, handler), libc::signal(libc::SIGTERM, handler)) };
+    let result = cmd.spawn().and_then(|mut child| {
+        let mut reaper = Reaper(child.id() as i32);
+        DOWNLOAD_PGID.store(reaper.0, Ordering::SeqCst);
+        let err = child.stderr.take();
+        let shown = thread::spawn(move || err.map(tee_stderr).unwrap_or_default());
+        let status = child.wait()?;
+        reaper.0 = 0;
+        DOWNLOAD_PGID.store(0, Ordering::SeqCst);
+        Ok((status, shown.join().unwrap_or_default()))
+    });
+    unsafe {
+        libc::signal(libc::SIGINT, old_int);
+        libc::signal(libc::SIGTERM, old_term);
+    }
+    result
+}
+
+fn tee_stderr(mut r: std::process::ChildStderr) -> Vec<u8> {
+    // The downloader's stderr (bars, lock notices) goes to the log, and to the screen with -v until a Python traceback starts; return the last bytes of everything.
+    let (mut tail, mut buf, mut live) = (Vec::new(), [0u8; 4096], true);
+    let mut err = std::io::stderr();
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let before = tail.len().min(TRACEBACK.len());
+        tail.extend_from_slice(&buf[..n]);
+        for line in String::from_utf8_lossy(&buf[..n]).split(['\n', '\r']).filter(|l| !l.trim().is_empty()) {
+            crate::step::log_line(line.trim_end());
+        }
+        if live {
+            let from = tail.len() - n - before;
+            let cut = tail[from..].windows(TRACEBACK.len()).position(|w| w == TRACEBACK).map(|p| (from + p).saturating_sub(tail.len() - n));
+            if crate::step::verbose() {
+                let _ = err.write_all(&buf[..cut.unwrap_or(n)]);
+                let _ = err.flush();
+            }
+            live = cut.is_none();
+        }
+        if tail.len() > TAIL_BYTES {
+            tail.drain(..tail.len() - TAIL_BYTES);
+        }
+    }
+    tail
+}
+
+fn download_failure(status: &ExitStatus, tail: &[u8]) -> String {
+    // One line for a failed download: the network case named, then the downloader's own last line.
+    let text = String::from_utf8_lossy(tail);
+    let drawn = |l: &&str| l.contains(['\u{2502}', '\u{256d}', '\u{2570}', '\u{2500}', '\u{256e}', '\u{256f}']);
+    let lines: Vec<&str> = text.split(['\n', '\r']).map(str::trim).filter(|l| !l.is_empty() && !drawn(l)).collect();
+    let last = lines.iter().rev().find(|l| l.contains("Error") || l.contains("Exception")).or(lines.last()).copied().unwrap_or("");
+    let low = text.to_lowercase();
+    let network = ["connecterror", "connectionerror", "proxyerror", "name or service not known", "temporary failure in name resolution", "max retries exceeded", "network is unreachable", "connection refused", "timed out", "readtimeout", "connecttimeout", "offline"];
+    if network.iter().any(|n| low.contains(n)) {
+        let host = hf_endpoint();
+        let host = host.split("://").last().unwrap_or(&host).trim_end_matches('/').to_string();
+        return format!("cannot reach {host} (network or proxy): {last}");
+    }
+    match last {
+        "" => format!("hf download exited with {status}"),
+        l if l.contains("gated") || l.contains("401") || l.contains("403") => l.to_string(),
+        l => format!("hf download exited with {status}: {l}"),
+    }
+}
+
+fn has_file(dir: &Path) -> bool {
+    // True when any regular file lives under dir (a resumable partial download counts).
+    fs::read_dir(dir).map(|rd| rd.flatten().any(|e| e.file_type().map(|t| if t.is_dir() { has_file(&e.path()) } else { true }).unwrap_or(true))).unwrap_or(true)
+}
+
+fn drop_empty_new_dir(dir: &Path, existed: bool) {
+    // A failed first download leaves no empty model folder behind; one that held anything, or that was there before, stays.
+    if !existed && !has_file(dir) {
+        let _ = fs::remove_dir_all(dir);
+    }
 }
 
 const HF_QUIET: &str = "import logging, runpy, sys
@@ -498,7 +637,7 @@ fn verify_model(
         for s in &bad {
             let _ = fs::remove_file(local_dir.join(&s.rfilename));
         }
-        download_with_retries(home, model_id, local_dir, revision, excludes)?;
+        download_with_retries(home, model_id, local_dir, revision, excludes, bad.iter().map(|s| s.size).sum())?;
         let again = hash_all(local_dir, &bad);
         if let Some((name, _)) = again.iter().find(|(_, r)| r.is_err()) {
             return Err(format!("checksum mismatch for {name} after re-download"));
@@ -520,7 +659,7 @@ fn verify_model(
     write_verified_cache(local_dir, &cache)?;
     write_revision(local_dir, revision)?;
     if count > 0 {
-        println!("verified {count} files ({:.2} GB)", bytes as f64 / 1e9);
+        crate::step::log_line(&format!("verified {count} files ({:.2} GB)", bytes as f64 / 1e9));
     }
     Ok(())
 }
@@ -593,7 +732,7 @@ fn parse_siblings(body: &serde_json::Value) -> Vec<HfSibling> {
     };
     arr.iter()
         .filter_map(|item| {
-            let name = item.get("rfilename").and_then(|v| v.as_str())?;
+            let name = item.get("rfilename").and_then(|v| v.as_str()).filter(|n| is_repo_path(n))?;
             Some(HfSibling {
                 rfilename: name.to_string(),
                 size: item.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -605,6 +744,11 @@ fn parse_siblings(body: &serde_json::Value) -> Vec<HfSibling> {
             })
         })
         .collect()
+}
+
+fn is_repo_path(name: &str) -> bool {
+    // A file name inside the model dir: relative, no empty, '.' or '..' part, so a listing can never point outside it.
+    !name.contains(['\0', '\\']) && name.split('/').all(|c| !c.is_empty() && c != "." && c != "..")
 }
 
 struct ApiResponse {
@@ -687,6 +831,73 @@ fn available_bytes(path: &Path) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_repo_is_not_found_and_never_called_gated() {
+        let anon = status_refusal("org/nope", 401, false).unwrap();
+        assert!(anon.contains("not found") && !anon.contains("gated") && anon.contains("--hf-token"), "{anon}");
+        assert!(status_refusal("org/nope", 404, true).unwrap().contains("no access"));
+        assert_eq!(status_refusal("org/m", 200, false), None);
+        assert_eq!(status_refusal("org/m", 500, false), None, "a server error is reported as one");
+    }
+
+    #[test]
+    fn a_repo_cannot_write_goethes_card_and_a_listing_cannot_leave_the_model_dir() {
+        let s = vec![sib("model.safetensors", 4), sib("config.json", 2), sib("goethe_card.toml", 9), sib(".goethe_verified.json", 9)];
+        let kept: Vec<&str> = wanted(&s, &download_excludes(&s)).iter().map(|f| f.rfilename.as_str()).collect();
+        assert_eq!(kept, ["model.safetensors", "config.json"], "the card of a repo is never downloaded");
+        let body = serde_json::json!({"siblings": [{"rfilename": "a.json"}, {"rfilename": "../../x"}, {"rfilename": "/etc/x"}, {"rfilename": "d/../../x"}, {"rfilename": "d//x"}, {"rfilename": "d/ok.json"}]});
+        let names: Vec<String> = parse_siblings(&body).into_iter().map(|f| f.rfilename).collect();
+        assert_eq!(names, ["a.json", "d/ok.json"]);
+    }
+
+    fn sh(script: &str) -> Command {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(script);
+        c
+    }
+
+    #[test]
+    fn the_downloader_runs_in_its_own_group_and_its_traceback_becomes_one_line() {
+        let (status, tail) = run_guarded(&mut sh("ps -o pid=,pgid= -p $$ >&2; echo Traceback \\(most recent call last\\): >&2; echo '  File \"x.py\", line 1' >&2; echo 'httpx.ConnectError: [Errno -3] Temporary failure in name resolution' >&2; exit 1")).unwrap();
+        assert!(!status.success());
+        let text = String::from_utf8_lossy(&tail).to_string();
+        let ids: Vec<i64> = text.lines().next().unwrap().split_whitespace().filter_map(|n| n.parse().ok()).collect();
+        assert_eq!(ids[0], ids[1], "the child leads its own process group: {text}");
+        assert_ne!(ids[1], unsafe { libc::getpgrp() } as i64);
+        let line = download_failure(&status, &tail);
+        assert_eq!(line, "cannot reach huggingface.co (network or proxy): httpx.ConnectError: [Errno -3] Temporary failure in name resolution");
+        assert!(!line.contains('\n') && !line.contains("Traceback"));
+        assert_eq!(download_failure(&status, b"401 Client Error: Unauthorized"), "401 Client Error: Unauthorized");
+    }
+
+    #[test]
+    fn leaving_the_download_early_stops_its_whole_group() {
+        let mut child = sh("sleep 30 & sleep 30").process_group(0).spawn().unwrap();
+        let group = child.id() as i32;
+        std::thread::sleep(Duration::from_millis(200));
+        drop(Reaper(group));
+        let status = child.wait().unwrap();
+        assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(libc::SIGTERM));
+        std::thread::sleep(Duration::from_millis(200));
+        assert_ne!(unsafe { libc::kill(-group, 0) }, 0, "the sleeping members of the group are gone too");
+    }
+
+    #[test]
+    fn a_failed_first_download_leaves_no_empty_folder_but_keeps_what_it_got() {
+        let home = tempfile::tempdir().unwrap();
+        let (fresh, kept, theirs) = (home.path().join("fresh"), home.path().join("kept"), home.path().join("theirs"));
+        for d in [&fresh, &kept, &theirs] {
+            fs::create_dir_all(d.join(".cache/huggingface/download")).unwrap();
+        }
+        fs::write(kept.join(".cache/huggingface/download/m.incomplete"), b"half").unwrap();
+        drop_empty_new_dir(&fresh, false);
+        drop_empty_new_dir(&kept, false);
+        drop_empty_new_dir(&theirs, true);
+        assert!(!fresh.exists(), "an empty folder this run made is removed");
+        assert!(kept.exists(), "a partial file is what a rerun resumes");
+        assert!(theirs.exists(), "a folder that was already there stays");
+    }
 
     #[test]
     fn a_pack_install_downloads_its_weights_and_the_small_metadata_only() {

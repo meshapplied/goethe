@@ -48,6 +48,17 @@ pub struct GoetheCard {
     pub supported_sm: Option<Vec<String>>,
 }
 
+pub fn fallback_allowed(flag: bool) -> bool {
+    // A model with a kernel pack for this card runs on its plain runtime only when the user opts in: --fallback, or GOETHE_ALLOW_FALLBACK=1.
+    allowed(flag, std::env::var("GOETHE_ALLOW_FALLBACK").ok().as_deref())
+}
+
+fn allowed(flag: bool, env: Option<&str>) -> bool {
+    flag || env == Some("1")
+}
+
+use crate::messages::{FALLBACK_HINT, LOGIN_FIRST, NOTHING_DOWNLOADED, ONLY_PACK};
+
 pub const PACK_SKIPPED: &str = "pack_skipped";
 
 const CARD_KEYS: &[&str] = &[
@@ -107,6 +118,7 @@ pub struct InstallOpts {
     pub yes: bool,
     pub reset: bool,
     pub quant: Option<String>,
+    pub fallback: bool,
 }
 
 struct Target {
@@ -140,17 +152,59 @@ pub fn run(opts: InstallOpts) -> Result<(), String> {
     // Place the files, write the card, register the model, then optionally load it.
     let home = goethe_home();
     ensure_layout(&home).map_err(|e| e.to_string())?;
-    let target = if Path::new(&opts.model_id).is_dir() {
-        install_local(&home, &opts)?
-    } else {
-        install_hub(&home, &opts)?
-    };
-    let model_id = target.model_id.clone();
-    register(&home, &opts, target)?;
+    let model_id = install_model(&home, &opts)?;
     if opts.load {
         load_installed(&model_id, &opts)?;
     }
     Ok(())
+}
+
+fn install_lock(home: &Path, opts: &InstallOpts) -> Result<Option<crate::pyenv::Lock>, String> {
+    // One install of a model id at a time (two at once raced on the farm and the card); installs of different models run side by side.
+    let local = Path::new(&opts.model_id).is_dir();
+    let id = match (local, &opts.name) {
+        (true, Some(name)) => name.clone(),
+        (true, None) => match fs::canonicalize(&opts.model_id).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())) {
+            Some(dir) => format!("local/{dir}"),
+            None => return Ok(None),
+        },
+        (false, _) => opts.model_id.clone(),
+    };
+    if validate_model_id(&id).is_err() {
+        return Ok(None);
+    }
+    let path = home.join("run").join(format!("install-{}.lock", crate::paths::sanitize_model_id(&id)));
+    crate::pyenv::lock_file(&path, &format!("Another goethe is installing {id}; waiting for it to finish")).map(Some)
+}
+
+fn install_model(home: &Path, opts: &InstallOpts) -> Result<String, String> {
+    // The files placed and the model registered; its id. Holds the model's install lock throughout.
+    let _lock = install_lock(home, opts)?;
+    let target = if Path::new(&opts.model_id).is_dir() {
+        install_local(home, opts)?
+    } else {
+        match install_hub(home, opts) {
+            Ok(t) => t,
+            Err(e) if gated_but_installed(&e, is_installed(home, &opts.model_id), opts.force) => {
+                println!("{} is already installed; --force downloads it again", opts.model_id);
+                return Ok(opts.model_id.clone());
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let model_id = target.model_id.clone();
+    register(home, opts, target)?;
+    Ok(model_id)
+}
+
+fn is_installed(home: &Path, model_id: &str) -> bool {
+    // The model has a row in the installed registry.
+    db::open(home).ok().is_some_and(|c| c.query_row("SELECT 1 FROM installed_models WHERE model_id = ?1", [model_id], |_| Ok(())).is_ok())
+}
+
+fn gated_but_installed(err: &str, installed: bool, force: bool) -> bool {
+    // Hugging Face answers a gated or private repo without a token as not found: for a model already installed that is no failure, unless --force asks for the download.
+    installed && !force && (err.contains(crate::messages::GATED) || err.contains(crate::messages::NOT_FOUND))
 }
 
 fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
@@ -159,11 +213,11 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         return Err(format!("{}: no such directory", opts.model_id));
     }
     validate_model_id(&opts.model_id)?;
-    println!("looking up {} ...", opts.model_id);
     let entry = fetch(&registry_url())
         .ok()
         .and_then(|r| find_model(&r, &opts.model_id).cloned());
     let card_dir = model_dir(home, &opts.model_id);
+    dir_owner_is(&card_dir, &opts.model_id)?;
     if opts.model_id == crate::engines::ninfer::NINFER_ID {
         let file = crate::engines::ninfer::acquire_ninfer(&card_dir)?;
         fs::create_dir_all(&card_dir).map_err(|e| e.to_string())?;
@@ -243,7 +297,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             let plan = crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home))?
                 .ok_or_else(|| format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch))?;
             if let Some(why) = refused_before_download(home, &plan, &crate::packs::python_runner(home)) {
-                println!("{}", pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why)?);
+                println!("{}", pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why, fallback_allowed(opts.fallback))?);
                 pack_refused = true;
                 break 'packed false;
             }
@@ -271,11 +325,16 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 (Some(d), None) => format!(", speculative decoding {} (+{:.1} GB)", d.name, dgb as f64 / GIB),
                 (Some(d), Some(what)) => format!(", speculative decoding off: {} needs {:.1} GB more {what}", d.name, dgb as f64 / GIB),
             };
+            let (fit_repo, fit_rev) = crate::packs::aux(&plan.entry).map_or((choice.offer.hf_repo.clone(), rev.clone()), |(repo, revision, _)| (repo, revision.unwrap_or_else(|| "main".into())));
+            match (hf::fetch_config_json(&fit_repo, &fit_rev), crate::hw::profile(home)) {
+                (Ok(cfg), Ok(hw)) => println!("{}", pack_fit(&crate::recommend::View::new(home, hw), &cfg, entry.as_ref(), opts, &choice.offer.arch, bytes(&files), &card_dir)?),
+                (Err(e), _) | (_, Err(e)) => eprintln!("note: the per-GPU fit was not checked before the download: {e}"),
+            }
             confirm(opts, &format!("{} ({}, {:.1} GB) with optimised kernels for {}{spec}", opts.model_id, choice.offer.format, bytes(&files) as f64 / GIB, choice.offer.arch))?;
             let pack_dl = DownloadOpts { revision: Some(rev), force: opts.force, no_verify: opts.no_verify, only: Some(files.clone()) };
-            hf::ensure_model(home, &choice.offer.hf_repo, &card_dir, &pack_dl)?;
+            fetch_weights(home, &choice.offer.hf_repo, &card_dir, &pack_dl)?;
             if let Some((repo, revision, only)) = crate::packs::aux(&plan.entry) {
-                hf::ensure_model(home, &repo, &card_dir, &DownloadOpts { revision, force: opts.force, no_verify: opts.no_verify, only: Some(only) })?;
+                fetch_aux(home, &repo, &card_dir, DownloadOpts { revision, force: opts.force, no_verify: opts.no_verify, only: Some(only) })?;
             }
             if let Some(d) = draft.filter(|_| short.is_none()) {
                 let only = Some(d.files.iter().map(|f| f.0.clone()).collect());
@@ -301,6 +360,8 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     };
     let local = crate::hw::profile(home).map(|h| h.gpus.iter().map(|g| g.name.clone()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
     let no_pack_gpu = crate::packs::catalog(home).and_then(|ix| crate::packs::unsupported_here(&ix, &opts.model_id, &crate::packs::local_archs(home), &local));
+    let built = crate::packs::catalog(home).map(|ix| crate::packs::built_for(&ix, &opts.model_id)).unwrap_or_default();
+    pack_only_gate(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)) && opts.quant.is_none(), declined, no_pack_gpu.as_deref(), &built)?;
     let gguf = engine_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), (declined, no_pack_gpu.as_deref()), opts.quant.as_deref())?;
     if !hf::offline_mode() {
         if let Ok(pre) = hf::preflight_model(&opts.model_id, dl.revision.as_deref()) {
@@ -317,9 +378,8 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             confirm(opts, &format!("{} ({fmt}, {:.1} GB) with {engine} (no kernel pack: {why})", opts.model_id, bytes as f64 / GIB))?;
         }
     }
-    hf::ensure_model(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf.clone(), ..dl })?;
-    let pack = structure_offer(home, opts, &card_dir)
-        .filter(|c| gguf.as_ref().is_none_or(|f| gguf_metadata(home, &card_dir, &c.offer.format, f).is_ok()));
+    fetch_weights(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf.clone(), ..dl })?;
+    let pack = readable(structure_offer(home, opts, &card_dir)?, |c| config_for_pack(home, opts, &card_dir, c, gguf.as_deref().unwrap_or_default()), fallback_allowed(opts.fallback))?;
     Ok(Target {
         model_id: opts.model_id.clone(),
         card_dir,
@@ -331,22 +391,128 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     })
 }
 
-fn structure_offer(home: &Path, opts: &InstallOpts, dir: &Path) -> Option<PackChoice> {
-    // Weights no pack names (a fine-tune, another repo or a folder of the same architecture) on a logged-in node with the engine installed: the pack whose structure they have, if taken. Any miss or error: None, silently.
-    let creds = crate::platform::load_credentials(home).ok().flatten()?;
+fn fetch_weights(home: &Path, repo: &str, dir: &Path, dl: &DownloadOpts) -> Result<(), String> {
+    // The model files, with one line for the result: how many, how big, and how long when that was over 3 s.
+    let started = std::time::Instant::now();
+    hf::ensure_model(home, repo, dir, dl)?;
+    let (files, bytes) = crate::progress::weights_in(dir);
+    println!("{}", crate::step::row("weights", &format!("{files} files {}{}", crate::progress::size(bytes), crate::step::took(started.elapsed()))));
+    Ok(())
+}
+
+fn readable<T>(choice: Option<T>, meta: impl FnOnce(&T) -> Result<(), String>, allow: bool) -> Result<Option<T>, String> {
+    // A pack offered for GGUF weights is used only when their config and tokenizer are in place; otherwise the install fails with the reason, or with --fallback serves them with the plain runtime and says why.
+    let Some(c) = choice else { return Ok(None) };
+    match (meta(&c), allow) {
+        (Ok(()), _) => Ok(Some(c)),
+        (Err(e), true) => {
+            eprintln!("note: the optimised kernels were not used, serving with the plain runtime: {e}");
+            Ok(None)
+        }
+        (Err(e), false) => Err(format!("the optimised kernels for these weights cannot be used: {e}; {FALLBACK_HINT}")),
+    }
+}
+
+fn fetch_aux(home: &Path, repo: &str, dir: &Path, dl: DownloadOpts) -> Result<(), String> {
+    // The model's own config and tokenizer files beside GGUF weights.
+    hf::ensure_model(home, repo, dir, &dl)?;
+    drop_orphan_index(dir);
+    Ok(())
+}
+
+fn drop_orphan_index(dir: &Path) {
+    // The repo's safetensors index comes along with its config files and names shards that are not here: without any .safetensors file it goes, or the weights look incomplete.
+    let names: Vec<(PathBuf, String)> = fs::read_dir(dir).into_iter().flatten().flatten().map(|e| (e.path(), e.file_name().to_string_lossy().into_owned())).collect();
+    if !names.iter().any(|(_, n)| n.ends_with(".safetensors")) {
+        for (p, _) in names.iter().filter(|(_, n)| n.ends_with(".safetensors.index.json")) {
+            let _ = fs::remove_file(p);
+        }
+    }
+}
+
+fn config_for_pack(home: &Path, opts: &InstallOpts, dir: &Path, c: &PackChoice, gguf: &[String]) -> Result<(), String> {
+    // The pack's signed entry names the model's own config and tokenizer files: fetch those beside the weights; only without them are they made from the GGUF header (which needs a transformers that knows the architecture).
+    if let Some((repo, revision, only)) = c.plan.as_ref().and_then(|p| crate::packs::aux(&p.entry)) {
+        fetch_aux(home, &repo, dir, DownloadOpts { revision, force: opts.force, no_verify: opts.no_verify, only: Some(only) })?;
+    }
+    if gguf.is_empty() {
+        Ok(())
+    } else {
+        gguf_metadata(home, dir, "gguf", gguf)
+    }
+}
+
+type Looked = Result<Option<(String, crate::packs::Plan)>, String>;
+
+struct OfferDeps<'a> {
+    creds: Result<Option<crate::platform::Credentials>, String>,
+    archs: Vec<String>,
+    index: &'a dyn Fn() -> Option<Vec<u8>>,
+    ensure_engine: &'a dyn Fn() -> Result<(), String>,
+    by_structure: &'a dyn Fn(&crate::platform::Credentials) -> Looked,
+}
+
+fn structure_offer(home: &Path, opts: &InstallOpts, dir: &Path) -> Result<Option<PackChoice>, String> {
+    // Weights no pack names (a fine-tune, another repo or a folder of the same architecture) on a logged-in node: the pack whose structure they have, if taken. See offer_for.
     let archs = crate::packs::local_archs(home);
-    let engine = crate::pyenv::has(home, crate::pyenv::Layer::Engine) || crate::pyenv::dev_python(home);
-    crate::packs::catalog(home).filter(|ix| engine && !crate::packs::offers_any(ix, &archs).is_empty())?;
-    let login = crate::packs::Login(creds.clone());
-    let broker = crate::packs::HttpBroker::new(&creds.platform_url, &login);
-    let (_, plan) = crate::packs::by_structure(home, dir, &archs, &broker, &crate::packs::python_runner(home)).ok()??;
+    let run = crate::packs::python_runner(home);
+    let deps = OfferDeps {
+        creds: crate::platform::load_credentials(home),
+        index: &|| crate::packs::catalog(home),
+        ensure_engine: &|| crate::pyenv::ensure(home, crate::pyenv::Layer::Engine),
+        by_structure: &|creds| {
+            let login = crate::packs::Login(creds.clone());
+            let broker = crate::packs::HttpBroker::new(&creds.platform_url, &login);
+            crate::packs::by_structure(home, dir, &archs, &broker, &run)
+        },
+        archs: archs.clone(),
+    };
+    offer_for(opts, deps)
+}
+
+fn offer_for(opts: &InstallOpts, deps: OfferDeps) -> Result<Option<PackChoice>, String> {
+    // Logged out, or no pack for this machine's GPUs at all: the plain runtime, as before. Logged in with packs for these GPUs: the engine layer is installed first when missing (the pack lookup runs in it), and a lookup that fails stops with its reason and the --fallback hint (or, with --fallback, says so and goes on); weights that match no pack structure say so in one line.
+    let creds = match deps.creds {
+        Ok(Some(c)) => c,
+        Ok(None) => return Ok(None),
+        Err(e) => {
+            eprintln!("note: the platform login cannot be read ({e}), so these weights are not checked for optimised kernels");
+            return Ok(None);
+        }
+    };
+    let miss = |why: String| -> Result<Option<PackChoice>, String> {
+        if fallback_allowed(opts.fallback) {
+            eprintln!("note: {why}; using the plain runtime");
+            Ok(None)
+        } else {
+            Err(format!("{why}; {FALLBACK_HINT}"))
+        }
+    };
+    let Some(index) = (deps.index)() else {
+        eprintln!("note: the kernel pack index is not reachable, so these weights are not checked for optimised kernels");
+        return Ok(None);
+    };
+    if crate::packs::offers_any(&index, &deps.archs).is_empty() {
+        return Ok(None);
+    }
+    if let Err(e) = (deps.ensure_engine)() {
+        return miss(format!("optimised kernels exist for this GPU but goethe-engine could not be installed to look for them: {e}"));
+    }
+    let plan = match (deps.by_structure)(&creds) {
+        Ok(Some((_, plan))) => plan,
+        Ok(None) => {
+            println!("no optimised kernel pack has the structure of these weights; using the plain runtime");
+            return Ok(None);
+        }
+        Err(e) => return miss(format!("looking for optimised kernels for these weights failed: {e}")),
+    };
     let what = format!("optimised kernels available for these weights (same structure as {})", plan.entry.offer.hf_repo);
     if opts.yes || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         println!("{what}");
     } else if !crate::term::ask(&format!("{what}; install them? [Y/n]"), "y").is_ok_and(|a| a.to_ascii_lowercase().starts_with('y')) {
-        return None;
+        return Ok(None);
     }
-    Some(PackChoice { offer: plan.entry.offer.clone(), creds, plan: Some(plan) })
+    Ok(Some(PackChoice { offer: plan.entry.offer.clone(), creds, plan: Some(plan) }))
 }
 
 fn confirm(opts: &InstallOpts, plan: &str) -> Result<(), String> {
@@ -357,7 +523,7 @@ fn confirm(opts: &InstallOpts, plan: &str) -> Result<(), String> {
     }
     match crate::term::ask(&format!("{plan}: download? [Y/n]"), "y")?.to_ascii_lowercase().starts_with('y') {
         true => Ok(()),
-        false => Err("nothing was downloaded".into()),
+        false => Err(NOTHING_DOWNLOADED.into()),
     }
 }
 
@@ -368,14 +534,48 @@ fn vram_preflight(home: &Path, bytes: u64) -> Result<(), String> {
     let total = hw.gpus.iter().filter(|g| !denied.contains(&g.index)).map(|g| g.vram_total_mb as f64 / 1024.0).sum::<f64>();
     let gb = bytes as f64 / GIB;
     if total > 0.0 && gb > total {
-        return Err(format!("the weights ({gb:.1} GB) are larger than the allowed GPUs together ({total:.1} GB); nothing was downloaded"));
+        return Err(format!("the weights ({gb:.1} GB) are larger than the allowed GPUs together ({total:.1} GB); {NOTHING_DOWNLOADED}"));
     }
     Ok(())
 }
 
+fn pack_fit(view: &crate::recommend::View, cfg: &Value, entry: Option<&RegistryModel>, opts: &InstallOpts, arch: &str, weights_bytes: u64, dir: &Path) -> Result<String, String> {
+    // The per-GPU budget goethe load will compute for a kernel-pack model (the pack runtime's own learned rows), from its config and the listed size of its weights, before a weight byte is fetched: refused with what is missing when no GPU set fits, else the fit line with its headroom.
+    let id = &opts.model_id;
+    let facts = model_facts::facts_from_config(cfg, weights_bytes as f64 / GIB, entry.map(|e| e.architecture.as_str()), id)?;
+    let vram = vram_estimate(dir, cfg, &facts, &[], "auto");
+    let ctx = opts.ctx.unwrap_or_else(|| entry.and_then(|e| e.effective_max_ctx()).unwrap_or(facts.max_ctx)).min(facts.max_ctx);
+    let input = crate::chooser::ChooserInput {
+        static_vram_gb: vram.weights_gb + vram.state_gb,
+        kv_bytes_per_token: vram.kv_bytes_per_token.max(1),
+        num_attention_heads: facts.num_attention_heads,
+        num_kv_heads: facts.num_kv_heads,
+        attention: facts.attention.clone(),
+        max_ctx: facts.max_ctx,
+        ctx,
+        max_conc: opts.max_conc.or(entry.and_then(|e| e.default_max_conc)).unwrap_or(8),
+        marlin_extra_gb: 0.0,
+        supported_sm: crate::packs::arch_ccs(arch),
+        memory: entry.and_then(|e| e.memory.clone()),
+    };
+    let pinned = opts.tp.or(entry.and_then(|e| e.default_tp)).filter(|t| *t > 0).map(|t| t as usize);
+    let fit = view.fit_as(id, &input, pinned, crate::engine_overhead::PACK_RUNTIME).map_err(|why| {
+        let cards: Vec<String> = view.gpus.iter().map(|g| format!("gpu{} {} {:.1} GB free", g.index, view.hw.gpus.iter().find(|h| h.index == g.index).map_or("", |h| h.name.as_str()), g.free_vram_mb as f64 / 1024.0)).collect();
+        format!("{id} does not fit the allowed GPUs now ({}), so {NOTHING_DOWNLOADED}: {why}. Options: --ctx with a smaller value, free the GPU (goethe gpu shows what uses it), or change which cards are used with goethe gpu --deny or --allow", cards.join(", "))
+    })?;
+    let free = fit.gpus.iter().filter_map(|g| view.gpus.iter().find(|x| x.index == *g)).map(|g| g.free_vram_mb as f64 / 1024.0).fold(f64::INFINITY, f64::min);
+    let total = fit.need.total();
+    Ok(format!("fit: {}; {total:.1} of {free:.1} GB free, {:.1} GB spare", fit.describe(&input), free - total))
+}
+
+fn stale_skip(card: Option<&toml::Table>, force: bool, allow: bool) -> Option<String> {
+    // The pack_skipped note of a card, when an explicit fallback is on and the pack is not being forced.
+    card?.get(PACK_SKIPPED).and_then(|v| v.as_str()).filter(|_| allow && !force).map(String::from)
+}
+
 fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String> {
-    // A pack in the platform's index for this model and a local GPU: used when the node is logged in; otherwise the user may log in now. Without a login no pack is ever downloaded. A pack that failed to open here earlier is skipped unless --force.
-    if let Some(why) = read_card_table(&model_dir(home, &opts.model_id)).and_then(|c| c.get(PACK_SKIPPED).and_then(|v| v.as_str().map(String::from))).filter(|_| !opts.force) {
+    // A pack in the platform's index for this model and a local GPU: used when the node is logged in; otherwise the user may log in now. Without a login no pack is ever downloaded. A pack skipped earlier by an explicit fallback stays skipped while the fallback is on, unless --force; without the opt-in the pack is tried again and fails loudly.
+    if let Some(why) = stale_skip(read_card_table(&model_dir(home, &opts.model_id)).as_ref(), opts.force, fallback_allowed(opts.fallback)) {
         eprintln!("note: skipping the kernel pack: {why} (--force tries it again)");
         return Ok(PackDecision::Declined);
     }
@@ -580,7 +780,11 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     // Register a local tree in place (symlink farm) or as a copy; the card always lives under models/<id>.
     let src = fs::canonicalize(&opts.model_id).map_err(|e| format!("{}: {e}", opts.model_id))?;
     let has_pack = src.join(PACK_FILE).is_file();
-    let gguf: Vec<String> = crate::engines::llama_cpp::gguf_paths(&src).iter().filter_map(|p| Some(p.strip_prefix(&src).ok()?.to_string_lossy().into_owned())).collect();
+    let gguf: Vec<String> = crate::engines::llama_cpp::gguf_paths(&src)
+        .iter()
+        .filter_map(|p| Some(p.strip_prefix(&src).ok()?.to_string_lossy().into_owned()))
+        .filter(|n| crate::engines::llama_cpp::is_model_gguf(n))
+        .collect();
     if !has_pack && gguf.is_empty() && !src.join("config.json").is_file() {
         return Err(format!("{} has no config.json", src.display()));
     }
@@ -598,6 +802,7 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     if src.starts_with(&models) {
         return Err(format!("{} is already inside {}", src.display(), models.display()));
     }
+    dir_owner_is(&card_dir, &model_id)?;
     let keep_copy = prepare_local_target(home, &card_dir, opts)?;
     if opts.copy_local {
         if !keep_copy {
@@ -616,8 +821,8 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     } else {
         fetch(&registry_url()).ok().and_then(|r| find_model(&r, &model_id).cloned())
     };
-    let pack = (!has_pack).then(|| structure_offer(home, opts, &card_dir)).flatten()
-        .filter(|c| gguf.is_empty() || gguf_metadata(home, &card_dir, &c.offer.format, &gguf).is_ok());
+    let offer = if has_pack { None } else { structure_offer(home, opts, &card_dir)? };
+    let pack = readable(offer, |c| config_for_pack(home, opts, &card_dir, c, &gguf), fallback_allowed(opts.fallback))?;
     Ok(Target {
         model_id,
         card_dir,
@@ -651,6 +856,14 @@ fn local_pack(home: &Path, dir: &Path, arch: &str, run: crate::packs::Runner) ->
     gguf_metadata(home, dir, if weights.iter().all(|w| w.ends_with(".gguf")) { "gguf" } else { "safetensors" }, &weights)
 }
 
+fn dir_owner_is(dir: &Path, model_id: &str) -> Result<(), String> {
+    // models/<id with / as __> is shared by ids that differ only there (x/y and x__y): the one that installed first keeps it.
+    match read_card_table(dir).and_then(|c| c.get("model_id").and_then(|v| v.as_str()).map(String::from)) {
+        Some(other) if other != model_id => Err(format!("{} already holds {other}, and {model_id} would share it; pick another name", dir.display())),
+        _ => Ok(()),
+    }
+}
+
 fn prepare_local_target(home: &Path, card_dir: &Path, opts: &InstallOpts) -> Result<bool, String> {
     // Reuse an existing install of the same kind; switching between copy and in-place needs --force.
     let Ok(meta) = fs::symlink_metadata(card_dir) else {
@@ -667,6 +880,10 @@ fn prepare_local_target(home: &Path, card_dir: &Path, opts: &InstallOpts) -> Res
     if !farm && opts.copy_local && !opts.force {
         return Ok(true);
     }
+    if !farm && !opts.copy_local && is_goethe_local_install(card_dir) {
+        clear_dir_except_card(home, card_dir)?;
+        return Ok(false);
+    }
     if !opts.force {
         return Err(format!(
             "{} exists as a {}; re-run with --force to replace it",
@@ -676,6 +893,11 @@ fn prepare_local_target(home: &Path, card_dir: &Path, opts: &InstallOpts) -> Res
     }
     clear_dir_except_card(home, card_dir)?;
     Ok(false)
+}
+
+pub fn is_goethe_local_install(dir: &Path) -> bool {
+    // A directory goethe made for a local folder install: its card names the source folder (the links and copied pack files in it are goethe's).
+    read_card_table(dir).is_some_and(|c| c.get("source_dir").and_then(|v| v.as_str()).is_some())
 }
 
 pub fn is_farm(dir: &Path) -> bool {
@@ -817,6 +1039,9 @@ fn register(home: &Path, opts: &InstallOpts, mut t: Target) -> Result<(), String
     };
     if let Some(why) = refused {
         drop_pack(&planned.dir);
+        if !fallback_allowed(opts.fallback) {
+            return Err(format!("{why}; {FALLBACK_HINT}"));
+        }
         t.pack = None;
         planned = plan(home, opts, &t)?;
         println!("{why}; using {}", crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?.id);
@@ -878,12 +1103,40 @@ fn refused_before_download(home: &Path, plan: &crate::packs::Plan, run: crate::p
     why
 }
 
-fn pack_only_refusal(model_id: &str, pack_only: bool, why: &str) -> Result<String, String> {
-    // A pack that cannot run here before any download: a pack-only model is refused with the cards its pack is built for; any other falls to its plain runtime.
+fn pack_only_gate(model_id: &str, pack_only: bool, declined: bool, no_pack_gpu: Option<&str>, built: &str) -> Result<(), String> {
+    // A pack-only model has no plain route: a node that is not logged in, or whose GPUs the packs are not built for, is refused before any download.
+    if !pack_only {
+        return Ok(());
+    }
+    if declined {
+        let cards = if built.is_empty() { String::new() } else { format!(" (packs are built for {built})") };
+        return Err(format!("{model_id} {ONLY_PACK}: {LOGIN_FIRST}{cards}; {NOTHING_DOWNLOADED}"));
+    }
+    match no_pack_gpu {
+        Some(why) => Err(format!("{model_id}: {why}")),
+        None => Ok(()),
+    }
+}
+
+fn pack_only_refusal(model_id: &str, pack_only: bool, why: &str, allow: bool) -> Result<String, String> {
+    // A pack that cannot run here before any download: a pack-only model is refused with the cards its pack is built for; any other is refused too unless the user opted into its plain runtime.
     if pack_only {
-        return Err(format!("{model_id} runs only with its kernel pack, and {why}; nothing was downloaded"));
+        return Err(format!("{model_id} {ONLY_PACK}, and {why}; {NOTHING_DOWNLOADED}"));
+    }
+    if !allow {
+        return Err(format!("{why}; {NOTHING_DOWNLOADED}; {FALLBACK_HINT}"));
     }
     Ok(format!("{why}; using its plain runtime"))
+}
+
+fn pack_failure_line(home: &Path, model_id: &str, log: &str) -> Option<String> {
+    // For a model that carries a kernel pack: why the pack did not open, in one line, and how to opt into the plain runtime when it has one.
+    let dir = model_dir(home, model_id);
+    if !dir.join(PACK_FILE).is_file() {
+        return None;
+    }
+    let why = load_failure(log);
+    Some(if has_plain_weights(&dir) { format!("{why}; {FALLBACK_HINT}") } else { why })
 }
 
 pub fn unpack_failed(home: &Path, model_id: &str, log: &str) -> Result<bool, String> {
@@ -951,8 +1204,9 @@ fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) 
     let broker = crate::packs::HttpBroker::new(&c.creds.platform_url, &login);
     let run = crate::packs::python_runner(home);
     let plan = c.plan.as_ref().ok_or("no kernel pack plan")?;
-    println!("installing the optimised kernels for {} ...", c.offer.arch);
+    let started = std::time::Instant::now();
     let variant = crate::packs::finish(home, &p.dir, &c.offer.arch, plan, &broker, &run)?;
+    println!("{}", crate::step::row("kernels", &format!("{} verified{}", c.offer.arch, crate::step::took(started.elapsed()))));
     pack_card(home, p, &c.offer.arch, &variant, cli_ctx)
 }
 
@@ -1260,38 +1514,24 @@ pub fn commit(home: &Path, p: &Planned, verb: &str, out: &mut dyn Write) -> Resu
     if let Some(note) = drop_shadowing_alias(&con, &p.model_id)? {
         eprintln!("warning: {note}");
     }
-    let mut lines = vec![format!("{verb} {}", p.model_id), format!("  path      {}", p.dir.display())];
-    lines.push(match &p.source_dir {
-        Some(src) => format!("  files     kept in {} (goethe remove only unregisters)", src.display()),
-        None => "  files     managed by goethe (goethe remove deletes them)".to_string(),
-    });
-    let state_note = if p.vram.state_gb > 0.0 {
-        format!(" + {:.1} GB per-request state for 4 requests", p.vram.state_gb)
-    } else {
-        String::new()
-    };
-    lines.push(format!("  vram      {:.1} GB weights{state_note}", p.vram.weights_gb));
+    let runtime = crate::engines::of_card(&toml::Value::Table(p.table.clone())).map_or("sglang", |e| e.id);
+    let per_request = crate::progress::size((p.vram.kv_bytes_per_token as f64 * p.ctx as f64 + p.vram.state_gb / 4.0 * GIB) as u64);
+    let quant = p.quant.as_deref().map_or(String::new(), |q| format!("  {q}"));
+    let said = if verb == "installed" { String::new() } else { format!("{verb} ") };
+    let mut lines = vec![format!("{said}{}  {runtime}  ctx {}  {:.1} GB + {per_request}/req{quant}", p.model_id, p.ctx, p.vram.weights_gb)];
+    if let Some(src) = &p.source_dir {
+        lines.push(format!("files stay in {} (goethe remove only unregisters)", src.display()));
+    }
     if p.vram.host_offload_gb > 0.0 {
-        lines.push(format!("  host ram  {:.1} GB offloaded weights in pinned memory", p.vram.host_offload_gb));
+        lines.push(format!("{:.1} GB of weights are offloaded to pinned host memory", p.vram.host_offload_gb));
     }
-    lines.push(format!(
-        "  kv cache  {:.1} KB per token ({}, {} attention)",
-        p.vram.kv_bytes_per_token as f64 / 1024.0,
-        p.kv_dtype,
-        p.facts.attention
-    ));
-    if let Some(e) = &p.engine {
-        lines.push(format!("  engine    {e}"));
-    }
-    if let Some(q) = &p.quant {
-        lines.push(format!("  quant     {q}, detected by SGLang"));
-    }
-    let tp_s = if p.tp == 0 { "auto".to_string() } else { p.tp.to_string() };
-    lines.push(format!("  defaults  ctx {}, max-conc {}, tp {tp_s}", p.ctx, p.max_conc));
     if !p.extra.is_empty() {
-        lines.push(format!("  sglang    {}", p.extra.join(" ")));
+        lines.push(format!("sglang args: {}", p.extra.join(" ")));
     }
-    lines.extend(p.notes.iter().map(|n| format!("  note      {n}")));
+    lines.extend(p.notes.iter().map(|n| format!("note: {n}")));
+    if verb == "installed" {
+        lines.push(format!("run: goethe run {}", p.model_id));
+    }
     writeln!(out, "{}", lines.join("\n")).map_err(|e| e.to_string())
 }
 
@@ -1342,7 +1582,9 @@ pub fn write_card_table(dir: &Path, table: &toml::Table) -> Result<(), String> {
     // Write goethe_card.toml through a temp file and rename so readers never see a partial card.
     let text = toml::to_string_pretty(table).map_err(|e| e.to_string())?;
     let tmp = dir.join(format!("{CARD_FILE}.tmp"));
-    fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let _ = fs::remove_file(&tmp);
+    let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    f.write_all(text.as_bytes()).map_err(|e| format!("{}: {e}", tmp.display()))?;
     fs::rename(&tmp, dir.join(CARD_FILE)).map_err(|e| format!("{}: {e}", dir.join(CARD_FILE).display()))
 }
 
@@ -1415,6 +1657,7 @@ fn load_installed(model_id: &str, opts: &InstallOpts) -> Result<(), String> {
         "yes": opts.yes,
         "extra_sglang_args": Vec::<String>::new(),
         "async_finish": true,
+        "fallback": opts.fallback,
     });
     run_load(params, opts.no_wait, false)
 }
@@ -1439,6 +1682,7 @@ pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), Stri
     // Send the load, show the plan, wait for this instance, and end with one RUNNING or STARTING line (or JSON).
     let started = std::time::Instant::now();
     let model_id = params.get("model_id").and_then(Value::as_str).unwrap_or_default().to_string();
+    crate::pack_update::note_if_newer(&goethe_home(), &model_id);
     let reply = send_load(params.clone())?;
     let message = reply_message(&reply);
     if is_already_loaded(&reply) {
@@ -1464,13 +1708,15 @@ pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), Stri
             let home = goethe_home();
             let log = fs::read_to_string(home.join("logs").join(format!("{iid}.log"))).unwrap_or_default();
             let failed = e.starts_with("the engine failed to start");
-            return match failed && unpack_failed(&home, &model_id, &log)? {
-                true => {
-                    let _ = crate::rpc::call("unload", json!({"model_id": model_id, "all": false, "force": true}));
-                    run_load(params, no_wait, json_out)
-                }
-                false => Err(e),
-            };
+            let allow = fallback_allowed(params.get("fallback").and_then(Value::as_bool) == Some(true));
+            if failed && allow && unpack_failed(&home, &model_id, &log)? {
+                let _ = crate::rpc::call("unload", json!({"model_id": model_id, "all": false, "force": true}));
+                return run_load(params, no_wait, json_out);
+            }
+            return Err(match failed.then(|| pack_failure_line(&home, &model_id, &log)).flatten() {
+                Some(line) => format!("{e}\n{line}"),
+                None => e,
+            });
         }
     }
     let row = instance_row(&iid);
@@ -1641,11 +1887,26 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_only_model_needs_a_login_and_a_card_its_pack_is_built_for() {
+        let built = "sm_120a, Blackwell (RTX 5090, RTX PRO 6000)";
+        let out = pack_only_gate("nvidia/Qwen3.8-27B-NVFP4", true, true, None, built).unwrap_err();
+        assert!(out.contains("goethe login first") && out.contains("sm_120a") && out.ends_with("nothing was downloaded"), "{out}");
+        let card = pack_only_gate("nvidia/Qwen3.8-27B-NVFP4", true, false, Some("It runs only with its kernel pack, built for sm_120a; this machine has sm_89"), built).unwrap_err();
+        assert!(card.starts_with("nvidia/Qwen3.8-27B-NVFP4: It runs only with its kernel pack") && card.contains("sm_89"), "{card}");
+        assert_eq!(pack_only_gate("nvidia/Qwen3.8-27B-NVFP4", true, false, None, built), Ok(()), "logged in with a pack for the card: on to the download plan");
+        for gguf in [(true, None), (false, Some("no variant"))] {
+            assert_eq!(pack_only_gate("ggml-org/embeddinggemma-2-GGUF", false, gguf.0, gguf.1, built), Ok(()), "a plain GGUF route keeps its own not-logged-in note");
+        }
+    }
+
+    #[test]
     fn a_pack_only_model_is_refused_before_download_and_any_other_uses_its_plain_runtime() {
         let why = "kernel pack for rtx_pro_6000_maxq (sm_120a, 188 SMs) does not run on NVIDIA GeForce RTX 5090 (no fit)";
-        let err = pack_only_refusal("nvidia/Qwen3.8-27B-NVFP4", true, why).unwrap_err();
+        let err = pack_only_refusal("nvidia/Qwen3.8-27B-NVFP4", true, why, true).unwrap_err();
         assert!(err.contains("runs only with its kernel pack") && err.contains("rtx_pro_6000_maxq (sm_120a") && err.ends_with("nothing was downloaded"), "{err}");
-        let note = pack_only_refusal("org/m-GGUF", false, why).unwrap();
+        let held = pack_only_refusal("org/m-GGUF", false, why, false).unwrap_err();
+        assert!(held.contains("nothing was downloaded") && held.contains("--fallback") && held.contains("GOETHE_ALLOW_FALLBACK"), "{held}");
+        let note = pack_only_refusal("org/m-GGUF", false, why, true).unwrap();
         assert!(note.ends_with("using its plain runtime"), "{note}");
     }
 
@@ -1654,6 +1915,16 @@ mod tests {
         let reg = crate::registry::bundled().unwrap();
         assert!(reg.models.iter().find(|m| m.id == "nvidia/Qwen3.8-27B-NVFP4").is_some_and(|m| m.pack_only == Some(true)));
         assert!(reg.models.iter().filter(|m| m.pack_only == Some(true)).count() >= 1);
+    }
+
+    #[test]
+    fn a_pack_failure_is_one_line_with_the_opt_in_hint_and_fallback_needs_an_opt_in() {
+        let (home, _) = packed_home();
+        let line = pack_failure_line(home.path(), "org/m-GGUF", "ImportError: libnccl.so.2: cannot open shared object file").unwrap();
+        assert!(line.starts_with("kernel pack failed to open (a host library is missing") && line.ends_with("instead"), "{line}");
+        assert!(line.contains("--fallback") && !line.contains('\n'), "{line}");
+        assert_eq!(pack_failure_line(home.path(), "org/none", "x"), None, "no pack: nothing to add");
+        assert!(allowed(true, None) && allowed(false, Some("1")) && !allowed(false, Some("0")) && !allowed(false, None));
     }
 
     #[test]
@@ -1688,9 +1959,13 @@ mod tests {
     fn a_pack_that_failed_here_is_not_offered_again_unless_forced() {
         let (home, dir) = packed_home();
         assert!(unpack_failed(home.path(), "org/m-GGUF", "Illegal instruction").unwrap());
-        let opts = InstallOpts { model_id: "org/m-GGUF".into(), ..Default::default() };
+        let opts = InstallOpts { model_id: "org/m-GGUF".into(), fallback: true, ..Default::default() };
         assert!(matches!(pack_decision(home.path(), &opts).unwrap(), PackDecision::Declined));
         assert!(dir.join(CARD_FILE).is_file());
+        let card = read_card_table(&dir);
+        assert!(stale_skip(card.as_ref(), false, true).is_some(), "an explicit fallback keeps the pack skipped");
+        assert_eq!(stale_skip(card.as_ref(), true, true), None, "--force tries the pack again");
+        assert_eq!(stale_skip(card.as_ref(), false, false), None, "without the opt-in a stale note never hides the pack");
     }
 
     #[test]
@@ -1704,6 +1979,280 @@ mod tests {
         crate::engines::llama_cpp::write_test_gguf_with(&proj, &[("clip.has_audio_encoder", 1)]);
         let p = plan_in_place(home.path(), "org/m-GGUF", &dir, None).unwrap();
         assert_eq!(p.table.get("task").and_then(|v| v.as_str()), Some("transcribe"));
+    }
+
+    #[test]
+    fn a_safetensors_index_without_its_shards_is_dropped_but_not_beside_real_ones() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("model.safetensors.index.json"), "{}").unwrap();
+        fs::write(d.path().join("config.json"), "{}").unwrap();
+        drop_orphan_index(d.path());
+        assert!(!d.path().join("model.safetensors.index.json").exists() && d.path().join("config.json").exists());
+        fs::write(d.path().join("model.safetensors.index.json"), "{}").unwrap();
+        fs::write(d.path().join("model-00001-of-00001.safetensors"), "x").unwrap();
+        drop_orphan_index(d.path());
+        assert!(d.path().join("model.safetensors.index.json").exists(), "real shards: the index stays");
+    }
+
+    #[test]
+    fn an_offered_pack_is_dropped_only_with_a_reason_and_a_projector_is_not_the_model() {
+        assert_eq!(readable(Some(1), |_| Ok(()), false), Ok(Some(1)));
+        assert_eq!(readable(Some(1), |_| Err("no config".into()), true), Ok(None), "with --fallback: dropped, with a note on stderr");
+        let err = readable(Some(1), |_| Err("no config".into()), false).unwrap_err();
+        assert!(err.contains("no config") && err.contains("--fallback"), "{err}");
+        assert_eq!(readable::<u8>(None, |_| panic!("no offer: nothing to read"), false), Ok(None));
+        let src = tempfile::tempdir().unwrap();
+        crate::engines::llama_cpp::write_test_gguf(&src.path().join("OrcaCyber-Q4_K_M.gguf"));
+        crate::engines::llama_cpp::write_test_gguf_with(&src.path().join("OrcaCyber-mmproj-F16.gguf"), &[("clip.vision.image_size", 448)]);
+        let (home, _) = gguf_home(true);
+        let opts = InstallOpts { model_id: src.path().display().to_string(), name: Some("me/orca".into()), ..Default::default() };
+        let t = install_local(home.path(), &opts).unwrap();
+        assert!(t.pack.is_none(), "no login: no offer");
+        let names: Vec<String> = crate::engines::llama_cpp::gguf_paths(src.path()).iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).filter(|n| crate::engines::llama_cpp::is_model_gguf(n)).collect();
+        assert_eq!(names, ["OrcaCyber-Q4_K_M.gguf"], "the metadata is made from the model file, never the projector");
+    }
+
+    #[test]
+    fn a_gated_answer_for_an_installed_model_is_already_installed() {
+        let gated = "org/m is gated or private on Hugging Face, so it needs your Hugging Face token.";
+        assert!(gated_but_installed(gated, true, false));
+        assert!(gated_but_installed("org/m: not found on Hugging Face, or private (check the id)", true, false));
+        assert!(!gated_but_installed(gated, true, true), "--force asks for the download");
+        assert!(!gated_but_installed(gated, false, false), "not installed: the gated guidance stands");
+        assert!(!gated_but_installed("disk full", true, false));
+        let (home, _) = gguf_home(false);
+        assert!(!is_installed(home.path(), "org/m-GGUF"));
+        let con = db::open(home.path()).unwrap();
+        con.execute("INSERT INTO installed_models (model_id, local_path, managed) VALUES ('org/m-GGUF', 'models/org/m-GGUF', 1)", []).ok();
+    }
+
+    #[test]
+    fn a_card_is_never_written_through_a_link_a_model_folder_ships() {
+        let (dir, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let victim = outside.path().join("keep.txt");
+        fs::write(&victim, "mine").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join(format!("{CARD_FILE}.tmp"))).unwrap();
+        write_card_table(dir.path(), &toml::from_str("model_id = \"a/b\"").unwrap()).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "mine");
+        assert!(fs::symlink_metadata(dir.path().join(CARD_FILE)).unwrap().is_file());
+        assert_eq!(read_card_table(dir.path()).unwrap()["model_id"].as_str(), Some("a/b"));
+    }
+
+    fn offer_index() -> Vec<u8> {
+        serde_json::json!({"schema": "gc-pack-index", "version": 3, "serial": 7, "entries": [{
+            "model": {"hf_repo": "org/Orca-GGUF", "revision": "abc", "format": "gguf", "structure": []},
+            "arch": "sm_120a", "abi_major": 3, "runtime": {"kind": "gc-c", "version": 1}, "min_engine": "0.2.0", "tier": "base",
+            "file": "m.gcpack", "manifest_sha256": "a".repeat(64), "size": 100, "sig": {"keyid": "k"}}]}).to_string().into_bytes()
+    }
+
+    fn login() -> crate::platform::Credentials {
+        crate::platform::Credentials {
+            platform_url: "http://127.0.0.1:1".into(),
+            node_id: "n1".into(),
+            workspace: crate::platform::Workspace::default(),
+            token: crate::platform::Secret::new("t".repeat(24)),
+            linked_at: "t".into(),
+        }
+    }
+
+    fn matched() -> Looked {
+        let entry = crate::packs::entries(&offer_index(), &["sm_120a".to_string()], |_| true).remove(0);
+        Ok(Some(("sm_120a".into(), crate::packs::Plan { entry, prefix: Vec::new(), variants: Vec::new(), serial: 7 })))
+    }
+
+    fn offered(opts: &InstallOpts, creds: Option<crate::platform::Credentials>, archs: &[&str], look: Looked, engine: Result<(), String>) -> (Result<Option<PackChoice>, String>, Vec<&'static str>) {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let got = offer_for(
+            opts,
+            OfferDeps {
+                creds: Ok(creds),
+                archs: archs.iter().map(|a| a.to_string()).collect(),
+                index: &|| Some(offer_index()),
+                ensure_engine: &|| {
+                    calls.borrow_mut().push("engine");
+                    engine.clone()
+                },
+                by_structure: &|_| {
+                    calls.borrow_mut().push("lookup");
+                    look.clone()
+                },
+            },
+        );
+        (got, calls.into_inner())
+    }
+
+    #[test]
+    fn the_pack_lookup_runs_in_the_engine_layer_that_was_installed_a_moment_before() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let run = crate::packs::python_runner(home.path());
+        let opts = InstallOpts { yes: true, ..Default::default() };
+        let seen = std::cell::RefCell::new(String::new());
+        let got = offer_for(
+            &opts,
+            OfferDeps {
+                creds: Ok(Some(login())),
+                archs: vec!["sm_120a".to_string()],
+                index: &|| Some(offer_index()),
+                ensure_engine: &|| {
+                    let bin = home.path().join("py-env/bin");
+                    fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
+                    fs::write(bin.join("python"), "#!/bin/sh\necho \"py-env python: $*\"\n").map_err(|e| e.to_string())?;
+                    fs::set_permissions(bin.join("python"), fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())
+                },
+                by_structure: &|_| {
+                    let (_, out) = run(&["pack".to_string(), "match".to_string()])?;
+                    seen.replace(out);
+                    Ok(None)
+                },
+            },
+        );
+        assert!(got.unwrap().is_none());
+        assert_eq!(seen.borrow().trim(), "py-env python: -m goethe_engine pack match", "the lookup used the python of the layer just installed");
+    }
+
+    #[test]
+    fn a_logged_in_fresh_home_installs_the_engine_first_and_then_takes_the_pack() {
+        let opts = InstallOpts { yes: true, ..Default::default() };
+        let (got, calls) = offered(&opts, Some(login()), &["sm_120a"], matched(), Ok(()));
+        assert_eq!(calls, ["engine", "lookup"], "the engine layer comes before the pack lookup");
+        assert_eq!(got.unwrap().unwrap().offer.hf_repo, "org/Orca-GGUF");
+    }
+
+    #[test]
+    fn a_failed_pack_lookup_on_a_logged_in_node_stops_with_its_reason_unless_fallback_is_on() {
+        let opts = InstallOpts { yes: true, ..Default::default() };
+        let (got, _) = offered(&opts, Some(login()), &["sm_120a"], Err("the platform answered 502".into()), Ok(()));
+        let err = got.err().unwrap();
+        assert!(err.contains("failed: the platform answered 502") && err.contains("--fallback"), "{err}");
+        let (got, _) = offered(&opts, Some(login()), &["sm_120a"], matched(), Err("no space left".into()));
+        let err = got.err().unwrap();
+        assert!(err.contains("goethe-engine could not be installed") && err.contains("no space left") && err.contains("--fallback"), "{err}");
+        let opted = InstallOpts { yes: true, fallback: true, ..Default::default() };
+        assert!(offered(&opted, Some(login()), &["sm_120a"], Err("502".into()), Ok(())).0.unwrap().is_none(), "--fallback serves it plain, after saying why");
+    }
+
+    #[test]
+    fn logged_out_or_no_pack_for_these_gpus_changes_nothing_and_unmatched_weights_go_plain() {
+        let opts = InstallOpts { yes: true, ..Default::default() };
+        let (got, calls) = offered(&opts, None, &["sm_120a"], matched(), Ok(()));
+        assert!(got.unwrap().is_none() && calls.is_empty(), "logged out: nothing runs, nothing installs");
+        let (got, calls) = offered(&opts, Some(login()), &["sm_90a"], matched(), Ok(()));
+        assert!(got.unwrap().is_none() && calls.is_empty(), "no pack for this GPU: the engine is not installed for it");
+        let (got, calls) = offered(&opts, Some(login()), &["sm_120a"], Ok(None), Ok(()));
+        assert!(got.unwrap().is_none() && calls == ["engine", "lookup"], "weights no pack matches: plain runtime");
+    }
+
+    fn card(free_gb: u64) -> crate::hw::GpuState {
+        crate::hw::GpuState {
+            index: 0,
+            uuid: "test-0".into(),
+            name: "NVIDIA GeForce RTX 5090".into(),
+            compute_capability: "12.0".into(),
+            vram_total_mb: 32 * 1024,
+            vram_used_mb: (32 - free_gb) * 1024,
+            vram_free_mb: free_gb * 1024,
+            pcie_gen: 5,
+            pcie_width: 16,
+            pcie_gen_max: 5,
+            pcie_width_max: 16,
+            running_processes: Vec::new(),
+            unified_memory: false,
+            numa_node: None,
+        }
+    }
+
+    fn view_of(home: &Path, gpu: crate::hw::GpuState) -> crate::recommend::View {
+        crate::recommend::View::new(home, crate::hw::HardwareState { profiled_at: "t".into(), driver: "t".into(), gpus: vec![gpu], links: vec![], unavailable: vec![], host: None, environment: None })
+    }
+
+    fn llama_cfg() -> Value {
+        json!({"architectures": ["LlamaForCausalLM"], "hidden_size": 4096, "num_hidden_layers": 32, "num_attention_heads": 32, "num_key_value_heads": 8, "max_position_embeddings": 8192, "torch_dtype": "bfloat16"})
+    }
+
+    #[test]
+    fn a_model_that_cannot_fit_one_card_is_refused_before_a_byte_with_what_is_missing() {
+        let home = tempfile::tempdir().unwrap();
+        let opts = InstallOpts { model_id: "nvidia/Big-NVFP4".into(), ..Default::default() };
+        let line = pack_fit(&view_of(home.path(), card(31)), &llama_cfg(), None, &opts, "sm_120a", 20 << 30, home.path()).unwrap();
+        assert!(line.starts_with("fit: tp=1 on GPU 0") && line.contains("GB per GPU (weights 20.0 + KV") && line.contains("of 31.0 GB free") && line.contains("GB spare"), "{line}");
+        let err = pack_fit(&view_of(home.path(), card(21)), &llama_cfg(), None, &opts, "sm_120a", 20 << 30, home.path()).unwrap_err();
+        for part in ["does not fit the allowed GPUs now", "gpu0 NVIDIA GeForce RTX 5090 21.0 GB free", "nothing was downloaded", "safety margin", "missing", "--ctx", "goethe gpu --deny"] {
+            assert!(err.contains(part), "{part}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_pack_fit_ignores_what_llama_cpp_learned_for_the_same_model() {
+        let home = tempfile::tempdir().unwrap();
+        let opts = InstallOpts { model_id: "nvidia/Big-NVFP4".into(), ctx: Some(4096), ..Default::default() };
+        let spare = |gpu: crate::hw::GpuState| pack_fit(&view_of(home.path(), gpu), &llama_cfg(), None, &opts, "sm_120a", 20 << 30, home.path());
+        let line = spare(card(31)).unwrap();
+        let total: f64 = line.split(" GB per GPU").next().unwrap().rsplit(' ').next().unwrap().parse().unwrap();
+        let tight = (total + 1.5 + 0.3).ceil() as u64;
+        assert!(spare(card(tight)).is_ok(), "fits with {tight} GB free: {line}");
+        let con = db::open(home.path()).unwrap();
+        crate::engine_overhead::store_learned(&con, "nvidia/Big-NVFP4", "NVIDIA GeForce RTX 5090", 1, crate::engine_overhead::Kind::Overhead, 4.8, "llama.cpp").unwrap();
+        assert!(spare(card(tight)).is_ok(), "a llama.cpp row never reaches the pack budget");
+        let view = view_of(home.path(), card(tight));
+        let input = crate::chooser::ChooserInput { static_vram_gb: 20.0, kv_bytes_per_token: 131072, num_attention_heads: 32, num_kv_heads: 8, attention: "gqa".into(), max_ctx: 8192, ctx: 4096, max_conc: 8, marlin_extra_gb: 0.0, supported_sm: vec!["12.0".into()], memory: None };
+        assert!(view.fit_as("nvidia/Big-NVFP4", &input, None, "llama.cpp").is_err(), "the same row does bind the llama.cpp runtime");
+    }
+
+    #[test]
+    fn ids_that_share_a_directory_do_not_take_it_over_from_each_other() {
+        let (home, _) = gguf_home(true);
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        for d in [&a, &b] {
+            crate::engines::llama_cpp::write_test_gguf(&d.path().join("m-Q8_0.gguf"));
+        }
+        let first = install_local(home.path(), &InstallOpts { model_id: a.path().display().to_string(), name: Some("x/y".into()), ..Default::default() }).unwrap();
+        fs::write(first.card_dir.join(CARD_FILE), format!("model_id = \"x/y\"\nsource_dir = \"{}\"\n", a.path().display())).unwrap();
+        let clash = InstallOpts { model_id: b.path().display().to_string(), name: Some("x__y".into()), ..Default::default() };
+        assert!(install_local(home.path(), &clash).err().unwrap().contains("would share it"));
+        assert!(fs::read_link(first.card_dir.join("m-Q8_0.gguf")).unwrap().starts_with(a.path()), "the first install still points at its own folder");
+        assert!(install_local(home.path(), &InstallOpts { name: Some("x/y".into()), ..clash }).is_ok(), "the same id reinstalls");
+    }
+
+    #[test]
+    fn installs_of_one_model_at_once_all_succeed_and_leave_one_card() {
+        let (home, _) = gguf_home(true);
+        let srcs: Vec<_> = (0..8).map(|_| tempfile::tempdir().unwrap()).collect();
+        for s in &srcs {
+            crate::engines::llama_cpp::write_test_gguf(&s.path().join("m-Q8_0.gguf"));
+        }
+        let results: Vec<Result<String, String>> = std::thread::scope(|sc| {
+            let hs: Vec<_> = srcs
+                .iter()
+                .map(|s| {
+                    let (h, o) = (home.path(), InstallOpts { model_id: s.path().display().to_string(), name: Some("me/same".into()), ..Default::default() });
+                    sc.spawn(move || install_model(h, &o))
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(results.iter().all(|r| r.as_deref() == Ok("me/same")), "{results:?}");
+        let card = read_card_table(&model_dir(home.path(), "me/same")).unwrap();
+        assert_eq!(card.get("model_id").and_then(|v| v.as_str()), Some("me/same"));
+    }
+
+    #[test]
+    fn an_install_over_the_leftovers_of_a_removed_local_install_replaces_them() {
+        let (home, _) = gguf_home(true);
+        let src = tempfile::tempdir().unwrap();
+        crate::engines::llama_cpp::write_test_gguf(&src.path().join("m-Q8_0.gguf"));
+        let opts = InstallOpts { model_id: src.path().display().to_string(), name: Some("me/m".into()), ..Default::default() };
+        let t = install_local(home.path(), &opts).unwrap();
+        fs::write(t.card_dir.join("pack.gcpack"), b"a copied pack").unwrap();
+        fs::write(t.card_dir.join(CARD_FILE), format!("model_id = \"me/m\"\nsource_dir = \"{}\"\n", src.path().display())).unwrap();
+        let again = install_local(home.path(), &opts).unwrap();
+        assert!(!again.card_dir.join("pack.gcpack").exists(), "the old copy is replaced without --force");
+        assert!(again.card_dir.join("m-Q8_0.gguf").exists() && src.path().join("m-Q8_0.gguf").is_file());
+        let own = model_dir(home.path(), "me/own");
+        fs::create_dir_all(&own).unwrap();
+        fs::write(own.join("w.gguf"), b"mine").unwrap();
+        let o = InstallOpts { name: Some("me/own".into()), ..opts };
+        assert!(install_local(home.path(), &o).err().unwrap().contains("--force"), "a folder of the user's own files is never replaced silently");
     }
 
     #[test]

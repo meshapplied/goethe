@@ -62,6 +62,7 @@ pub struct View {
     pub hw: HardwareState,
     pub gpus: Vec<GpuPlacementInput>,
     con: Option<Connection>,
+    home: std::path::PathBuf,
 }
 
 impl View {
@@ -94,7 +95,7 @@ impl View {
                 }
             })
             .collect();
-        View { hw, gpus, con }
+        View { hw, gpus, con, home: home.to_path_buf() }
     }
 
     pub fn capacity(home: &Path, hw: HardwareState) -> View {
@@ -119,15 +120,18 @@ impl View {
     }
 
     pub fn fit(&self, model_id: &str, input: &ChooserInput, pinned_tp: Option<usize>) -> Result<Fit, String> {
-        // The plan goethe load would pick (shrinking ctx, then concurrency) and its budget with learned figures.
+        // The plan goethe load would pick (shrinking ctx, then concurrency) and its budget with learned figures of the runtime the card names.
+        self.fit_as(model_id, input, pinned_tp, &crate::engine_overhead::model_runtime(&self.home, model_id))
+    }
+
+    pub fn fit_as(&self, model_id: &str, input: &ChooserInput, pinned_tp: Option<usize>, runtime: &str) -> Result<Fit, String> {
+        // The same plan for a model not installed yet: the learned figures are those of `runtime`, never another runtime's rows.
         let plan = chooser::pick_load_plan(input, &self.gpus, Some(&self.hw), pinned_tp, None).map_err(|e| e.message)?;
         let mut trial = input.clone();
         trial.ctx = plan.ctx;
         trial.max_conc = plan.max_conc;
         let base = chooser::need(&trial, plan.tp, &plan.cc);
-        let learned = self.con.as_ref().map(|c| {
-            crate::engine_overhead::read_learned(c, model_id, &self.gpu_name(plan.gpus[0]), plan.tp as u64)
-        });
+        let learned = self.con.as_ref().map(|c| crate::engine_overhead::read_learned(c, model_id, &self.gpu_name(plan.gpus[0]), plan.tp as u64, runtime));
         let learned = learned.unwrap_or_default();
         let need = chooser::with_learned(base, learned);
         for g in &plan.gpus {
@@ -287,6 +291,20 @@ pub fn recommend(home: &Path, view: &View, reg: &Registry) -> RecommendOutput {
     out
 }
 
+pub fn suggested_model(home: &Path, reg: &Registry) -> String {
+    // The model to name in examples: the first row of `goethe models recommend` (the smallest that fits these GPUs), else the smallest downloadable catalog model.
+    let top = crate::placement::load_hw(home).and_then(|hw| {
+        let mut rows = recommend(home, &View::capacity(home, hw), reg).recommended;
+        rows.sort_by(|a, b| (a.vram_per_gpu_gb * a.tp as f64).total_cmp(&(b.vram_per_gpu_gb * b.tp as f64)));
+        rows.into_iter().next().map(|m| m.model_id)
+    });
+    top.or_else(|| {
+        let smallest = reg.models.iter().filter(|m| m.manual_download_reason().is_none()).min_by(|a, b| a.static_vram_gb.total_cmp(&b.static_vram_gb));
+        smallest.map(|m| m.id.clone())
+    })
+    .unwrap_or_else(|| "nvidia/Llama-3.1-8B-Instruct-NVFP4".to_string())
+}
+
 pub fn ninfer_profile() -> RegistryModel {
     serde_json::from_value(serde_json::json!({
         "id": crate::engines::ninfer::NINFER_ID,
@@ -421,6 +439,33 @@ mod tests {
         assert!(f.describe(&input).contains("(reduced to fit)"), "{}", f.describe(&input));
         let full = view(vec![gpu(2, 2, true)]).fit(&m.id, &input, None).unwrap_err();
         assert!(full.contains("missing"), "{full}");
+    }
+
+    #[test]
+    fn examples_name_the_first_recommended_model_else_the_smallest_catalog_one() {
+        let ada = serde_json::json!({"supported_sm": ["8.9"], "max_ctx": 4096});
+        let with = |extra: serde_json::Value| {
+            let mut v = ada.as_object().unwrap().clone();
+            v.extend(extra.as_object().unwrap().clone());
+            serde_json::Value::Object(v)
+        };
+        let reg = Registry {
+            version: 1,
+            models: vec![
+                entry("org/big", with(serde_json::json!({"static_vram_gb": 12.0}))),
+                entry("org/small", with(serde_json::json!({"static_vram_gb": 5.6}))),
+                entry("org/gated", with(serde_json::json!({"static_vram_gb": 2.0, "gated": true}))),
+            ],
+        };
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(suggested_model(home.path(), &reg), "org/small", "no hardware profile: the smallest downloadable model, never a gated one");
+        let mut card = gpu(0, 20, false);
+        card.compute_capability = "8.9".into();
+        let hw = HardwareState { profiled_at: "t".into(), driver: "t".into(), gpus: vec![card], links: vec![], unavailable: vec![], host: None, environment: None };
+        std::fs::write(home.path().join("hardware_state.json"), serde_json::to_string(&hw).unwrap()).unwrap();
+        let shown = recommend(home.path(), &View::capacity(home.path(), hw), &reg).recommended;
+        assert_eq!(shown.len(), 2, "big and small fit, the gated one is left out");
+        assert_eq!(suggested_model(home.path(), &reg), "org/small", "the first row of the recommend table: the smallest that fits");
     }
 
     #[test]

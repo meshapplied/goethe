@@ -175,12 +175,21 @@ pub fn ensure(home: &Path, layer: Layer) -> Result<(), String> {
 fn progress_line(home: &Path, layer: Layer) -> String {
     // One line on what is about to download, smaller when PyTorch is already in the py-env.
     let torch = site_packages(home).is_some_and(|s| dist_version(&s, "torch").is_some());
-    match (layer, torch) {
-        (Layer::Base, _) => "Setting up the Python environment (about 30 MB, only once)".to_string(),
-        (Layer::Engine, false) => format!("Installing goethe-engine {ENGINE_VERSION} with PyTorch and the CUDA libraries (about 5 GB, only once)"),
-        (Layer::Engine, true) => format!("Installing goethe-engine {ENGINE_VERSION} (PyTorch is already installed)"),
-        (Layer::Sglang, false) => "Installing SGLang and the CUDA libraries (about 8 GB, only once)".to_string(),
-        (Layer::Sglang, true) => "Installing SGLang and its CUDA libraries (about 4 GB more, only once; PyTorch is already installed)".to_string(),
+    let what = match (layer, torch) {
+        (Layer::Base, _) => "installing (about 30 MB, once)".to_string(),
+        (Layer::Engine, false) => format!("installing {ENGINE_VERSION} (about 5 GB with PyTorch, once)"),
+        (Layer::Engine, true) => format!("installing {ENGINE_VERSION}"),
+        (Layer::Sglang, false) => "installing (about 8 GB, once)".to_string(),
+        (Layer::Sglang, true) => "installing (about 4 GB more, once)".to_string(),
+    };
+    crate::step::row(layer_label(layer), &what)
+}
+
+fn layer_label(layer: Layer) -> &'static str {
+    match layer {
+        Layer::Base => "python",
+        Layer::Engine => "engine",
+        Layer::Sglang => "sglang",
     }
 }
 
@@ -211,12 +220,17 @@ pub struct Lock(#[allow(dead_code)] fs::File);
 
 pub fn lock(home: &Path) -> Result<Lock, String> {
     // Exclusive flock on GOETHE_HOME/run/pyenv.lock for the whole install; a second goethe waits its turn.
-    let dir = home.join("run");
-    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let path = dir.join("pyenv.lock");
-    let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    lock_file(&home.join("run").join("pyenv.lock"), "Another goethe is installing into the Python environment; waiting for it to finish")
+}
+
+pub fn lock_file(path: &Path, waiting: &str) -> Result<Lock, String> {
+    // Exclusive flock on a file in run/, created when missing; says `waiting` once when another goethe holds it, then waits.
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        println!("Another goethe is installing into the Python environment; waiting for it to finish");
+        println!("{waiting}");
         if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
             return Err(format!("{}: {}", path.display(), std::io::Error::last_os_error()));
         }
@@ -270,14 +284,28 @@ pub(crate) fn install_from(home: &Path, pkg: &str, sums: &Path, tmp: &Path, laye
     if layer == Layer::Engine {
         cmd.env("GOETHE_ENGINE_WHEEL_URL", ENGINE_WHEEL_URL).env("GOETHE_ENGINE_WHEEL_SHA256", ENGINE_WHEEL_SHA256);
     }
-    let status = cmd.status().map_err(|e| format!("could not run bootstrap.sh: {e}"))?;
-    if !status.success() {
-        return Err(format!(
-            "installing the {} layer of the Python environment failed ({}; the output above says why). What was installed before still works; run the command again to retry",
-            layer.name(),
-            status.code().map_or("killed".to_string(), |c| format!("bootstrap.sh exit {c}"))
+    let py_env = home.join("py-env");
+    let before = crate::progress::dir_bytes(&py_env);
+    let (watched, cache) = (home.join("py-env"), std::env::var_os("UV_CACHE_DIR").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/uv"))));
+    let held = |watched: &Path, cache: &Option<PathBuf>| crate::progress::dir_bytes(watched) + cache.as_deref().map_or(0, crate::progress::dir_bytes);
+    let base = held(&watched, &cache);
+    let ticker = crate::progress::Ticker::start(layer_label(layer), None, crate::progress::every(), move || held(&watched, &cache).saturating_sub(base), crate::progress::eprint_line);
+    let started = std::time::Instant::now();
+    let done = crate::step::run(&mut cmd).map_err(|e| format!("could not run bootstrap.sh: {e}"));
+    drop(ticker);
+    let done = done?;
+    if !done.status.success() {
+        return Err(crate::step::failure(
+            &format!("installing the {} layer of the Python environment", layer.name()),
+            &done,
+            "what was installed before still works; run the command again to retry",
         ));
     }
+    let grown = crate::progress::size(crate::progress::dir_bytes(&py_env).saturating_sub(before));
+    let version = if layer == Layer::Engine { format!("{ENGINE_VERSION} ") } else { String::new() };
+    let secs = started.elapsed();
+    let time = if secs >= crate::step::SLOW { format!(", {} s", secs.as_secs()) } else { String::new() };
+    println!("{}", crate::step::row(layer_label(layer), &format!("{version}ready ({grown}{time})")));
     if let Some(w) = wheel {
         let name = w.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         fs::write(pyenv.join("LATEST"), format!("{name}\n")).map_err(|e| e.to_string())?;

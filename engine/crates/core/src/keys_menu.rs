@@ -72,11 +72,13 @@ pub(crate) enum Input {
     Esc,
     Backspace,
     Interrupt,
+    PageUp,
+    PageDown,
     Char(char),
 }
 
 pub(crate) fn parse_input(bytes: &[u8]) -> Vec<Input> {
-    // Arrows (CSI or SS3), Enter, Space, Backspace, Ctrl-C, a lone Esc, and typed characters; other escape sequences are skipped.
+    // Arrows (CSI or SS3), Page Up and Down (also Ctrl-U and Ctrl-D), Enter, Space, Backspace, Ctrl-C, a lone Esc, and typed characters; other escape sequences are skipped.
     let chars: Vec<char> = String::from_utf8_lossy(bytes).chars().collect();
     let mut out = Vec::new();
     let mut i = 0;
@@ -95,6 +97,8 @@ pub(crate) fn parse_input(bytes: &[u8]) -> Vec<Input> {
                         'B' => Some(Input::Down),
                         'C' => Some(Input::Right),
                         'D' => Some(Input::Left),
+                        '~' if chars[i + 1..j] == ['5'] => Some(Input::PageUp),
+                        '~' if chars[i + 1..j] == ['6'] => Some(Input::PageDown),
                         _ => None,
                     });
                 }
@@ -105,6 +109,8 @@ pub(crate) fn parse_input(bytes: &[u8]) -> Vec<Input> {
             ' ' => out.push(Input::Space),
             '\x7f' | '\x08' => out.push(Input::Backspace),
             '\x03' => out.push(Input::Interrupt),
+            '\x15' => out.push(Input::PageUp),
+            '\x04' => out.push(Input::PageDown),
             c if c.is_control() => {}
             c => out.push(Input::Char(c)),
         }

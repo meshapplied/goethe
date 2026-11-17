@@ -14,6 +14,16 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  main-in-dev:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Every commit of main is in dev
+        run: bash engine/tests/main_in_dev.sh origin/main origin/dev
+
   python:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -34,7 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: pipx run ruff check goethe tests
-      - run: shellcheck -S warning install.sh engine/tests/accept.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
+      - run: shellcheck -S warning install.sh engine/tests/accept.sh engine/tests/main_in_dev.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
 
   attribution:
     runs-on: ubuntu-24.04
