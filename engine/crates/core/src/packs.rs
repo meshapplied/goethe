@@ -700,9 +700,8 @@ pub fn finish_as(
         let total: u64 = runs.iter().map(|(_, l)| *l).sum();
         let started_at = crate::progress::NET_BYTES.load(std::sync::atomic::Ordering::Relaxed);
         let ticker = (total > 0).then(|| {
-            eprintln!("downloading the kernel pack: {} to fetch", crate::progress::size(total));
             let counted = move || crate::progress::NET_BYTES.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(started_at);
-            crate::progress::Ticker::start("kernel pack", Some(total), crate::progress::INTERVAL, counted, crate::progress::eprint_line)
+            crate::progress::Ticker::start("kernel pack", Some(total), crate::progress::every(), counted, crate::progress::eprint_line)
         });
         for (o, l) in runs {
             delta.fetched += l;
