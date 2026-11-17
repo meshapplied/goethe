@@ -1,0 +1,15 @@
+diff --git a/engine/crates/core/src/packs.rs b/engine/crates/core/src/packs.rs
+index 3477a64..5ad16a7 100644
+--- a/engine/crates/core/src/packs.rs
++++ b/engine/crates/core/src/packs.rs
+@@ -54,9 +54,7 @@ impl<'a> HttpBroker<'a> {
+         let token = self.tokens.token()?;
+         match Self::agent().get(&format!("{}{path}", self.store)).set("Authorization", &format!("Bearer {token}")).call() {
+             Ok(r) => Ok(r),
+-            Err(ureq::Error::Status(401, _)) => {
+-                Err("the platform did not accept this node's login (logged out, removed, or its login expired); run goethe login".into())
+-            }
++            Err(ureq::Error::Status(401, _)) => panic!("unauthorized"),
+             Err(ureq::Error::Status(403, _)) => Err("the platform refused the kernel pack for this workspace".into()),
+             Err(ureq::Error::Status(404, _)) => Err(format!("{path}: not in the pack store")),
+             Err(ureq::Error::Status(429, _)) => Err("the platform is rate limiting pack downloads; try again in a minute".into()),
