@@ -126,6 +126,17 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
     }
 }
 
+pub const KV_SHARE_OF_FREE: f64 = 0.4;
+
+pub fn cap_default_ctx(input: &ChooserInput, tp: usize, cc: &str, free_gb: f64) -> u64 {
+    // A context nobody asked for is halved (down to 8192) until its KV cache is at most 40% of the free VRAM.
+    let mut trial = input.clone();
+    while trial.ctx > 8192 && need(&trial, tp, cc).kv > KV_SHARE_OF_FREE * free_gb {
+        trial.ctx = (trial.ctx / 2).max(8192);
+    }
+    trial.ctx
+}
+
 pub fn per_gpu_budget_gb(input: &ChooserInput, tp: usize, cc: &str) -> f64 {
     need(input, tp, cc).total()
 }
@@ -437,6 +448,17 @@ mod tests {
     fn mixed_host() -> Vec<GpuPlacementInput> {
         // Two RTX PRO 6000 (12.0), one H100 (9.0) and one RTX 3090 (8.6).
         vec![gpu_on(0, "12.0", 20.0), gpu_on(1, "12.0", 20.0), gpu_on(2, "9.0", 70.0), gpu_on(3, "8.6", 23.0)]
+    }
+
+    #[test]
+    fn an_unasked_context_is_capped_so_the_kv_cache_stays_within_40_percent_of_free_vram() {
+        let m = ChooserInput { ctx: 131072, max_conc: 1, kv_bytes_per_token: 65536, ..inp() };
+        let kv = |ctx: u64| need(&ChooserInput { ctx, ..m.clone() }, 1, "12.0").kv;
+        let capped = cap_default_ctx(&m, 1, "12.0", 10.0);
+        assert!(capped < 131072 && kv(capped) <= KV_SHARE_OF_FREE * 10.0, "{capped}");
+        assert!(kv(capped * 2) > KV_SHARE_OF_FREE * 10.0, "the largest halving that fits");
+        assert_eq!(cap_default_ctx(&m, 1, "12.0", 4000.0), 131072, "plenty of room keeps the default");
+        assert_eq!(cap_default_ctx(&m, 1, "12.0", 0.1), 8192, "never below 8192");
     }
 
     #[test]
