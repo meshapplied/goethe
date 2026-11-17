@@ -64,5 +64,5 @@ for patch in "${HERE}"/*.patch; do
 done
 echo
 echo "died ${#died[@]}, survived ${#survived[@]}, broken ${#broken[@]}"
-printf 'BROKEN    %s\n' "${broken[@]}"
+[[ ${#broken[@]} -gt 0 ]] && printf 'BROKEN    %s\n' "${broken[@]}"
 exit $(( ${#survived[@]} + ${#broken[@]} > 0 ))
