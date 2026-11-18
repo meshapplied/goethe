@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install goethe into fresh Ubuntu 24.04, Debian 12 and Rocky 9 KVM VMs from signed test packages (scenarios.sh); only docker and /dev/kvm on the host; DISTROS, KEEP=1.
+# Install goethe into fresh Ubuntu 24.04, Debian 12 and Rocky 9 KVM VMs from signed test packages (scenarios.sh); only docker and /dev/kvm on the host; DISTROS, KEEP=1, UV_BIN adds the model install.
 
 set -euo pipefail
 
@@ -8,7 +8,7 @@ HERE="${ROOT}/tests/vm"
 WORK="${HERE}/.work"
 BIN="${ROOT}/target-portable/x86_64-unknown-linux-gnu/release"
 NGINX="${ROOT}/dist/cdn/bin/linux-x86_64/nginx"
-UV="${UV_BIN:?set UV_BIN to a uv binary for linux-x86_64 (the release package has one)}"
+UV="${UV_BIN:-}"
 [[ -x "${BIN}/goethe" && -x "${NGINX}" ]] || { echo "build first: GOETHE_CARGO_FEATURES=goethe/test-release-key packaging/build_bin.sh and packaging/build_nginx_linux.sh" >&2; exit 1; }
 "${BIN}/goethe" --version >/dev/null
 
@@ -22,7 +22,7 @@ package() {
   # One signed package at cdn/$1; $2=extra appends a byte to goethe and goethed (another build of the same version); a v/<version>/ copy for pinned installs.
   local dir="${WORK}/cdn/$1" f
   mkdir -p "${dir}/bin/linux-x86_64" "${dir}/pyenv" "${dir}/v1"
-  cp "${BIN}/goethe" "${BIN}/goethed" "${NGINX}" "${UV}" "${dir}/bin/linux-x86_64/"
+  cp "${BIN}/goethe" "${BIN}/goethed" "${NGINX}" ${UV:+"${UV}"} "${dir}/bin/linux-x86_64/"
   if [[ "${2:-}" == extra ]]; then
     for f in goethe goethed; do printf '\n' >>"${dir}/bin/linux-x86_64/${f}"; done
   fi
