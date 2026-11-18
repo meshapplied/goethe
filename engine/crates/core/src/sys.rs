@@ -308,7 +308,7 @@ mod imp {
     }
 
     pub fn memory() -> Memory {
-        // Total from hw.memsize; available = free, inactive and speculative pages; cached = file-backed pages.
+        // available = free + speculative + the larger of inactive or file-backed + purgeable; cached = file-backed.
         let total = sysctl_u64("hw.memsize").unwrap_or(0);
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
         let mut vm: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
@@ -321,7 +321,11 @@ mod imp {
         let pages = |n: u64| n * page / 1024;
         Memory {
             total_kb: total / 1024,
-            available_kb: pages(vm.free_count as u64 + vm.inactive_count as u64 + vm.speculative_count as u64),
+            available_kb: pages(
+                vm.free_count as u64
+                    + vm.speculative_count as u64
+                    + (vm.inactive_count as u64).max(vm.external_page_count as u64 + vm.purgeable_count as u64),
+            ),
             cached_kb: pages(vm.external_page_count as u64),
         }
     }

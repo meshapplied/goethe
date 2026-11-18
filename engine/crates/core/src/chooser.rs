@@ -1,6 +1,6 @@
 // Tensor parallel size and GPU set selection for goethe load.
 
-use crate::calc::{missing_gb, shortfall, Need, BASE_OVERHEAD_GB};
+use crate::calc::{base_overhead_gb, missing_gb, shortfall, Need};
 use crate::memory_spec::MemorySpec;
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -134,7 +134,7 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
         return Need {
             weights: (input.static_vram_gb + marlin) / tp as f64,
             kv: tokens * input.kv_bytes_per_token as f64 / GIB / shard,
-            overhead: BASE_OVERHEAD_GB + request_table,
+            overhead: base_overhead_gb(cc) + request_table,
             ..Need::default()
         };
     };
@@ -149,7 +149,7 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
             / tp as f64
             + ((conc + 1) * m.request_bytes + m.fixed_bytes) as f64)
             / GIB,
-        overhead: BASE_OVERHEAD_GB + request_table,
+        overhead: base_overhead_gb(cc) + request_table,
         load_peak: m.load_peak_bytes as f64 / tp as f64 / GIB,
     }
 }
@@ -458,6 +458,12 @@ mod tests {
             supported_sm: Vec::new(),
             memory: None,
         }
+    }
+
+    #[test]
+    fn metal_pays_no_cuda_overhead() {
+        let (cuda, metal) = (need(&inp(), 1, "12.0"), need(&inp(), 1, "metal"));
+        assert!((cuda.overhead - metal.overhead - (crate::calc::BASE_OVERHEAD_GB - crate::calc::METAL_OVERHEAD_GB)).abs() < 1e-9);
     }
 
     fn gpu(idx: u32, free_gb: f64, foreign: bool) -> GpuPlacementInput {
