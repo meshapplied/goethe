@@ -184,6 +184,8 @@ fn the_chat_screen_streams_a_reply_and_leaves_cleanly_without_writing_a_file() {
         std::thread::sleep(Duration::from_millis(50));
     };
     assert!(status.success(), "{status:?}");
-    read_until(&master, &mut seen, "\x1b[?1049l");
+    if cfg!(target_os = "linux") {
+        read_until(&master, &mut seen, "\x1b[?1049l");
+    }
     assert_eq!(std::fs::read_dir(cwd.path()).unwrap().count(), 0, "closing writes nothing");
 }

@@ -162,8 +162,27 @@ jobs:
           path: bin-aarch64.tar
           retention-days: 30
 
+  build-macos:
+    needs: [guard, ci]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: goethe, goethed and nginx for Apple Silicon
+        run: bash engine/packaging/build_macos.sh
+      - name: End to end on macOS
+        run: bash engine/tests/macos_e2e.sh
+      - name: Pack for the merge job
+        run: tar -C engine/dist/cdn/bin -cf bin-darwin.tar darwin-aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-darwin
+          path: bin-darwin.tar
+          retention-days: 30
+
   merge:
-    needs: [guard, build, build-aarch64]
+    needs: [guard, build, build-aarch64, build-macos]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -174,10 +193,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: bin-aarch64
-      - name: Unpack both architectures
+      - uses: actions/download-artifact@v4
+        with:
+          name: bin-darwin
+      - name: Unpack every platform
         run: |
           tar -xf cdn-x86_64.tar
           tar -C cdn/bin -xf bin-aarch64.tar
+          tar -C cdn/bin -xf bin-darwin.tar
       - name: Combine both architectures into one package
         run: |
           for f in cdn/bin/linux-{aarch64,x86_64}/{goethe,goethed,uv} cdn/pyenv/bootstrap.sh; do
@@ -188,6 +211,10 @@ jobs:
           done
           for b in goethe goethed; do
             file "cdn/bin/linux-x86_64/$b" | grep -q "x86-64" || { echo "x86_64 $b is not x86-64"; exit 1; }
+          done
+          for b in goethe goethed nginx; do
+            test -x "cdn/bin/darwin-aarch64/$b" || { echo "darwin-aarch64 $b is missing"; exit 1; }
+            file "cdn/bin/darwin-aarch64/$b" | grep -q "Mach-O 64-bit.*arm64" || { echo "darwin $b is not an arm64 Mach-O"; exit 1; }
           done
           cdn/bin/linux-x86_64/goethe --version
           sed -i 's/^arches=.*/arches=x86_64,aarch64/' cdn/BUILDINFO

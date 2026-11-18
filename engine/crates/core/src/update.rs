@@ -48,7 +48,7 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     if let Some(note) = &kept {
         println!("{note}");
     }
-    let (sglang, engine) = if opts.engine { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
+    let (sglang, engine) = if opts.engine && !cfg!(target_os = "macos") { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
     let ternary = if opts.ternary { ternary_delta(home, &sums) } else { None };
     let local_commit = option_env!("GOETHE_GIT_COMMIT").unwrap_or("unknown");
     let remote_commit = fetch_verified(pkg, &sums, "BUILDINFO", tmp)
@@ -75,7 +75,7 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     crate::host::confirm(&question, opts.yes)?;
     let mut staged = Vec::new();
     for bin in ["goethe", "goethed"].into_iter().filter(|_| bins) {
-        let rel = format!("bin/linux-{arch}/{bin}");
+        let rel = format!("bin/{}/{bin}", platform_dir(&arch));
         staged.push(stage(pkg, &sums, &rel, tmp, &home.join("bin").join(bin))?);
     }
     let differs = |what: &str| pending.iter().any(|(w, d)| *w == what && d.differs);
@@ -134,7 +134,7 @@ fn binaries_due(order: Ordering, opts: &UpdateOpts, local: &str, remote: &str, d
 fn binaries_differ(home: &Path, sums: &Path, arch: &str) -> Result<bool, String> {
     // Another build at the same version: the installed bin/goethe or bin/goethed differs from the signed entry.
     for bin in ["goethe", "goethed"] {
-        let want = lookup_sum(sums, &format!("bin/linux-{arch}/{bin}"))?;
+        let want = lookup_sum(sums, &format!("bin/{}/{bin}", platform_dir(arch)))?;
         if sha256_file(&home.join("bin").join(bin)).ok().as_deref() != Some(want.as_str()) {
             return Ok(true);
         }
@@ -290,6 +290,11 @@ pub fn compare_versions(a: &str, b: &str) -> Ordering {
         (Some(_), None) => Ordering::Less,
         (Some(x), Some(y)) => x.cmp(&y),
     })
+}
+
+pub fn platform_dir(arch: &str) -> String {
+    // The package folder of this system's binaries: darwin-aarch64 on a Mac, linux-<arch> elsewhere.
+    if cfg!(target_os = "macos") { format!("darwin-{arch}") } else { format!("linux-{arch}") }
 }
 
 pub(crate) fn normalize_arch() -> String {
