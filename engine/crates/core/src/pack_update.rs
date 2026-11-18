@@ -103,7 +103,7 @@ fn drop_new(dir: &Path) {
     let _ = std::fs::remove_file(dir.join(format!("pack.prefix{NEW}")));
 }
 
-fn verified_index(home: &Path, broker: &dyn Broker, run: Runner) -> Result<(Vec<u8>, u64), String> {
+fn verified_index(home: &Path, broker: &impl Broker, run: Runner) -> Result<(Vec<u8>, u64), String> {
     // The platform's index, checked by the engine against the pinned keys and refused when older than the last one installed; nothing of it is kept unless it passes.
     let dir = crate::paths::private_temp_dir("goethe-idx")?;
     let checked = (|| {
@@ -124,7 +124,7 @@ fn verified_index(home: &Path, broker: &dyn Broker, run: Runner) -> Result<(Vec<
     checked
 }
 
-pub fn refresh(home: &Path, model_id: &str, dir: &Path, arch: &str, broker: &dyn Broker, run: Runner) -> Result<Outcome, String> {
+pub fn refresh(home: &Path, model_id: &str, dir: &Path, arch: &str, broker: &impl Broker, run: Runner) -> Result<Outcome, String> {
     // Bring an installed model's pack to the index's: nothing when it already is, the changed blocks only when it is not, loud when it cannot.
     let Some(installed) = installed_manifest(dir) else { return Err(format!("{model_id}: no installed kernel pack to update")) };
     let have = installed_overlays(dir);
@@ -167,7 +167,7 @@ pub fn installed_overlays(dir: &Path) -> Vec<String> {
     v["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(String::from)).collect()
 }
 
-fn overlay_only(_home: &Path, dir: &Path, entry: &Entry, installed: &str, broker: &dyn Broker, run: Runner) -> Result<u64, String> {
+fn overlay_only(_home: &Path, dir: &Path, entry: &Entry, installed: &str, broker: &impl Broker, run: Runner) -> Result<u64, String> {
     // The entry lists overlays for the installed base: fetch only those (small), check each against its hash and the engine, then stack them.
     use sha2::{Digest, Sha256};
     let have = installed_overlays(dir);
@@ -245,8 +245,8 @@ pub fn run_all(check_only: bool) -> Result<(), String> {
         println!("kernel packs: not checked, this node is not logged in (goethe login)");
         return Ok(());
     };
-    let login = crate::packs::Login(creds.clone());
-    let broker = crate::packs::HttpBroker::new(&creds.platform_url, &login);
+    let token = || Ok(creds.token.expose().to_string());
+    let broker = crate::packs::HttpBroker::new(&creds.platform_url, &token);
     let run = crate::packs::python_runner(&home);
     let mut failed = Vec::new();
     for (id, dir, arch) in packs {

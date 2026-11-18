@@ -10,18 +10,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-pub trait TokenSource {
-    fn token(&self) -> Result<String, String>;
-}
-
-pub struct Login(pub crate::platform::Credentials);
-
-impl TokenSource for Login {
-    fn token(&self) -> Result<String, String> {
-        Ok(self.0.token.expose().to_string())
-    }
-}
-
 pub trait Broker {
     fn index(&self) -> Result<Vec<u8>, String>;
     fn index_sig(&self) -> Result<Vec<u8>, String>;
@@ -30,7 +18,7 @@ pub trait Broker {
 
 pub struct HttpBroker<'a> {
     store: String,
-    tokens: &'a dyn TokenSource,
+    token: &'a dyn Fn() -> Result<String, String>,
     link: RefCell<Option<(String, String, Instant)>>,
 }
 
@@ -41,8 +29,8 @@ const MAX_INDEX: u64 = 64 << 20;
 const MERGE_GAP: u64 = 1 << 20;
 
 impl<'a> HttpBroker<'a> {
-    pub fn new(store: &str, tokens: &'a dyn TokenSource) -> HttpBroker<'a> {
-        HttpBroker { store: store.trim_end_matches('/').to_string(), tokens, link: RefCell::new(None) }
+    pub fn new(store: &str, token: &'a dyn Fn() -> Result<String, String>) -> HttpBroker<'a> {
+        HttpBroker { store: store.trim_end_matches('/').to_string(), token, link: RefCell::new(None) }
     }
 
     fn agent() -> ureq::Agent {
@@ -51,7 +39,7 @@ impl<'a> HttpBroker<'a> {
 
     fn platform(&self, path: &str) -> Result<ureq::Response, String> {
         // One request to the platform with the node's token; a redirect comes back to the caller, which follows it without the token.
-        let token = self.tokens.token()?;
+        let token = (self.token)()?;
         match Self::agent().get(&format!("{}{path}", self.store)).set("Authorization", &format!("Bearer {token}")).call() {
             Ok(r) => Ok(r),
             Err(ureq::Error::Status(401, _)) => {
@@ -688,7 +676,7 @@ pub fn variant_max_ctx(prefix: &[u8], variant: &str) -> Option<u64> {
     manifest_of(prefix)?["buckets"].as_array()?.iter().filter(|b| b["variant"].as_str() == Some(variant)).filter_map(|b| b["maxctx"].as_u64()).max()
 }
 
-fn fetch_prefix(broker: &dyn Broker, entry: &Entry) -> Result<(Vec<u8>, usize), String> {
+fn fetch_prefix(broker: &impl Broker, entry: &Entry) -> Result<(Vec<u8>, usize), String> {
     // The pack's head, container header and manifest (its first bytes, no weights), the manifest checked against the index entry's hash; and where the manifest starts in them.
     let head = broker.range(&entry.file, 0, 16)?;
     if &head[..8] != b"GCPACK3\n" {
@@ -714,7 +702,7 @@ fn fetch_prefix(broker: &dyn Broker, entry: &Entry) -> Result<(Vec<u8>, usize), 
     Ok(([head, header, body].concat(), at))
 }
 
-pub fn unverified_prefix(model_id: &str, arch: &str, broker: &dyn Broker) -> Result<Option<(Entry, Vec<u8>)>, String> {
+pub fn unverified_prefix(model_id: &str, arch: &str, broker: &impl Broker) -> Result<Option<(Entry, Vec<u8>)>, String> {
     // The pack's first bytes by the index as the platform serves it, before goethe-engine exists to verify the index: only for refusing early; anything installed is checked by plan() again.
     let raw = broker.index()?;
     let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().find(runnable) else { return Ok(None) };
@@ -722,7 +710,7 @@ pub fn unverified_prefix(model_id: &str, arch: &str, broker: &dyn Broker) -> Res
     Ok(Some((entry, prefix)))
 }
 
-pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &dyn Broker, run: Runner) -> Result<Option<Plan>, String> {
+pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &impl Broker, run: Runner) -> Result<Option<Plan>, String> {
     // The signed index's pack for this model and arch, and its manifest's weight files per variant (what to download), only the variant a quant names (id, desc.quant or desc.format, any case). None: no pack.
     let work = home.join("packs");
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -761,7 +749,7 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
     Ok(Some(Plan { entry, prefix, variants, variant_ids, serial }))
 }
 
-pub fn by_structure(home: &Path, dir: &Path, archs: &[String], broker: &dyn Broker, run: Runner) -> Result<Option<(String, Plan)>, String> {
+pub fn by_structure(home: &Path, dir: &Path, archs: &[String], broker: &impl Broker, run: Runner) -> Result<Option<(String, Plan)>, String> {
     // The signed index's pack, on the first of `archs` with one, whose structure (tensor table and metadata keys, never weight values) the weights in `dir` have, whatever repo they came from.
     let work = home.join("packs");
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -796,7 +784,7 @@ fn merged(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     out
 }
 
-pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Broker, run: Runner) -> Result<String, String> {
+pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &impl Broker, run: Runner) -> Result<String, String> {
     // Match the downloaded model files, fetch only the byte ranges of the pack they need, verify, store the serial; the variant id.
     let (variant, _) = finish_as(home, dir, arch, plan, broker, run, Next { suffix: "", donor: None })?;
     store_serial(home, plan.serial)?;
@@ -825,7 +813,7 @@ pub fn finish_as(
     dir: &Path,
     arch: &str,
     plan: &Plan,
-    broker: &dyn Broker,
+    broker: &impl Broker,
     run: Runner,
     next: Next,
 ) -> Result<(String, Delta), String> {
@@ -1430,13 +1418,6 @@ mod tests {
         assert!(ccs.contains(&"12.0".to_string()) && !ccs.contains(&"9.0".to_string()));
     }
 
-    struct Tok(Result<String, String>);
-    impl TokenSource for Tok {
-        fn token(&self) -> Result<String, String> {
-            self.0.clone()
-        }
-    }
-
     fn serve(reply: String) -> (String, std::thread::JoinHandle<String>) {
         // One-shot HTTP server: replies to one request, returns the request head it saw.
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1462,7 +1443,7 @@ mod tests {
     fn the_token_goes_to_the_platform_and_the_range_request_to_the_link_without_it() {
         let (target, target_seen) = serve("HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nConnection: close\r\n\r\nabcd".into());
         let (store, store_seen) = serve(format!("HTTP/1.1 302 Found\r\nLocation: {target}/blob\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"));
-        let tok = Tok(Ok("SECRET".into()));
+        let tok = || Ok("SECRET".into());
         let b = HttpBroker::new(&store, &tok);
         assert_eq!(b.range("m.gcpack", 10, 4).unwrap(), b"abcd");
         let (s, t) = (store_seen.join().unwrap(), target_seen.join().unwrap());
@@ -1473,9 +1454,9 @@ mod tests {
     #[test]
     fn http_401_and_a_missing_login_are_errors() {
         let (store, _h) = serve("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into());
-        let tok = Tok(Ok("bad".into()));
+        let tok = || Ok("bad".into());
         assert!(HttpBroker::new(&store, &tok).index().unwrap_err().contains("goethe login"));
-        let none = Tok(Err("not logged in".into()));
+        let none = || Err("not logged in".into());
         assert!(HttpBroker::new("http://127.0.0.1:1", &none).range("m.gcpack", 0, 16).unwrap_err().contains("not logged in"));
     }
 }

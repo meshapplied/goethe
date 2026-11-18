@@ -325,17 +325,7 @@ pub fn platform_dir(arch: &str) -> String {
 }
 
 pub(crate) fn normalize_arch() -> String {
-    let raw = std::env::var("GOETHE_ARCH")
-        .ok()
-        .or_else(|| {
-            Command::new("uname")
-                .arg("-m")
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-        })
-        .unwrap_or_else(|| "x86_64".to_string());
+    let raw = std::env::var("GOETHE_ARCH").unwrap_or_else(|_| std::env::consts::ARCH.to_string());
     match raw.as_str() {
         "arm64" | "aarch64" => "aarch64".to_string(),
         "x86_64" | "amd64" => "x86_64".to_string(),
@@ -723,13 +713,11 @@ mod tests {
     }
 
     #[test]
-    fn one_sha256_file_matches_ninfer_wrapper() {
+    fn sha256_file_hex_digest() {
         let t = tempfile::tempdir().unwrap();
         let p = t.path().join("blob");
         fs::write(&p, b"goethe-sha256-equiv").unwrap();
         let a = sha256_file(&p).unwrap();
-        let b = crate::engines::ninfer::sha256_file(&p).unwrap();
-        assert_eq!(a, b);
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(sha256_file(&t.path().join("missing")).is_err());

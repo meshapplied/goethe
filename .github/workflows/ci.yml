@@ -153,6 +153,7 @@ jobs:
           workspaces: engine
           shared-key: engine-dev
       - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo build --locked --features goethe/test-release-key
       - name: CPU gates (harness self-test, package signing and verification) on the dev build
         env:
@@ -164,29 +165,11 @@ jobs:
           bash tests/gate.sh 0
           bash tests/gate.sh 6 --only stage6_integrity.py
 
-  engine-clippy:
-    needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: engine
-    steps:
-      - uses: actions/checkout@v4
-      - name: Rust toolchain from rust-toolchain.toml
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: engine
-          shared-key: engine-clippy
-      - run: cargo clippy --locked --all-targets -- -D warnings
-
-  fresh-user:
+  e2e-user:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: engine
@@ -203,24 +186,6 @@ jobs:
       - run: cargo build --locked --features goethe/test-release-key
       - name: The real binaries as a pristine user, no GPU (fake driver library, package host, platform, Hub mirror, packs and engines)
         run: python3 tests/e2e_cli.py FreshUser
-
-  user-paths:
-    needs: changes
-    if: ${{ needs.changes.outputs.e2e == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: engine
-    steps:
-      - uses: actions/checkout@v4
-      - name: Rust toolchain from rust-toolchain.toml
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: engine
-          shared-key: engine-dev
-      - run: cargo build --locked --features goethe/test-release-key
       - name: The other user paths with no GPU (cards, offline, gated, Ctrl-C, fallback, bad index, update)
         run: python3 tests/e2e_cli.py Matrix
 
@@ -249,7 +214,7 @@ jobs:
   # only when the `changes` flag that gates it is false; a failed `changes` job or any other skip fails it.
   gate:
     if: ${{ always() }}
-    needs: [changes, python, lint, attribution, ninfer-patch, engine-test, engine-clippy, fresh-user, user-paths]
+    needs: [changes, python, lint, attribution, ninfer-patch, engine-test, e2e-user]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -268,8 +233,8 @@ jobs:
             | select((.value.result == "skipped" and (
                 (.key == "python" and $f.python != "true")
                 or (.key == "ninfer-patch" and $f.patches != "true")
-                or (.key | IN("engine-test", "engine-clippy") and $f.rust != "true")
-                or (.key | IN("fresh-user", "user-paths") and $f.e2e != "true")
+                or (.key == "engine-test" and $f.rust != "true")
+                or (.key == "e2e-user" and $f.e2e != "true")
               )) | not)
             | "\(.key): \(.value.result)"' <<<"$NEEDS")
           [ -z "$bad" ] || { echo "$bad"; exit 1; }
