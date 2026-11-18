@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.3 (2026-11-18)
 
 - The installer is one short script for Linux and macOS: it checks the machine, verifies the signed package and `goethe`, and hands over to `goethe setup`, which does the rest and is safe to run again to repair or upgrade. It installs no system packages beyond `openssl` and CA certificates (as root, when missing), no nginx from the distribution (goethe ships its own for Linux too), and no Python environment (the first model install sets it up).
 - `goethe doctor --fix` makes the system changes the installer used to make: the NVIDIA driver (load, install, open module for Blackwell), NVIDIA's CUDA 13 forward-compatibility libraries for 535-579 drivers, and a C++ compiler once SGLang is installed, each asked for.
@@ -12,8 +12,6 @@
 - `goethe status` lists the served models too; `goethe api` is the address, keys and how to connect.
 - `goethe load M --save` stores `--gpu`, `--ctx`, `--max-conc` and the engine flags after `--` as the model's defaults (replaces `models config`); `--dry-run` shows the placement without loading (replaces `hw pick-gpus`). `--force` and `--yes` on load are one flag (`--yes`); `--tp` is only for "split over N GPUs goethe picks".
 - Extra engine flags are always given after `--` (`--sglang-arg` is gone). `goethe logs goethed|gateway|MODEL`; `goethe doctor --hardware` (was `hw profile`), `--public` (was `--probe-public`); `goethe login --lifetime` (was `token-lifetime`); `goethe remove --traces keep|delete`. Removed: `service`, `get`, `configure`, `logs --prune`, `install --no-load/--no-verify/--reset/--tp`, `--model` and `--gpus` everywhere.
-
-## 0.3.3 (2026-11-17)
 
 - A model with a kernel pack that cannot open or run on this machine now stops with one reason line and the opt-in (`--fallback`, or `GOETHE_ALLOW_FALLBACK=1`). Nothing silently serves it with llama.cpp or SGLang any more. A model without a pack for this card still uses its plain runtime.
 - A pack-only model (Qwen3.8-27B-NVFP4) is refused before any download when the node is logged out or the card is not one its packs are built for.

@@ -1,1 +1,0 @@
-python3 -m unittest tests.test_main_in_dev
