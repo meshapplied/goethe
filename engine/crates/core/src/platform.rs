@@ -430,12 +430,18 @@ pub fn hostname() -> String {
             raw = String::from_utf8_lossy(&buf[..buf.iter().position(|&b| b == 0).unwrap_or(buf.len())]).into_owned();
         }
     }
-    let name = clean_text(raw.trim().trim_end_matches(".local"), 253);
+    let name = host_label(raw.trim().trim_end_matches(".local"));
     if name.is_empty() {
         "unknown".to_string()
     } else {
         name
     }
+}
+
+pub fn host_label(raw: &str) -> String {
+    // The platform takes letters, digits, dot, dash and underscore; anything else (a space, an apostrophe) becomes a dash.
+    let mapped: String = raw.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' }).collect();
+    mapped.trim_matches('-').chars().take(253).collect()
 }
 
 pub fn public_ip_url(home: &Path) -> Result<String, String> {
@@ -743,5 +749,12 @@ mod tests {
         assert_eq!(clean_text("abcdef", 3), "abc");
         assert!(valid_id("node-1_a.b") && !valid_id("") && !valid_id("a/b") && !valid_id(&"a".repeat(129)));
         assert!(!valid_token("short") && !valid_token("mesh_node_ with space") && valid_token("mesh_node_abcdefghijkl"));
+    }
+
+    #[test]
+    fn a_hostname_the_platform_would_refuse_is_made_safe() {
+        assert_eq!(host_label("Mozers-MacBook-Pro"), "Mozers-MacBook-Pro");
+        assert_eq!(host_label("Mozer's MacBook Pro"), "Mozer-s-MacBook-Pro");
+        assert_eq!(host_label("gpu-box.lan"), "gpu-box.lan");
     }
 }

@@ -548,6 +548,27 @@ fn san_extension(names: &[String]) -> String {
     format!("subjectAltName={}", entries.join(","))
 }
 
+pub(crate) fn self_signed(key: &Path, crt: &Path, ec: bool, days: u32, cn: &str, extensions: &[&str]) -> Result<(), String> {
+    // A self-signed certificate from a config file, which OpenSSL and macOS's LibreSSL read alike; EC keys via ecparam.
+    let cfg = crt.with_extension("cnf");
+    let text = format!("[req]\nprompt = no\ndistinguished_name = dn\nx509_extensions = ext\n[dn]\nCN = {cn}\n[ext]\n{}\n", extensions.join("\n"));
+    fs::write(&cfg, text).map_err(|e| e.to_string())?;
+    let quiet = |c: &mut Command| c.stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    let mut req = Command::new("openssl");
+    req.args(["req", "-x509", "-config"]).arg(&cfg).args(["-days", &days.to_string(), "-nodes", "-out"]).arg(crt);
+    let made = if ec {
+        quiet(Command::new("openssl").args(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out"]).arg(key))
+            && quiet(req.arg("-key").arg(key))
+    } else {
+        quiet(req.args(["-newkey", "rsa:2048", "-keyout"]).arg(key))
+    };
+    let _ = fs::remove_file(&cfg);
+    if !made {
+        return Err("openssl could not create a self-signed certificate".to_string());
+    }
+    fs::set_permissions(key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())
+}
+
 fn ensure_tls(home: &Path, san: &str, stale: bool) -> Result<(), String> {
     // Self-signed certificate on first use, or again when the names changed; the key is always 0600 in a 0700 directory.
     let cert_dir = nginx_prefix(home).join("certs");
@@ -555,21 +576,7 @@ fn ensure_tls(home: &Path, san: &str, stale: bool) -> Result<(), String> {
     let crt = cert_dir.join("server.crt");
     let key = cert_dir.join("server.key");
     if stale || !(crt.is_file() && key.is_file()) {
-        let status = Command::new("openssl")
-            .args(["req", "-x509", "-newkey", "rsa:2048", "-keyout"])
-            .arg(&key)
-            .arg("-out")
-            .arg(&crt)
-            .args(["-days", "365", "-nodes", "-subj", "/CN=goethe-local"])
-            .arg("-addext")
-            .arg(san)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|e| e.to_string())?;
-        if !status.success() {
-            return Err("openssl cert generation failed".to_string());
-        }
+        self_signed(&key, &crt, false, 365, "goethe-local", &[san])?;
     }
     fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())
 }

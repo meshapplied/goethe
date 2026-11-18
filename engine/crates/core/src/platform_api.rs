@@ -186,12 +186,21 @@ fn transport_text(t: &ureq::Transport) -> String {
 }
 
 pub fn error_code(body: &str) -> String {
-    // The documented {error:"<code>"} reduced to a short code; anything else says nothing.
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
-        .filter(|c| !c.is_empty() && c.len() <= 64 && c.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')))
-        .unwrap_or_default()
+    // The documented {error:"<code>"} reduced to a short code, with the snapshot field it names; anything else says nothing.
+    let token = |v: &Value, key: &str, max: usize| {
+        v.get(key)
+            .and_then(Value::as_str)
+            .filter(|c| !c.is_empty() && c.len() <= max && c.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')))
+            .map(str::to_string)
+    };
+    let Some(v) = serde_json::from_str::<Value>(body).ok() else {
+        return String::new();
+    };
+    match (token(&v, "error", 64), token(&v, "field", 96)) {
+        (Some(code), Some(field)) => format!("{code}: {field}"),
+        (Some(code), None) => code,
+        _ => String::new(),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -465,6 +474,12 @@ mod tests {
         let m = mock::serve(vec![(200, r#"{"device_code":"d","user_code":"AB\u001b[2J","verification_uri_complete":"http://evil.example.com/x","expires_in":900,"interval":3}"#.into())]);
         let c = Client::new(&m.url, Duration::from_secs(5)).unwrap();
         assert!(c.auth_start("h", "f").is_err());
+    }
+
+    #[test]
+    fn a_rejected_snapshot_names_its_field() {
+        assert_eq!(error_code(r#"{"error":"invalid_snapshot","field":"gpus.0.sm"}"#), "invalid_snapshot: gpus.0.sm");
+        assert_eq!(error_code(r#"{"error":"invalid_snapshot","field":"no spaces allowed"}"#), "invalid_snapshot");
     }
 
     #[test]

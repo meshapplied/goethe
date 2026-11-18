@@ -26,12 +26,26 @@ trap cleanup EXIT
 
 mkdir -p "${CDN}/bin" "${CDN}/v1"
 cp -R "${ROOT}/dist/cdn/bin/darwin-aarch64" "${CDN}/bin/"
-cp "${ROOT}/cdn/install.sh" "${CDN}/install.sh"
 cp "${ROOT}/cdn/v1/registry.json" "${CDN}/v1/registry.json"
 for f in LICENSE NOTICE; do [[ -f "${REPO}/${f}" ]] && cp "${REPO}/${f}" "${CDN}/${f}"; done
+grep -E '^version\s*=' "${ROOT}/crates/goethe/Cargo.toml" | head -n1 | sed 's/.*"\(.*\)".*/\1/' >"${CDN}/VERSION"
+
+openssl ecparam -genkey -name prime256v1 -noout -out "${WORK}/test.key"
+openssl ec -in "${WORK}/test.key" -pubout -out "${WORK}/test_pub.pem" 2>/dev/null
+bash "${ROOT}/packaging/subst_install_pubkey.sh" "${ROOT}/cdn/install.sh" "${WORK}/test_pub.pem" "${CDN}/install.sh"
+(cd "${CDN}" && find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
+  echo "$(shasum -a 256 "${f}" | awk '{print $1}')  ${f}"
+done >SHA256SUMS)
+openssl dgst -sha256 -sign "${WORK}/test.key" -out "${CDN}/SHA256SUMS.sig" "${CDN}/SHA256SUMS"
 
 echo "== installer"
-GOETHE_INSECURE=1 GOETHE_PKG_URL="file://${CDN}" bash "${CDN}/install.sh" </dev/null
+GOETHE_PKG_URL="file://${CDN}" bash "${CDN}/install.sh" </dev/null >"${WORK}/install.log" 2>&1 || { cat "${WORK}/install.log"; exit 1; }
+cat "${WORK}/install.log"
+check "the package signature was verified" grep -q "signed by the Goethe release key" "${WORK}/install.log"
+cp "${CDN}/bin/darwin-aarch64/goethe" "${WORK}/goethe.orig"
+printf 'x' >>"${CDN}/bin/darwin-aarch64/goethe"
+check "a tampered binary is refused" bash -c '! GOETHE_HOME="$0/tampered" GOETHE_PKG_URL="file://$1" bash "$1/install.sh" </dev/null >/dev/null 2>&1' "${WORK}" "${CDN}"
+cp "${WORK}/goethe.orig" "${CDN}/bin/darwin-aarch64/goethe"
 check "goethe runs" "${G}" --version
 check "no Python environment was set up" test ! -e "${GOETHE_HOME}/py-env"
 check "no uv was installed" test ! -e "${GOETHE_HOME}/bin/uv"
@@ -79,6 +93,8 @@ echo "${reply}" | head -c 400; echo
 check "the gateway answers a chat request" grep -q '"choices"' <<<"${reply}"
 models="$(curl -sS --cacert "${GOETHE_HOME}/nginx/certs/server.crt" "${api}/models" -H "Authorization: Bearer ${key}" || true)"
 check "the model is listed" grep -q "${MODEL}" <<<"${models}"
+"${G}" doctor --snapshot >"${ROOT}/dist/snapshot-mac.json"
+check "the heartbeat names this Mac and its Metal GPU" bash -c 'grep -q "\"os\":\"macOS" "$0" && grep -q "Apple" "$0" && ! grep -q "\"sm\":\"metal\"" "$0"' "${ROOT}/dist/snapshot-mac.json"
 gpu="$("${G}" gpu --json)"
 check "goethe gpu lists the Apple GPU" grep -qi "apple" <<<"${gpu}"
 status="$("${G}" status)"

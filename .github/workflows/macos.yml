@@ -48,4 +48,10 @@ jobs:
         with:
           name: darwin-aarch64
           path: engine/dist/cdn/bin/darwin-aarch64
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snapshot-mac
+          path: engine/dist/snapshot-mac.json
+          if-no-files-found: ignore
           retention-days: 7

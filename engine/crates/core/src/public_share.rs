@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -467,23 +467,9 @@ fn ensure_cert(home: &Path, ip: Option<IpAddr>) -> Result<(), String> {
     if current && crt.is_file() && key.is_file() {
         return Ok(());
     }
-    let ok = Command::new("openssl")
-        .args(["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-keyout"])
-        .arg(&key)
-        .arg("-out")
-        .arg(&crt)
-        .args(["-days", "30", "-nodes", "-subj", "/CN=goethe-public"])
-        .args(["-addext", &san, "-addext", "basicConstraints=critical,CA:TRUE"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| e.to_string())?
-        .success();
-    if !ok {
-        return Err("openssl could not create the public gateway certificate".to_string());
-    }
+    nginx::self_signed(&key, &crt, true, 30, "goethe-public", &[&san, "basicConstraints=critical,CA:TRUE"])
+        .map_err(|_| "openssl could not create the public gateway certificate".to_string())?;
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
     fs::set_permissions(&crt, fs::Permissions::from_mode(0o644)).map_err(|e| e.to_string())?;
     nginx::write_private(&san_file, san.as_bytes())
 }
@@ -687,5 +673,14 @@ mod tests {
         store(h, &share(true, now() + 600)).unwrap();
         tick(h);
         assert!(load(h).unwrap().open, "an open window stays open");
+    }
+
+    #[test]
+    fn the_public_certificate_names_the_address_and_works_with_this_openssl() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_cert(dir.path(), Some("203.0.113.9".parse().unwrap())).unwrap();
+        let out = Command::new("openssl").args(["x509", "-noout", "-text", "-in"]).arg(cert_path(dir.path())).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("203.0.113.9") && text.contains("CA:TRUE"), "{text}");
     }
 }
