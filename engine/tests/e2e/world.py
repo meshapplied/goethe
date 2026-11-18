@@ -424,6 +424,10 @@ class Cell:
             ["cc", "-shared", "-fPIC", "-o", str(shim / "libnvidia-ml.so.1"), str(HERE / "nvml_shim.c")], check=True
         )
         (shim / "libnvidia-ml.so").symlink_to("libnvidia-ml.so.1")
+        subprocess.run(
+            ["cc", "-shared", "-fPIC", "-o", str(shim / "libcuda.so.1"), str(HERE / "cuda_shim.c")], check=True
+        )
+        (shim / "libcuda.so").symlink_to("libcuda.so.1")
         shutil.copytree(FAKE, self.fakes / "fake")
         ports = []
         for _ in range(2):

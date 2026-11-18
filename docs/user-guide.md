@@ -214,7 +214,7 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 | `goethe trace` | Record requests and replies as training traces (`on`, `off`, `--key`); see [traces.md](traces.md) |
 | `goethe learn` | Let a session keep what compaction would drop (`on`, `off`, `--model`); see [learn.md](learn.md) |
 | `goethe api domain` | DNS record for your own hostname (`check <name>`) |
-| `goethe api share 5h --key <name>` | Open the API on a public address for a while for chosen keys (`stop` closes it) |
+| `goethe api share 5h --key <name> --allow <their-ip>/32` | Open the API on a public address for a while for chosen keys from their IP (`stop` closes it) |
 
 ### GPUs and system
 
@@ -307,7 +307,7 @@ goethe api expose vpn      # or local, or public; asks who may connect
 - **VPN or private network (recommended):** connect your VPN first, then pick it from the list. Any VPN with a network interface works, and so does a cloud VM's private network. Goethe lists tunnels and interfaces on private addresses, leaves out container bridges and public network cards, and shows the range each one reaches, taken from the system's routes. When a VPN routes each device separately, the private block its address is in (such as `100.64.0.0/10` or `10.0.0.0/8`) is used, so devices added later can connect too; you can narrow it to specific addresses. Default routes are never allowed. The gateway follows the interface: a new address after a reconnect or a reboot is picked up within a few seconds, and while the interface is down only this machine can connect (`goethe status` says so). The allowlist itself only changes when you run `goethe api expose` again; `goethe doctor` warns if it no longer lets the network's clients in. A VPN without an interface (userspace mode) can't be listened on directly: use local mode and the VPN's own port forwarding.
 - **Public network:** any address that can reach this machine. You open the port in your firewall yourself.
 
-It then asks whether to restrict access to specific IP addresses, and offers to create the first key. In scripts: `goethe api expose vpn --yes`, or `goethe api expose public --allow 203.0.113.7 --yes`.
+It then asks whether to restrict access to specific IP addresses, and offers to create the first key. In scripts: `goethe api expose vpn --yes`, or `goethe api expose public --allow 203.0.113.7/32 --yes`. Public always needs `--allow` and a confirm (`--yes` or `y`); it will not open every interface on a leftover allowlist alone.
 
 ### Keys
 
@@ -339,13 +339,13 @@ goethe api allow remove 192.168.1.0/24
 To give someone outside your network access for a limited time, without changing how the API is normally reached:
 
 ```bash
-goethe api share 5h --key my-app      # prints the URL, the key and the certificate to send
-goethe api share 1d --key ci          # another key on the same address, for a day
-goethe api share stop --key ci        # stop sharing one key
-goethe api share stop                 # close early
+goethe api share 5h --key my-app --allow 203.0.113.7/32   # prints the URL, the key and the certificate to send
+goethe api share 1d --key ci --allow 203.0.113.7/32       # another key on the same address, for a day
+goethe api share stop --key ci                            # stop sharing one key
+goethe api share stop                                     # close early
 ```
 
-The public address exists only while some key is shared, accepts only the keys you chose (never admin keys), each until its own time, and closes by itself when the last one ends. Keys stay the same every time. The menu's Public address page does the same with a form. Details and the full list of security precautions: [`goethe api share`](cli.md#goethe-api-share-duration).
+The public address exists only while some key is shared, accepts only the keys you chose (never admin keys), each until its own time and from the client addresses you named with `--allow` (or kept from the last share of those keys), and closes by itself when the last one ends. Keys stay the same every time. The menu's Public address page does the same with a form. Details and the full list of security precautions: [`goethe api share`](cli.md#goethe-api-share-duration).
 
 ### Address, aliases and your own domain
 

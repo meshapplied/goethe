@@ -51,20 +51,16 @@ impl Share {
     }
 
     fn settle(&mut self) {
-        // One gateway for every shared key: open until the last key's time ends; nginx admits the union of their addresses, or anyone when a key has none.
+        // One gateway for every shared key: open until the last key's time ends; nginx admits the union of their allowlists.
         self.keys = self.grants.iter().map(|g| g.key.clone()).collect();
         self.until = self.grants.iter().map(|g| g.until).max().unwrap_or(self.until);
-        self.allow = if self.grants.iter().all(|g| !g.allow.is_empty()) {
-            let mut all: Vec<String> = Vec::new();
-            for c in self.grants.iter().flat_map(|g| g.allow.iter()) {
-                if !all.contains(c) {
-                    all.push(c.clone());
-                }
+        let mut all: Vec<String> = Vec::new();
+        for c in self.grants.iter().flat_map(|g| g.allow.iter()) {
+            if !all.contains(c) {
+                all.push(c.clone());
             }
-            all
-        } else {
-            Vec::new()
-        };
+        }
+        self.allow = all;
     }
 
     fn grant(&self, key: &str) -> Option<Grant> {
@@ -197,7 +193,7 @@ fn decide(share: Option<&Share>, key_id: &str, is_admin: bool, now: i64, client:
     if now >= g.until {
         return Access::KeyExpired;
     }
-    if !g.allow.is_empty() && !client.is_some_and(|ip| g.allow.iter().any(|c| cidr_contains(c, ip))) {
+    if g.allow.is_empty() || !client.is_some_and(|ip| g.allow.iter().any(|c| cidr_contains(c, ip))) {
         return Access::NotFromHere;
     }
     Access::Allowed
@@ -216,6 +212,13 @@ fn key_rows(home: &Path) -> Result<Vec<KeyRow>, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string());
     rows
+}
+
+fn strip_tokens_for_reopen(keys: &mut [SharedKey]) {
+    // Reopening remembered keys must not reprint bearer tokens (goethe api / keys create already showed them).
+    for k in keys {
+        k.token = None;
+    }
 }
 
 fn resolve_keys(home: &Path, wanted: &[String], until: i64, warnings: &mut Vec<String>) -> Result<Vec<SharedKey>, String> {
@@ -255,6 +258,70 @@ fn port_free(port: u16) -> bool {
     TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).is_ok()
 }
 
+fn share_allow(cli: &[String], reuse_keys: bool, kept: &[String]) -> Vec<String> {
+    // --allow wins; reopening the same keys keeps the addresses from their last share. Never the VPN/API allowlist.
+    if !cli.is_empty() {
+        return cli.to_vec();
+    }
+    if reuse_keys && !kept.is_empty() {
+        return kept.to_vec();
+    }
+    Vec::new()
+}
+
+fn need_client_allow(home: &Path) -> String {
+    // Who may connect is the client's public IP, not this machine's (that one is only the URL).
+    let here = crate::platform::lookup_public_ip(home)
+        .ok()
+        .map(|ip| format!(" this machine's public address is {ip} (that becomes the URL, not --allow);"))
+        .unwrap_or_default();
+    format!(
+        "name who may connect with --allow <their-ip>/32 (their phone or laptop's public IP, not this machine's).{here} ask them; to open to every address use --dangerously-allow-all-inbound"
+    )
+}
+
+fn reject_bad_share_cidrs(home: &Path, allow: &[String]) -> Result<(), String> {
+    let machine = crate::platform::lookup_public_ip(home).ok();
+    for c in allow {
+        if c.ends_with("/0") {
+            return Err(
+                "the public gateway will not open to every address unless you pass --dangerously-allow-all-inbound; otherwise name the client's public IP with --allow <their-ip>/32"
+                    .into(),
+            );
+        }
+        if let Some(ip) = machine {
+            let host = format!("{ip}/{}", if ip.is_ipv4() { 32 } else { 128 });
+            if *c == host {
+                return Err(format!(
+                    "{c} is this machine's public address (the URL), not who may connect; use their phone or laptop's public IP"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_share_cidrs(
+    home: &Path,
+    cli_allow: &[String],
+    reuse_keys: bool,
+    kept: &[String],
+    dangerously_allow_all_inbound: bool,
+) -> Result<Vec<String>, String> {
+    if dangerously_allow_all_inbound {
+        if !cli_allow.is_empty() {
+            return Err("--dangerously-allow-all-inbound cannot be combined with --allow".into());
+        }
+        return Ok(vec!["0.0.0.0/0".into()]);
+    }
+    let allow = share_allow(cli_allow, reuse_keys, kept);
+    if allow.is_empty() {
+        return Err(need_client_allow(home));
+    }
+    reject_bad_share_cidrs(home, &allow)?;
+    Ok(allow)
+}
+
 fn mux_public_listening(home: &Path) -> bool {
     nginx::persisted_mux_port(home)
         .is_ok_and(|p| TcpStream::connect_timeout(&public_mux_addr(p), Duration::from_millis(500)).is_ok())
@@ -276,6 +343,7 @@ pub struct OpenArgs<'a> {
     pub keys: &'a [String],
     pub allow: &'a [String],
     pub port: Option<u16>,
+    pub dangerously_allow_all_inbound: bool,
 }
 
 pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
@@ -297,8 +365,12 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
     } else {
         a.keys.to_vec()
     };
-    let keys = resolve_keys(home, &wanted, until, &mut warnings)?;
-    let allow = a.allow.iter().map(|c| security::canonical_cidr(c)).collect::<Result<Vec<_>, _>>()?;
+    let reopen = a.keys.is_empty();
+    let mut keys = resolve_keys(home, &wanted, until, &mut warnings)?;
+    if reopen {
+        strip_tokens_for_reopen(&mut keys);
+    }
+    let cli_allow = a.allow.iter().map(|c| security::canonical_cidr(c)).collect::<Result<Vec<_>, _>>()?;
     let port = a.port.or(previous.as_ref().map(|p| p.port)).unwrap_or(DEFAULT_PORT);
     let mut grants: Vec<Grant> = previous
         .as_ref()
@@ -307,8 +379,18 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
         .unwrap_or_default();
     for k in &keys {
         let kept = previous.as_ref().and_then(|p| p.grant(&k.id)).map(|g| g.allow).unwrap_or_default();
+        let allow = resolve_share_cidrs(home, &cli_allow, reopen, &kept, a.dangerously_allow_all_inbound)?;
         grants.retain(|g| g.key != k.id);
-        grants.push(Grant { key: k.id.clone(), until, allow: if a.allow.is_empty() && a.keys.is_empty() { kept } else { allow.clone() } });
+        grants.push(Grant { key: k.id.clone(), until, allow });
+    }
+    if a.dangerously_allow_all_inbound {
+        warnings.push(format!(
+            "every address may connect; rate limit is {RATE_PER_IP} requests/s per client (burst {}), {CONN_PER_IP} connections",
+            2 * RATE_PER_IP
+        ));
+    }
+    if reopen {
+        warnings.push("the key secret is not printed again; goethe api shows it".into());
     }
     let gateway_port = nginx::public_port_u16(home);
     let mux_port = nginx::persisted_mux_port(home)?;
@@ -462,16 +544,17 @@ fn ensure_cert(home: &Path, ip: Option<IpAddr>) -> Result<(), String> {
         names.insert(0, format!("IP:{ip}"));
     }
     let san = format!("subjectAltName={}", names.join(","));
+    let stamp = format!("{san}\nleaf");
     let san_file = dir.join("public_sans.txt");
-    let current = fs::read_to_string(&san_file).map(|s| s.trim() == san).unwrap_or(false);
+    let current = fs::read_to_string(&san_file).map(|s| s.trim() == stamp).unwrap_or(false);
     if current && crt.is_file() && key.is_file() {
         return Ok(());
     }
-    nginx::self_signed(&key, &crt, true, 30, "goethe-public", &[&san, "basicConstraints=critical,CA:TRUE"])
+    nginx::self_signed(&key, &crt, true, 30, "goethe-public", &[&san, "basicConstraints=critical,CA:FALSE"])
         .map_err(|_| "openssl could not create the public gateway certificate".to_string())?;
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&crt, fs::Permissions::from_mode(0o644)).map_err(|e| e.to_string())?;
-    nginx::write_private(&san_file, san.as_bytes())
+    nginx::write_private(&san_file, stamp.as_bytes())
 }
 
 fn fingerprint(crt: &Path) -> Option<String> {
@@ -487,13 +570,8 @@ pub fn nginx_block(home: &Path, mux_port: u16, modern_http2: bool, max_body_mb: 
     if !cert_path(home).is_file() && ensure_cert(home, None).is_err() {
         return String::new();
     }
-    let allow = if share.allow.is_empty() {
-        String::new()
-    } else {
-        let mut lines: String = share.allow.iter().map(|c| format!("    allow {c};\n")).collect();
-        lines.push_str("    deny all;\n");
-        lines
-    };
+    let mut allow: String = share.allow.iter().map(|c| format!("    allow {c};\n")).collect();
+    allow.push_str("    deny all;\n");
     const TMPL: &str = include_str!("../../../nginx/goethe_public.conf.tmpl");
     TMPL.replace("{{PORT}}", &share.port.to_string())
         .replace("{{HTTP2_LISTEN}}", if modern_http2 { "" } else { " http2" })
@@ -535,7 +613,7 @@ mod tests {
     use super::*;
 
     fn share(open: bool, until: i64) -> Share {
-        Share { open, until, port: 8444, keys: vec!["k1".into()], allow: vec![], grants: vec![] }
+        Share { open, until, port: 8444, keys: vec!["k1".into()], allow: vec!["203.0.113.0/24".into()], grants: vec![] }
     }
 
     fn granted(grants: &[(&str, i64, &[&str])]) -> Share {
@@ -547,12 +625,13 @@ mod tests {
 
     #[test]
     fn two_keys_share_one_gateway_and_one_that_ended_is_refused_while_the_other_works() {
-        let s = granted(&[("k1", 1000, &[]), ("k4", 5000, &[])]);
+        let ip = |s: &str| Some(s.parse::<IpAddr>().unwrap());
+        let s = granted(&[("k1", 1000, &["203.0.113.0/24"]), ("k4", 5000, &["203.0.113.0/24"])]);
         assert_eq!((s.until, s.keys.clone()), (5000, vec!["k1".to_string(), "k4".to_string()]), "open until the last key ends");
-        assert_eq!(decide(Some(&s), "k1", false, 999, None), Access::Allowed);
-        assert_eq!(decide(Some(&s), "k1", false, 1000, None), Access::KeyExpired);
-        assert_eq!(decide(Some(&s), "k4", false, 1000, None), Access::Allowed, "the gateway stays open for the other key");
-        assert_eq!(decide(Some(&s), "k4", false, 5000, None), Access::Closed);
+        assert_eq!(decide(Some(&s), "k1", false, 999, ip("203.0.113.1")), Access::Allowed);
+        assert_eq!(decide(Some(&s), "k1", false, 1000, ip("203.0.113.1")), Access::KeyExpired);
+        assert_eq!(decide(Some(&s), "k4", false, 1000, ip("203.0.113.1")), Access::Allowed, "the gateway stays open for the other key");
+        assert_eq!(decide(Some(&s), "k4", false, 5000, ip("203.0.113.1")), Access::Closed);
     }
 
     #[test]
@@ -563,10 +642,10 @@ mod tests {
         assert_eq!(decide(Some(&s), "k1", false, 0, ip("203.0.113.9")), Access::Allowed);
         assert_eq!(decide(Some(&s), "k1", false, 0, ip("198.51.100.7")), Access::NotFromHere, "not the other key's address");
         assert_eq!(decide(Some(&s), "k1", false, 0, None), Access::NotFromHere, "no address, no entry");
-        let open = granted(&[("k1", 1000, &["203.0.113.0/24"]), ("k4", 1000, &[])]);
-        assert!(open.allow.is_empty(), "a key without addresses opens nginx to anyone; the router still limits k1");
-        assert_eq!(decide(Some(&open), "k1", false, 0, ip("8.8.8.8")), Access::NotFromHere);
-        assert_eq!(decide(Some(&open), "k4", false, 0, ip("8.8.8.8")), Access::Allowed);
+        let mixed = granted(&[("k1", 1000, &["203.0.113.0/24"]), ("k4", 1000, &[])]);
+        assert_eq!(mixed.allow, vec!["203.0.113.0/24".to_string()], "empty allowlists do not open nginx to the world");
+        assert_eq!(decide(Some(&mixed), "k1", false, 0, ip("8.8.8.8")), Access::NotFromHere);
+        assert_eq!(decide(Some(&mixed), "k4", false, 0, ip("8.8.8.8")), Access::NotFromHere);
         assert!(cidr_contains("2001:db8::/32", "2001:db8::1".parse().unwrap()) && !cidr_contains("2001:db8::/32", "2001:db9::1".parse().unwrap()));
     }
 
@@ -583,13 +662,14 @@ mod tests {
 
     #[test]
     fn only_listed_non_admin_keys_pass_while_the_window_is_open() {
+        let ip = |s: &str| Some(s.parse::<IpAddr>().unwrap());
         let s = share(true, 1000);
-        assert_eq!(decide(Some(&s), "k1", false, 999, None), Access::Allowed);
-        assert_eq!(decide(Some(&s), "k1", false, 1000, None), Access::Closed, "closes at the end second");
-        assert_eq!(decide(Some(&s), "k2", false, 999, None), Access::KeyNotShared);
-        assert_eq!(decide(Some(&s), "k1", true, 999, None), Access::KeyNotShared, "admin keys never");
-        assert_eq!(decide(Some(&share(false, 5000)), "k1", false, 999, None), Access::Closed, "shut down");
-        assert_eq!(decide(None, "k1", false, 0, None), Access::Closed);
+        assert_eq!(decide(Some(&s), "k1", false, 999, ip("203.0.113.1")), Access::Allowed);
+        assert_eq!(decide(Some(&s), "k1", false, 1000, ip("203.0.113.1")), Access::Closed, "closes at the end second");
+        assert_eq!(decide(Some(&s), "k2", false, 999, ip("203.0.113.1")), Access::KeyNotShared);
+        assert_eq!(decide(Some(&s), "k1", true, 999, ip("203.0.113.1")), Access::KeyNotShared, "admin keys never");
+        assert_eq!(decide(Some(&share(false, 5000)), "k1", false, 999, ip("203.0.113.1")), Access::Closed, "shut down");
+        assert_eq!(decide(None, "k1", false, 0, ip("203.0.113.1")), Access::Closed);
     }
 
     fn home_with_keys() -> tempfile::TempDir {
@@ -621,12 +701,25 @@ mod tests {
         let got = resolve_keys(h, &["app".into(), "k1".into()], now() + 60, &mut w).unwrap();
         assert_eq!(got.len(), 1, "the same key twice counts once");
         assert!(w.is_empty());
+        assert!(got[0].token.as_deref() == Some("tok"));
         assert!(resolve_keys(h, &["root".into()], now() + 60, &mut w).err().unwrap().contains("admin"));
         assert!(resolve_keys(h, &["old".into()], now() + 60, &mut w).err().unwrap().contains("expired"));
         assert!(resolve_keys(h, &["dup".into()], now() + 60, &mut w).err().unwrap().contains("several"));
         assert!(resolve_keys(h, &["nope".into()], now() + 60, &mut w).err().unwrap().contains("app"));
         resolve_keys(h, &["wide".into()], now() + 60, &mut w).unwrap();
         assert!(w.iter().any(|x| x.contains("every model")));
+    }
+
+    #[test]
+    fn reopen_without_named_keys_strips_bearer_tokens() {
+        let dir = home_with_keys();
+        let h = dir.path();
+        let mut w = Vec::new();
+        let mut keys = resolve_keys(h, &["app".into()], now() + 60, &mut w).unwrap();
+        assert_eq!(keys[0].token.as_deref(), Some("tok"));
+        strip_tokens_for_reopen(&mut keys);
+        assert!(keys[0].token.is_none());
+        assert_eq!(keys[0].name, "app");
     }
 
     #[test]
@@ -647,18 +740,89 @@ mod tests {
     }
 
     #[test]
+    fn nginx_block_always_denies_all_even_with_an_empty_allowlist() {
+        let dir = home_with_keys();
+        let h = dir.path();
+        store(h, &Share { allow: vec![], ..share(true, now() + 600) }).unwrap();
+        let block = nginx_block(h, 30000, true, 64);
+        assert!(block.contains("deny all;"), "{block}");
+        assert!(!block.contains("allow "), "empty allowlist must not admit the world: {block}");
+    }
+
+    #[test]
+    fn share_allow_prefers_cli_then_kept_never_gateway() {
+        assert_eq!(share_allow(&["203.0.113.9/32".into()], false, &["198.51.100.1/32".into()]), vec!["203.0.113.9/32".to_string()]);
+        assert_eq!(share_allow(&[], true, &["198.51.100.1/32".into()]), vec!["198.51.100.1/32".to_string()]);
+        assert!(share_allow(&[], false, &[]).is_empty(), "VPN/API allowlist must not open public share");
+        assert!(share_allow(&[], true, &[]).is_empty());
+    }
+
+    #[test]
+    fn need_client_allow_names_the_client_not_this_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let msg = need_client_allow(dir.path());
+        assert!(msg.contains("their phone or laptop") && msg.contains("--allow"), "{msg}");
+        assert!(msg.contains("dangerously-allow-all-inbound"), "{msg}");
+        assert!(!msg.contains("goethe api allow"), "{msg}");
+    }
+
+    #[test]
+    fn share_refuses_everyone_and_this_machines_public_ip_unless_dangerously() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        assert!(reject_bad_share_cidrs(home, &["0.0.0.0/0".into()]).unwrap_err().contains("dangerously-allow-all-inbound"));
+        assert!(reject_bad_share_cidrs(home, &["::/0".into()]).unwrap_err().contains("dangerously-allow-all-inbound"));
+        let ip: IpAddr = "203.0.113.50".parse().unwrap();
+        std::env::set_var("GOETHE_PUBLIC_IP", ip.to_string());
+        let err = reject_bad_share_cidrs(home, &[format!("{ip}/32")]).unwrap_err();
+        std::env::remove_var("GOETHE_PUBLIC_IP");
+        assert!(err.contains("this machine's public address"), "{err}");
+        assert!(reject_bad_share_cidrs(home, &["198.51.100.7/32".into()]).is_ok());
+
+        let all = resolve_share_cidrs(home, &[], false, &[], true).unwrap();
+        assert_eq!(all, vec!["0.0.0.0/0".to_string()]);
+        assert!(resolve_share_cidrs(home, &["198.51.100.7/32".into()], false, &[], true)
+            .unwrap_err()
+            .contains("cannot be combined"));
+        assert!(resolve_share_cidrs(home, &["0.0.0.0/0".into()], false, &[], false)
+            .unwrap_err()
+            .contains("dangerously-allow-all-inbound"));
+        assert_eq!(
+            resolve_share_cidrs(home, &["198.51.100.7/32".into()], false, &[], false).unwrap(),
+            vec!["198.51.100.7/32".to_string()]
+        );
+        assert_eq!(
+            resolve_share_cidrs(home, &[], true, &["203.0.113.9/32".into()], false).unwrap(),
+            vec!["203.0.113.9/32".to_string()]
+        );
+        assert!(resolve_share_cidrs(home, &[], false, &[], false).unwrap_err().contains("--allow"));
+    }
+
+    #[test]
+    fn nginx_block_with_everyone_still_ends_in_deny_all() {
+        let dir = home_with_keys();
+        let h = dir.path();
+        store(h, &Share { allow: vec!["0.0.0.0/0".into()], ..share(true, now() + 600) }).unwrap();
+        let block = nginx_block(h, 30000, true, 64);
+        assert!(block.contains("allow 0.0.0.0/0;\n    deny all;"), "{block}");
+        assert!(block.contains(&format!("rate={RATE_PER_IP}r/s")), "{block}");
+        assert!(block.contains(&format!("limit_conn goethe_pub_conn {CONN_PER_IP}")), "{block}");
+    }
+
+    #[test]
     fn the_router_sees_every_change_at_once() {
         let dir = home_with_keys();
         let h = dir.path();
-        assert_eq!(check(h, "k1", false, None), Access::Closed);
+        let ip = Some("203.0.113.1".parse::<IpAddr>().unwrap());
+        assert_eq!(check(h, "k1", false, ip), Access::Closed);
         store(h, &share(true, now() + 600)).unwrap();
-        assert_eq!(check(h, "k1", false, None), Access::Allowed);
+        assert_eq!(check(h, "k1", false, ip), Access::Allowed);
         store(h, &Share { keys: vec!["k4".into()], ..share(true, now() + 600) }).unwrap();
-        assert_eq!(check(h, "k1", false, None), Access::KeyNotShared, "a replaced key stops at the next request");
+        assert_eq!(check(h, "k1", false, ip), Access::KeyNotShared, "a replaced key stops at the next request");
         store(h, &Share { open: false, ..share(true, now() + 600) }).unwrap();
-        assert_eq!(check(h, "k1", false, None), Access::Closed);
+        assert_eq!(check(h, "k1", false, ip), Access::Closed);
         fs::remove_file(path(h)).unwrap();
-        assert_eq!(check(h, "k1", false, None), Access::Closed);
+        assert_eq!(check(h, "k1", false, ip), Access::Closed);
     }
 
     #[test]
@@ -681,6 +845,6 @@ mod tests {
         ensure_cert(dir.path(), Some("203.0.113.9".parse().unwrap())).unwrap();
         let out = Command::new("openssl").args(["x509", "-noout", "-text", "-in"]).arg(cert_path(dir.path())).output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout);
-        assert!(text.contains("203.0.113.9") && text.contains("CA:TRUE"), "{text}");
+        assert!(text.contains("203.0.113.9") && text.contains("CA:FALSE"), "{text}");
     }
 }

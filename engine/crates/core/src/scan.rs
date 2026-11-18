@@ -275,7 +275,19 @@ fn candidate_dirs(home: &Path, dir: Option<&str>) -> Result<Vec<PathBuf>, String
         out.sort();
         return Ok(out);
     };
-    let canonical = fs::canonicalize(d).map_err(|e| format!("{d}: {e}"))?;
+    let raw = Path::new(d);
+    let candidate = if raw.is_absolute() || d.contains('/') || d.contains('\\') {
+        raw.to_path_buf()
+    } else {
+        models.join(d)
+    };
+    let canonical = fs::canonicalize(&candidate).map_err(|e| {
+        format!(
+            "{}: {e} (a folder inside {}, e.g. org__name; or goethe install <path> --name org/name)",
+            candidate.display(),
+            models.display()
+        )
+    })?;
     let root = fs::canonicalize(&models).map_err(|e| e.to_string())?;
     match canonical.strip_prefix(&root) {
         Ok(rel) if !rel.as_os_str().is_empty() => Ok(vec![models.join(rel)]),
@@ -335,7 +347,10 @@ pub fn survey(home: &Path, con: &Connection, dirs: Vec<PathBuf>, m: &Machine) ->
             continue;
         }
         if meta.is_ok_and(|m| m.file_type().is_symlink()) {
-            let why = format!("a symlink; register the folder it points to with goethe install {}", canonical.display());
+            let why = format!(
+                "a symlink; register it with: goethe install {} --name <org/name>",
+                canonical.display()
+            );
             out.push(Finding { path, name, state: State::Unsupported(why) });
             continue;
         }
@@ -925,6 +940,21 @@ mod tests {
             states,
             vec!["org__done=registered:org/done", "org__fresh=supported:org/fresh", "plain=supported:local/plain"]
         );
+    }
+
+    #[test]
+    fn folder_name_resolves_under_models_not_cwd() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        crate::paths::ensure_layout(h).unwrap();
+        let models = h.join("models");
+        fs::write(model(&models, "org__fresh", "LlamaForCausalLM").join("model.safetensors"), b"x").unwrap();
+        let got = candidate_dirs(h, Some("org__fresh")).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], models.join("org__fresh"));
+        let err = candidate_dirs(h, Some("nope__missing")).unwrap_err();
+        assert!(err.contains("models"), "{err}");
+        assert!(err.contains("goethe install") || err.contains("org__name") || err.contains("No such"), "{err}");
     }
 
     #[test]

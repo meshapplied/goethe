@@ -36,7 +36,7 @@ struct ModelRow {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Verdict {
     Unknown,
-    Fits { per_gpu: f64, total: f64 },
+    Fits { per_gpu: f64, total: f64, ctx: u64, max_conc: u64 },
     TooLarge,
     Unsupported,
 }
@@ -45,7 +45,9 @@ impl Verdict {
     fn label(&self) -> String {
         match self {
             Verdict::Unknown => "unknown (run goethe doctor --hardware)".to_string(),
-            Verdict::Fits { per_gpu, .. } => format!("fits: {per_gpu:.1} GB per GPU"),
+            Verdict::Fits { per_gpu, ctx, max_conc, .. } => {
+                format!("fits: {per_gpu:.1} GB per GPU (ctx {ctx}, {max_conc} concurrent)")
+            }
             Verdict::TooLarge => "does not fit: not enough GPU memory".to_string(),
             Verdict::Unsupported => "does not fit: unsupported architecture".to_string(),
         }
@@ -135,11 +137,22 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
                     id: row.model_id,
                     status: "available".to_string(),
                     gb: row.vram_per_gpu_gb * row.tp as f64,
-                    fit: Verdict::Fits { per_gpu: row.vram_per_gpu_gb, total: row.vram_per_gpu_gb * row.tp as f64 }.label(),
+                    fit: Verdict::Fits {
+                        per_gpu: row.vram_per_gpu_gb,
+                        total: row.vram_per_gpu_gb * row.tp as f64,
+                        ctx: row.ctx,
+                        max_conc: row.max_conc,
+                    }
+                    .label(),
                     custom: None,
                     optimised: None,
                     runtime: Some(crate::engines::ninfer::ENGINE.id.to_string()),
-                    verdict: Verdict::Fits { per_gpu: row.vram_per_gpu_gb, total: row.vram_per_gpu_gb * row.tp as f64 },
+                    verdict: Verdict::Fits {
+                        per_gpu: row.vram_per_gpu_gb,
+                        total: row.vram_per_gpu_gb * row.tp as f64,
+                        ctx: row.ctx,
+                        max_conc: row.max_conc,
+                    },
                 });
             }
         }
@@ -247,7 +260,12 @@ fn verdict(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<u
         return Verdict::Unsupported;
     }
     match view.fit(id, input, pinned) {
-        Ok(f) => Verdict::Fits { per_gpu: f.need.total(), total: f.need.total() * f.tp as f64 },
+        Ok(f) => Verdict::Fits {
+            per_gpu: f.need.total(),
+            total: f.need.total() * f.tp as f64,
+            ctx: f.ctx,
+            max_conc: f.max_conc,
+        },
         Err(_) => Verdict::TooLarge,
     }
 }
@@ -461,6 +479,7 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
                     marlin_extra_gb: install::card_marlin_extra_gb(&card),
                     supported_sm: install::card_supported_sm(&card),
                     memory: crate::memory_spec::installed(&home.join(r.get::<_, String>(11)?), &card, &[]),
+                    overhead_gb: crate::engines::of_card(&card).map_or(crate::calc::BASE_OVERHEAD_GB, |e| e.overhead_gb),
                 }, &home.join(r.get::<_, String>(11)?), &card),
             })
         })
@@ -874,8 +893,24 @@ mod tests {
     }
 
     #[test]
+    fn fit_label_names_ctx_and_concurrency() {
+        let v = Verdict::Fits { per_gpu: 23.3, total: 23.3, ctx: 8192, max_conc: 4 };
+        let label = v.label();
+        assert!(label.contains("23.3 GB per GPU") && label.contains("ctx 8192") && label.contains("4 concurrent"), "{label}");
+    }
+
+    #[test]
     fn a_gated_catalog_model_is_marked_and_explained() {
-        let row = |id: &str, fit: String| ModelRow { id: id.into(), status: "available".into(), gb: 5.0, fit, custom: None, optimised: None, runtime: None, verdict: Verdict::Fits { per_gpu: 5.0, total: 5.0 } };
+        let row = |id: &str, fit: String| ModelRow {
+            id: id.into(),
+            status: "available".into(),
+            gb: 5.0,
+            fit,
+            custom: None,
+            optimised: None,
+            runtime: None,
+            verdict: Verdict::Fits { per_gpu: 5.0, total: 5.0, ctx: 8192, max_conc: 4 },
+        };
         let text = list_text(&[row("org/open", "fits: 5.0 GB per GPU".into()), row("org/closed", format!("fits: 5.0 GB per GPU{GATED_FIT}"))], None);
         assert!(text.contains("org/closed") && text.contains("gated: needs your Hugging Face token or access"), "{text}");
         assert!(text.contains(&format!("gated models: {}", crate::hf::GATED_WAYS)), "{text}");

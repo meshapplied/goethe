@@ -278,7 +278,14 @@ fn step_serve(model: &str) -> Result<(), String> {
 fn step_access(model: &str) -> Result<(), String> {
     // Who can reach the API, then a key for the first client, then the ready-to-use call with that key filled in.
     heading(3, "Configure API access", Some("Choose who can reach the API:"));
-    let api = configure::apply_access(&ApiOpts { mode: None, vpn_ip: None, interface: None, allow: Vec::new(), yes: false })?;
+    let api = configure::apply_access(&ApiOpts {
+        mode: None,
+        vpn_ip: None,
+        interface: None,
+        allow: Vec::new(),
+        yes: false,
+        dangerously_allow_all_inbound: false,
+    })?;
     let token = choose_key(model)?;
     READY.lock().unwrap_or_else(|e| e.into_inner()).replace((api.clone(), model.to_string(), token.clone()));
     Ok(())
@@ -365,7 +372,14 @@ fn advanced() -> Result<(), String> {
             }
             Some(4) => {
                 screen("Configure API access", Some("Choose who can reach the API:"));
-                configure::apply_access(&ApiOpts { mode: None, vpn_ip: None, interface: None, allow: Vec::new(), yes: false })
+                configure::apply_access(&ApiOpts {
+                    mode: None,
+                    vpn_ip: None,
+                    interface: None,
+                    allow: Vec::new(),
+                    yes: false,
+                    dangerously_allow_all_inbound: false,
+                })
                     .map(|api| Some(format!("API endpoint: {api}")))
             }
             Some(5) => crate::keys_menu::session().map(|s| s.summary()),

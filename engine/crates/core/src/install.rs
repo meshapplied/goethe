@@ -2519,7 +2519,21 @@ mod tests {
         crate::engine_overhead::store_learned(&con, "nvidia/Big-NVFP4", "NVIDIA GeForce RTX 5090", 1, crate::engine_overhead::Kind::Overhead, 4.8, "llama.cpp").unwrap();
         assert!(spare(card(tight)).is_ok(), "a llama.cpp row never reaches the pack budget");
         let view = view_of(home.path(), card(tight));
-        let input = crate::chooser::ChooserInput { window_gb_per_request: 0.0, static_vram_gb: 20.0, kv_bytes_per_token: 131072, num_attention_heads: 32, num_kv_heads: 8, attention: "gqa".into(), max_ctx: 8192, ctx: 4096, max_conc: 8, marlin_extra_gb: 0.0, supported_sm: vec!["12.0".into()], memory: None };
+        let input = crate::chooser::ChooserInput {
+            window_gb_per_request: 0.0,
+            static_vram_gb: 20.0,
+            kv_bytes_per_token: 131072,
+            num_attention_heads: 32,
+            num_kv_heads: 8,
+            attention: "gqa".into(),
+            max_ctx: 8192,
+            ctx: 4096,
+            max_conc: 8,
+            marlin_extra_gb: 0.0,
+            supported_sm: vec!["12.0".into()],
+            memory: None,
+            overhead_gb: crate::calc::METAL_OVERHEAD_GB,
+        };
         assert!(view.fit_as("nvidia/Big-NVFP4", &input, None, "llama.cpp").is_err(), "the same row does bind the llama.cpp runtime");
     }
 

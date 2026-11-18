@@ -1,11 +1,12 @@
 // NInfer: the pinned .ninfer artifact (fetch, verify, head patch) and its ninfer-serve command line.
 
-use super::{kept_env, placement_env, EngineSpec};
+use super::{engine_key_env, kept_env, placement_env, EngineSpec};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const ENGINE: super::Engine = super::Engine {
     id: "ninfer",
+    overhead_gb: crate::calc::METAL_OVERHEAD_GB,
     layer: None,
     params: None,
     command: ninfer_command,
@@ -55,19 +56,7 @@ pub fn accept_ninfer(len: u64, digest: &str) -> Result<(), String> {
 }
 
 pub fn sha256_file(path: &Path) -> Result<String, String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-    let mut f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut h = Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = f.read(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(format!("{:x}", h.finalize()))
+    crate::update::sha256_file(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 pub fn ninfer_in(dir: &Path) -> Option<PathBuf> {
@@ -303,6 +292,7 @@ fn ninfer_command(spec: &EngineSpec) -> Result<Command, String> {
     cmd.env_clear()
         .envs(kept_env())
         .envs(placement_env(spec));
+    engine_key_env(&mut cmd, spec.engine_key);
     Ok(cmd)
 }
 

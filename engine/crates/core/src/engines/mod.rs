@@ -11,22 +11,23 @@ use std::process::Command;
 
 pub struct Engine {
     pub id: &'static str,
+    pub overhead_gb: f64,
     pub layer: Option<crate::pyenv::Layer>,
     pub params: Option<&'static [&'static str]>,
     pub command: fn(&EngineSpec) -> Result<Command, String>,
 }
 
-pub const ENGINES: &[&Engine] = &[&goethe_engine::ENGINE, &ninfer::ENGINE, &sglang::SGLANG, &sglang::TERNARY, &llama_cpp::ENGINE];
+pub const ENGINES: &[&Engine] = &[&goethe_engine::ENGINE, &ninfer::ENGINE, &sglang::SGLANG, &llama_cpp::ENGINE];
 
 const ENVELOPE: &[&str] = &["model", "messages", "prompt", "input", "stream", "stream_options", "user"];
 
 pub fn by_id(id: &str) -> Result<&'static Engine, String> {
+    let id = if id == "ternary" { sglang::SGLANG.id } else { id };
     let ids: Vec<&str> = ENGINES.iter().map(|e| e.id).collect();
     ENGINES.iter().copied().find(|e| e.id == id).ok_or_else(|| format!("engine {id} is not one goethe runs ({})", ids.join(", ")))
 }
 
 pub fn of_card(card: &toml::Value) -> Result<&'static Engine, String> {
-    // The card's runtime; a card without one is SGLang's.
     by_id(card.get("runtime").and_then(|v| v.as_str()).unwrap_or(sglang::SGLANG.id))
 }
 
@@ -164,12 +165,35 @@ fn compiler_env() -> Vec<(String, String)> {
     crate::host_compiler::engine_env(crate::host_compiler::find().as_ref(), inherited.as_deref())
 }
 
+pub const ENGINE_KEY_ENV: &str = "GOETHE_ENGINE_API_KEY";
+
+fn engine_key_env(cmd: &mut Command, key: &str) {
+    // Owner-only in /proc/<pid>/environ; never put the secret on argv (world-readable cmdline).
+    cmd.env(ENGINE_KEY_ENV, key).env("LLAMA_API_KEY", key);
+}
+
 fn card_env(spec: &EngineSpec) -> Vec<(String, String)> {
-    // Card env table and card pythonpath.
+    // Card env table and card pythonpath. Loader hooks from a card never enter the process.
+    let (out, dropped) = card_env_parts(spec);
+    if !dropped.is_empty() {
+        eprintln!(
+            "goethe: card [env] dropped {}: loader hooks never enter the engine",
+            dropped.join(", ")
+        );
+    }
+    out
+}
+
+fn card_env_parts(spec: &EngineSpec) -> (Vec<(String, String)>, Vec<String>) {
     let home = spec.home;
     let mut out = Vec::new();
+    let mut dropped = Vec::new();
     if let Some(table) = spec.card.get("env").and_then(|v| v.as_table()) {
         for (k, v) in table {
+            if k.starts_with("LD_") || k.starts_with("DYLD_") {
+                dropped.push(k.clone());
+                continue;
+            }
             if let Some(s) = v.as_str() {
                 out.push((k.clone(), expand_home(s, home)));
             }
@@ -186,7 +210,7 @@ fn card_env(spec: &EngineSpec) -> Vec<(String, String)> {
     if !paths.is_empty() {
         out.push(("PYTHONPATH".to_string(), paths.join(":")));
     }
-    out
+    (out, dropped)
 }
 
 #[cfg(test)]
@@ -235,7 +259,6 @@ mod tests {
         assert_eq!(a[n + 1], "org/m");
         let q = a.iter().position(|x| x == "--uvicorn-access-log-exclude-prefixes").unwrap();
         assert_eq!(&a[q + 1..q + 4], ["/health", "/v1/models", "/get_model_info"]);
-        assert!(a[q + 4].starts_with("--"));
         assert!(!a.iter().any(|x| x == "--disable-radix-cache"));
     }
 
@@ -262,13 +285,25 @@ mod tests {
         assert_eq!(e.get("CUDA_VISIBLE_DEVICES"), Some(&Some("3,2".to_string())));
         assert_eq!(e.get(INSTANCE_ENV), Some(&Some("inst-x".to_string())));
         assert_eq!(e.get("SPT_NOENV"), Some(&Some("1".to_string())));
-        assert_eq!(e.get("PYTHONPATH"), Some(&Some("/h/x".to_string())));
+        assert_eq!(e.get("PYTHONPATH"), Some(&Some("/h/lib:/h/x".to_string())));
         assert_eq!(e.get("A"), Some(&Some("1".to_string())));
         assert!(!e.contains_key("TERNARY_PACK_DIR"));
         assert!(!e.contains_key("CARGO_MANIFEST_DIR"));
         let a = args(&plain);
-        let k = a.iter().position(|x| x == "--api-key").unwrap();
-        assert_eq!(a[k + 1].len(), 32);
+        assert!(!a.iter().any(|x| x == "--api-key"), "{a:?}");
+        assert_eq!(e.get(ENGINE_KEY_ENV).and_then(|v| v.as_ref().map(|s| s.len())), Some(32));
+        let card: toml::Value = toml::from_str("[env]\nLD_PRELOAD = \"/x.so\"\nDYLD_INSERT_LIBRARIES = \"/y.dylib\"\nOK = \"1\"").unwrap();
+        let (kept, dropped) = card_env_parts(&EngineSpec {
+            model_path: Path::new("/h/models/m"),
+            tp: 1,
+            ..test_spec(Path::new("/h"), &card, &[3, 2])
+        });
+        assert!(kept.iter().any(|(k, v)| k == "OK" && v == "1"));
+        assert!(!kept.iter().any(|(k, _)| k.starts_with("LD_") || k.starts_with("DYLD_")));
+        assert!(dropped.contains(&"LD_PRELOAD".to_string()) && dropped.contains(&"DYLD_INSERT_LIBRARIES".to_string()), "{dropped:?}");
+        let blocked = envs(&spec_cmd("[env]\nLD_PRELOAD = \"/x.so\"\nDYLD_INSERT_LIBRARIES = \"/y.dylib\"\nOK = \"1\"", 1));
+        assert!(!blocked.contains_key("LD_PRELOAD") && !blocked.contains_key("DYLD_INSERT_LIBRARIES"));
+        assert_eq!(blocked.get("OK"), Some(&Some("1".into())));
     }
 
     #[test]
@@ -303,8 +338,9 @@ mod tests {
         assert!(err.contains("not allowed"), "{err}");
         assert!(check_extra_args(&strs(&["--tokenizer-worker-num=2"])).is_err());
         let single = args(&spec_cmd("extra_sglang_args = [\"--tokenizer-worker-num\", \"1\"]", 1));
-        assert!(single.iter().any(|a| a == "--api-key"));
+        assert!(!single.iter().any(|a| a == "--api-key"));
         assert!(single.windows(2).any(|w| w[0] == "--host" && w[1] == "127.0.0.1"));
+        assert!(single.iter().any(|a| a == "goethe_sglang_boot"));
     }
 
     #[test]
@@ -314,6 +350,16 @@ mod tests {
         assert_eq!(a.len(), 32);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn light_engines_pay_half_a_gig_on_cuda_sglang_pays_base() {
+        assert!((by_id("llama.cpp").unwrap().overhead_gb - crate::calc::METAL_OVERHEAD_GB).abs() < 1e-9);
+        assert!((by_id("goethe-engine").unwrap().overhead_gb - crate::calc::METAL_OVERHEAD_GB).abs() < 1e-9);
+        assert!((by_id("ninfer").unwrap().overhead_gb - crate::calc::METAL_OVERHEAD_GB).abs() < 1e-9);
+        assert!((by_id("sglang").unwrap().overhead_gb - crate::calc::BASE_OVERHEAD_GB).abs() < 1e-9);
+        assert!((by_id("ternary").unwrap().overhead_gb - crate::calc::BASE_OVERHEAD_GB).abs() < 1e-9);
+        assert_eq!(by_id("ternary").unwrap().id, "sglang", "ternary launches as sglang");
     }
 
     #[test]
@@ -335,10 +381,13 @@ mod tests {
     #[test]
     fn every_runtime_a_card_was_ever_written_with_resolves_and_an_unknown_one_is_refused() {
         assert_eq!(of_card(&toml::from_str("").unwrap()).unwrap().id, "sglang");
-        for id in ["sglang", "ternary", "ninfer", "goethe-engine", "llama.cpp"] {
+        for id in ["sglang", "ninfer", "goethe-engine", "llama.cpp"] {
             assert_eq!(of_card(&toml::from_str(&format!("runtime = \"{id}\"")).unwrap()).unwrap().id, id);
         }
-        assert!(args(&spec_cmd("", 1)).iter().any(|a| a == "sglang.launch_server"));
+        let ternary: toml::Value = toml::from_str("runtime = \"ternary\"").unwrap();
+        assert_eq!(of_card(&ternary).unwrap().id, "sglang");
+        assert_eq!(crate::engine_overhead::card_runtime(&ternary), "ternary");
+        assert!(args(&spec_cmd("", 1)).iter().any(|a| a == "goethe_sglang_boot"));
         assert!(of_card(&toml::from_str("runtime = \"vllm\"").unwrap()).map(|e| e.id).unwrap_err().contains("not one goethe runs"));
     }
 

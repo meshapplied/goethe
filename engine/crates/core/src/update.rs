@@ -28,6 +28,7 @@ pub fn run(opts: UpdateOpts) -> Result<(), String> {
     // Fetch and verify the signed manifest, compare versions, stage files, then swap atomically.
     let home = goethe_home();
     ensure_layout(&home).map_err(|e| e.to_string())?;
+    let _ = crate::setup::migrate_retired_pkg_env(&home);
     let pkg = pkg_base_url();
     let tmp = home.join(".update-staging");
     let _ = fs::remove_dir_all(&tmp);
@@ -693,5 +694,18 @@ mod tests {
         assert_eq!(compare_versions("0.2.0-rc1", "0.2.0"), Ordering::Less);
         assert_eq!(compare_versions("v0.1.1+abc", "0.1.1"), Ordering::Equal);
         assert_eq!(compare_versions("0.0.9", "0.1.0"), Ordering::Less);
+    }
+
+    #[test]
+    fn one_sha256_file_matches_ninfer_wrapper() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("blob");
+        fs::write(&p, b"goethe-sha256-equiv").unwrap();
+        let a = sha256_file(&p).unwrap();
+        let b = crate::engines::ninfer::sha256_file(&p).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(sha256_file(&t.path().join("missing")).is_err());
     }
 }

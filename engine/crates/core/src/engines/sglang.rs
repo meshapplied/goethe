@@ -1,37 +1,27 @@
-// SGLang: python -m sglang.launch_server with Goethe-owned flags, card and load extras; ternary is SGLang plus its kernel env.
+// SGLang launch: Goethe-owned flags, card extras; ternary cards are the same command plus TERNARY_* env.
 
-use super::{arch_env, card_env, compiler_env, default_cuda_home, engine_path, expand_home, kept_env, placement_env, resolve_python, EngineSpec};
+use super::{
+    arch_env, card_env, compiler_env, default_cuda_home, engine_key_env, engine_path, expand_home, kept_env, placement_env,
+    resolve_python, EngineSpec,
+};
+use crate::sglang_infer::RESERVED_FLAGS;
 use std::process::Command;
 
 pub const SGLANG: super::Engine = super::Engine {
     id: "sglang",
+    overhead_gb: crate::calc::BASE_OVERHEAD_GB,
     layer: Some(crate::pyenv::Layer::Sglang),
     params: None,
-    command: |spec| Ok(sglang_command(spec)),
+    command: |spec| {
+        let mut cmd = sglang_command(spec);
+        apply_ternary(spec, &mut cmd)?;
+        Ok(cmd)
+    },
 };
 
-pub const TERNARY: super::Engine = super::Engine { id: "ternary", command: ternary_command, ..SGLANG };
-
-const OWNED_FLAGS: &[&str] = &[
-    "--host",
-    "--port",
-    "--tp-size",
-    "--tensor-parallel-size",
-    "--mem-fraction-static",
-    "--context-length",
-    "--max-running-requests",
-    "--max-mamba-cache-size",
-    "--swa-full-tokens-ratio",
-    "--api-key",
-    "--served-model-name",
-    "--pack",
-    "--weights",
-    "--tokenizer",
-];
 const QUIET_PATHS: &[&str] = &["/health", "/v1/models", "/get_model_info"];
 
 pub fn check_extra_args(args: &[String]) -> Result<(), String> {
-    // Refuse Goethe owned flags, and tokenizer workers above 1 because that mode cannot take an API key.
     if multi_tokenizer(args) {
         return Err("extra SGLang arg --tokenizer-worker-num greater than 1 is not allowed: that mode cannot take an API key, so Goethe will not listen on TCP".into());
     }
@@ -40,10 +30,8 @@ pub fn check_extra_args(args: &[String]) -> Result<(), String> {
         if !name.starts_with("--") || name.len() < 3 {
             continue;
         }
-        if let Some(owned) = OWNED_FLAGS.iter().find(|o| o.starts_with(name)) {
-            return Err(format!(
-                "extra SGLang arg {arg} is not allowed: Goethe sets {owned} itself (use goethe load options instead)"
-            ));
+        if let Some((owned, _)) = RESERVED_FLAGS.iter().find(|(f, _)| *f == name || f.starts_with(name)) {
+            return Err(format!("extra SGLang arg {arg} is not allowed: Goethe sets {owned} itself (use goethe load options instead)"));
         }
     }
     Ok(())
@@ -57,7 +45,6 @@ pub fn card_extra_args(card: &toml::Value) -> Vec<String> {
 }
 
 fn multi_tokenizer(args: &[String]) -> bool {
-    // SGLang refuses --api-key with --tokenizer-worker-num > 1, so such engines run keyless on loopback.
     args.iter().enumerate().any(|(i, a)| {
         let value = match a.strip_prefix("--tokenizer-worker-num") {
             Some("") => args.get(i + 1).map(String::as_str),
@@ -69,12 +56,13 @@ fn multi_tokenizer(args: &[String]) -> bool {
 }
 
 fn memory_args(spec: &EngineSpec, extras: &[String]) -> Vec<String> {
-    // The window ratio, state slots and chunk size the budget assumed; a chunk size the user set wins.
     let Some(m) = crate::memory_spec::installed(spec.model_path, spec.card, spec.load_extra) else { return Vec::new() };
     let args = crate::chooser::engine_args(&m, spec.ctx, spec.max_conc);
     let user_chunk = extras.iter().any(|a| a.starts_with("--chunked-prefill-size"));
     args.chunks(2).filter(|p| !(user_chunk && p[0] == "--chunked-prefill-size")).flatten().cloned().collect()
 }
+
+const SGLANG_BOOT: &str = "import os,runpy,sys\nsys.argv=['sglang.launch_server',*sys.argv[1:],'--api-key',os.environ['GOETHE_ENGINE_API_KEY']]\nrunpy.run_module('sglang.launch_server',run_name='__main__')\n";
 
 fn graph_args(max_conc: u64, extras: &[String]) -> Vec<String> {
     // Decode CUDA graphs captured only up to the batch the model runs (its concurrency), not SGLang's default range: a shorter load and less VRAM; graph flags the user set win.
@@ -86,10 +74,15 @@ fn graph_args(max_conc: u64, extras: &[String]) -> Vec<String> {
 }
 
 fn sglang_command(spec: &EngineSpec) -> Command {
-    // Goethe flags, then checked card and load extras, in a cleared env; probe paths stay out of the access log.
+    let lib = spec.home.join("lib");
+    let boot = lib.join("goethe_sglang_boot.py");
+    if !boot.is_file() {
+        let _ = std::fs::create_dir_all(&lib);
+        let _ = crate::platform::write_private(&boot, SGLANG_BOOT.as_bytes());
+    }
     let mut cmd = Command::new(resolve_python(spec.home));
     cmd.arg("-m")
-        .arg("sglang.launch_server")
+        .arg("goethe_sglang_boot")
         .arg("--model-path")
         .arg(spec.model_path)
         .arg("--host")
@@ -111,7 +104,6 @@ fn sglang_command(spec: &EngineSpec) -> Command {
     let extras: Vec<String> = card_extra_args(spec.card).into_iter().chain(spec.load_extra.iter().cloned()).collect();
     cmd.args(memory_args(spec, &extras));
     cmd.args(graph_args(spec.max_conc, &extras));
-    cmd.arg("--api-key").arg(spec.engine_key);
     if let Some(dtype) = spec
         .card
         .get("kv_cache_dtype")
@@ -126,6 +118,10 @@ fn sglang_command(spec: &EngineSpec) -> Command {
     }
     cmd.args(&extras);
     let card_vars = card_env(spec);
+    let mut py_path = lib.display().to_string();
+    if let Some((_, v)) = card_vars.iter().find(|(k, _)| k == "PYTHONPATH") {
+        py_path = format!("{py_path}:{v}");
+    }
     cmd.env_clear()
         .envs(kept_env())
         .env("PATH", engine_path(spec.home))
@@ -135,27 +131,35 @@ fn sglang_command(spec: &EngineSpec) -> Command {
         .envs(compiler_env())
         .envs(card_vars)
         .envs(placement_env(spec))
+        .env("PYTHONPATH", py_path)
         .env("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         .env("SPT_NOENV", "1");
+    engine_key_env(&mut cmd, spec.engine_key);
     cmd
 }
 
-fn ternary_command(spec: &EngineSpec) -> Result<Command, String> {
-    // SGLang with the card's top-level TERNARY_* keys in its env, once the ternary kernels are installed.
+fn apply_ternary(spec: &EngineSpec, cmd: &mut Command) -> Result<(), String> {
+    if spec.card.get("runtime").and_then(|v| v.as_str()) != Some("ternary") {
+        return Ok(());
+    }
     crate::runtime::require_ternary_runtime(spec.home)?;
-    let mut cmd = sglang_command(spec);
     for (k, v) in spec.card.as_table().into_iter().flatten() {
         if let (true, Some(s)) = (k.starts_with("TERNARY_"), v.as_str()) {
             cmd.env(k, expand_home(s, spec.home));
         }
     }
-    Ok(cmd)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::test_spec;
-    use super::graph_args;
+    use super::{check_extra_args, graph_args};
+    use std::ffi::OsStr;
+
+    fn arg_vec(cmd: &std::process::Command) -> Vec<String> {
+        cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
 
     #[test]
     fn graphs_are_captured_up_to_the_concurrency_unless_the_user_says_otherwise() {
@@ -176,5 +180,55 @@ mod tests {
         let cmd = super::super::command(&spec).unwrap();
         let want = format!("{}/p", home.path().display());
         assert!(cmd.get_envs().any(|(k, v)| k == "TERNARY_PACK_DIR" && v.is_some_and(|v| v.to_string_lossy() == want)));
+        assert_eq!(super::super::of_card(&card).unwrap().id, "sglang");
+        assert_eq!(crate::engine_overhead::card_runtime(&card), "ternary");
+    }
+
+    #[test]
+    fn plain_sglang_does_not_require_ternary_kernels() {
+        let home = tempfile::tempdir().unwrap();
+        let card: toml::Value = toml::from_str("runtime = \"sglang\"\nTERNARY_PACK_DIR = \"/should-not-apply\"").unwrap();
+        let cmd = super::super::command(&test_spec(home.path(), &card, &[0])).unwrap();
+        assert!(!cmd.get_envs().any(|(k, _)| k == OsStr::new("TERNARY_PACK_DIR")));
+    }
+
+    #[test]
+    fn ternary_argv_matches_plain_sglang_only_env_differs() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(crate::runtime::ternary_kernels_dir(home.path())).unwrap();
+        let plain: toml::Value = toml::from_str("runtime = \"sglang\"").unwrap();
+        let tern: toml::Value =
+            toml::from_str("runtime = \"ternary\"\nTERNARY_PACK_DIR = \"$GOETHE_HOME/p\"\nTERNARY_MODEL_DIR = \"$GOETHE_HOME/b\"").unwrap();
+        let a = super::super::command(&test_spec(home.path(), &plain, &[0])).unwrap();
+        let b = super::super::command(&test_spec(home.path(), &tern, &[0])).unwrap();
+        assert_eq!(arg_vec(&a), arg_vec(&b), "fold must not change the SGLang argv");
+        assert_eq!(a.get_program(), b.get_program());
+        let mut tern_envs: Vec<_> = b
+            .get_envs()
+            .filter(|(k, _)| k.to_string_lossy().starts_with("TERNARY_"))
+            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+            .collect();
+        tern_envs.sort();
+        assert_eq!(
+            tern_envs,
+            [
+                ("TERNARY_MODEL_DIR".into(), Some(format!("{}/b", home.path().display()))),
+                ("TERNARY_PACK_DIR".into(), Some(format!("{}/p", home.path().display()))),
+            ]
+        );
+        assert!(!a.get_envs().any(|(k, _)| k.to_string_lossy().starts_with("TERNARY_")));
+    }
+
+    #[test]
+    fn reserved_table_rejects_former_owned_and_engine_pack_flags() {
+        for bad in [
+            "--host", "--port", "--tp-size", "--tensor-parallel-size", "--mem-fraction-static", "--context-length",
+            "--max-running-requests", "--max-mamba-cache-size", "--swa-full-tokens-ratio", "--api-key", "--served-model-name",
+            "--pack", "--weights", "--tokenizer", "--model-path", "--model",
+        ] {
+            let err = check_extra_args(&[bad.to_string(), "1".into()]).unwrap_err();
+            assert!(err.contains("not allowed"), "{bad}: {err}");
+        }
+        check_extra_args(&["--chunked-prefill-size".into(), "4096".into(), "--trust-remote-code".into()]).unwrap();
     }
 }

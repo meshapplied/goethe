@@ -146,6 +146,7 @@ impl View {
         let mut trial = input.clone();
         trial.ctx = plan.ctx;
         trial.max_conc = plan.max_conc;
+        trial.overhead_gb = crate::engines::by_id(runtime).map_or(calc::BASE_OVERHEAD_GB, |e| e.overhead_gb);
         let base = chooser::need(&trial, plan.tp, &plan.cc);
         let learned = self.con.as_ref().map(|c| crate::engine_overhead::read_learned(c, model_id, &self.gpu_name(plan.gpus[0]), plan.tp as u64, runtime));
         let learned = learned.unwrap_or_default();
@@ -238,7 +239,10 @@ pub fn run(json_out: bool) -> Result<(), String> {
                 Some(n) => format!("{} ({n})", item.model_id),
                 None => item.model_id.clone(),
             };
-            let mut cells = vec![name, format!("{total:.1} GB")];
+            let mut cells = vec![
+                name,
+                format!("{:.1} GB/GPU · ctx {} · {} conc", item.vram_per_gpu_gb, item.ctx, item.max_conc),
+            ];
             if multi {
                 cells.push(format_gpu_list(&item.gpus));
             }
@@ -262,10 +266,11 @@ pub fn preview(home: &Path, model: &RegistryModel) -> Result<Option<String>, Str
     let pinned = model.default_tp.filter(|t| *t > 0).map(|t| t as usize);
     match view.fit(&model.id, &input, pinned) {
         Ok(f) => Ok(Some(format!(
-            "fit: ctx {} on GPU {} ({:.1} GB per GPU)",
+            "fit: {:.1} GB per GPU (ctx {}, {} concurrent) on GPU {}",
+            f.need.total(),
             f.ctx,
+            f.max_conc,
             format_gpu_list(&f.gpus),
-            f.need.total()
         ))),
         Err(e) => Err(format!("does not fit the allowed GPUs: {e}")),
     }
@@ -407,6 +412,7 @@ pub fn registry_input(m: &RegistryModel) -> ChooserInput {
             crate::memory_spec::apply_engine_args(&mut spec, None, &m.extra_sglang_args);
             spec
         }),
+        overhead_gb: crate::engines::by_id(m.effective_runtime()).map_or(crate::calc::BASE_OVERHEAD_GB, |e| e.overhead_gb),
     }
 }
 
@@ -582,7 +588,8 @@ mod tests {
         let llama = reg.models.iter().find(|m| m.id == "nvidia/Llama-3.1-8B-Instruct-NVFP4").unwrap();
         let line = preview(home.path(), llama).unwrap().unwrap();
         assert!(line.contains("ctx 65536"), "{line}");
-        assert!(line.contains("23.4 GB"), "{line}");
+        assert!(line.contains("23.4 GB per GPU"), "{line}");
+        assert!(line.contains("concurrent"), "{line}");
         let big = reg.models.iter().find(|m| m.id == "Qwen/Qwen3.8-27B").unwrap();
         assert!(preview(home.path(), big).is_err());
     }

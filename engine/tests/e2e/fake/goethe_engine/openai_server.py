@@ -1,6 +1,7 @@
 """A model server speaking the OpenAI routes goethe uses: health, models, chat, completions, embeddings."""
 
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -15,7 +16,8 @@ def option(args, *names):
 
 def serve(args):
     """Run until killed: port, key and served name come from the engine's own flags."""
-    port, key = int(option(args, "--port")), option(args, "--api-key") or ""
+    port = int(option(args, "--port"))
+    key = option(args, "--api-key") or os.environ.get("GOETHE_ENGINE_API_KEY") or os.environ.get("LLAMA_API_KEY") or ""
     name = option(args, "--alias", "--served-model-name") or "model"
 
     class Handler(BaseHTTPRequestHandler):

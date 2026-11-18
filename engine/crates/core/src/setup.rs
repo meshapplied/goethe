@@ -6,15 +6,32 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PKG_URL: &str = "https://pkg.goethe.sh";
 
+pub fn migrate_retired_pkg_env(home: &Path) -> Result<(), String> {
+    let text = fs::read_to_string(home.join("goethe.env")).unwrap_or_default();
+    if !text.contains("pkg.meshapplied.com") {
+        return Ok(());
+    }
+    let m = crate::paths::parse_env_file(&text);
+    write_env_file(
+        home,
+        &env_file_text(
+            m.get("GOETHE_PKG_URL").map(|s| s.as_str()).unwrap_or(DEFAULT_PKG_URL),
+            m.get("GOETHE_REGISTRY_URL").map(|s| s.as_str()),
+            m.get("GOETHE_PKG_TOKEN").map(|s| s.as_str()),
+            true,
+        ),
+    )
+}
+
 pub fn env_file_text(pkg: &str, registry: Option<&str>, token: Option<&str>, keep_file_url: bool) -> String {
     // GOETHE_HOME/goethe.env holds only what differs from the defaults; a file:// package is a one-off unless asked to keep it.
     let pkg = pkg.trim_end_matches('/');
     let mut out = String::new();
     let local = pkg.starts_with("file://");
-    if pkg != DEFAULT_PKG_URL && !pkg.is_empty() && (!local || keep_file_url) {
+    if pkg != DEFAULT_PKG_URL && !pkg.is_empty() && !pkg.contains("pkg.meshapplied.com") && (!local || keep_file_url) {
         out.push_str(&format!("GOETHE_PKG_URL={pkg}\n"));
     }
-    if let Some(r) = registry.map(str::trim).filter(|r| !r.is_empty() && *r != format!("{pkg}/v1/registry.json")) {
+    if let Some(r) = registry.map(str::trim).filter(|r| !r.is_empty() && !r.contains("pkg.meshapplied.com") && *r != format!("{pkg}/v1/registry.json")) {
         out.push_str(&format!("GOETHE_REGISTRY_URL={r}\n"));
     }
     if let Some(t) = token.map(str::trim).filter(|t| !t.is_empty()) {
@@ -268,6 +285,7 @@ pub fn run(o: Opts) -> Result<(), String> {
     // Verify the signed package, place goethe, goethed and nginx (handing a running goethed's engines over), then settings, links, certificate, fixes and login.
     let home = crate::paths::goethe_home();
     crate::paths::ensure_layout(&home).map_err(|e| format!("{}: {e}", home.display()))?;
+    let _ = migrate_retired_pkg_env(&home);
     fs::set_permissions(&home, std::os::unix::fs::PermissionsExt::from_mode(0o700)).map_err(|e| format!("{}: {e}", home.display()))?;
     let macos = cfg!(target_os = "macos");
     let from = o.from.clone().unwrap_or_else(|| o.pkg.clone()).trim_end_matches('/').to_string();
@@ -411,6 +429,21 @@ mod tests {
         assert!(login_question(&Link::NotLinked).unwrap().contains("Log in to the Goethe platform now?"));
         assert!(login_question(&linked(true)).unwrap().contains("revoked or has expired"), "a token uninstall revoked");
         assert_eq!(login_question(&linked(false)), None);
+    }
+
+    #[test]
+    fn retired_pkg_host_is_dropped_from_goethe_env() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path();
+        fs::create_dir_all(home).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(home, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        crate::platform::write_private(&home.join("goethe.env"), b"GOETHE_PKG_URL=https://pkg.meshapplied.com\nGOETHE_PKG_TOKEN=tok\n").unwrap();
+        migrate_retired_pkg_env(home).unwrap();
+        let text = fs::read_to_string(home.join("goethe.env")).unwrap_or_default();
+        assert!(!text.contains("pkg.meshapplied.com"), "{text}");
+        assert!(text.contains("GOETHE_PKG_TOKEN=tok"), "{text}");
+        migrate_retired_pkg_env(home).unwrap();
     }
 
     #[test]

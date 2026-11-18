@@ -830,7 +830,14 @@ fn access_page(tty: &mut Tty) -> Result<(), String> {
                 tty.resume()?;
             }
             Some(1) => tty.inside(|| {
-                crate::configure::run_api(crate::configure::ApiOpts { mode: None, vpn_ip: None, interface: None, allow: Vec::new(), yes: false })
+                crate::configure::run_api(crate::configure::ApiOpts {
+                    mode: None,
+                    vpn_ip: None,
+                    interface: None,
+                    allow: Vec::new(),
+                    yes: false,
+                    dangerously_allow_all_inbound: false,
+                })
             })?,
             Some(_) => {
                 let mut page = SharePage::new();
@@ -944,13 +951,34 @@ impl SharePage {
         };
         let allow: Vec<String> = self.allow.split([',', ' ']).map(str::trim).filter(|c| !c.is_empty()).map(str::to_string).collect();
         let home = goethe_home();
-        match share::open(&home, share::OpenArgs { secs, keys: std::slice::from_ref(&name), allow: &allow, port: None }) {
+        match share::open(
+            &home,
+            share::OpenArgs {
+                secs,
+                keys: std::slice::from_ref(&name),
+                allow: &allow,
+                port: None,
+                dangerously_allow_all_inbound: false,
+            },
+        ) {
             Ok(o) => {
                 self.reload();
                 self.key.clear();
                 self.allow.clear();
                 let warn = o.warnings.first().map(|w| format!("  Note: {w}")).unwrap_or_default();
-                self.say(format!("Shared {name} until {}; send {} with the key.{warn}", share::local_time(share::now() + secs), o.cert.display()), false);
+                let clients = if o.share.allow.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Only: {}.", o.share.allow.join(", "))
+                };
+                self.say(
+                    format!(
+                        "Shared {name} until {}; send {} with the key.{clients}{warn}",
+                        share::local_time(share::now() + secs),
+                        o.cert.display()
+                    ),
+                    false,
+                );
             }
             Err(e) => self.say(e, true),
         }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""goethe api expose without a terminal: local, public with named clients, public refusing 0.0.0.0/0, VPN."""
+"""goethe api expose without a terminal: local, public with named clients, refuse bare --yes / 0.0.0.0 /0, VPN."""
 
 from __future__ import annotations
 
@@ -22,13 +22,21 @@ def main() -> None:
         if rr.returncode == 0 or _status(goethe, env)["bind"] == "0.0.0.0":
             raise RuntimeError(f"without a terminal api expose public needs --yes: {rr.stdout} {rr.stderr}")
         rr = run([goethe, "api", "expose", "local", "--yes"], env=env)
-        if rr.returncode != 0 or "API key (default): goethe_sk_" not in rr.stdout:
-            raise RuntimeError(f"local mode with --yes must bind loopback and create a key: {rr.stdout} {rr.stderr}")
-        if _status(goethe, env)["bind"] != "127.0.0.1":
-            raise RuntimeError("local mode must bind 127.0.0.1")
+        if rr.returncode != 0 or _status(goethe, env)["bind"] != "127.0.0.1":
+            raise RuntimeError(f"local mode with --yes must bind loopback: {rr.stdout} {rr.stderr}")
+        rr = run([goethe, "api", "expose", "public", "--yes"], env=env)
+        if rr.returncode == 0 or _status(goethe, env)["bind"] != "127.0.0.1":
+            raise RuntimeError(
+                f"public --yes without --allow must refuse and leave bind unchanged: {rr.stdout} {rr.stderr}"
+            )
+        if "--allow" not in (rr.stdout + rr.stderr):
+            raise RuntimeError(f"refusal must name --allow: {rr.stdout} {rr.stderr}")
+        rr = run([goethe, "api", "expose", "0.0.0.0"], env=env)
+        if rr.returncode == 0 or _status(goethe, env)["bind"] != "127.0.0.1":
+            raise RuntimeError(f"raw expose 0.0.0.0 must refuse: {rr.stdout} {rr.stderr}")
         rr = run([goethe, "api", "expose", "public", "--yes", "--allow", "0.0.0.0/0"], env=env)
         if rr.returncode == 0 or _status(goethe, env)["bind"] != "127.0.0.1":
-            raise RuntimeError(f"public mode must refuse 0.0.0.0/0 without a terminal and change nothing: {rr.stdout}")
+            raise RuntimeError(f"public mode must refuse 0.0.0.0/0 without dangerously and change nothing: {rr.stdout}")
         quiet = {**env, "GOETHE_PUBLIC_IP_LOOKUP": "0"}
         rr = run([goethe, "api", "expose", "public", "--yes", "--allow", "203.0.113.7"], env=quiet)
         if "Your public IP: unknown, lookup disabled" not in rr.stdout:
@@ -42,8 +50,8 @@ def main() -> None:
         if rr.returncode == 0 or "not an address of this host" not in rr.stderr:
             raise RuntimeError(f"a VPN address this host does not have must be refused: {rr.stdout} {rr.stderr}")
         rr = run([goethe, "api", "expose", "local", "--yes"], env=env)
-        if rr.returncode != 0 or "API keys: 1 exist" not in rr.stdout:
-            raise RuntimeError(f"a second run must keep the existing key: {rr.stdout} {rr.stderr}")
+        if rr.returncode != 0 or _status(goethe, env)["bind"] != "127.0.0.1":
+            raise RuntimeError(f"local again must succeed: {rr.stdout} {rr.stderr}")
     print("stage5_configure_api ok")
 
 

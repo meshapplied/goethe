@@ -31,6 +31,7 @@ pub struct ApiOpts {
     pub interface: Option<String>,
     pub allow: Vec<String>,
     pub yes: bool,
+    pub dangerously_allow_all_inbound: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -349,8 +350,50 @@ fn configure_vpn(opts: &ApiOpts, nets: &[Network]) -> Result<String, String> {
     Ok(target.addr().to_string())
 }
 
+fn resolve_public_allows(opts: &ApiOpts) -> Result<Vec<String>, String> {
+    // Named clients required; --yes alone must not bind every interface on a leftover allowlist.
+    if opts.dangerously_allow_all_inbound {
+        if !opts.allow.is_empty() {
+            return Err("--dangerously-allow-all-inbound does not mix with --allow".to_string());
+        }
+        return Ok(vec!["0.0.0.0/0".to_string()]);
+    }
+    let mut ranges = opts.allow.clone();
+    if ranges.is_empty() {
+        if !interactive() || opts.yes {
+            return Err(
+                "public needs who may connect: goethe api expose public --allow <their-ip>/32 --yes\n\
+                 (to allow every address on purpose: --dangerously-allow-all-inbound --yes)"
+                    .to_string(),
+            );
+        }
+        if !confirm(RESTRICT_QUESTION, true, false)? {
+            return Err(
+                "public needs client addresses (--allow <their-ip>/32), or --dangerously-allow-all-inbound --yes"
+                    .to_string(),
+            );
+        }
+        let a = ask("Client IPs or ranges to allow, comma separated (e.g. 203.0.113.7/32):", "")?;
+        ranges = a.split(',').map(str::trim).filter(|r| !r.is_empty()).map(String::from).collect();
+    }
+    if ranges.is_empty() {
+        return Err(
+            "public needs who may connect: goethe api expose public --allow <their-ip>/32 --yes".to_string(),
+        );
+    }
+    for r in &ranges {
+        security::canonical_cidr(r)?;
+        if is_everyone(r) {
+            return Err(format!(
+                "{r} opens every address; use --dangerously-allow-all-inbound --yes"
+            ));
+        }
+    }
+    Ok(ranges)
+}
+
 fn configure_public(opts: &ApiOpts) -> Result<String, String> {
-    // Warn, show the public IP and its API URL, confirm, bind every interface and allow only the named clients.
+    // Warn, require named clients (or an explicit world-open), confirm, bind every interface.
     println!("{}: {PUBLIC_WARNING}", crate::term::paint("WARNING", crate::term::Color::Yellow));
     let port = nginx::public_port_u16(&goethe_home());
     let public = lookup_public_ip();
@@ -358,37 +401,27 @@ fn configure_public(opts: &ApiOpts) -> Result<String, String> {
     for line in public_ip_lines(public, port, &nginx::interface_addrs().unwrap_or_default()) {
         println!("{line}");
     }
-    if !confirm("Expose the API on every network interface anyway?", false, opts.yes)? {
+    let ranges = resolve_public_allows(opts)?;
+    if !opts.yes && !interactive() {
+        return Err(
+            "public open needs a terminal to confirm (y), or pass --yes with --allow <their-ip>/32".to_string(),
+        );
+    }
+    let confirm_q = if opts.dangerously_allow_all_inbound {
+        "Bind every network interface and allow EVERY client address?"
+    } else {
+        "Expose the API on every network interface (0.0.0.0) for the allowlisted clients?"
+    };
+    if !confirm(confirm_q, false, opts.yes)? {
         return Err("nothing changed (goethe api expose local or goethe api expose vpn to pick one)".to_string());
     }
-    let mut ranges = opts.allow.clone();
-    let mut everyone_chosen = false;
-    if ranges.is_empty() && interactive() && !opts.yes {
-        if confirm(RESTRICT_QUESTION, false, false)? {
-            let a = ask("Client IPs or ranges to allow, comma separated (e.g. 203.0.113.7/32):", "")?;
-            ranges = a.split(',').map(str::trim).filter(|r| !r.is_empty()).map(String::from).collect();
-        } else {
-            ranges = vec!["0.0.0.0/0".to_string()];
-            everyone_chosen = true;
-            println!("Every address that can reach this machine may connect; each request still needs an API key.");
-        }
-    }
-    for r in &ranges {
-        security::canonical_cidr(r)?;
-        if is_everyone(r) && !everyone_chosen {
-            println!("{r} lets every address on the internet try your API keys.");
-            if !interactive() || !confirm("Allow every address anyway?", false, false)? {
-                return Err(format!("refusing to allow {r}; name the client addresses instead"));
-            }
-        }
+    if opts.dangerously_allow_all_inbound {
+        println!("Every address that can reach this machine may connect; each request still needs an API key. Rate limits still apply.");
     }
     bind("0.0.0.0")?;
     allow("127.0.0.1/32", "this machine", true)?;
     for r in &ranges {
         allow(r, "public client", true)?;
-    }
-    if ranges.is_empty() {
-        println!("No client addresses were added: only addresses already on the allowlist can connect (goethe api allow add <ip>/32).");
     }
     Ok(public_host.unwrap_or_else(|| "0.0.0.0".to_string()))
 }
@@ -469,5 +502,44 @@ mod tests {
         assert!(Mode::parse("lan").is_err());
         assert!(is_everyone("0.0.0.0/0") && is_everyone("::/0") && !is_everyone("203.0.113.7/32"));
         assert_eq!(Net::new("10.1.2.3".parse().unwrap(), 16).to_string(), "10.1.0.0/16");
+    }
+
+    fn opts(allow: &[&str], yes: bool, dangerously: bool) -> ApiOpts {
+        ApiOpts {
+            mode: Some(Mode::Public),
+            vpn_ip: None,
+            interface: None,
+            allow: allow.iter().map(|s| (*s).to_string()).collect(),
+            yes,
+            dangerously_allow_all_inbound: dangerously,
+        }
+    }
+
+    #[test]
+    fn public_yes_without_allow_is_refused() {
+        let err = resolve_public_allows(&opts(&[], true, false)).unwrap_err();
+        assert!(err.contains("--allow"), "{err}");
+    }
+
+    #[test]
+    fn public_allow_is_accepted() {
+        let got = resolve_public_allows(&opts(&["203.0.113.7/32"], true, false)).unwrap();
+        assert_eq!(got, vec!["203.0.113.7/32".to_string()]);
+    }
+
+    #[test]
+    fn public_everyone_cidr_needs_dangerously_flag() {
+        let err = resolve_public_allows(&opts(&["0.0.0.0/0"], true, false)).unwrap_err();
+        assert!(err.contains("dangerously-allow-all-inbound"), "{err}");
+    }
+
+    #[test]
+    fn public_dangerously_opens_everyone_and_rejects_mixed_allow() {
+        assert_eq!(
+            resolve_public_allows(&opts(&[], true, true)).unwrap(),
+            vec!["0.0.0.0/0".to_string()]
+        );
+        let err = resolve_public_allows(&opts(&["203.0.113.7/32"], true, true)).unwrap_err();
+        assert!(err.contains("does not mix"), "{err}");
     }
 }

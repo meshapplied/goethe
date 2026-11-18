@@ -104,7 +104,7 @@ impl Client {
 
     pub fn auth_start(&self, hostname: &str, fingerprint: &str) -> Result<Started, ApiError> {
         let body = json!({"action": "start", "hostname": hostname, "version": env!("CARGO_PKG_VERSION"), "fingerprint": fingerprint});
-        parse_started(&self.post("/api/device/auth", body.to_string().as_bytes(), None)?, self.base().starts_with("http://"))
+        parse_started(&self.post("/api/device/auth", body.to_string().as_bytes(), None)?, &self.base())
     }
 
     pub fn auth_poll(&self, device_code: &Secret) -> Result<Poll, ApiError> {
@@ -250,7 +250,7 @@ fn malformed(what: &str) -> ApiError {
     ApiError::Malformed(what.to_string())
 }
 
-pub fn parse_started(v: &Value, dev: bool) -> Result<Started, ApiError> {
+pub fn parse_started(v: &Value, base: &str) -> Result<Started, ApiError> {
     #[derive(Deserialize)]
     struct Raw {
         device_code: String,
@@ -266,8 +266,11 @@ pub fn parse_started(v: &Value, dev: bool) -> Result<Started, ApiError> {
     if r.user_code.is_empty() || r.user_code.len() > 32 || !r.user_code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err(malformed("the user code is not valid"));
     }
-    let check = if dev { crate::platform::check_dev_link } else { crate::platform::check_link };
+    let check = if base.starts_with("http://") { crate::platform::check_dev_link } else { crate::platform::check_link };
     let uri = check(&r.verification_uri_complete).map_err(|_| malformed("the verification link is not a valid https URL"))?;
+    if !verification_on_base(base, &uri) {
+        return Err(malformed("the verification link is not on the platform"));
+    }
     Ok(Started {
         device_code: Secret::new(r.device_code),
         user_code: r.user_code,
@@ -275,6 +278,26 @@ pub fn parse_started(v: &Value, dev: bool) -> Result<Started, ApiError> {
         expires_in: r.expires_in.clamp(30, 900),
         interval: r.interval.clamp(1, 60),
     })
+}
+
+fn verification_on_base(base: &str, uri: &str) -> bool {
+    let host = |u: &str| -> String {
+        let rest = u.split_once("://").map(|(_, r)| r).unwrap_or("");
+        let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let auth = auth.rsplit_once('@').map(|(_, a)| a).unwrap_or(auth);
+        let h = if let Some(v6) = auth.strip_prefix('[') {
+            v6.split_once(']').map(|(h, _)| h).unwrap_or("")
+        } else {
+            match auth.rsplit_once(':') {
+                Some((h, p)) if p.parse::<u16>().is_ok() => h,
+                _ => auth,
+            }
+        };
+        let h = h.to_ascii_lowercase();
+        h.strip_prefix("www.").unwrap_or(&h).to_string()
+    };
+    let (b, u) = (host(base), host(uri));
+    !b.is_empty() && b == u
 }
 
 pub fn parse_approved(v: &Value) -> Result<Approved, ApiError> {
@@ -474,6 +497,18 @@ mod tests {
         let m = mock::serve(vec![(200, r#"{"device_code":"d","user_code":"AB\u001b[2J","verification_uri_complete":"http://evil.example.com/x","expires_in":900,"interval":3}"#.into())]);
         let c = Client::new(&m.url, Duration::from_secs(5)).unwrap();
         assert!(c.auth_start("h", "f").is_err());
+        let m = mock::serve(vec![(200, r#"{"device_code":"d","user_code":"ABCD-1234","verification_uri_complete":"https://evil.example.com/x","expires_in":900,"interval":3}"#.into())]);
+        let c = Client::new(&m.url, Duration::from_secs(5)).unwrap();
+        assert!(c.auth_start("h", "f").is_err(), "https on another origin is refused");
+    }
+
+    #[test]
+    fn verification_link_must_share_the_platform_host() {
+        assert!(verification_on_base("https://goethe.sh", "https://goethe.sh/device?code=1"));
+        assert!(verification_on_base("https://goethe.sh", "https://www.goethe.sh/device?code=1"), "www twin");
+        assert!(!verification_on_base("https://goethe.sh", "https://evil.example.com/device"));
+        assert!(!verification_on_base("https://goethe.sh", "https://goethe.sh.evil.com/device"));
+        assert!(verification_on_base("http://127.0.0.1:9", "http://127.0.0.1:9/device"));
     }
 
     #[test]

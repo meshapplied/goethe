@@ -59,8 +59,13 @@ pub const RESERVED_FLAGS: &[(&str, &str)] = &[
     ("--context-length", "use --ctx"),
     ("--max-running-requests", "use --max-conc"),
     ("--mem-fraction-static", "goethed derives it from the VRAM budget"),
+    ("--max-mamba-cache-size", "goethe sizes the state pool from the budget"),
+    ("--swa-full-tokens-ratio", "goethe sizes the window pool from the budget"),
     ("--served-model-name", "goethe serves the model under its id"),
     ("--api-key", "goethed sets a per-engine key"),
+    ("--pack", "goethe-engine sets the pack path"),
+    ("--weights", "goethe-engine sets the weight paths"),
+    ("--tokenizer", "goethe-engine sets the tokenizer dir"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

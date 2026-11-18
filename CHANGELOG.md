@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `goethe api expose public --yes` without `--allow` no longer binds every interface on a leftover allowlist; name the clients and confirm (`--yes` or `y`). Raw `goethe api expose 0.0.0.0` is refused (use `expose public`). World-open clients need the hidden `--dangerously-allow-all-inbound --yes`.
+- The gateway TLS certificate SAN includes this host's interface IPs (tailnet, LAN), so `curl --cacert` to the bind address verifies; the cert refreshes when that list changes.
+- `goethe models scan <foldername>` resolves the name under `GOETHE_HOME/models`, not the current working directory.
 - goethe picks the engine before downloading: a goethe kernel pack on a logged-in node, else SGLang when it supports the model, else llama.cpp on the repo's GGUF files or on the GGUF build Hugging Face lists for the model (the name typed becomes an alias), else a refusal with each engine's reason. Embedding models like embeddinggemma install this way. On a Mac, llama.cpp with the same GGUF lookup instead of a name search.
 - A kernel pack that cannot run gives way to the plain runtime by default, saying why (`GOETHE_ALLOW_FALLBACK=0` restores the error). The pack structure check after a download, and the goethe-engine install it needs, run only when a pack of the model's architecture exists for the GPU.
 - `goethe models` shows each model's engine.

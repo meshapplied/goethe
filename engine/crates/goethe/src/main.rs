@@ -74,24 +74,20 @@ const EXPOSE_HELP: &str = "Who can reach the API:
 
 \t→ goethe api expose local            (this machine only)
 \t→ goethe api expose vpn --interface wg0
-\t→ goethe api expose public --allow 203.0.113.7/32
+\t→ goethe api expose public --allow 203.0.113.7/32 --yes
 
-Or listen on one address or interface directly:
-
-\t→ goethe api expose 0.0.0.0
-\t→ goethe api expose wg0
+Public always needs --allow <their-ip>/32 and a confirm (--yes, or y on a terminal). It never opens on a leftover allowlist alone.
 
 goethe api expose alone shows where the API listens and who may connect.";
 
 const SHARE_HELP: &str = "Examples:
 
-\t→ goethe api share 5h --key my-app
-\t→ goethe api share 1d          (the keys of the last opening)
+\t→ goethe api share 5h --key my-app --allow <their-ip>/32
+\t→ goethe api share 5h --key my-app --dangerously-allow-all-inbound
 \t→ goethe api share             (status)
-\t→ goethe api share stop --key my-app   (that key only)
 \t→ goethe api share stop
 
-Every shared key uses the one public gateway, each until its own time and from its own addresses; it closes when the last one ends.";
+--allow is who may connect (their public IP: ask them, or https://ifconfig.me on their device). This machine's IP is only the URL goethe prints. Reopening the same keys keeps their last addresses. --dangerously-allow-all-inbound opens to every address (rate limits still apply). Closes when the last key ends.";
 
 #[derive(Parser)]
 #[command(
@@ -460,16 +456,22 @@ struct TraceArgs {
 
 #[derive(clap::Args)]
 struct ExposeArgs {
-    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::expose_targets), value_name = "WHERE", help = "local, vpn or public; or an address (127.0.0.1, 0.0.0.0, an IP of this host) or an interface such as wg0 to listen on.")]
+    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::expose_targets), value_name = "WHERE", help = "local, vpn or public; or an address (127.0.0.1, an IP of this host) or an interface such as wg0 to listen on.")]
     target: Option<String>,
-    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::interfaces), long, value_name = "NAME", conflicts_with = "ip", help = "With vpn or public: the network interface to serve, e.g. wg0; the gateway follows its address.")]
+    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::interfaces), long, value_name = "NAME", conflicts_with = "ip", help = "With vpn: the network interface to serve, e.g. wg0; the gateway follows its address.")]
     interface: Option<String>,
-    #[arg(long, value_name = "IP", help = "With vpn or public: a fixed address of this machine to listen on, instead of following an interface.")]
+    #[arg(long, value_name = "IP", hide = true, help = "Advanced: with vpn, a fixed address of this machine to listen on, instead of following an interface.")]
     ip: Option<std::net::IpAddr>,
-    #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "With vpn or public: client ranges to allow (default for vpn: the ranges the network reaches).")]
+    #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "With vpn or public: client ranges to allow (required for public; default for vpn: the ranges the network reaches).")]
     allow: Vec<String>,
-    #[arg(long, help = "Apply without questions (public still refuses 0.0.0.0/0).")]
+    #[arg(long, help = "Apply without questions. Public still needs --allow <their-ip>/32 (or --dangerously-allow-all-inbound).")]
     yes: bool,
+    #[arg(
+        long,
+        hide = true,
+        help = "Advanced / public only: allow every client address (0.0.0.0/0). Needs --yes. Not with --allow."
+    )]
+    dangerously_allow_all_inbound: bool,
     #[arg(long, help = "With no WHERE: the status as JSON.")]
     json: bool,
 }
@@ -482,6 +484,8 @@ struct ShareArgs {
     key: Vec<String>,
     #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Only these client addresses or ranges may use the keys given, such as 203.0.113.7.")]
     allow: Vec<String>,
+    #[arg(long, help = "Allow every address on the public gateway (0.0.0.0/0). Rate limits still apply. Not with --allow.")]
+    dangerously_allow_all_inbound: bool,
     #[arg(long, help = "The public port (default 8444, or the last one used).")]
     port: Option<u16>,
 }
@@ -677,7 +681,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("goethe api expose vpn --interface wg0", "serve a VPN or private network (also local or public)"),
         ("goethe api allow add 203.0.113.7/32", "let a client address in (remove takes it out)"),
         ("goethe api domain check DOMAIN", "check that a domain reaches the API"),
-        ("goethe api share 5h --key my-app", "open a public address for a while (share stop closes it)"),
+        ("goethe api share 5h --key my-app --allow <their-ip>/32", "open a public address for a while (share stop closes it)"),
     ]),
     ("Learning and traces", &[
         ("goethe learn on", "sessions keep what compaction drops (--model M for one model)"),
@@ -911,9 +915,22 @@ fn main() {
             Some(domain) => goethe_core::domain::check(&domain).map(|text| print!("{text}")),
             None => goethe_core::domain::explain().map(|text| print!("{text}")),
         },
-        Commands::Api { cmd: Some(ApiCommands::Share(ShareArgs { duration, key, allow, port })), .. } => {
-            do_share(duration.as_deref().unwrap_or("status"), &key, &allow, port)
-        }
+        Commands::Api {
+            cmd: Some(ApiCommands::Share(ShareArgs {
+                duration,
+                key,
+                allow,
+                dangerously_allow_all_inbound,
+                port,
+            })),
+            ..
+        } => do_share(
+            duration.as_deref().unwrap_or("status"),
+            &key,
+            &allow,
+            dangerously_allow_all_inbound,
+            port,
+        ),
         Commands::Learn(LearnArgs { action, model, print, json }) => do_learn(action.as_deref(), &model, print.as_deref(), json),
         Commands::Trace(TraceArgs {
             action,
@@ -1085,14 +1102,24 @@ fn do_allow(a: AllowArgs) -> Result<(), String> {
 
 fn do_expose(e: ExposeArgs) -> Result<(), String> {
     // goethe api expose: the status; local|vpn|public runs the access setup; an address or interface is listened on directly.
-    let ExposeArgs { target, interface, ip, allow, yes, json } = e;
-    let mode_only = interface.is_some() || ip.is_some() || !allow.is_empty() || yes;
+    let ExposeArgs { target, interface, ip, allow, yes, dangerously_allow_all_inbound, json } = e;
+    let mode_only = interface.is_some() || ip.is_some() || !allow.is_empty() || yes || dangerously_allow_all_inbound;
     match target.as_deref() {
         None if mode_only => usage("give local, vpn or public with --interface, --ip, --allow or --yes"),
         None => do_gateway_status(json),
         Some(m @ ("local" | "vpn" | "public")) => {
             let mode = goethe_core::configure::Mode::parse(m).unwrap_or_else(|e| usage(e));
-            goethe_core::configure::run_api(goethe_core::configure::ApiOpts { mode: Some(mode), vpn_ip: ip, interface, allow, yes })
+            if dangerously_allow_all_inbound && mode != goethe_core::configure::Mode::Public {
+                usage("--dangerously-allow-all-inbound is only for public");
+            }
+            goethe_core::configure::run_api(goethe_core::configure::ApiOpts {
+                mode: Some(mode),
+                vpn_ip: ip,
+                interface,
+                allow,
+                yes,
+                dangerously_allow_all_inbound,
+            })
         }
         Some(_) if mode_only => usage("--interface, --ip, --allow and --yes go with local, vpn or public"),
         Some(addr) => do_gateway_bind(addr),
@@ -1601,10 +1628,13 @@ fn do_ps(json: bool) -> Result<(), String> {
 }
 
 fn do_gateway_bind(addr: &str) -> Result<(), String> {
-    // An address, or an interface name whose address the gateway follows; persist, apply, and remind about the allowlist.
+    // An address or interface; unspecified binds go through expose public with its guards.
     let home = goethe_home();
     ensure_layout(&home).map_err(|e| format!("layout: {e}"))?;
     let loopback = match addr.trim().parse::<std::net::IpAddr>() {
+        Ok(ip) if ip.is_unspecified() => usage(
+            "listening on every address needs: goethe api expose public --allow <their-ip>/32 --yes",
+        ),
         Ok(ip) => {
             println!("{}", nginx::set_public_bind(&home, &ip.to_string())?);
             ip.is_loopback()
@@ -1613,7 +1643,9 @@ fn do_gateway_bind(addr: &str) -> Result<(), String> {
             println!("{}", nginx::set_public_bind_interface(&home, addr.trim())?);
             false
         }
-        Err(_) => usage(format!("invalid address {addr:?}: use 0.0.0.0, 127.0.0.1, an IP address of this host or an interface name")),
+        Err(_) => usage(format!(
+            "invalid address {addr:?}: use 127.0.0.1, an IP address of this host or an interface name"
+        )),
     };
     if !loopback && security::allowlist_list()?.is_empty() {
         print!("\n{}", empty_allowlist_text());
@@ -1710,7 +1742,13 @@ fn do_status() -> Result<(), String> {
     Ok(())
 }
 
-fn do_share(public: &str, keys: &[String], allow: &[String], port: Option<u16>) -> Result<(), String> {
+fn do_share(
+    public: &str,
+    keys: &[String],
+    allow: &[String],
+    dangerously_allow_all_inbound: bool,
+    port: Option<u16>,
+) -> Result<(), String> {
     // goethe api share <duration> | stop | (status).
     use goethe_core::public_share as share;
     let home = goethe_home();
@@ -1736,7 +1774,7 @@ fn do_share(public: &str, keys: &[String], allow: &[String], port: Option<u16>) 
         }
         "status" => {
             if !keys.is_empty() || !allow.is_empty() || port.is_some() {
-                usage("give a duration to open the public gateway, such as goethe api share 5h --key my-app");
+                usage("give a duration to open the public gateway, such as goethe api share 5h --key my-app --allow <their-ip>/32");
             }
             match share::active(&home) {
                 Some(s) => {
@@ -1744,33 +1782,47 @@ fn do_share(public: &str, keys: &[String], allow: &[String], port: Option<u16>) 
                     println!("Public gateway: open until {} ({} left)", share::local_time(s.until), left(s.until - share::now()));
                     println!("URL:  https://{}/v1", host_port(&ip, s.port));
                     for (name, g) in share::shared(&home) {
-                        let from = if g.allow.is_empty() { "any address".to_string() } else { g.allow.join(", ") };
+                        let from = if g.allow.is_empty() { "no addresses (unreachable)".to_string() } else { g.allow.join(", ") };
                         println!("Key:  {name} until {} ({} left), from {from}", share::local_time(g.until), left(g.until - share::now()));
                     }
                     println!("\nStop one key with: goethe api share stop --key <name>; close it with: goethe api share stop");
                 }
-                None => println!("The public gateway is closed. Open it with: goethe api share 5h --key <key name>"),
+                None => println!("The public gateway is closed. Open it with: goethe api share 5h --key <name> --allow <their-ip>/32"),
             }
             Ok(())
         }
         dur => {
             let secs = share::parse_duration(dur)?;
-            let o = share::open(&home, share::OpenArgs { secs, keys, allow, port })?;
+            let o = share::open(
+                &home,
+                share::OpenArgs {
+                    secs,
+                    keys,
+                    allow,
+                    port,
+                    dangerously_allow_all_inbound,
+                },
+            )?;
             let ip = o.public_ip.map(|i| i.to_string()).unwrap_or_else(|| "<public IP>".into());
             let url = format!("https://{}/v1", host_port(&ip, o.share.port));
             println!("Shared until {} ({}); the public gateway is open until {}\n", share::local_time(share::now() + secs), left(secs), share::local_time(o.share.until));
             println!("URL:  {url}");
             for k in &o.keys {
                 let models = k.models.as_deref().filter(|m| !m.is_empty()).unwrap_or("every model");
-                let token = k.token.as_deref().unwrap_or("(shown when it was created)");
-                println!("Key:  {} {token}  models: {models}", k.name);
+                match k.token.as_deref() {
+                    Some(token) => println!("Key:  {} {token}  models: {models}", k.name),
+                    None => println!("Key:  {} (id {})  models: {models}", k.name, k.id),
+                }
             }
-            if !allow.is_empty() {
-                println!("Only: {}", allow.join(", "));
+            let clients: Vec<String> = o.share.allow.clone();
+            if clients.iter().any(|c| c.ends_with("/0")) {
+                println!("Only these clients: every address (--dangerously-allow-all-inbound)");
+            } else if !clients.is_empty() {
+                println!("Only these clients: {}", clients.join(", "));
             }
             println!("\nTLS:  self-signed for this address. Send {} with the key (it holds no secret); the recipient", o.cert.display());
             println!("      verifies the gateway with it, for example:");
-            let token = o.keys.first().and_then(|k| k.token.as_deref()).unwrap_or("<key>");
+            let token = o.keys.first().and_then(|k| k.token.as_deref()).unwrap_or("<your_bearer_token>");
             println!("      curl --cacert public.crt {url}/models -H \"Authorization: Bearer {token}\"");
             if let Some(f) = &o.fingerprint {
                 println!("      SHA-256 fingerprint: {f}");
@@ -2029,6 +2081,12 @@ mod tests {
         assert!(parse(&["api", "expose", "vpn", "--interface", "wg0"]).is_ok() && parse(&["api", "expose", "wg0"]).is_ok());
         assert!(matches!(parse(&["api", "share", "5h", "--key", "a,b"]).unwrap().command,
             Commands::Api { cmd: Some(ApiCommands::Share(ShareArgs { duration: Some(_), .. })), .. }));
+        let Commands::Api { cmd: Some(ApiCommands::Share(s)), .. } =
+            parse(&["api", "share", "5h", "--key", "my-app", "--dangerously-allow-all-inbound"]).unwrap().command
+        else {
+            panic!()
+        };
+        assert!(s.dangerously_allow_all_inbound && s.allow.is_empty());
         assert!(parse(&["models", "alias", "set", "fast", "org/m"]).is_ok() && parse(&["models", "scan", "mydir"]).is_ok());
         assert!(parse(&["models", "--json", "scan"]).is_err() && parse(&["api", "--json", "keys"]).is_err());
         assert!(parse(&["learn", "on", "--model", "m"]).is_ok() && parse(&["trace", "on", "--all-keys"]).is_ok());
