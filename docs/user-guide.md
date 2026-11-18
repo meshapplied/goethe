@@ -343,7 +343,7 @@ goethe api share stop --key ci                            # stop sharing one key
 goethe api share stop                                     # close early
 ```
 
-The public address exists only while some key is shared, accepts only the keys you chose (never admin keys), each until its own time and from the client addresses you named (`--allow`, or `goethe api allow` first), and closes by itself when the last one ends. Keys stay the same every time. The menu's Public address page does the same with a form. Details and the full list of security precautions: [`goethe api share`](cli.md#goethe-api-share-duration).
+The public address exists only while some key is shared, accepts only the keys you chose (never admin keys), each until its own time and from the client addresses you named with `--allow` (or kept from the last share of those keys), and closes by itself when the last one ends. Keys stay the same every time. The menu's Public address page does the same with a form. Details and the full list of security precautions: [`goethe api share`](cli.md#goethe-api-share-duration).
 
 ### Address, aliases and your own domain
 
