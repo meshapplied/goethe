@@ -527,12 +527,23 @@ pub fn write_gateway_configs(home: &Path) -> Result<(), String> {
 }
 
 fn tls_names() -> Vec<String> {
-    // Loopback, this host's name, and anything in GOETHE_TLS_NAMES. A pod's public IP changes every start, so a name is what a client pins.
+    // Loopback, this host's name, every interface IP (tailnet, LAN, …), and GOETHE_TLS_NAMES.
+    // Clients curl the bind address with --cacert; without those IPs in the SAN, verification fails (curl 60).
     let mut names: Vec<String> = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
     if let Ok(h) = fs::read_to_string("/etc/hostname") {
         let h = h.trim();
         if !h.is_empty() && h != "localhost" {
             names.push(h.to_string());
+        }
+    }
+    if let Some(addrs) = interface_addrs() {
+        for a in addrs {
+            // Skip link-local noise; keep loopback (already listed), private, and public iface IPs.
+            match a.ip {
+                IpAddr::V4(v4) if v4.is_link_local() => {}
+                IpAddr::V6(v6) if v6.is_unicast_link_local() => {}
+                ip => names.push(ip.to_string()),
+            }
         }
     }
     names.extend(std::env::var("GOETHE_TLS_NAMES").unwrap_or_default().split(',').map(|n| n.trim().to_string()));
@@ -590,8 +601,14 @@ fn worker_user_line(root: bool, group: Option<&str>) -> String {
 }
 
 pub fn ensure_certs(home: &Path) -> Result<(), String> {
-    // The gateway's self-signed certificate for this host's names, made at install so it exists before the first goethe up.
-    ensure_tls(home, &san_extension(&tls_names()), false)
+    // The gateway's self-signed certificate for this host's names; refreshed when the SAN list changes (new iface IP).
+    let san = san_extension(&tls_names());
+    let san_file = nginx_prefix(home).join("certs/sans.txt");
+    let stale = fs::read_to_string(&san_file).map(|s| s.trim() != san).unwrap_or(true);
+    ensure_tls(home, &san, stale)?;
+    private_dir(&nginx_prefix(home).join("certs"), false)?;
+    write_private(&san_file, format!("{san}\n").as_bytes())?;
+    Ok(())
 }
 
 fn ensure_tls(home: &Path, san: &str, stale: bool) -> Result<(), String> {
@@ -1214,6 +1231,16 @@ mod tests {
         let names = tls_names();
         assert!(names.contains(&"localhost".to_string()) && names.contains(&"127.0.0.1".to_string()));
         assert!(names.iter().all(|n| !n.trim().is_empty()));
+        // Interface IPs (tailnet, LAN) belong in the SAN so curl --cacert to the bind address works.
+        if let Some(addrs) = interface_addrs() {
+            for a in addrs {
+                match a.ip {
+                    IpAddr::V4(v4) if v4.is_link_local() => {}
+                    IpAddr::V6(v6) if v6.is_unicast_link_local() => {}
+                    ip => assert!(names.contains(&ip.to_string()), "missing iface IP {ip} in {names:?}"),
+                }
+            }
+        }
         std::env::set_var("GOETHE_TLS_NAMES", "pod-8443.proxy.runpod.net, ,");
         assert!(tls_names().contains(&"pod-8443.proxy.runpod.net".to_string()), "blank entries dropped");
         std::env::remove_var("GOETHE_TLS_NAMES");

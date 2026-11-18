@@ -271,24 +271,24 @@ Who can reach the API. Without an argument it shows where the API listens and ho
 | `goethe api expose` | Show where the API listens and who may connect (`--json` for scripts) |
 | `goethe api expose local` | This machine only |
 | `goethe api expose vpn` | A VPN or other private network (recommended) |
-| `goethe api expose public` | A public address |
-| `goethe api expose <address or interface>` | Listen on `127.0.0.1` (this machine only), `0.0.0.0` (all addresses), one IP of this machine, or an interface such as `wg0`, whose address is followed |
+| `goethe api expose public` | A public address (needs `--allow <their-ip>/32` and `--yes`, or `y` on a terminal) |
+| `goethe api expose <address or interface>` | Listen on `127.0.0.1`, one IP of this machine, or an interface such as `wg0` (followed). Not `0.0.0.0`: use `expose public` |
 
 For a VPN it lists the networks this machine is on, with the ranges each one reaches, and works with any VPN that has a network interface. It then asks whether to restrict access to specific IP addresses. The gateway follows the chosen interface: when its address changes, it moves within a few seconds, and while the interface has no address only this machine can connect.
 
+`expose public` never binds every interface on a leftover allowlist. Name the clients with `--allow`, confirm with `--yes` (or `y`), and only then does it listen on `0.0.0.0`. Opening every client address needs the hidden `--dangerously-allow-all-inbound --yes`.
+
 | Option | Description |
 |---|---|
-| `--interface <name>` | With `vpn` or `public`: the network interface to serve, such as `wg0`; needed without a terminal when there are several |
-| `--ip <ip>` | With `vpn` or `public`: a fixed address of this machine instead of an interface |
-| `--allow <cidr>` | With `vpn` or `public`: a client address or range to allow; repeatable |
-| `--yes` | Apply without questions (`public` still refuses `0.0.0.0/0`) |
+| `--interface <name>` | With `vpn`: the network interface to serve, such as `wg0`; needed without a terminal when there are several |
+| `--allow <cidr>` | With `vpn` or `public`: a client address or range to allow; **required for public**; repeatable |
+| `--yes` | Apply without questions. Public still needs `--allow` (or `--dangerously-allow-all-inbound`) |
 | `--json` | With no argument: the status as JSON |
 
 ```bash
 goethe api expose local
 goethe api expose vpn --interface wg0
-goethe api expose public --allow 203.0.113.7/32
-goethe api expose 0.0.0.0
+goethe api expose public --allow 203.0.113.7/32 --yes
 ```
 
 ### `goethe api allow`

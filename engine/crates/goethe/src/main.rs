@@ -74,12 +74,9 @@ const EXPOSE_HELP: &str = "Who can reach the API:
 
 \t→ goethe api expose local            (this machine only)
 \t→ goethe api expose vpn --interface wg0
-\t→ goethe api expose public --allow 203.0.113.7/32
+\t→ goethe api expose public --allow 203.0.113.7/32 --yes
 
-Or listen on one address or interface directly:
-
-\t→ goethe api expose 0.0.0.0
-\t→ goethe api expose wg0
+Public always needs --allow <their-ip>/32 and a confirm (--yes, or y on a terminal). It never opens on a leftover allowlist alone.
 
 goethe api expose alone shows where the API listens and who may connect.";
 
@@ -459,16 +456,22 @@ struct TraceArgs {
 
 #[derive(clap::Args)]
 struct ExposeArgs {
-    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::expose_targets), value_name = "WHERE", help = "local, vpn or public; or an address (127.0.0.1, 0.0.0.0, an IP of this host) or an interface such as wg0 to listen on.")]
+    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::expose_targets), value_name = "WHERE", help = "local, vpn or public; or an address (127.0.0.1, an IP of this host) or an interface such as wg0 to listen on.")]
     target: Option<String>,
-    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::interfaces), long, value_name = "NAME", conflicts_with = "ip", help = "With vpn or public: the network interface to serve, e.g. wg0; the gateway follows its address.")]
+    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::interfaces), long, value_name = "NAME", conflicts_with = "ip", help = "With vpn: the network interface to serve, e.g. wg0; the gateway follows its address.")]
     interface: Option<String>,
-    #[arg(long, value_name = "IP", help = "With vpn or public: a fixed address of this machine to listen on, instead of following an interface.")]
+    #[arg(long, value_name = "IP", hide = true, help = "Advanced: with vpn, a fixed address of this machine to listen on, instead of following an interface.")]
     ip: Option<std::net::IpAddr>,
-    #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "With vpn or public: client ranges to allow (default for vpn: the ranges the network reaches).")]
+    #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "With vpn or public: client ranges to allow (required for public; default for vpn: the ranges the network reaches).")]
     allow: Vec<String>,
-    #[arg(long, help = "Apply without questions (public still refuses 0.0.0.0/0).")]
+    #[arg(long, help = "Apply without questions. Public still needs --allow <their-ip>/32 (or --dangerously-allow-all-inbound).")]
     yes: bool,
+    #[arg(
+        long,
+        hide = true,
+        help = "Advanced / public only: allow every client address (0.0.0.0/0). Needs --yes. Not with --allow."
+    )]
+    dangerously_allow_all_inbound: bool,
     #[arg(long, help = "With no WHERE: the status as JSON.")]
     json: bool,
 }
@@ -1099,14 +1102,24 @@ fn do_allow(a: AllowArgs) -> Result<(), String> {
 
 fn do_expose(e: ExposeArgs) -> Result<(), String> {
     // goethe api expose: the status; local|vpn|public runs the access setup; an address or interface is listened on directly.
-    let ExposeArgs { target, interface, ip, allow, yes, json } = e;
-    let mode_only = interface.is_some() || ip.is_some() || !allow.is_empty() || yes;
+    let ExposeArgs { target, interface, ip, allow, yes, dangerously_allow_all_inbound, json } = e;
+    let mode_only = interface.is_some() || ip.is_some() || !allow.is_empty() || yes || dangerously_allow_all_inbound;
     match target.as_deref() {
         None if mode_only => usage("give local, vpn or public with --interface, --ip, --allow or --yes"),
         None => do_gateway_status(json),
         Some(m @ ("local" | "vpn" | "public")) => {
             let mode = goethe_core::configure::Mode::parse(m).unwrap_or_else(|e| usage(e));
-            goethe_core::configure::run_api(goethe_core::configure::ApiOpts { mode: Some(mode), vpn_ip: ip, interface, allow, yes })
+            if dangerously_allow_all_inbound && mode != goethe_core::configure::Mode::Public {
+                usage("--dangerously-allow-all-inbound is only for public");
+            }
+            goethe_core::configure::run_api(goethe_core::configure::ApiOpts {
+                mode: Some(mode),
+                vpn_ip: ip,
+                interface,
+                allow,
+                yes,
+                dangerously_allow_all_inbound,
+            })
         }
         Some(_) if mode_only => usage("--interface, --ip, --allow and --yes go with local, vpn or public"),
         Some(addr) => do_gateway_bind(addr),
@@ -1616,9 +1629,13 @@ fn do_ps(json: bool) -> Result<(), String> {
 
 fn do_gateway_bind(addr: &str) -> Result<(), String> {
     // An address, or an interface name whose address the gateway follows; persist, apply, and remind about the allowlist.
+    // Unspecified (0.0.0.0 / ::) is not a shortcut: that path used to open every interface without the public guards.
     let home = goethe_home();
     ensure_layout(&home).map_err(|e| format!("layout: {e}"))?;
     let loopback = match addr.trim().parse::<std::net::IpAddr>() {
+        Ok(ip) if ip.is_unspecified() => usage(
+            "listening on every address needs: goethe api expose public --allow <their-ip>/32 --yes",
+        ),
         Ok(ip) => {
             println!("{}", nginx::set_public_bind(&home, &ip.to_string())?);
             ip.is_loopback()
@@ -1627,7 +1644,9 @@ fn do_gateway_bind(addr: &str) -> Result<(), String> {
             println!("{}", nginx::set_public_bind_interface(&home, addr.trim())?);
             false
         }
-        Err(_) => usage(format!("invalid address {addr:?}: use 0.0.0.0, 127.0.0.1, an IP address of this host or an interface name")),
+        Err(_) => usage(format!(
+            "invalid address {addr:?}: use 127.0.0.1, an IP address of this host or an interface name"
+        )),
     };
     if !loopback && security::allowlist_list()?.is_empty() {
         print!("\n{}", empty_allowlist_text());

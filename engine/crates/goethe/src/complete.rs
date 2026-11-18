@@ -64,13 +64,12 @@ pub fn authkey_stdin() -> Vec<CompletionCandidate> {
 }
 
 pub fn expose_targets() -> Vec<CompletionCandidate> {
-    // goethe api expose: the three modes, then the addresses and interfaces it can listen on directly.
+    // Modes first. Raw 0.0.0.0 is not offered: that bind goes through `expose public` with guards.
     let mut out = vec![
         candidate("local", "this machine only"),
         candidate("vpn", "a VPN or private network"),
-        candidate("public", "a public network, allowlisted clients"),
+        candidate("public", "a public network, allowlisted clients (needs --allow and --yes)"),
         candidate("127.0.0.1", "this machine only"),
-        candidate("0.0.0.0", "every address"),
     ];
     out.extend(interfaces());
     out

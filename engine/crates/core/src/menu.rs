@@ -830,7 +830,14 @@ fn access_page(tty: &mut Tty) -> Result<(), String> {
                 tty.resume()?;
             }
             Some(1) => tty.inside(|| {
-                crate::configure::run_api(crate::configure::ApiOpts { mode: None, vpn_ip: None, interface: None, allow: Vec::new(), yes: false })
+                crate::configure::run_api(crate::configure::ApiOpts {
+                    mode: None,
+                    vpn_ip: None,
+                    interface: None,
+                    allow: Vec::new(),
+                    yes: false,
+                    dangerously_allow_all_inbound: false,
+                })
             })?,
             Some(_) => {
                 let mut page = SharePage::new();
