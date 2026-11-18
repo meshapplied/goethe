@@ -254,6 +254,7 @@ pub fn run(o: Opts) -> Result<(), String> {
     // Verify the signed package, place goethe, goethed and nginx (handing a running goethed's engines over), then settings, links, certificate, fixes and login.
     let home = crate::paths::goethe_home();
     crate::paths::ensure_layout(&home).map_err(|e| format!("{}: {e}", home.display()))?;
+    fs::set_permissions(&home, std::os::unix::fs::PermissionsExt::from_mode(0o700)).map_err(|e| format!("{}: {e}", home.display()))?;
     let macos = cfg!(target_os = "macos");
     let from = o.from.clone().unwrap_or_else(|| o.pkg.clone()).trim_end_matches('/').to_string();
     let tmp = home.join(".setup-staging");
@@ -290,6 +291,14 @@ fn run_in(home: &Path, o: &Opts, from: &str, tmp: &Path, macos: bool) -> Result<
     let old_version = upgrading.then(|| fs::read_to_string(home.join("VERSION")).unwrap_or_default().trim().to_string()).filter(|v| !v.is_empty());
     crate::update::swap_all(&staged)?;
     fs::copy(tmp.join("VERSION"), home.join("VERSION")).map_err(|e| e.to_string())?;
+    if running {
+        crate::service::refresh_unit(home);
+        let kept = crate::service::live_engine_pids().len();
+        crate::update::start_upgraded(home, before, kept)?;
+    }
+    if let Some(n) = note {
+        say(&n);
+    }
     for f in ["LICENSE", "NOTICE"] {
         if let Ok(p) = crate::update::fetch_verified(from, &sums, f, tmp) {
             let _ = fs::copy(p, home.join(f));
@@ -307,14 +316,6 @@ fn run_in(home: &Path, o: &Opts, from: &str, tmp: &Path, macos: bool) -> Result<
     write_env_file(home, &env)?;
     if o.pkg.starts_with("file://") && !o.keep_file_url {
         say("installed from a local folder; later updates and downloads come from pkg.goethe.sh");
-    }
-    if running {
-        crate::service::refresh_unit(home);
-        let kept = crate::service::live_engine_pids().len();
-        crate::update::start_upgraded(home, before, kept)?;
-    }
-    if let Some(n) = note {
-        say(&n);
     }
 
     heading(2, total, if macos { "Checking this Mac" } else { "Checking this machine" });
