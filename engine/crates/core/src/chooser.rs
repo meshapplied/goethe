@@ -63,6 +63,7 @@ pub struct LoadPlan {
     pub cc: String,
     pub ctx: u64,
     pub max_conc: u64,
+    pub disable_marlin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,7 +212,24 @@ pub fn plan_with(
     pinned_gpus: Option<&[u32]>,
     learned: LearnedAt,
 ) -> Result<LoadPlan, PlanError> {
-    // Pinned GPUs as given, else a pinned or the smallest fitting tp over GPUs whose architecture runs the model.
+    let marlin = plan_once(input, gpus, hw, pinned_tp, pinned_gpus, learned);
+    if input.marlin_extra_gb <= 0.0 {
+        return marlin;
+    }
+    let mut stock = input.clone();
+    stock.marlin_extra_gb = 0.0;
+    let stock = plan_once(&stock, gpus, hw, pinned_tp, pinned_gpus, learned);
+    prefer_capacity(marlin, stock)
+}
+
+fn plan_once(
+    input: &ChooserInput,
+    gpus: &[GpuPlacementInput],
+    hw: Option<&HardwareState>,
+    pinned_tp: Option<usize>,
+    pinned_gpus: Option<&[u32]>,
+    learned: LearnedAt,
+) -> Result<LoadPlan, PlanError> {
     if let Some(pg) = pinned_gpus.filter(|p| !p.is_empty()) {
         let tp = pinned_tp.unwrap_or(pg.len());
         if tp != pg.len() {
@@ -256,6 +274,21 @@ pub fn plan_with(
         return fits(input).or_else(|| shrink_until(input, fits)).ok_or_else(|| closest_miss(input, &eligible, hw, tp, learned));
     }
     auto_plan(input, &eligible, hw, learned)
+}
+
+fn prefer_capacity(with_extra: Result<LoadPlan, PlanError>, without: Result<LoadPlan, PlanError>) -> Result<LoadPlan, PlanError> {
+    match (with_extra, without) {
+        (Ok(a), Ok(mut b)) if (b.ctx, b.max_conc) > (a.ctx, a.max_conc) => {
+            b.disable_marlin = true;
+            Ok(b)
+        }
+        (Ok(a), _) => Ok(a),
+        (Err(_), Ok(mut b)) => {
+            b.disable_marlin = true;
+            Ok(b)
+        }
+        (Err(e), Err(_)) => Err(e),
+    }
 }
 
 const MAX_TP: usize = 64;
@@ -305,14 +338,14 @@ fn plan(input: &ChooserInput, tp: usize, set: SetRank) -> LoadPlan {
         cc: set.cc,
         ctx: input.ctx,
         max_conc: input.max_conc,
+        disable_marlin: false,
     }
 }
 
-/// Lowest context auto-shrink will try before giving up (below this, ask the user for --ctx).
 pub const SHRINK_CTX_FLOOR: u64 = 2048;
 
 fn shrink_until(input: &ChooserInput, mut fits: impl FnMut(&ChooserInput) -> Option<LoadPlan>) -> Option<LoadPlan> {
-    // Context halved down to SHRINK_CTX_FLOOR, then one request fewer at full context, until a memory shortfall goes away.
+    // Context halved down to SHRINK_CTX_FLOOR, then concurrency, until a shortfall clears.
     let mut trial = input.clone();
     trial.ctx = input.ctx.min(input.max_ctx);
     trial.max_conc = input.max_conc.max(1);
@@ -551,8 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_shrink_places_nvfp4_with_marlin_on_a_32gb_card() {
-        // Disk ~23 GB + Marlin copy ~7.85 GB on a 5090: full ctx refuses; shrink must still place.
+    fn weight_extra_that_wont_fit_is_dropped_so_the_card_still_places() {
         let mut m = inp();
         m.static_vram_gb = 23.0;
         m.ctx = 262_144;
@@ -565,8 +597,9 @@ mod tests {
         m.attention = "hybrid".into();
         m.supported_sm = vec!["12.0".into()];
         let plan = pick_load_plan(&m, &[gpu(0, 31.3, false)], None, None, None)
-            .expect("shrink must place this NVFP4 on one 32 GB GPU");
+            .expect("dropping the weight-extra copy must still place on one 32 GB GPU");
         assert_eq!(plan.tp, 1);
+        assert!(plan.disable_marlin, "planned without the dual-copy weight overhead");
         assert!(plan.ctx < m.ctx, "ctx reduced: {}", plan.ctx);
         assert!(plan.ctx >= SHRINK_CTX_FLOOR, "{}", plan.ctx);
         assert!(plan.max_conc <= m.max_conc);

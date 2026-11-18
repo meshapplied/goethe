@@ -1632,7 +1632,6 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
     let (old_args, old_quant_note) = sgl::drop_quantization_when_config_declares(&old_args, &cfg);
-    // Card may still carry a stale registry --quantization; drop it unless the user passes one on the CLI.
     if old_quant_note.is_some() && !sgl::has_flag(&cli_args, "--quantization") {
         notes.extend(old_quant_note);
     }

@@ -178,8 +178,7 @@ pub fn has_flag(args: &[String], flag: &str) -> bool {
 }
 
 pub fn drop_quantization_when_config_declares(args: &[String], cfg: &Value) -> (Vec<String>, Option<String>) {
-    // SGLang reads quantization_config itself; a registry --quantization that disagrees (e.g. modelopt_fp4
-    // on a compressed-tensors checkpoint) aborts startup. User CLI can still pass --quantization later.
+    // Drop registry --quantization when config.json already declares quantization_config.
     if cfg
         .get("quantization_config")
         .and_then(|q| q.get("quant_method"))

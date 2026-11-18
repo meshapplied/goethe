@@ -308,10 +308,14 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
     let gpu_name = gpu_name(&snap, plan.gpus[0]);
     let fit_ctx = plan.ctx;
     let min_free = free.values().copied().fold(f64::INFINITY, f64::min);
-    if req.params.ctx.is_none() {
-        plan.ctx = chooser::cap_default_ctx(&chooser_input(req, plan.ctx, plan.max_conc), plan.tp, &plan.cc, min_free);
+    let mut card = req.card.clone();
+    if plan.disable_marlin {
+        set_card_env(&mut card, "GOETHE_MARLIN", "0");
     }
-    let input = chooser_input(req, plan.ctx, plan.max_conc);
+    if req.params.ctx.is_none() {
+        plan.ctx = chooser::cap_default_ctx(&chooser_input_on(req, &card, plan.ctx, plan.max_conc), plan.tp, &plan.cc, min_free);
+    }
+    let input = chooser_input_on(req, &card, plan.ctx, plan.max_conc);
     let learned = crate::engine_overhead::read_learned(con, model_id, &gpu_name, plan.tp as u64, &runtime);
     let need = chooser::with_learned(chooser::need(&input, plan.tp, &plan.cc), learned);
     let found = foreign::foreign_on(&snap, &plan.gpus, &managed, &live);
@@ -346,6 +350,9 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
             reduced.join(", ")
         ));
     }
+    if plan.disable_marlin {
+        notices.push_str("weight dual-copy off (GOETHE_MARLIN=0): keeps KV room on this card\n");
+    }
     if !copies.is_empty() {
         let list: Vec<String> = copies.iter().map(|c| format!("{} on GPU {} (port {})", c.0, c.2, c.3)).collect();
         notices.push_str(&format!("another replica of {model_id}; already loaded: {}\n", list.join(", ")));
@@ -362,7 +369,7 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
             plan.ctx
         ));
     }
-    let starting = start_engine(req, con, &plan, need, learned, min_free, gpu_name)?;
+    let starting = start_engine(req, con, &plan, need, learned, min_free, gpu_name, card)?;
     Ok(Step::Started(Box::new(starting), notices))
 }
 
@@ -393,6 +400,7 @@ fn start_engine(
     learned: Learned,
     min_free: f64,
     gpu_name: String,
+    card: toml::Value,
 ) -> Result<Starting, LoadErr> {
     // Port and slot, spawn, then the STARTING row and ledger entry; any failure after spawn stops the engine.
     let (lo, hi) = crate::ports::engine_port_range().map_err(err1)?;
@@ -420,7 +428,7 @@ fn start_engine(
         served_name: model_id,
         engine_key: &engine_key,
         model_path: &req.model_path,
-        card: &req.card,
+        card: &card,
         port,
         ctx: plan.ctx,
         max_conc: plan.max_conc,
@@ -491,12 +499,12 @@ fn start_engine(
         gpu_name,
         tp,
         model_path: req.model_path.clone(),
-        card: req.card.clone(),
+        input: chooser_input_on(req, &card, plan.ctx, plan.max_conc),
+        card,
         gpus: plan.gpus.clone(),
         cc: plan.cc.clone(),
         ctx: plan.ctx,
         max_conc: plan.max_conc,
-        input: chooser_input(req, plan.ctx, plan.max_conc),
         plan_free: min_free,
     })
 }
@@ -1305,18 +1313,35 @@ fn kv_bytes_per_token(row: &InstRow, card: &toml::Value) -> u64 {
 }
 
 fn chooser_input(req: &LoadReq, ctx: u64, max_conc: u64) -> ChooserInput {
-    // Budget inputs from the card: KV bytes for its dtype, its Marlin copy and the compute capabilities it lists.
+    chooser_input_on(req, &req.card, ctx, max_conc)
+}
+
+fn chooser_input_on(req: &LoadReq, card: &toml::Value, ctx: u64, max_conc: u64) -> ChooserInput {
     let row = &req.row;
     let facts = crate::chooser::CardFacts {
         static_vram_gb: row.static_vram_gb,
-        kv_bytes_per_token: kv_bytes_per_token(row, &req.card),
+        kv_bytes_per_token: kv_bytes_per_token(row, card),
         num_attention_heads: row.num_attention_heads.unwrap_or(1) as u64,
         num_kv_heads: row.num_kv_heads.unwrap_or(1) as u64,
         attention: row.attention.clone().unwrap_or_else(|| "gqa".to_string()),
         max_ctx: row.max_ctx.unwrap_or(row.default_ctx) as u64,
     };
-    let input = ChooserInput::from_card(facts, &req.card, crate::memory_spec::installed(&req.model_path, &req.card, &req.params.extra_sglang_args), ctx, max_conc);
-    crate::engines::llama_cpp::with_header_kv(input, &req.model_path, &req.card)
+    let input = ChooserInput::from_card(
+        facts,
+        card,
+        crate::memory_spec::installed(&req.model_path, card, &req.params.extra_sglang_args),
+        ctx,
+        max_conc,
+    );
+    crate::engines::llama_cpp::with_header_kv(input, &req.model_path, card)
+}
+
+fn set_card_env(card: &mut toml::Value, key: &str, val: &str) {
+    let table = card.as_table_mut().expect("card is a table");
+    let env = table.entry("env").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if let Some(env) = env.as_table_mut() {
+        env.insert(key.to_string(), toml::Value::String(val.to_string()));
+    }
 }
 
 fn gpu_name(snap: &[GpuLive], idx: u32) -> String {

@@ -1,8 +1,7 @@
 // VRAM budget calculator from the product spec, with the one fit rule every load path uses.
 
 const SAFETY_MARGIN_GB: f64 = 1.5;
-/// SGLang accepts mem_fraction_static up to ~0.99 for heavy NVFP4 weights on a full card; 0.95 refused those loads.
-const MAX_MEM_FRACTION: f64 = 0.99;
+const MAX_MEM_FRACTION: f64 = 1.0;
 pub const BASE_OVERHEAD_GB: f64 = 1.8;
 pub const METAL_OVERHEAD_GB: f64 = 0.5;
 
@@ -30,18 +29,10 @@ impl Need {
 }
 
 pub fn missing_gb(need: &Need, free_gb: f64) -> f64 {
-    // GB a budget lacks. Weights+peak must fit in free. When weights already fill most of the card and
-    // KV/state are tiny (auto-shrink floor), allow the load: SGLang runs those at mem_fraction ≈ 0.99 and
-    // the 1.5+1.8 padding would otherwise refuse every 27B NVFP4 on a 32 GB GPU. Otherwise keep the pool
-    // cap and safety margin (so a fat learned overhead still refuses).
+    // Weights+peak must fit in free; pool may use the whole free card; else keep the safety margin.
     let by_weights = need.weights + need.load_peak - free_gb;
     let by_pool = need.pool() - MAX_MEM_FRACTION * free_gb;
     let by_margin = need.total() - (free_gb - SAFETY_MARGIN_GB);
-    let kvish = need.kv + need.window + need.state;
-    // Near-full card: weights leave a little slack, KV is shrunk away, ignore the 1.5+1.8 padding.
-    if need.weights + need.load_peak + 0.3 <= free_gb && kvish <= SAFETY_MARGIN_GB && need.weights >= 0.85 * free_gb {
-        return 0.0;
-    }
     by_weights.max(by_pool).max(by_margin).max(0.0)
 }
 
@@ -177,7 +168,7 @@ mod tests {
              minus a 1.5 GB safety margin: missing 1.3 GB"
         );
         let capped = shortfall(&need(70.0, 9.5, 1.8), 2, 75.6).unwrap();
-        assert!(capped.contains("missing") && (capped.contains("99%") || capped.contains("safety margin")), "{capped}");
+        assert!(capped.contains("missing") && (capped.contains("100%") || capped.contains("safety margin")), "{capped}");
         assert_eq!(shortfall(&need(10.0, 1.0, 1.8), 2, 75.6), None);
     }
 
@@ -190,11 +181,8 @@ mod tests {
     }
 
     #[test]
-    fn a_near_full_card_weight_load_with_tiny_kv_is_allowed() {
-        // 27B NVFP4 + Marlin on a 5090: ~30.8 GB weights, shrink KV/state down; must not refuse on the 1.5+1.8 padding alone.
-        let n = Need { weights: 30.8, kv: 0.2, state: 0.3, overhead: 1.8, ..Need::default() };
-        assert_eq!(missing_gb(&n, 31.3), 0.0, "pool {:.1} on 31.3 free", n.pool());
-        assert!(missing_gb(&Need { kv: 4.0, state: 4.0, ..n }, 31.3) > 0.0, "fat KV still refuses");
-        assert!(missing_gb(&need(20.0, 0.1, 1.8), 20.0) > 0.0, "exact-fill with overhead still refuses");
+    fn exact_fill_with_overhead_still_refuses() {
+        assert!(missing_gb(&need(20.0, 0.1, 1.8), 20.0) > 0.0);
+        assert!(missing_gb(&need(20.0, 1.0, 0.5), 21.0) > 0.0);
     }
 }
