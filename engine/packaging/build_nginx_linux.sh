@@ -45,7 +45,7 @@ docker run --rm --name "goethe-build-nginx-${ARCH}" \
     chown "$HOST_UID:$HOST_GID" /out/nginx
     libs="$(objdump -p /out/nginx | awk "/NEEDED/ {print \$2}" | sort | tr "\n" " ")"
     for l in $libs; do
-      case "$l" in libc.so.6 | libpthread.so.0 | libdl.so.2 | libcrypt.so.1 | libm.so.6) ;; *) echo "nginx needs $l, which is not part of glibc" >&2; exit 1 ;; esac
+      case "$l" in libc.so.6 | libpthread.so.0 | libdl.so.2 | libcrypt.so.1 | libm.so.6 | ld-linux-aarch64.so.1 | ld-linux-x86-64.so.2) ;; *) echo "nginx needs $l, which is not part of glibc" >&2; exit 1 ;; esac
     done
     glibc="$(objdump -T /out/nginx | sed -n "s/.*GLIBC_\([0-9.]*\).*/\1/p" | sort -V | tail -n1)"
     echo "nginx needs: $libs(glibc $glibc)"
