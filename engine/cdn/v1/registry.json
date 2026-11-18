@@ -1504,5 +1504,212 @@
         "image"
       ]
     }
+  ],
+  "gguf_models": [
+    {
+      "id": "ggml-org/gemma-4-E2B-it-GGUF",
+      "architecture": "dense",
+      "static_vram_gb": 2.65,
+      "download_gb": 2.65,
+      "kv_bytes_per_token": 32768,
+      "supported_sm": [],
+      "default_ctx": 8192,
+      "max_ctx": 8192,
+      "default_max_conc": 4,
+      "attention": "gqa",
+      "runtime": "llama.cpp",
+      "family": "Gemma 4",
+      "license": "gemma",
+      "released": "2026",
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "description": "Gemma 4 E2B, Q4_0: small and quick, for 8 GB Macs."
+    },
+    {
+      "id": "ggml-org/gemma-4-E4B-it-GGUF",
+      "architecture": "dense",
+      "static_vram_gb": 4.28,
+      "download_gb": 4.28,
+      "kv_bytes_per_token": 49152,
+      "supported_sm": [],
+      "default_ctx": 8192,
+      "max_ctx": 8192,
+      "default_max_conc": 4,
+      "attention": "gqa",
+      "runtime": "llama.cpp",
+      "family": "Gemma 4",
+      "license": "gemma",
+      "released": "2026",
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "description": "Gemma 4 E4B, Q4_0."
+    },
+    {
+      "id": "Qwen/Qwen3-8B-GGUF",
+      "architecture": "dense",
+      "static_vram_gb": 4.68,
+      "download_gb": 4.68,
+      "kv_bytes_per_token": 147456,
+      "supported_sm": [],
+      "default_ctx": 8192,
+      "max_ctx": 8192,
+      "default_max_conc": 4,
+      "attention": "gqa",
+      "runtime": "llama.cpp",
+      "family": "Qwen3",
+      "license": "apache-2.0",
+      "released": "2025",
+      "modalities": [
+        "text"
+      ],
+      "description": "Qwen3 8B, Q4_K_M."
+    },
+    {
+      "id": "ggml-org/gpt-oss-20b-GGUF",
+      "architecture": "moe",
+      "static_vram_gb": 11.28,
+      "download_gb": 11.28,
+      "kv_bytes_per_token": 49152,
+      "supported_sm": [],
+      "default_ctx": 16384,
+      "max_ctx": 16384,
+      "default_max_conc": 4,
+      "attention": "gqa",
+      "runtime": "llama.cpp",
+      "family": "gpt-oss",
+      "license": "apache-2.0",
+      "released": "2025",
+      "modalities": [
+        "text"
+      ],
+      "description": "gpt-oss 20B, MXFP4."
+    },
+    {
+      "id": "ggml-org/gemma-4-26B-A4B-it-GGUF",
+      "architecture": "moe",
+      "static_vram_gb": 13.61,
+      "download_gb": 13.61,
+      "kv_bytes_per_token": 98304,
+      "supported_sm": [],
+      "default_ctx": 8192,
+      "max_ctx": 8192,
+      "default_max_conc": 4,
+      "attention": "gqa",
+      "runtime": "llama.cpp",
+      "family": "Gemma 4",
+      "license": "gemma",
+      "released": "2026",
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "description": "Gemma 4 26B A4B, Q4_0."
+    },
+    {
+      "id": "ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF",
+      "architecture": "moe",
+      "static_vram_gb": 17.6,
+      "download_gb": 17.6,
+      "kv_bytes_per_token": 24576,
+      "supported_sm": [],
+      "default_ctx": 16384,
+      "max_ctx": 16384,
+      "default_max_conc": 4,
+      "attention": "gqa",
+      "runtime": "llama.cpp",
+      "family": "Nemotron 3.5",
+      "license": "nvidia-open-model-license",
+      "released": "2026",
+      "modalities": [
+        "text"
+      ],
+      "description": "Nemotron 3.5 Lightning 30B A3B, Q4_0."
+    },
+    {
+      "id": "ggml-org/Qwen3.8-27B-GGUF",
+      "architecture": "dense",
+      "static_vram_gb": 18.07,
+      "download_gb": 18.07,
+      "kv_bytes_per_token": 65536,
+      "supported_sm": [],
+      "default_ctx": 16384,
+      "max_ctx": 16384,
+      "default_max_conc": 4,
+      "attention": "gqa",
+      "runtime": "llama.cpp",
+      "family": "Qwen3.8",
+      "license": "apache-2.0",
+      "released": "2026",
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "description": "Qwen3.8 27B, Q4_K_M."
+    },
+    {
+      "id": "ggml-org/Qwen3.6-35B-A3B-GGUF",
+      "architecture": "moe",
+      "static_vram_gb": 19.13,
+      "download_gb": 19.13,
+      "kv_bytes_per_token": 40960,
+      "supported_sm": [],
+      "default_ctx": 16384,
+      "max_ctx": 16384,
+      "default_max_conc": 4,
+      "attention": "gqa",
+      "runtime": "llama.cpp",
+      "family": "Qwen3.6",
+      "license": "apache-2.0",
+      "released": "2026",
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "description": "Qwen3.6 35B A3B, Q4_K_M."
+    },
+    {
+      "id": "ggml-org/gpt-oss-120b-GGUF",
+      "architecture": "moe",
+      "static_vram_gb": 59.03,
+      "download_gb": 59.03,
+      "kv_bytes_per_token": 73728,
+      "supported_sm": [],
+      "default_ctx": 16384,
+      "max_ctx": 16384,
+      "default_max_conc": 4,
+      "attention": "gqa",
+      "runtime": "llama.cpp",
+      "family": "gpt-oss",
+      "license": "apache-2.0",
+      "released": "2025",
+      "modalities": [
+        "text"
+      ],
+      "description": "gpt-oss 120B, MXFP4, for Macs with 96 GB or more."
+    },
+    {
+      "id": "ggml-org/embeddinggemma-300M-GGUF",
+      "architecture": "dense",
+      "static_vram_gb": 0.31,
+      "download_gb": 0.31,
+      "kv_bytes_per_token": 8192,
+      "supported_sm": [],
+      "default_ctx": 2048,
+      "max_ctx": 2048,
+      "default_max_conc": 4,
+      "attention": "gqa",
+      "runtime": "llama.cpp",
+      "family": "EmbeddingGemma",
+      "license": "gemma",
+      "released": "2025",
+      "modalities": [
+        "embedding"
+      ],
+      "description": "EmbeddingGemma 300M, Q8_0: embeddings."
+    }
   ]
 }

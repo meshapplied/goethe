@@ -468,6 +468,7 @@ mod tests {
                 entry("org/small", with(serde_json::json!({"static_vram_gb": 5.6}))),
                 entry("org/gated", with(serde_json::json!({"static_vram_gb": 2.0, "gated": true}))),
             ],
+            gguf_models: Vec::new(),
         };
         let home = tempfile::tempdir().unwrap();
         assert_eq!(suggested_model(home.path(), &reg), "org/small", "no hardware profile: the smallest downloadable model, never a gated one");
@@ -491,6 +492,7 @@ mod tests {
                 entry("meshapplied/open", serde_json::json!({})),
                 entry("meshapplied/huge", serde_json::json!({"static_vram_gb": 900.0})),
             ],
+            gguf_models: Vec::new(),
         };
         let out = recommend(std::path::Path::new("/none"), &v, &reg);
         let ids: Vec<&str> = out.recommended.iter().map(|r| r.model_id.as_str()).collect();

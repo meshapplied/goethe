@@ -40,8 +40,12 @@ pub fn run(json: bool, probe_public: bool) -> Result<(), String> {
         if !folded.is_empty() {
             println!("also OK: {} (goethe -v doctor lists them)", folded.join(", "));
         }
-        println!("\nGPU architectures goethe supports: {}", crate::gpu_arch::microarchitectures_text());
-        println!("Architectures of this machine: {}", crate::packs::local_archs(&home).join(", "));
+        if cfg!(target_os = "macos") {
+            println!("\nOn a Mac goethe serves GGUF models with llama.cpp on Metal.");
+        } else {
+            println!("\nGPU architectures goethe supports: {}", crate::gpu_arch::microarchitectures_text());
+            println!("Architectures of this machine: {}", crate::packs::local_archs(&home).join(", "));
+        }
     }
     if probe_public {
         probe_public_reachability(&home);
@@ -103,9 +107,72 @@ const CHECKS: &[(&str, CheckFn)] = &[
     ("compiler", |_| check_compiler()),
 ];
 
+const MAC_CHECKS: &[(&str, CheckFn)] = &[
+    ("hardware", check_mac_hardware),
+    ("platform", check_platform),
+    ("llama.cpp", check_llama_cpp),
+    ("nginx", check_nginx),
+    ("goethe_home", check_goethe_home),
+    ("disk", check_disk),
+    ("ram", check_ram),
+    ("state_db", check_state_db),
+    ("environment", |_| check("environment", "OK", "macOS: goethe up adds a LaunchAgent, so goethed starts when you log in")),
+    ("ports", check_ports),
+    ("goethed", |_| check_goethed()),
+    ("gateway", check_gateway),
+    ("network", check_network),
+    ("tls", check_tls),
+    ("huggingface", check_hf),
+    ("registry", check_registry),
+];
+
+pub fn mac_hardware_note(chip: &str, arm64: bool, version: &str, limit_mb: u64, free_mb: u64, total_mb: u64) -> (&'static str, String) {
+    // Apple Silicon and macOS 14 or newer, then the memory the GPU may use and how much of it is free now.
+    if !arm64 {
+        return ("FAIL", format!("{chip}: Intel Macs are not supported; goethe needs Apple Silicon (M1 or newer)"));
+    }
+    let major = crate::apple::parse_version(version).map_or(0, |v| v.0);
+    let gb = |mb: u64| mb as f64 / 1024.0;
+    let text = format!(
+        "{chip}, macOS {version}\nGPU may use {:.1} of {:.1} GB unified memory; {:.1} GB free now",
+        gb(limit_mb),
+        gb(total_mb),
+        gb(free_mb)
+    );
+    if major < 14 {
+        return ("FAIL", format!("{text}\nmacOS {version} is too old: llama.cpp's Metal build needs macOS 14 or newer"));
+    }
+    ("OK", text)
+}
+
+#[cfg(target_os = "macos")]
+fn check_mac_hardware(_home: &Path) -> Check {
+    let g = crate::apple::gpu(&[]);
+    let total = crate::sys::memory().total_kb / 1024;
+    let (status, text) = mac_hardware_note(&g.name, crate::apple::apple_silicon(), &crate::apple::macos_version(), g.vram_total_mb, g.vram_free_mb, total);
+    check("hardware", status, text)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn check_mac_hardware(home: &Path) -> Check {
+    check_hardware(home)
+}
+
+fn check_llama_cpp(home: &Path) -> Check {
+    // The Metal build of llama-server, installed or fetched on the first model install.
+    match crate::engines::llama_cpp::server_bin(home) {
+        Ok(p) => check("llama.cpp", "OK", p.display().to_string()),
+        Err(_) => match crate::engines::llama_cpp::server_ready(home) {
+            Ok(()) => check("llama.cpp", "INFO", format!("llama.cpp {} is downloaded on the first model install", crate::engines::llama_cpp::TAG)),
+            Err(why) => check("llama.cpp", "FAIL", why),
+        },
+    }
+}
+
 fn collect_checks(home: &Path) -> Vec<Check> {
     // Run every check in parallel; each result carries the check's fixed name even on timeout.
-    let pending: Vec<_> = CHECKS
+    let list = if cfg!(target_os = "macos") { MAC_CHECKS } else { CHECKS };
+    let pending: Vec<_> = list
         .iter()
         .map(|(name, f)| {
             let h = home.to_path_buf();
@@ -748,6 +815,16 @@ fn available_gb(path: &Path) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mac_needs_apple_silicon_and_macos_14() {
+        let (st, text) = mac_hardware_note("Apple M3 Max (40-core GPU)", true, "15.1", 48 * 1024, 40 * 1024, 64 * 1024);
+        assert_eq!(st, "OK");
+        assert!(text.contains("Apple M3 Max") && text.contains("macOS 15.1") && text.contains("GPU may use 48.0 of 64.0 GB") && text.contains("40.0 GB free"), "{text}");
+        assert_eq!(mac_hardware_note("Intel Core i9", false, "14.0", 0, 0, 0).0, "FAIL");
+        let (st, text) = mac_hardware_note("Apple M1", true, "13.6", 10_000, 8_000, 16_000);
+        assert!(st == "FAIL" && text.contains("macOS 14 or newer"), "{text}");
+    }
 
     #[test]
     fn plain_ok_rows_fold_into_one_line_unless_everything_is_asked_for() {

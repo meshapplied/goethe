@@ -157,9 +157,12 @@ pub fn gguf_paths(dir: &Path) -> Vec<PathBuf> {
 }
 
 pub fn is_model_gguf(name: &str) -> bool {
-    // A model file or the first shard of a split one; mmproj files (named mmproj-X or X.mmproj-f16) are vision projectors.
+    // A model file or the first shard of a split one; mmproj files (named mmproj-X or X.mmproj-f16) are vision projectors, and
+    // mtp-, dflash- and eagle3- files are speculative-decoding drafters that ship beside the model.
     let base = name.rsplit('/').next().unwrap_or(name);
-    base.ends_with(".gguf") && !base.to_ascii_lowercase().contains("mmproj") && (!base.contains("-of-") || base.contains("-00001-of-"))
+    let lower = base.to_ascii_lowercase();
+    let drafter = ["mtp-", "dflash-", "eagle3-", "eagle-", "draft-"].iter().any(|p| lower.starts_with(p));
+    base.ends_with(".gguf") && !lower.contains("mmproj") && !drafter && (!base.contains("-of-") || base.contains("-00001-of-"))
 }
 
 pub fn gguf_in(dir: &Path, card: &toml::Value, quant: Option<&str>) -> Result<PathBuf, String> {

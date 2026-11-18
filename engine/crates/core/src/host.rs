@@ -91,6 +91,12 @@ pub fn sysroot() -> PathBuf {
 
 pub fn probe_host(home: &Path, cloud: &str) -> HostInfo {
     // Read CPU, memory, OS and the filesystems behind GOETHE_HOME and models/.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = cloud;
+        return crate::apple::host_info(home);
+    }
+    #[cfg_attr(target_os = "macos", allow(unreachable_code))]
     let root = sysroot();
     let read = |rel: &str| std::fs::read_to_string(root.join(rel)).unwrap_or_default();
     let mut cpu = parse_cpuinfo(&read("proc/cpuinfo"));
@@ -116,6 +122,12 @@ pub fn probe_host(home: &Path, cloud: &str) -> HostInfo {
 
 pub fn probe_environment(public_port: u16) -> EnvironmentInfo {
     // This process's environment, completed from the container's main process: SSH sessions do not inherit RUNPOD_* and the like.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = public_port;
+        return crate::apple::environment();
+    }
+    #[cfg_attr(target_os = "macos", allow(unreachable_code))]
     let root = sysroot();
     let mut env: BTreeMap<String, String> = std::env::vars().collect();
     for (k, v) in pid1_env(&root) {
@@ -134,7 +146,11 @@ fn pid1_env(root: &Path) -> Vec<(String, String)> {
 }
 
 pub fn mem_available_gb() -> Option<f64> {
-    // MemAvailable in GB, or None when /proc/meminfo is unreadable.
+    // Available memory in GB, or None when it cannot be read.
+    if cfg!(target_os = "macos") {
+        let m = crate::sys::memory();
+        return (m.total_kb > 0).then_some(m.available_kb as f64 / 1024.0 / 1024.0);
+    }
     let text = std::fs::read_to_string(sysroot().join("proc/meminfo")).ok()?;
     let mem = parse_meminfo(&text);
     (mem.total_mb > 0).then_some(mem.available_mb as f64 / 1024.0)

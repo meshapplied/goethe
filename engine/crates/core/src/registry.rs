@@ -12,6 +12,13 @@ use std::path::Path;
 pub struct Registry {
     pub version: u32,
     pub models: Vec<RegistryModel>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gguf_models: Vec<RegistryModel>,
+}
+
+pub fn gguf_catalog() -> bool {
+    // A Mac (or GOETHE_CATALOG=gguf) uses the GGUF models of the registry as its catalog, served by llama.cpp.
+    cfg!(target_os = "macos") || std::env::var("GOETHE_CATALOG").is_ok_and(|v| v == "gguf")
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -149,6 +156,15 @@ pub fn bundled() -> Result<Registry, String> {
 }
 
 pub fn fetch(url: &str) -> Result<Registry, String> {
+    // A published registry without GGUF models (older than this build) leaves a Mac the catalog built into goethe.
+    let reg = fetch_any(url)?;
+    if gguf_catalog() && reg.models.is_empty() {
+        return bundled();
+    }
+    Ok(reg)
+}
+
+fn fetch_any(url: &str) -> Result<Registry, String> {
     // file:// or http(s). Parse a body only after the release key verifies it. The default URL with no signature uses the built in catalog.
     if let Some(rest) = url.strip_prefix("file://") {
         let path = Path::new(rest);
@@ -263,7 +279,11 @@ pub fn find_model<'a>(reg: &'a Registry, model_id: &str) -> Option<&'a RegistryM
 }
 
 pub fn parse_registry(text: &str) -> Result<Registry, String> {
-    serde_json::from_str(text).map_err(|e| format!("registry parse failed: {e}"))
+    let mut reg: Registry = serde_json::from_str(text).map_err(|e| format!("registry parse failed: {e}"))?;
+    if gguf_catalog() {
+        reg.models = std::mem::take(&mut reg.gguf_models);
+    }
+    Ok(reg)
 }
 
 fn fs_read(path: &Path) -> Result<String, String> {
@@ -281,6 +301,18 @@ pub fn run_validate(source: &str, opts: &ValidateOpts) -> Result<(), String> {
             errors.push(format!("duplicate id {}", m.id));
         }
         validate_entry(m, &mut errors);
+    }
+    for m in &reg.gguf_models {
+        // GGUF models (the catalog of a Mac): served by llama.cpp, the size of the default quant, a repo with GGUF files.
+        if !ids.insert(m.id.clone()) {
+            errors.push(format!("duplicate id {}", m.id));
+        }
+        if m.effective_runtime() != "llama.cpp" {
+            errors.push(format!("{}: a GGUF model has runtime llama.cpp", m.id));
+        }
+        if m.static_vram_gb <= 0.0 {
+            errors.push(format!("{}: static_vram_gb (the default quant's size) must be above 0", m.id));
+        }
     }
     if opts.online {
         for m in &reg.models {
@@ -342,8 +374,8 @@ fn validate_entry(m: &RegistryModel, errors: &mut Vec<String>) {
         errors.push(format!("{}: architecture must be dense or moe", m.id));
     }
     let rt = m.effective_runtime();
-    if rt != "sglang" && rt != "ternary" {
-        errors.push(format!("{}: runtime must be sglang or ternary", m.id));
+    if rt != "sglang" && rt != "ternary" && rt != "llama.cpp" {
+        errors.push(format!("{}: runtime must be sglang, ternary or llama.cpp", m.id));
     }
     if rt == "ternary" {
         validate_ternary(m, errors);
@@ -547,6 +579,7 @@ pub fn run_entries(
     let out = Registry {
         version: 1,
         models,
+        gguf_models: Vec::new(),
     };
     println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
     Ok(())
