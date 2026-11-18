@@ -214,7 +214,7 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 | `goethe trace` | Record requests and replies as training traces (`on`, `off`, `--key`); see [traces.md](traces.md) |
 | `goethe learn` | Let a session keep what compaction would drop (`on`, `off`, `--model`); see [learn.md](learn.md) |
 | `goethe api domain` | DNS record for your own hostname (`check <name>`) |
-| `goethe api share 5h --key <name>` | Open the API on a public address for a while for chosen keys (`stop` closes it) |
+| `goethe api share 5h --key <name> --allow <their-ip>/32` | Open the API on a public address for a while for chosen keys from their IP (`stop` closes it) |
 
 ### GPUs and system
 
@@ -337,13 +337,13 @@ goethe api allow remove 192.168.1.0/24
 To give someone outside your network access for a limited time, without changing how the API is normally reached:
 
 ```bash
-goethe api share 5h --key my-app      # prints the URL, the key and the certificate to send
-goethe api share 1d --key ci          # another key on the same address, for a day
-goethe api share stop --key ci        # stop sharing one key
-goethe api share stop                 # close early
+goethe api share 5h --key my-app --allow 203.0.113.7/32   # their public IP, not this machine's
+goethe api share 1d --key ci --allow 203.0.113.7/32       # another key on the same address, for a day
+goethe api share stop --key ci                            # stop sharing one key
+goethe api share stop                                     # close early
 ```
 
-The public address exists only while some key is shared, accepts only the keys you chose (never admin keys), each until its own time, and closes by itself when the last one ends. Keys stay the same every time. The menu's Public address page does the same with a form. Details and the full list of security precautions: [`goethe api share`](cli.md#goethe-api-share-duration).
+The public address exists only while some key is shared, accepts only the keys you chose (never admin keys), each until its own time and from the client addresses you named (`--allow`, or `goethe api allow` first), and closes by itself when the last one ends. Keys stay the same every time. The menu's Public address page does the same with a form. Details and the full list of security precautions: [`goethe api share`](cli.md#goethe-api-share-duration).
 
 ### Address, aliases and your own domain
 
