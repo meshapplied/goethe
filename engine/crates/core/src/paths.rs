@@ -47,6 +47,12 @@ pub fn setting(key: &str) -> Option<String> {
     from_env.or_else(|| ENV_FILE_KEYS.contains(&key).then(|| parse_env_file(&file()).remove(key)).flatten())
 }
 
+pub fn setting_from_file(key: &str) -> bool {
+    // True when a setting comes from GOETHE_HOME/goethe.env and not from the environment, so doctor can say where to remove it.
+    std::env::var(key).ok().filter(|v| !v.is_empty()).is_none()
+        && parse_env_file(&std::fs::read_to_string(goethe_home().join("goethe.env")).unwrap_or_default()).contains_key(key)
+}
+
 pub fn parse_env_file(text: &str) -> BTreeMap<String, String> {
     // KEY=VALUE lines (optionally quoted) for the allowed keys only; comments and other keys are ignored.
     text.lines()

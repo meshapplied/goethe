@@ -148,7 +148,8 @@ pub const DEFAULT_REGISTRY_URL: &str = "https://pkg.goethe.sh/v1/registry.json";
 const BUNDLED_REGISTRY: &str = include_str!("../../../cdn/v1/registry.json");
 
 pub fn registry_url() -> String {
-    crate::paths::setting("GOETHE_REGISTRY_URL").unwrap_or_else(|| DEFAULT_REGISTRY_URL.to_string())
+    // GOETHE_REGISTRY_URL when set, else the registry of the package goethe installs from.
+    crate::paths::setting("GOETHE_REGISTRY_URL").unwrap_or_else(|| format!("{}/v1/registry.json", crate::update::pkg_base_url()))
 }
 
 pub fn bundled() -> Result<Registry, String> {

@@ -106,11 +106,11 @@ fn validate_home(home: &Path) -> Result<(), String> {
 }
 
 fn remove_installer_symlinks(home: &Path) {
-    let mut links = vec![PathBuf::from("/usr/local/bin/goethe")];
+    let mut dirs = vec![PathBuf::from("/usr/local/bin"), PathBuf::from("/opt/homebrew/bin")];
     if let Some(h) = std::env::var_os("HOME") {
-        links.push(PathBuf::from(h).join(".local/bin/goethe"));
+        dirs.extend([PathBuf::from(&h).join(".local/bin"), PathBuf::from(&h).join("bin")]);
     }
-    for path in links {
+    for path in dirs.iter().flat_map(|d| [d.join("goethe"), d.join("goethed")]) {
         if fs::read_link(&path).is_ok_and(|t| t.starts_with(home)) {
             let _ = fs::remove_file(&path);
         }

@@ -767,6 +767,15 @@ fn check_hf(_home: &Path) -> Check {
     }
 }
 
+fn registry_warning(url: &str, e: &str, home: &Path) -> String {
+    // An unreachable registry, and when the address comes from goethe.env, the line to delete to go back to the default.
+    let from_file = ["GOETHE_REGISTRY_URL", "GOETHE_PKG_URL"].into_iter().find(|k| crate::paths::setting_from_file(k));
+    match from_file {
+        Some(key) => format!("{url} unreachable ({e}); it comes from {key} in {}: delete that line to use pkg.goethe.sh", home.join("goethe.env").display()),
+        None => format!("{url} unreachable ({e}); check network access, or set GOETHE_REGISTRY_URL (file:// works)"),
+    }
+}
+
 fn check_registry(home: &Path) -> Check {
     if hf::offline_mode() {
         let cache = home.join("registry.cache.json");
@@ -792,10 +801,7 @@ fn check_registry(home: &Path) -> Check {
         Err(e) => Check {
             name: "registry".into(),
             status: "WARN".into(),
-            hint: format!(
-                "{} unreachable ({e}); check network access, or set GOETHE_REGISTRY_URL (file:// works) in the environment or in GOETHE_HOME/goethe.env",
-                registry_url()
-            ),
+            hint: registry_warning(&registry_url(), &e, home),
         },
     }
 }

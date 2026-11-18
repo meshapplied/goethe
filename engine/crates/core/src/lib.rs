@@ -67,6 +67,7 @@ pub mod update;
 pub mod uninstall;
 pub mod autostart;
 pub mod service;
+pub mod setup;
 pub mod watchdog_policy;
 pub mod watchdog_liveness;
 pub mod slots;
