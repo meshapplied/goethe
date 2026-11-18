@@ -162,6 +162,23 @@ jobs:
           path: bin-aarch64.tar
           retention-days: 30
 
+  nginx-aarch64:
+    needs: [guard, ci]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: goethe's own nginx for aarch64 Linux
+        run: bash engine/packaging/build_nginx_linux.sh
+      - name: Pack for the merge job
+        run: tar -C engine/dist/cdn/bin -cf nginx-aarch64.tar linux-aarch64/nginx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nginx-aarch64
+          path: nginx-aarch64.tar
+          retention-days: 30
+
   build-macos:
     needs: [guard, ci]
     if: ${{ !cancelled() && !failure() }}
@@ -182,7 +199,7 @@ jobs:
           retention-days: 30
 
   merge:
-    needs: [guard, build, build-aarch64, build-macos]
+    needs: [guard, build, build-aarch64, nginx-aarch64, build-macos]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -196,20 +213,24 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: bin-darwin
+      - uses: actions/download-artifact@v4
+        with:
+          name: nginx-aarch64
       - name: Unpack every platform
         run: |
           tar -xf cdn-x86_64.tar
           tar -C cdn/bin -xf bin-aarch64.tar
+          tar -C cdn/bin -xf nginx-aarch64.tar
           tar -C cdn/bin -xf bin-darwin.tar
       - name: Combine both architectures into one package
         run: |
-          for f in cdn/bin/linux-{aarch64,x86_64}/{goethe,goethed,uv} cdn/pyenv/bootstrap.sh; do
+          for f in cdn/bin/linux-{aarch64,x86_64}/{goethe,goethed,uv,nginx} cdn/pyenv/bootstrap.sh; do
             test -x "$f" || { echo "$f is not executable"; exit 1; }
           done
-          for b in goethe goethed uv; do
+          for b in goethe goethed uv nginx; do
             file "cdn/bin/linux-aarch64/$b" | grep -q "ARM aarch64" || { echo "aarch64 $b is not aarch64"; exit 1; }
           done
-          for b in goethe goethed; do
+          for b in goethe goethed nginx; do
             file "cdn/bin/linux-x86_64/$b" | grep -q "x86-64" || { echo "x86_64 $b is not x86-64"; exit 1; }
           done
           for b in goethe goethed nginx; do

@@ -8,12 +8,8 @@ OUT="${ROOT}/dist/cdn/bin/darwin-aarch64"
 WORK="${WORK:-${ROOT}/target/macos-build}"
 export MACOSX_DEPLOYMENT_TARGET=14.0
 
-NGINX_VERSION=1.30.6
-NGINX_SHA256=3cf46f5ed7504d460125866b7bea99fb357f31d887e2e63b35503310e9b8b6c8
-OPENSSL_VERSION=3.5.9
-OPENSSL_SHA256=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
-PCRE2_VERSION=10.49
-PCRE2_SHA256=929f0b20e62879252a15886b06c89f1edef61a363cbd5826fb041080a5e557ae
+# shellcheck source=nginx_versions.sh
+. "${ROOT}/packaging/nginx_versions.sh"
 
 if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
   echo "build_macos.sh runs on an Apple Silicon Mac" >&2
@@ -33,9 +29,9 @@ mkdir -p "${OUT}" "${WORK}"
 (cd "${ROOT}" && cargo build --release --locked --bin goethe --bin goethed)
 cp "${ROOT}/target/release/goethe" "${ROOT}/target/release/goethed" "${OUT}/"
 
-fetch "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" "${NGINX_SHA256}"
-fetch "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" "${OPENSSL_SHA256}"
-fetch "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2_VERSION}/pcre2-${PCRE2_VERSION}.tar.gz" "${PCRE2_SHA256}"
+fetch "${NGINX_URL}" "${NGINX_SHA256}"
+fetch "${OPENSSL_URL}" "${OPENSSL_SHA256}"
+fetch "${PCRE2_URL}" "${PCRE2_SHA256}"
 (
   cd "${WORK}/nginx-${NGINX_VERSION}"
   ./configure \
