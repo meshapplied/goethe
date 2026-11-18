@@ -422,8 +422,15 @@ pub fn fingerprint_of(machine_id: &str) -> String {
 }
 
 pub fn hostname() -> String {
-    let raw = fs::read_to_string(crate::host::sysroot().join("proc/sys/kernel/hostname")).unwrap_or_default();
-    let name = clean_text(&raw, 253);
+    // The kernel's hostname (/proc on Linux, gethostname elsewhere), without macOS's .local suffix.
+    let mut raw = fs::read_to_string(crate::host::sysroot().join("proc/sys/kernel/hostname")).unwrap_or_default();
+    if raw.trim().is_empty() {
+        let mut buf = [0u8; 256];
+        if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0 {
+            raw = String::from_utf8_lossy(&buf[..buf.iter().position(|&b| b == 0).unwrap_or(buf.len())]).into_owned();
+        }
+    }
+    let name = clean_text(raw.trim().trim_end_matches(".local"), 253);
     if name.is_empty() {
         "unknown".to_string()
     } else {

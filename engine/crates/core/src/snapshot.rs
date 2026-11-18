@@ -161,9 +161,9 @@ impl Collector {
             node: Node {
                 hostname: crate::platform::hostname(),
                 goethe_version: env!("CARGO_PKG_VERSION").to_string(),
-                os: clean_text(&crate::host::os_release_name(&read("etc/os-release")), 128),
-                kernel: clean_text(&read("proc/sys/kernel/osrelease"), 128),
-                uptime_s: parse_uptime(&read("proc/uptime")),
+                os: clean_text(&os_name(&read), 128),
+                kernel: clean_text(&kernel_release(&read), 128),
+                uptime_s: uptime(&read),
                 environment: environment(&root),
                 daemon: Daemon {
                     started_at: self.daemon_started_at.clone(),
@@ -214,6 +214,7 @@ pub fn now_rfc3339() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn parse_uptime(text: &str) -> u64 {
     text.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()).map(|f| f.max(0.0) as u64).unwrap_or(0)
 }
@@ -369,7 +370,7 @@ fn gpus(con: &rusqlite::Connection, home: &Path) -> Vec<Gpu> {
                 uuid: clean_text(&uuid, 64),
                 pci_bus_id: pci,
                 name: clean_text(&r.name, 128),
-                sm: clean_text(&r.compute_capability, 16),
+                sm: platform_sm(&r.compute_capability),
                 vram_total_mb: r.vram_total_mb,
                 vram_used_mb: r.managed_mb + r.foreign_mb,
                 vram_goethe_mb: r.managed_mb,
@@ -379,6 +380,43 @@ fn gpus(con: &rusqlite::Connection, home: &Path) -> Vec<Gpu> {
             }
         })
         .collect()
+}
+
+fn os_name(read: &dyn Fn(&str) -> String) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = read;
+        format!("macOS {}", crate::sys::sysctl_text("kern.osproductversion").unwrap_or_default())
+    }
+    #[cfg(not(target_os = "macos"))]
+    crate::host::os_release_name(&read("etc/os-release"))
+}
+
+fn kernel_release(read: &dyn Fn(&str) -> String) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = read;
+        crate::sys::sysctl_text("kern.osrelease").unwrap_or_default()
+    }
+    #[cfg(not(target_os = "macos"))]
+    read("proc/sys/kernel/osrelease")
+}
+
+fn uptime(read: &dyn Fn(&str) -> String) -> u64 {
+    // Seconds since boot: /proc/uptime, or on macOS now minus kern.boottime.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = read;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        crate::sys::boot_epoch().map_or(0, |boot| u64::try_from(now - boot).unwrap_or(0))
+    }
+    #[cfg(not(target_os = "macos"))]
+    parse_uptime(&read("proc/uptime"))
+}
+
+pub fn platform_sm(cc: &str) -> String {
+    // The platform takes NVIDIA capabilities like 12.0; a Mac's "metal" goes as empty, which it reads as none.
+    if cc.chars().all(|c| c.is_ascii_digit() || c == '.') { clean_text(cc, 8) } else { String::new() }
 }
 
 pub fn short_bus_id(raw: &str) -> String {
@@ -655,5 +693,11 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&data).unwrap();
         assert_eq!(v["models"]["installed"], serde_json::json!([]));
         assert_eq!(v["models"]["loaded"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_mac_gpu_sends_no_capability() {
+        assert_eq!(platform_sm("12.0"), "12.0");
+        assert_eq!(platform_sm("metal"), "");
     }
 }
