@@ -24,7 +24,7 @@ fi
 docker run --rm --name "goethe-build-portable-${ARCH}" \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
   -e GOETHE_GIT_COMMIT="${COMMIT}" -e GOETHE_BUILD_DATE="$(date -u +%s)" \
-  -e GOETHE_ARCH="${ARCH}" -e GOETHE_TRIPLE="${TRIPLE}" \
+  -e GOETHE_ARCH="${ARCH}" -e GOETHE_TRIPLE="${TRIPLE}" -e GOETHE_CARGO_FEATURES="${GOETHE_CARGO_FEATURES:-}" \
   -e CARGO_HOME=/cache/cargo -e RUSTUP_HOME=/cache/rustup -e CARGO_TARGET_DIR=/src/target-portable \
   -v "${ROOT}:/src" -v "${CACHE}:/cache" -w /src \
   ubuntu:20.04 bash -c '
@@ -45,7 +45,7 @@ docker run --rm --name "goethe-build-portable-${ARCH}" \
     if [[ "$GOETHE_ARCH" == aarch64 ]]; then
       rustup target add aarch64-unknown-linux-gnu >/dev/null
     fi
-    cargo build --release --locked --target "$GOETHE_TRIPLE"
+    cargo build --release --locked --target "$GOETHE_TRIPLE" ${GOETHE_CARGO_FEATURES:+--features "$GOETHE_CARGO_FEATURES"}
     OUT="/src/target-portable/$GOETHE_TRIPLE/release"
     for bin in goethe goethed; do
       file "$OUT/$bin" | grep -q "ELF 64-bit"
