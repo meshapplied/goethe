@@ -174,9 +174,12 @@ fn fake_unified_enabled() -> bool {
 }
 
 fn host_unified_mem_mb() -> Result<(u64, u64, u64), String> {
-    let text = std::fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
-    let m = host::parse_meminfo(&text);
-    Ok((m.total_mb, m.total_mb.saturating_sub(m.available_mb), m.available_mb))
+    let m = crate::sys::memory();
+    if m.total_kb == 0 {
+        return Err("host memory unreadable".to_string());
+    }
+    let (total, avail) = (m.total_kb / 1024, m.available_kb / 1024);
+    Ok((total, total.saturating_sub(avail), avail))
 }
 
 pub fn memory_from_nvml_or_unified(

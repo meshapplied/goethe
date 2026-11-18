@@ -613,7 +613,8 @@ mod tests {
             sha256_file(&p).unwrap()
         };
         let sums = home.join("SHA256SUMS");
-        fs::write(&sums, format!("{}  bin/linux-x86_64/goethe\n{}  bin/linux-x86_64/goethed\n", sha(b"cli"), sha(b"daemon"))).unwrap();
+        let dir = platform_dir("x86_64");
+        fs::write(&sums, format!("{}  bin/{dir}/goethe\n{}  bin/{dir}/goethed\n", sha(b"cli"), sha(b"daemon"))).unwrap();
         assert!(!binaries_differ(home, &sums, "x86_64").unwrap());
         fs::write(home.join("bin/goethed"), b"older daemon").unwrap();
         assert!(binaries_differ(home, &sums, "x86_64").unwrap());

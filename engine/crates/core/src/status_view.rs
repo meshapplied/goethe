@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(strip(&vram_bar(500, 50_000, 100_000)), "\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}", "a small share still gets a block");
         let t = plain(&render(&view(), 124));
         let last = t.iter().rposition(|l| !l.is_empty()).unwrap();
-        assert!(t[last].contains("goethe models") && t[last].contains("other processes") && t[last].contains("free") && t[last].contains("memory bandwidth"), "{}", t[last]);
+        assert!(t[last].contains("goethe models") && t[last].contains("other processes") && t[last].contains("free") && t[last].contains(if cfg!(target_os = "macos") { "GPU busy" } else { "memory bandwidth" }), "{}", t[last]);
         let g = plain(&gpu_render(&view(), 124));
         assert!(g.iter().any(|l| l.contains("gpu3")) && g.iter().any(|l| l.contains("other processes")) && !g.iter().any(|l| l.contains("CPU")));
     }

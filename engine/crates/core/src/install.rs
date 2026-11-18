@@ -2495,7 +2495,8 @@ mod tests {
         fs::write(first.card_dir.join(CARD_FILE), format!("model_id = \"x/y\"\nsource_dir = \"{}\"\n", a.path().display())).unwrap();
         let clash = InstallOpts { model_id: b.path().display().to_string(), name: Some("x__y".into()), ..Default::default() };
         assert!(install_local(home.path(), &clash).err().unwrap().contains("would share it"));
-        assert!(fs::read_link(first.card_dir.join("m-Q8_0.gguf")).unwrap().starts_with(a.path()), "the first install still points at its own folder");
+        let own = fs::read_link(first.card_dir.join("m-Q8_0.gguf")).unwrap();
+        assert!(own.starts_with(a.path()) || own.starts_with(a.path().canonicalize().unwrap()), "the first install still points at its own folder");
         assert!(install_local(home.path(), &InstallOpts { name: Some("x/y".into()), ..clash }).is_ok(), "the same id reinstalls");
     }
 

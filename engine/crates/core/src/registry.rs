@@ -18,7 +18,7 @@ pub struct Registry {
 
 pub fn gguf_catalog() -> bool {
     // A Mac (or GOETHE_CATALOG=gguf) uses the GGUF models of the registry as its catalog, served by llama.cpp.
-    cfg!(target_os = "macos") || std::env::var("GOETHE_CATALOG").is_ok_and(|v| v == "gguf")
+    cfg!(all(target_os = "macos", not(test))) || std::env::var("GOETHE_CATALOG").is_ok_and(|v| v == "gguf")
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

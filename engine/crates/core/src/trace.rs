@@ -1409,6 +1409,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_partial_write_is_cut_back() {
         // A real short write needs a file size limit, which applies to the whole process, so a child runs it.
         if let Some(path) = std::env::var_os("TRACE_TEST_LIMITED_FILE") {

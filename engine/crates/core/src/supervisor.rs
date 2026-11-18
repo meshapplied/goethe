@@ -1829,7 +1829,7 @@ mod tests {
             let (mut stale, stale_ticks) = sleeper();
             let (mut squat, squat_ticks) = sleeper();
             insert_running(con, "i-good", me.pid, me.start_ticks, port);
-            insert_running(con, "i-stale", stale.id() as i32, stale_ticks + 9, port + 1);
+            insert_running(con, "i-stale", stale.id() as i32, stale_ticks + 9, 1);
             insert_running(con, "i-squat", squat.id() as i32, squat_ticks, squatted);
             let stale_id = Identity {
                 instance_id: "i-orphan".to_string(),
