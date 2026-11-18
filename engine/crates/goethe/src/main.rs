@@ -1791,8 +1791,10 @@ fn do_share(
             println!("URL:  {url}");
             for k in &o.keys {
                 let models = k.models.as_deref().filter(|m| !m.is_empty()).unwrap_or("every model");
-                let token = k.token.as_deref().unwrap_or("(shown when it was created)");
-                println!("Key:  {} {token}  models: {models}", k.name);
+                match k.token.as_deref() {
+                    Some(token) => println!("Key:  {} {token}  models: {models}", k.name),
+                    None => println!("Key:  {} (id {})  models: {models}", k.name, k.id),
+                }
             }
             let clients: Vec<String> = o.share.allow.clone();
             if clients.iter().any(|c| c.ends_with("/0")) {
@@ -1802,7 +1804,7 @@ fn do_share(
             }
             println!("\nTLS:  self-signed for this address. Send {} with the key (it holds no secret); the recipient", o.cert.display());
             println!("      verifies the gateway with it, for example:");
-            let token = o.keys.first().and_then(|k| k.token.as_deref()).unwrap_or("<key>");
+            let token = o.keys.first().and_then(|k| k.token.as_deref()).unwrap_or("<your_bearer_token>");
             println!("      curl --cacert public.crt {url}/models -H \"Authorization: Bearer {token}\"");
             if let Some(f) = &o.fingerprint {
                 println!("      SHA-256 fingerprint: {f}");

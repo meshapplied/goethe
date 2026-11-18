@@ -214,6 +214,13 @@ fn key_rows(home: &Path) -> Result<Vec<KeyRow>, String> {
     rows
 }
 
+fn strip_tokens_for_reopen(keys: &mut [SharedKey]) {
+    // Reopening remembered keys must not reprint bearer tokens (goethe api / keys create already showed them).
+    for k in keys {
+        k.token = None;
+    }
+}
+
 fn resolve_keys(home: &Path, wanted: &[String], until: i64, warnings: &mut Vec<String>) -> Result<Vec<SharedKey>, String> {
     // Each name or id must match exactly one existing key that is not an admin key and has not expired.
     let rows = key_rows(home)?;
@@ -359,7 +366,11 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
     } else {
         a.keys.to_vec()
     };
-    let keys = resolve_keys(home, &wanted, until, &mut warnings)?;
+    let reopen = a.keys.is_empty();
+    let mut keys = resolve_keys(home, &wanted, until, &mut warnings)?;
+    if reopen {
+        strip_tokens_for_reopen(&mut keys);
+    }
     let cli_allow = a.allow.iter().map(|c| security::canonical_cidr(c)).collect::<Result<Vec<_>, _>>()?;
     let port = a.port.or(previous.as_ref().map(|p| p.port)).unwrap_or(DEFAULT_PORT);
     let mut grants: Vec<Grant> = previous
@@ -369,7 +380,7 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
         .unwrap_or_default();
     for k in &keys {
         let kept = previous.as_ref().and_then(|p| p.grant(&k.id)).map(|g| g.allow).unwrap_or_default();
-        let allow = resolve_share_cidrs(home, &cli_allow, a.keys.is_empty(), &kept, a.dangerously_allow_all_inbound)?;
+        let allow = resolve_share_cidrs(home, &cli_allow, reopen, &kept, a.dangerously_allow_all_inbound)?;
         grants.retain(|g| g.key != k.id);
         grants.push(Grant { key: k.id.clone(), until, allow });
     }
@@ -378,6 +389,9 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
             "every address may connect; rate limit is {RATE_PER_IP} requests/s per client (burst {}), {CONN_PER_IP} connections",
             2 * RATE_PER_IP
         ));
+    }
+    if reopen {
+        warnings.push("the key secret is not printed again; goethe api shows it".into());
     }
     let gateway_port = nginx::public_port_u16(home);
     let mux_port = nginx::persisted_mux_port(home)?;
@@ -688,12 +702,25 @@ mod tests {
         let got = resolve_keys(h, &["app".into(), "k1".into()], now() + 60, &mut w).unwrap();
         assert_eq!(got.len(), 1, "the same key twice counts once");
         assert!(w.is_empty());
+        assert!(got[0].token.as_deref() == Some("tok"));
         assert!(resolve_keys(h, &["root".into()], now() + 60, &mut w).err().unwrap().contains("admin"));
         assert!(resolve_keys(h, &["old".into()], now() + 60, &mut w).err().unwrap().contains("expired"));
         assert!(resolve_keys(h, &["dup".into()], now() + 60, &mut w).err().unwrap().contains("several"));
         assert!(resolve_keys(h, &["nope".into()], now() + 60, &mut w).err().unwrap().contains("app"));
         resolve_keys(h, &["wide".into()], now() + 60, &mut w).unwrap();
         assert!(w.iter().any(|x| x.contains("every model")));
+    }
+
+    #[test]
+    fn reopen_without_named_keys_strips_bearer_tokens() {
+        let dir = home_with_keys();
+        let h = dir.path();
+        let mut w = Vec::new();
+        let mut keys = resolve_keys(h, &["app".into()], now() + 60, &mut w).unwrap();
+        assert_eq!(keys[0].token.as_deref(), Some("tok"));
+        strip_tokens_for_reopen(&mut keys);
+        assert!(keys[0].token.is_none());
+        assert_eq!(keys[0].name, "app");
     }
 
     #[test]

@@ -239,7 +239,11 @@ pub fn run(json_out: bool) -> Result<(), String> {
                 Some(n) => format!("{} ({n})", item.model_id),
                 None => item.model_id.clone(),
             };
-            let mut cells = vec![name, format!("{total:.1} GB")];
+            // Same shape as goethe models: per-GPU need plus the ctx/concurrency the plan used.
+            let mut cells = vec![
+                name,
+                format!("{:.1} GB/GPU · ctx {} · {} conc", item.vram_per_gpu_gb, item.ctx, item.max_conc),
+            ];
             if multi {
                 cells.push(format_gpu_list(&item.gpus));
             }
@@ -263,10 +267,11 @@ pub fn preview(home: &Path, model: &RegistryModel) -> Result<Option<String>, Str
     let pinned = model.default_tp.filter(|t| *t > 0).map(|t| t as usize);
     match view.fit(&model.id, &input, pinned) {
         Ok(f) => Ok(Some(format!(
-            "fit: ctx {} on GPU {} ({:.1} GB per GPU)",
+            "fit: {:.1} GB per GPU (ctx {}, {} concurrent) on GPU {}",
+            f.need.total(),
             f.ctx,
+            f.max_conc,
             format_gpu_list(&f.gpus),
-            f.need.total()
         ))),
         Err(e) => Err(format!("does not fit the allowed GPUs: {e}")),
     }
@@ -583,7 +588,8 @@ mod tests {
         let llama = reg.models.iter().find(|m| m.id == "nvidia/Llama-3.1-8B-Instruct-NVFP4").unwrap();
         let line = preview(home.path(), llama).unwrap().unwrap();
         assert!(line.contains("ctx 65536"), "{line}");
-        assert!(line.contains("23.4 GB"), "{line}");
+        assert!(line.contains("23.4 GB per GPU"), "{line}");
+        assert!(line.contains("concurrent"), "{line}");
         let big = reg.models.iter().find(|m| m.id == "Qwen/Qwen3.8-27B").unwrap();
         assert!(preview(home.path(), big).is_err());
     }

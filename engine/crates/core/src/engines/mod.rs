@@ -174,11 +174,24 @@ fn engine_key_env(cmd: &mut Command, key: &str) {
 
 fn card_env(spec: &EngineSpec) -> Vec<(String, String)> {
     // Card env table and card pythonpath. Loader hooks from a card never enter the process.
+    let (out, dropped) = card_env_parts(spec);
+    if !dropped.is_empty() {
+        eprintln!(
+            "goethe: card [env] dropped {}: loader hooks never enter the engine",
+            dropped.join(", ")
+        );
+    }
+    out
+}
+
+fn card_env_parts(spec: &EngineSpec) -> (Vec<(String, String)>, Vec<String>) {
     let home = spec.home;
     let mut out = Vec::new();
+    let mut dropped = Vec::new();
     if let Some(table) = spec.card.get("env").and_then(|v| v.as_table()) {
         for (k, v) in table {
             if k.starts_with("LD_") || k.starts_with("DYLD_") {
+                dropped.push(k.clone());
                 continue;
             }
             if let Some(s) = v.as_str() {
@@ -197,7 +210,7 @@ fn card_env(spec: &EngineSpec) -> Vec<(String, String)> {
     if !paths.is_empty() {
         out.push(("PYTHONPATH".to_string(), paths.join(":")));
     }
-    out
+    (out, dropped)
 }
 
 #[cfg(test)]
@@ -279,6 +292,15 @@ mod tests {
         let a = args(&plain);
         assert!(!a.iter().any(|x| x == "--api-key"), "{a:?}");
         assert_eq!(e.get(ENGINE_KEY_ENV).and_then(|v| v.as_ref().map(|s| s.len())), Some(32));
+        let card: toml::Value = toml::from_str("[env]\nLD_PRELOAD = \"/x.so\"\nDYLD_INSERT_LIBRARIES = \"/y.dylib\"\nOK = \"1\"").unwrap();
+        let (kept, dropped) = card_env_parts(&EngineSpec {
+            model_path: Path::new("/h/models/m"),
+            tp: 1,
+            ..test_spec(Path::new("/h"), &card, &[3, 2])
+        });
+        assert!(kept.iter().any(|(k, v)| k == "OK" && v == "1"));
+        assert!(!kept.iter().any(|(k, _)| k.starts_with("LD_") || k.starts_with("DYLD_")));
+        assert!(dropped.contains(&"LD_PRELOAD".to_string()) && dropped.contains(&"DYLD_INSERT_LIBRARIES".to_string()), "{dropped:?}");
         let blocked = envs(&spec_cmd("[env]\nLD_PRELOAD = \"/x.so\"\nDYLD_INSERT_LIBRARIES = \"/y.dylib\"\nOK = \"1\"", 1));
         assert!(!blocked.contains_key("LD_PRELOAD") && !blocked.contains_key("DYLD_INSERT_LIBRARIES"));
         assert_eq!(blocked.get("OK"), Some(&Some("1".into())));
