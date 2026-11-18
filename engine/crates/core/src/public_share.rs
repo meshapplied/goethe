@@ -35,19 +35,14 @@ fn share_conn(home: &Path) -> u64 {
 
 fn persist_share_limits(home: &Path) {
     // Hidden: GOETHE_SHARE_RATE_PER_IP / GOETHE_SHARE_CONN_PER_IP (1-65535); same shape as the private gateway.
-    for (var, name, default) in [
-        ("GOETHE_SHARE_RATE_PER_IP", "share_rate_per_ip", DEFAULT_RATE_PER_IP),
-        ("GOETHE_SHARE_CONN_PER_IP", "share_conn_per_ip", DEFAULT_CONN_PER_IP),
-    ] {
-        let value = std::env::var(var)
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .filter(|v| (1..=65535).contains(v))
-            .unwrap_or(default);
-        if let Err(e) = nginx::write_private(&nginx::nginx_prefix(home).join(name), format!("{value}\n").as_bytes()) {
-            eprintln!("goethe api share: {e}");
-        }
-    }
+    nginx::persist_named_limits(
+        home,
+        &[
+            ("GOETHE_SHARE_RATE_PER_IP", "share_rate_per_ip", DEFAULT_RATE_PER_IP),
+            ("GOETHE_SHARE_CONN_PER_IP", "share_conn_per_ip", DEFAULT_CONN_PER_IP),
+        ],
+        "goethe api share",
+    );
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -603,19 +598,14 @@ pub fn nginx_block(home: &Path, mux_port: u16, modern_http2: bool, max_body_mb: 
     TMPL.replace("{{PORT}}", &share.port.to_string())
         .replace("{{HTTP2_LISTEN}}", if modern_http2 { "" } else { " http2" })
         .replace("{{HTTP2_ON}}", if modern_http2 { "    http2 on;" } else { "" })
-        .replace("{{CERT}}", &quote(&dir.join("certs/public.crt")))
-        .replace("{{KEY}}", &quote(&dir.join("certs/public.key")))
+        .replace("{{CERT}}", &nginx::quote(&dir.join("certs/public.crt")))
+        .replace("{{KEY}}", &nginx::quote(&dir.join("certs/public.key")))
         .replace("{{ALLOW}}", &allow)
         .replace("{{RATE_PER_IP}}", &share_rate(home).to_string())
         .replace("{{BURST_PER_IP}}", &(2 * share_rate(home)).to_string())
         .replace("{{CONN_PER_IP}}", &share_conn(home).to_string())
         .replace("{{MAX_BODY_MB}}", &max_body_mb.to_string())
         .replace("{{PUBLIC_MUX}}", &public_mux_addr(mux_port).to_string())
-}
-
-fn quote(path: &Path) -> String {
-    let s = path.display().to_string();
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 pub fn status_line(home: &Path) -> Option<String> {

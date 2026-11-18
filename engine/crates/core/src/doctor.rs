@@ -447,17 +447,42 @@ fn check_glibc() -> Check {
     }
 }
 
+fn nginx_http2_fixed(v: (u32, u32, u32)) -> bool {
+    // Stable 1.30.7+ or mainline 1.31.9+ (CVE-2026-123007 and related). Goethe enables HTTP/2.
+    match v {
+        (1, 30, p) => p >= 7,
+        (1, 31, p) => p >= 9,
+        (1, m, _) if m >= 32 => true,
+        (maj, _, _) if maj > 1 => true,
+        _ => false,
+    }
+}
+
 fn check_nginx(home: &Path) -> Check {
     // Same lookup the gateway uses: NGINX_BIN, GOETHE_HOME/nginx-root, then PATH.
     let bin = crate::nginx::nginx_bin(home);
-    if bin.is_file() {
-        return check("nginx", "OK", bin.display().to_string());
+    if !bin.is_file() {
+        return check(
+            "nginx",
+            "FAIL",
+            "nginx not found: set NGINX_BIN, install nginx, or rerun the goethe installer (rootless nginx under GOETHE_HOME/nginx-root)",
+        );
     }
-    check(
-        "nginx",
-        "FAIL",
-        "nginx not found: set NGINX_BIN, install nginx, or rerun the goethe installer (rootless nginx under GOETHE_HOME/nginx-root)",
-    )
+    match crate::nginx::nginx_version(&bin) {
+        Some(v) if !nginx_http2_fixed(v) => check(
+            "nginx",
+            "WARN",
+            format!(
+                "{} is nginx/{}.{}.{}; need 1.30.7+ or 1.31.9+ (HTTP/2 fixes). Re-run the installer or goethe update once the package ships that build",
+                bin.display(),
+                v.0,
+                v.1,
+                v.2
+            ),
+        ),
+        Some(v) => check("nginx", "OK", format!("{} (nginx/{}.{}.{})", bin.display(), v.0, v.1, v.2)),
+        None => check("nginx", "OK", bin.display().to_string()),
+    }
 }
 
 fn check_goethe_home(home: &Path) -> Check {
@@ -910,6 +935,15 @@ mod tests {
         let c = check_pyenv(home.path());
         assert_eq!(c.status, "INFO", "the installer no longer sets it up");
         assert!(c.hint.contains("the first goethe install of a model sets it up"), "{}", c.hint);
+    }
+
+    #[test]
+    fn nginx_http2_floor_matches_stable_and_mainline_fixes() {
+        assert!(!nginx_http2_fixed((1, 30, 6)));
+        assert!(nginx_http2_fixed((1, 30, 7)));
+        assert!(!nginx_http2_fixed((1, 31, 8)));
+        assert!(nginx_http2_fixed((1, 31, 9)));
+        assert!(!nginx_http2_fixed((1, 29, 7)));
     }
 
     #[test]

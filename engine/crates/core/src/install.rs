@@ -297,8 +297,8 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     let declined = match pack_decision(home, opts)? {
         PackDecision::Use(mut choice) => 'packed: {
             // Only the files the pack was built for, at its pinned revision; a pack no allowed GPU runs is refused from its manifest before anything is installed, the engine layer once, on first use.
-            let login = crate::packs::Login(choice.creds.clone());
-            let broker = crate::packs::HttpBroker::new(&choice.creds.platform_url, &login);
+            let token = || Ok(choice.creds.token.expose().to_string());
+            let broker = crate::packs::HttpBroker::new(&choice.creds.platform_url, &token);
             let refuse = |why: String| match pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why, fallback_allowed(opts.fallback)) {
                 Ok(line) => line,
                 Err(refusal) => {
@@ -491,8 +491,8 @@ fn structure_offer(home: &Path, opts: &InstallOpts, dir: &Path) -> Result<Option
         index: &|| crate::packs::catalog(home),
         ensure_engine: &|| crate::pyenv::ensure(home, crate::pyenv::Layer::Engine),
         by_structure: &|creds| {
-            let login = crate::packs::Login(creds.clone());
-            let broker = crate::packs::HttpBroker::new(&creds.platform_url, &login);
+            let token = || Ok(creds.token.expose().to_string());
+            let broker = crate::packs::HttpBroker::new(&creds.platform_url, &token);
             crate::packs::by_structure(home, dir, &archs, &broker, &run)
         },
         may_match: &|index| {
@@ -655,9 +655,10 @@ fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String
     }
     let Some(index) = crate::packs::catalog(home) else { return Ok(PackDecision::None) };
     let archs = crate::packs::local_archs(home);
-    let Some(offer) = crate::packs::offers(&index, &opts.model_id, &archs).into_iter().next() else {
+    let engine = crate::packs::pack_engine_version(home);
+    let Some(offer) = crate::packs::offers_for(&index, &opts.model_id, &archs, &engine).into_iter().next() else {
         let theirs = crate::packs::pack_archs(&index, &opts.model_id);
-        if let Some(note) = crate::packs::engine_too_old(&index, &opts.model_id, &archs) {
+        if let Some(note) = crate::packs::engine_too_old_at(&index, &opts.model_id, &archs, &engine) {
             eprintln!("{note}");
         } else if !theirs.is_empty() && !theirs.iter().any(|a| archs.contains(a)) {
             eprintln!("note: kernel packs for {} exist for {} only, not for this machine's GPUs ({})", opts.model_id, theirs.join(", "), archs.join(", "));
@@ -1428,8 +1429,8 @@ pub(crate) fn load_refusal(log: &str) -> Option<String> {
 
 fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) -> Result<Option<String>, String> {
     // Pull with this node's login (goethe-engine verifies index, identity, pack and arch), then point the card at it.
-    let login = crate::packs::Login(c.creds.clone());
-    let broker = crate::packs::HttpBroker::new(&c.creds.platform_url, &login);
+    let token = || Ok(c.creds.token.expose().to_string());
+    let broker = crate::packs::HttpBroker::new(&c.creds.platform_url, &token);
     let run = crate::packs::python_runner(home);
     let plan = c.plan.as_ref().ok_or("no kernel pack plan")?;
     let started = std::time::Instant::now();

@@ -49,8 +49,11 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     if let Some(note) = &kept {
         println!("{note}");
     }
-    let (sglang, engine) = if opts.engine && !cfg!(target_os = "macos") { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
-    let ternary = if opts.ternary { ternary_delta(home, &sums) } else { None };
+    let want_engines = (opts.engine || pyenv::engine_installed(home).is_some() || pyenv::has(home, Layer::Sglang)) && !cfg!(target_os = "macos");
+    let want_ternary = opts.ternary || (want_engines && ternary_installed(home));
+    let (sglang, engine) = if want_engines { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
+    let ternary = if want_ternary { ternary_delta(home, &sums) } else { None };
+    let nginx = nginx_delta(home, &sums, &arch);
     let local_commit = option_env!("GOETHE_GIT_COMMIT").unwrap_or("unknown");
     let remote_commit = fetch_verified(pkg, &sums, "BUILDINFO", tmp)
         .ok()
@@ -60,6 +63,7 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     let installed = if bins { build_label(&local_ver, Some(local_commit)) } else { published.clone() };
     let parts = [
         ("goethe", kept.is_none().then(|| Delta::of(&installed, &published, bins))),
+        ("nginx", nginx),
         ("SGLang", sglang),
         ("goethe-engine", engine),
         ("ternary pack", ternary),
@@ -80,6 +84,10 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
         staged.push(stage(pkg, &sums, &rel, tmp, &home.join("bin").join(bin))?);
     }
     let differs = |what: &str| pending.iter().any(|(w, d)| *w == what && d.differs);
+    if differs("nginx") {
+        let rel = format!("bin/{}/nginx", platform_dir(&arch));
+        staged.push(stage(pkg, &sums, &rel, tmp, &home.join("nginx-root/usr/sbin/nginx"))?);
+    }
     if differs("SGLang") {
         pyenv::sglang_wheel(home, pkg, &sums, tmp)?;
     }
@@ -97,13 +105,14 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
             }
         }
     }
-    if bins && pyenv::engine_installed(home).is_some() {
-        let ok = std::process::Command::new(home.join("bin/goethe"))
-            .args(["update", "--engine", "--yes"])
+    let mut engine_ok = !(bins && pyenv::engine_installed(home).is_some() && differs("goethe-engine"));
+    if bins && pyenv::engine_installed(home).is_some() && differs("goethe-engine") {
+        engine_ok = Command::new(home.join("bin/goethe"))
+            .args(["update", "engine", "--yes"])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
-        if !ok {
+        if !engine_ok {
             eprintln!("note: goethe-engine was not brought to the new pin; run goethe update engine");
         }
     }
@@ -112,18 +121,21 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
         let sha = lookup_sum(&sums, TERNARY_REL)?;
         fs::write(home.join(TERNARY_RECORD), format!("{sha}\n")).map_err(|e| e.to_string())?;
     }
-    if bins {
+    if bins && engine_ok {
         fs::copy(&version_file, home.join("VERSION")).map_err(|e| e.to_string())?;
     }
     if was_running && bins {
         restart_goethed(home)?;
+    }
+    if differs("nginx") && crate::nginx::master_running(home) {
+        let _ = crate::nginx::reload(home);
     }
     println!("{}", if bins { format!("updated to goethe {published}") } else { format!("updated {what}") });
     Ok(())
 }
 
 fn binaries_due(order: Ordering, opts: &UpdateOpts, local: &str, remote: &str, differ: impl FnOnce() -> Result<bool, String>) -> Result<(bool, Option<String>), String> {
-    // Whether goethe and goethed are replaced, and the note when they are kept. The version guard is theirs alone: a published goethe older than this build is kept, and only --allow-downgrade without a component flag installs it; --engine, --ternary and the pack refresh go on whatever the binaries do.
+    // Whether goethe and goethed are replaced, and the note when they are kept. The version guard is theirs alone: a published goethe older than this build is kept, and only --allow-downgrade without engine/ternary installs it; engines and packs go on whatever the binaries do.
     match order {
         Ordering::Equal => Ok((differ()?, None)),
         Ordering::Greater => Ok((true, None)),
@@ -141,6 +153,20 @@ fn binaries_differ(home: &Path, sums: &Path, arch: &str) -> Result<bool, String>
         }
     }
     Ok(false)
+}
+
+fn nginx_delta(home: &Path, sums: &Path, arch: &str) -> Option<Delta> {
+    // Bundled nginx when the package ships one and the on-disk binary differs (or is missing).
+    let rel = format!("bin/{}/nginx", platform_dir(arch));
+    let want = lookup_sum(sums, &rel).ok()?;
+    let dest = home.join("nginx-root/usr/sbin/nginx");
+    let have = sha256_file(&dest).ok();
+    let short = |s: &str| s.chars().take(12).collect::<String>();
+    Some(Delta {
+        installed: have.as_deref().map(short).or(Some("missing".into())),
+        published: short(&want),
+        differs: have.as_deref() != Some(want.as_str()),
+    })
 }
 
 fn buildinfo_commit(text: &str, len: usize) -> Option<String> {
@@ -299,17 +325,7 @@ pub fn platform_dir(arch: &str) -> String {
 }
 
 pub(crate) fn normalize_arch() -> String {
-    let raw = std::env::var("GOETHE_ARCH")
-        .ok()
-        .or_else(|| {
-            Command::new("uname")
-                .arg("-m")
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-        })
-        .unwrap_or_else(|| "x86_64".to_string());
+    let raw = std::env::var("GOETHE_ARCH").unwrap_or_else(|_| std::env::consts::ARCH.to_string());
     match raw.as_str() {
         "arm64" | "aarch64" => "aarch64".to_string(),
         "x86_64" | "amd64" => "x86_64".to_string(),
@@ -598,9 +614,9 @@ mod tests {
     fn a_build_ahead_of_the_published_release_keeps_its_binaries_and_still_updates_what_was_asked() {
         let due = |o: &UpdateOpts, order| binaries_due(order, o, "0.3.3", "0.3.2", || panic!("only an equal version compares the binaries")).map(|(bins, note)| (bins, note.is_some()));
         assert_eq!(due(&opts(false, false, false), Ordering::Less), Ok((false, true)), "no flags: the note, nothing replaced, no error");
-        assert_eq!(due(&opts(true, false, false), Ordering::Less), Ok((false, true)), "--engine: the binaries stay, the engine layer is still looked at");
-        assert_eq!(due(&opts(false, true, false), Ordering::Less), Ok((false, true)), "--ternary likewise");
-        assert_eq!(due(&opts(true, false, true), Ordering::Less), Ok((false, true)), "--allow-downgrade never turns --engine into a binary downgrade");
+        assert_eq!(due(&opts(true, false, false), Ordering::Less), Ok((false, true)), "update engine: the binaries stay, the engine layer is still looked at");
+        assert_eq!(due(&opts(false, true, false), Ordering::Less), Ok((false, true)), "ternary likewise");
+        assert_eq!(due(&opts(true, false, true), Ordering::Less), Ok((false, true)), "--allow-downgrade never turns update engine into a binary downgrade");
         assert_eq!(due(&opts(false, false, true), Ordering::Less), Ok((true, false)), "--allow-downgrade alone installs the older published binaries");
         assert_eq!(due(&opts(true, false, false), Ordering::Greater), Ok((true, false)), "an older build still updates");
         let note = binaries_due(Ordering::Less, &opts(false, false, false), "0.3.3", "0.3.2", || Ok(false)).unwrap().1.unwrap();
@@ -697,13 +713,11 @@ mod tests {
     }
 
     #[test]
-    fn one_sha256_file_matches_ninfer_wrapper() {
+    fn sha256_file_hex_digest() {
         let t = tempfile::tempdir().unwrap();
         let p = t.path().join("blob");
         fs::write(&p, b"goethe-sha256-equiv").unwrap();
         let a = sha256_file(&p).unwrap();
-        let b = crate::engines::ninfer::sha256_file(&p).unwrap();
-        assert_eq!(a, b);
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(sha256_file(&t.path().join("missing")).is_err());

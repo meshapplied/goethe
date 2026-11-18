@@ -10,18 +10,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-pub trait TokenSource {
-    fn token(&self) -> Result<String, String>;
-}
-
-pub struct Login(pub crate::platform::Credentials);
-
-impl TokenSource for Login {
-    fn token(&self) -> Result<String, String> {
-        Ok(self.0.token.expose().to_string())
-    }
-}
-
 pub trait Broker {
     fn index(&self) -> Result<Vec<u8>, String>;
     fn index_sig(&self) -> Result<Vec<u8>, String>;
@@ -30,7 +18,7 @@ pub trait Broker {
 
 pub struct HttpBroker<'a> {
     store: String,
-    tokens: &'a dyn TokenSource,
+    token: &'a dyn Fn() -> Result<String, String>,
     link: RefCell<Option<(String, String, Instant)>>,
 }
 
@@ -41,8 +29,8 @@ const MAX_INDEX: u64 = 64 << 20;
 const MERGE_GAP: u64 = 1 << 20;
 
 impl<'a> HttpBroker<'a> {
-    pub fn new(store: &str, tokens: &'a dyn TokenSource) -> HttpBroker<'a> {
-        HttpBroker { store: store.trim_end_matches('/').to_string(), tokens, link: RefCell::new(None) }
+    pub fn new(store: &str, token: &'a dyn Fn() -> Result<String, String>) -> HttpBroker<'a> {
+        HttpBroker { store: store.trim_end_matches('/').to_string(), token, link: RefCell::new(None) }
     }
 
     fn agent() -> ureq::Agent {
@@ -51,7 +39,7 @@ impl<'a> HttpBroker<'a> {
 
     fn platform(&self, path: &str) -> Result<ureq::Response, String> {
         // One request to the platform with the node's token; a redirect comes back to the caller, which follows it without the token.
-        let token = self.tokens.token()?;
+        let token = (self.token)()?;
         match Self::agent().get(&format!("{}{path}", self.store)).set("Authorization", &format!("Bearer {token}")).call() {
             Ok(r) => Ok(r),
             Err(ureq::Error::Status(401, _)) => {
@@ -409,8 +397,18 @@ pub fn may_match(index: &[u8], archs: &[String], gguf_arch: Option<&str>, config
 }
 
 pub fn offers(index: &[u8], model_id: &str, archs: &[String]) -> Vec<Offer> {
-    // Packs of `index` for `model_id` (case-insensitive) on one of `archs`, in `archs` order, that the pinned engine can run.
-    dedup(entries(index, archs, |repo| repo.eq_ignore_ascii_case(model_id)).into_iter().filter(runnable).map(|e| e.offer).collect())
+    offers_for(index, model_id, archs, crate::pyenv::ENGINE_VERSION)
+}
+
+pub fn offers_for(index: &[u8], model_id: &str, archs: &[String], engine: &str) -> Vec<Offer> {
+    // Packs of `index` for `model_id` on one of `archs` that `engine` can run.
+    dedup(
+        entries(index, archs, |repo| repo.eq_ignore_ascii_case(model_id))
+            .into_iter()
+            .filter(|e| runnable_at(e, engine))
+            .map(|e| e.offer)
+            .collect(),
+    )
 }
 
 pub fn offers_any(index: &[u8], archs: &[String]) -> Vec<Offer> {
@@ -428,19 +426,37 @@ fn dedup(v: Vec<Offer>) -> Vec<Offer> {
     out
 }
 
+pub fn pack_engine_version(home: &Path) -> String {
+    // Installed wheel when present (fail-closed against pin/installed skew); else the pin this binary will install.
+    crate::pyenv::engine_installed(home).unwrap_or_else(|| crate::pyenv::ENGINE_VERSION.to_string())
+}
+
 pub fn runnable(e: &Entry) -> bool {
-    // The pinned goethe-engine (the one goethe installs) is at least the pack's min_engine.
-    Some(e.min_engine) <= version(crate::pyenv::ENGINE_VERSION)
+    runnable_at(e, crate::pyenv::ENGINE_VERSION)
+}
+
+pub fn runnable_at(e: &Entry, engine: &str) -> bool {
+    // `engine` is the goethe-engine that can actually load the pack (installed, or the pin when none is).
+    Some(e.min_engine) <= version(engine)
 }
 
 pub fn engine_too_old(index: &[u8], model_id: &str, archs: &[String]) -> Option<String> {
-    // A note when the index has packs for `model_id` on `archs` but each needs a newer goethe-engine than the pinned one.
+    engine_too_old_at(index, model_id, archs, crate::pyenv::ENGINE_VERSION)
+}
+
+pub fn engine_too_old_at(index: &[u8], model_id: &str, archs: &[String], engine: &str) -> Option<String> {
+    // A note when the index has packs for `model_id` on `archs` but each needs a newer goethe-engine than `engine`.
     let es = entries(index, archs, |r| r.eq_ignore_ascii_case(model_id));
-    if es.iter().any(runnable) {
+    if es.iter().any(|e| runnable_at(e, engine)) {
         return None;
     }
     let (a, b, c) = es.iter().map(|e| e.min_engine).min()?;
-    Some(format!("engine_too_old: {model_id} needs goethe-engine >= {a}.{b}.{c}, installed {}: run goethe update", crate::pyenv::ENGINE_VERSION))
+    let hint = if engine == crate::pyenv::ENGINE_VERSION {
+        "run goethe update"
+    } else {
+        "run goethe update engine"
+    };
+    Some(format!("engine_too_old: {model_id} needs goethe-engine >= {a}.{b}.{c}, installed {engine}: {hint}"))
 }
 
 pub fn pack_archs(index: &[u8], model_id: &str) -> Vec<String> {
@@ -660,7 +676,7 @@ pub fn variant_max_ctx(prefix: &[u8], variant: &str) -> Option<u64> {
     manifest_of(prefix)?["buckets"].as_array()?.iter().filter(|b| b["variant"].as_str() == Some(variant)).filter_map(|b| b["maxctx"].as_u64()).max()
 }
 
-fn fetch_prefix(broker: &dyn Broker, entry: &Entry) -> Result<(Vec<u8>, usize), String> {
+fn fetch_prefix(broker: &impl Broker, entry: &Entry) -> Result<(Vec<u8>, usize), String> {
     // The pack's head, container header and manifest (its first bytes, no weights), the manifest checked against the index entry's hash; and where the manifest starts in them.
     let head = broker.range(&entry.file, 0, 16)?;
     if &head[..8] != b"GCPACK3\n" {
@@ -686,7 +702,7 @@ fn fetch_prefix(broker: &dyn Broker, entry: &Entry) -> Result<(Vec<u8>, usize), 
     Ok(([head, header, body].concat(), at))
 }
 
-pub fn unverified_prefix(model_id: &str, arch: &str, broker: &dyn Broker) -> Result<Option<(Entry, Vec<u8>)>, String> {
+pub fn unverified_prefix(model_id: &str, arch: &str, broker: &impl Broker) -> Result<Option<(Entry, Vec<u8>)>, String> {
     // The pack's first bytes by the index as the platform serves it, before goethe-engine exists to verify the index: only for refusing early; anything installed is checked by plan() again.
     let raw = broker.index()?;
     let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().find(runnable) else { return Ok(None) };
@@ -694,7 +710,7 @@ pub fn unverified_prefix(model_id: &str, arch: &str, broker: &dyn Broker) -> Res
     Ok(Some((entry, prefix)))
 }
 
-pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &dyn Broker, run: Runner) -> Result<Option<Plan>, String> {
+pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &impl Broker, run: Runner) -> Result<Option<Plan>, String> {
     // The signed index's pack for this model and arch, and its manifest's weight files per variant (what to download), only the variant a quant names (id, desc.quant or desc.format, any case). None: no pack.
     let work = home.join("packs");
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -733,7 +749,7 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
     Ok(Some(Plan { entry, prefix, variants, variant_ids, serial }))
 }
 
-pub fn by_structure(home: &Path, dir: &Path, archs: &[String], broker: &dyn Broker, run: Runner) -> Result<Option<(String, Plan)>, String> {
+pub fn by_structure(home: &Path, dir: &Path, archs: &[String], broker: &impl Broker, run: Runner) -> Result<Option<(String, Plan)>, String> {
     // The signed index's pack, on the first of `archs` with one, whose structure (tensor table and metadata keys, never weight values) the weights in `dir` have, whatever repo they came from.
     let work = home.join("packs");
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -768,7 +784,7 @@ fn merged(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     out
 }
 
-pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &dyn Broker, run: Runner) -> Result<String, String> {
+pub fn finish(home: &Path, dir: &Path, arch: &str, plan: &Plan, broker: &impl Broker, run: Runner) -> Result<String, String> {
     // Match the downloaded model files, fetch only the byte ranges of the pack they need, verify, store the serial; the variant id.
     let (variant, _) = finish_as(home, dir, arch, plan, broker, run, Next { suffix: "", donor: None })?;
     store_serial(home, plan.serial)?;
@@ -797,7 +813,7 @@ pub fn finish_as(
     dir: &Path,
     arch: &str,
     plan: &Plan,
-    broker: &dyn Broker,
+    broker: &impl Broker,
     run: Runner,
     next: Next,
 ) -> Result<(String, Delta), String> {
@@ -1384,6 +1400,11 @@ mod tests {
         ix["entries"][0]["min_engine"] = "9.0.0".into();
         let e = engine_too_old(ix.to_string().as_bytes(), "org/m-gguf", &archs).unwrap();
         assert!(e.starts_with("engine_too_old: org/m-gguf needs goethe-engine >= 9.0.0, installed "), "{e}");
+        let raw = ix.to_string();
+        let old = engine_too_old_at(raw.as_bytes(), "org/m-gguf", &archs, "0.0.1").unwrap();
+        assert!(old.contains("goethe update engine"), "{old}");
+        assert!(offers_for(raw.as_bytes(), "org/m-gguf", &archs, "0.0.1").is_empty());
+        assert!(!offers_for(raw.as_bytes(), "org/m-gguf", &archs, "9.0.0").is_empty());
     }
 
     #[test]
@@ -1395,13 +1416,6 @@ mod tests {
     fn the_card_names_the_compute_capabilities_of_the_pack_arch() {
         let ccs = arch_ccs("sm_120a");
         assert!(ccs.contains(&"12.0".to_string()) && !ccs.contains(&"9.0".to_string()));
-    }
-
-    struct Tok(Result<String, String>);
-    impl TokenSource for Tok {
-        fn token(&self) -> Result<String, String> {
-            self.0.clone()
-        }
     }
 
     fn serve(reply: String) -> (String, std::thread::JoinHandle<String>) {
@@ -1429,7 +1443,7 @@ mod tests {
     fn the_token_goes_to_the_platform_and_the_range_request_to_the_link_without_it() {
         let (target, target_seen) = serve("HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nConnection: close\r\n\r\nabcd".into());
         let (store, store_seen) = serve(format!("HTTP/1.1 302 Found\r\nLocation: {target}/blob\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"));
-        let tok = Tok(Ok("SECRET".into()));
+        let tok = || Ok("SECRET".into());
         let b = HttpBroker::new(&store, &tok);
         assert_eq!(b.range("m.gcpack", 10, 4).unwrap(), b"abcd");
         let (s, t) = (store_seen.join().unwrap(), target_seen.join().unwrap());
@@ -1440,9 +1454,9 @@ mod tests {
     #[test]
     fn http_401_and_a_missing_login_are_errors() {
         let (store, _h) = serve("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into());
-        let tok = Tok(Ok("bad".into()));
+        let tok = || Ok("bad".into());
         assert!(HttpBroker::new(&store, &tok).index().unwrap_err().contains("goethe login"));
-        let none = Tok(Err("not logged in".into()));
+        let none = || Err("not logged in".into());
         assert!(HttpBroker::new("http://127.0.0.1:1", &none).range("m.gcpack", 0, 16).unwrap_err().contains("not logged in"));
     }
 }

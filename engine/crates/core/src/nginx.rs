@@ -161,21 +161,30 @@ pub fn gateway_limit(home: &Path, name: &str, default: u64) -> u64 {
     persisted_port(home, name).map(u64::from).unwrap_or(default)
 }
 
-pub fn persist_gateway_limits(home: &Path) {
-    // Daemon side: GOETHE_GATEWAY_RATE_PER_IP (requests/s, burst twice that) and GOETHE_GATEWAY_CONN_PER_IP for nginx.
-    for (var, name, default) in [
-        ("GOETHE_GATEWAY_RATE_PER_IP", "rate_per_ip", DEFAULT_RATE_PER_IP),
-        ("GOETHE_GATEWAY_CONN_PER_IP", "conn_per_ip", DEFAULT_CONN_PER_IP),
-    ] {
+pub(crate) fn persist_named_limits(home: &Path, rows: &[(&str, &str, u64)], tag: &str) {
+    // Write each GOETHE_* env (1-65535) or its default into nginx/<name>.
+    for &(var, name, default) in rows {
         let value = std::env::var(var)
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|v| (1..=65535).contains(v))
             .unwrap_or(default);
         if let Err(e) = write_private(&nginx_prefix(home).join(name), format!("{value}\n").as_bytes()) {
-            eprintln!("goethe api expose: {e}");
+            eprintln!("{tag}: {e}");
         }
     }
+}
+
+pub fn persist_gateway_limits(home: &Path) {
+    // Daemon side: GOETHE_GATEWAY_RATE_PER_IP (requests/s, burst twice that) and GOETHE_GATEWAY_CONN_PER_IP for nginx.
+    persist_named_limits(
+        home,
+        &[
+            ("GOETHE_GATEWAY_RATE_PER_IP", "rate_per_ip", DEFAULT_RATE_PER_IP),
+            ("GOETHE_GATEWAY_CONN_PER_IP", "conn_per_ip", DEFAULT_CONN_PER_IP),
+        ],
+        "goethe api expose",
+    );
 }
 
 pub fn persist_max_body_mb(home: &Path) -> u64 {
@@ -425,12 +434,12 @@ pub fn gateway_connect_addr(home: &Path) -> SocketAddr {
     SocketAddr::new(ip, public_port_u16(home))
 }
 
-fn quote(path: &Path) -> String {
+pub(crate) fn quote(path: &Path) -> String {
     let s = path.display().to_string();
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn nginx_version(bin: &Path) -> Option<(u32, u32, u32)> {
+pub(crate) fn nginx_version(bin: &Path) -> Option<(u32, u32, u32)> {
     let out = Command::new(bin).arg("-v").output().ok()?;
     let text = String::from_utf8_lossy(&out.stderr).to_string();
     let v = text.split("nginx/").nth(1)?.split_whitespace().next()?.to_string();

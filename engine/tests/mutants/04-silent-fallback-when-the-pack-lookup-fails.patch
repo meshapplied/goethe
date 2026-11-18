@@ -4,8 +4,8 @@ index 32fd185..9c33f5f 100644
 +++ b/engine/crates/core/src/install.rs
 @@ -294,8 +294,10 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
              crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
-             let login = crate::packs::Login(choice.creds.clone());
-             let broker = crate::packs::HttpBroker::new(&choice.creds.platform_url, &login);
+             let token = || Ok(choice.creds.token.expose().to_string());
+             let broker = crate::packs::HttpBroker::new(&choice.creds.platform_url, &token);
 -            let plan = crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home))?
 -                .ok_or_else(|| format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch))?;
 +            let plan = match crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home)) {

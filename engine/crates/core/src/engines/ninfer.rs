@@ -55,13 +55,13 @@ pub fn accept_ninfer(len: u64, digest: &str) -> Result<(), String> {
     }
 }
 
-pub fn sha256_file(path: &Path) -> Result<String, String> {
-    crate::update::sha256_file(path).map_err(|e| format!("{}: {e}", path.display()))
-}
-
 pub fn ninfer_in(dir: &Path) -> Option<PathBuf> {
     let p = dir.join(NINFER_FILE);
     p.is_file().then_some(p)
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    crate::update::sha256_file(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 pub fn check_ninfer_with(path: &Path, mut hash: impl FnMut(&Path) -> Result<String, String>) -> Result<(), String> {
