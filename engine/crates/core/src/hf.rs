@@ -282,7 +282,8 @@ pub fn ensure_model(home: &Path, model_id: &str, local_dir: &Path, opts: &Downlo
     let fetched = if native_download() {
         native_with_retries(model_id, local_dir, &revision, &files)
     } else {
-        download_with_retries(home, model_id, local_dir, &revision, &excludes, bytes_missing(&files, local_dir))
+        crate::pyenv::ensure(home, crate::pyenv::Layer::Base)
+            .and_then(|_| download_with_retries(home, model_id, local_dir, &revision, &excludes, bytes_missing(&files, local_dir)))
     };
     if let Err(e) = fetched {
         drop_empty_new_dir(local_dir, existed);

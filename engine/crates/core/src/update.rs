@@ -198,7 +198,7 @@ impl Delta {
 fn pyenv_deltas(home: &Path, base: &str, sums: &Path, tmp: &Path) -> Result<(Option<Delta>, Option<Delta>), String> {
     // The py-env layers that are present, against what is published; an absent layer is never installed here.
     if !pyenv::has(home, Layer::Base) {
-        println!("no Python environment at {}; run the installer", home.join("py-env").display());
+        println!("no Python environment yet; goethe install sets it up when a model needs it");
         return Ok((None, None));
     }
     let sglang = if pyenv::has(home, Layer::Sglang) { Some(engine_delta(home, base, sums, tmp)?) } else { None };

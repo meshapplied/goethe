@@ -578,15 +578,11 @@ fn check_pyenv(home: &Path) -> Check {
     // The hermetic py-env's python and base layer, then SGLang and goethe-engine when installed, read from disk.
     let env = home.join("py-env");
     if !env.join("bin/python").is_file() {
-        let release = std::env::current_exe().ok().and_then(|e| crate::paths::home_of_binary(&e)).is_some();
-        return match release {
-            true => check("py-env", "FAIL", "run the installer"),
-            false => check("py-env", "INFO", "created on first goethe install (or goethe update engine)"),
-        };
+        return check("py-env", "INFO", "not set up yet: the first goethe install of a model sets it up (about 30 MB, more for engines)");
     }
     let (python, sglang) = pyenv_versions(&env);
     if !pyenv::has(home, Layer::Base) {
-        return check("py-env", "FAIL", format!("python {python} but no huggingface_hub (the hf CLI); run the installer again"));
+        return check("py-env", "WARN", format!("python {python} but no huggingface_hub (the hf CLI); the next goethe install puts it back"));
     }
     let engine = match pyenv::engine_installed(home) {
         Some(v) if v == pyenv::ENGINE_VERSION => format!(", goethe-engine {v}"),
@@ -905,10 +901,11 @@ mod tests {
     }
 
     #[test]
-    fn a_source_install_without_a_py_env_is_told_when_it_comes() {
+    fn a_missing_py_env_is_told_when_it_comes() {
         let home = tempfile::tempdir().unwrap();
         let c = check_pyenv(home.path());
-        assert_eq!((c.status.as_str(), c.hint.as_str()), ("INFO", "created on first goethe install (or goethe update engine)"), "the test binary is not a release install");
+        assert_eq!(c.status, "INFO", "the installer no longer sets it up");
+        assert!(c.hint.contains("the first goethe install of a model sets it up"), "{}", c.hint);
     }
 
     #[test]
