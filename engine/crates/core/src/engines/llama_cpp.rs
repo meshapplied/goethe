@@ -231,8 +231,38 @@ pub fn has_audio_encoder(mmproj: &Path) -> bool {
     header(mmproj).is_ok_and(|m| m.iter().any(|(k, v)| (k == "clip.has_audio_encoder" && v.0.first() == Some(&1)) || k.starts_with("clip.audio.")))
 }
 
+const SWA_BATCH: u64 = 512;
+
+pub fn sliding_layers(arch: &str, layers: usize, window: u64, pattern: &[u64]) -> Vec<bool> {
+    // Which layers attend over a sliding window, as llama.cpp reads them: a per-layer pattern, a period (every n-th layer is full), or the period it builds in for its architecture.
+    let period = |n: usize| (0..layers).map(|i| (i + 1) % n != 0).collect();
+    match (window, pattern) {
+        (0, _) => vec![false; layers],
+        (_, p) if p.len() == layers => p.iter().map(|v| *v != 0).collect(),
+        (_, [n]) if *n > 1 => period(*n as usize),
+        _ => match arch {
+            "gemma3" => period(6),
+            "gemma2" => period(2),
+            "cohere2" => period(4),
+            _ => vec![false; layers],
+        },
+    }
+}
+
+pub fn with_header_kv(mut input: crate::chooser::ChooserInput, dir: &Path, card: &toml::Value) -> crate::chooser::ChooserInput {
+    // A llama.cpp model's KV from its GGUF header, read at every plan so a model installed before the header was read this way gets it too (KV in f16).
+    if card.get("runtime").and_then(|v| v.as_str()) != Some(ENGINE.id) {
+        return input;
+    }
+    if let Some(f) = gguf_in(dir, card, None).ok().and_then(|g| facts(dir, &g).ok()) {
+        input.kv_bytes_per_token = f.kv_elems_per_token * 2;
+        input.window_gb_per_request = (f.swa_kv_elems_per_request * 2) as f64 / crate::model_facts::GIB;
+    }
+    input
+}
+
 pub fn facts(dir: &Path, gguf: &Path) -> Result<crate::model_facts::ModelFacts, String> {
-    // Shape from the GGUF header; every layer's KV counted at full context (sliding windows overcounted, never under).
+    // Shape from the GGUF header: full-attention layers hold KV for the whole context, sliding-window layers for their window (plus a batch) per request, and layers that share an earlier layer's KV hold none.
     let m = header(gguf).map_err(|e| format!("{}: {e}", gguf.display()))?;
     let arch = m.get("general.architecture").map(|v| v.1.clone()).filter(|a| !a.is_empty()).ok_or_else(|| format!("{}: no general.architecture", gguf.display()))?;
     let nums = |k: &str| m.get(&format!("{arch}.{k}")).map(|v| v.0.clone()).unwrap_or_default();
@@ -246,17 +276,26 @@ pub fn facts(dir: &Path, gguf: &Path) -> Result<crate::model_facts::ModelFacts, 
         kv = vec![kv.first().copied().unwrap_or(heads); layers as usize];
     }
     let dim = |k: &str| Some(max(k)).filter(|d| *d > 0).unwrap_or(max("embedding_length") / heads.max(1));
+    let (k, v) = (dim("attention.key_length"), dim("attention.value_length"));
+    let (ks, vs) = (Some(max("attention.key_length_swa")).filter(|d| *d > 0).unwrap_or(k), Some(max("attention.value_length_swa")).filter(|d| *d > 0).unwrap_or(v));
+    let n = layers as usize;
+    let window = max("attention.sliding_window");
+    let sliding = sliding_layers(&arch, n, window, &nums("attention.sliding_window_pattern"));
+    let own = n.saturating_sub(max("attention.shared_kv_layers") as usize);
+    let heads_at = |i: usize| kv.get(i).copied().unwrap_or(0);
+    let full: u64 = (0..own).filter(|&i| !sliding[i]).map(|i| heads_at(i) * (k + v)).sum();
+    let windowed: u64 = (0..own).filter(|&i| sliding[i]).map(|i| heads_at(i) * (ks + vs)).sum();
     let weights = gguf_paths(dir).into_iter().filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("mmproj")));
     let bytes: u64 = weights.filter_map(|p| p.metadata().ok()).map(|m| m.len()).sum();
     Ok(crate::model_facts::ModelFacts {
         architecture: if max("expert_count") > 0 { "moe" } else { "dense" }.into(),
         static_vram_gb: bytes as f64 / crate::model_facts::GIB,
-        kv_elems_per_token: kv.iter().sum::<u64>() * (dim("attention.key_length") + dim("attention.value_length")),
+        kv_elems_per_token: full.max(1),
         max_ctx: max("context_length"),
         num_attention_heads: heads,
         num_kv_heads: kv.iter().copied().max().unwrap_or(0),
         attention: "gqa".into(),
-        swa_kv_elems_per_request: 0,
+        swa_kv_elems_per_request: windowed * (window.min(max("context_length").max(1)) + SWA_BATCH),
         linear_state_bytes_per_request: 0,
     })
 }
@@ -381,11 +420,53 @@ pub fn write_test_gguf_with(path: &Path, extra: &[(&str, u32)]) {
 }
 
 #[cfg(test)]
+pub fn write_gguf(path: &Path, arch: &str, nums: &[(&str, Vec<u32>)], bools: &[(&str, Vec<bool>)]) {
+    // A GGUF header of `arch` with u32 keys (an array when several values) and bool arrays.
+    let s = |v: &str| [(v.len() as u64).to_le_bytes().to_vec(), v.as_bytes().to_vec()].concat();
+    let arr = |t: u32, items: Vec<Vec<u8>>| [t.to_le_bytes().to_vec(), (items.len() as u64).to_le_bytes().to_vec(), items.concat()].concat();
+    let mut kvs = vec![("general.architecture".to_string(), 8u32, s(arch))];
+    for (k, v) in nums {
+        let key = format!("{arch}.{k}");
+        match v.as_slice() {
+            [one] => kvs.push((key, 4, one.to_le_bytes().to_vec())),
+            many => kvs.push((key, 9, arr(4, many.iter().map(|x| x.to_le_bytes().to_vec()).collect()))),
+        }
+    }
+    for (k, v) in bools {
+        kvs.push((format!("{arch}.{k}"), 9, arr(7, v.iter().map(|b| vec![u8::from(*b)]).collect())));
+    }
+    let mut g = [b"GGUF".to_vec(), 3u32.to_le_bytes().to_vec(), 0u64.to_le_bytes().to_vec(), (kvs.len() as u64).to_le_bytes().to_vec()].concat();
+    for (k, t, v) in kvs {
+        g.extend([s(&k), t.to_le_bytes().to_vec(), v].concat());
+    }
+    std::fs::write(path, g).unwrap();
+}
+
+#[cfg(test)]
 mod tests {
     use super::super::{check_params, command, test_spec};
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn sliding_and_shared_layers_hold_no_full_context_kv() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("m.gguf");
+        let pattern: Vec<bool> = (0..10).map(|i| i % 5 != 4).collect();
+        let nums = vec![
+            ("block_count", vec![10]), ("attention.head_count", vec![8]), ("attention.head_count_kv", vec![1]), ("context_length", vec![131072]),
+            ("attention.key_length", vec![512]), ("attention.value_length", vec![512]), ("attention.key_length_swa", vec![256]),
+            ("attention.value_length_swa", vec![256]), ("attention.sliding_window", vec![512]), ("attention.shared_kv_layers", vec![5]),
+        ];
+        write_gguf(&p, "gemma4", &nums, &[("attention.sliding_window_pattern", pattern)]);
+        let f = facts(d.path(), &p).unwrap();
+        assert_eq!(f.kv_elems_per_token, 1024, "one full layer of the five that own KV");
+        assert_eq!(f.swa_kv_elems_per_request, 4 * 512 * (512 + 512), "four sliding layers over their window and a batch");
+        assert_eq!(sliding_layers("gemma3", 6, 1024, &[]), vec![true, true, true, true, true, false]);
+        assert_eq!(sliding_layers("llama", 3, 4096, &[]), vec![false; 3], "an unknown pattern counts every layer in full");
+        assert_eq!(sliding_layers("x", 4, 0, &[1, 1, 1, 1]), vec![false; 4], "no window, no sliding");
+    }
 
     #[test]
     fn launches_llama_server_on_the_gguf_with_goethe_budget_and_one_gpu() {

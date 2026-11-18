@@ -434,7 +434,8 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
                 id: r.get(0)?,
                 default_tp: r.get(5)?,
                 runtime: card.get("runtime").and_then(|v| v.as_str()).unwrap_or("sglang").to_string(),
-                input: ChooserInput {
+                input: crate::engines::llama_cpp::with_header_kv(ChooserInput {
+                    window_gb_per_request: 0.0,
                     static_vram_gb: r.get(1)?,
                     kv_bytes_per_token: card_kv_bytes(&card, elems, kv_bytes.max(0) as u64).max(1),
                     num_attention_heads: r.get::<_, Option<i64>>(7)?.unwrap_or(1) as u64,
@@ -446,7 +447,7 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
                     marlin_extra_gb: install::card_marlin_extra_gb(&card),
                     supported_sm: install::card_supported_sm(&card),
                     memory: crate::memory_spec::installed(&home.join(r.get::<_, String>(11)?), &card, &[]),
-                },
+                }, &home.join(r.get::<_, String>(11)?), &card),
             })
         })
         .map_err(|e| e.to_string())?;

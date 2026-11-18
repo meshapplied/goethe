@@ -1315,7 +1315,8 @@ fn chooser_input(req: &LoadReq, ctx: u64, max_conc: u64) -> ChooserInput {
         attention: row.attention.clone().unwrap_or_else(|| "gqa".to_string()),
         max_ctx: row.max_ctx.unwrap_or(row.default_ctx) as u64,
     };
-    ChooserInput::from_card(facts, &req.card, crate::memory_spec::installed(&req.model_path, &req.card, &req.params.extra_sglang_args), ctx, max_conc)
+    let input = ChooserInput::from_card(facts, &req.card, crate::memory_spec::installed(&req.model_path, &req.card, &req.params.extra_sglang_args), ctx, max_conc);
+    crate::engines::llama_cpp::with_header_kv(input, &req.model_path, &req.card)
 }
 
 fn gpu_name(snap: &[GpuLive], idx: u32) -> String {
