@@ -267,13 +267,18 @@ pub fn candidates(ifaces: &[Iface]) -> Vec<Iface> {
     out
 }
 
+fn client_range(addr: Ipv4Addr) -> bool {
+    // A route clients can come from: not broadcast, multicast, loopback, link-local or unspecified, which macOS lists on a VPN interface too.
+    !(addr.is_broadcast() || addr.is_multicast() || addr.is_loopback() || addr.is_link_local() || addr.is_unspecified())
+}
+
 pub fn reach(iface: &Iface, routes: &[Route]) -> Vec<Net> {
     // Its routes and own subnet, never a default or near-default route; with only per-peer host routes, the private block of its address, so later peers are covered.
     let mut nets: Vec<Net> = routes
         .iter()
         .filter(|r| r.dev == iface.name)
         .filter_map(|r| r.dst)
-        .filter(|n| n.prefix >= WIDEST_RANGE && !(n.prefix == 32 && n.addr == iface.addr))
+        .filter(|n| client_range(n.addr) && n.prefix >= WIDEST_RANGE && !(n.prefix == 32 && n.addr == iface.addr))
         .collect();
     if iface.prefix <= 30 && iface.prefix >= WIDEST_RANGE {
         nets.push(Net::new(iface.addr, iface.prefix));
@@ -298,6 +303,14 @@ pub fn reach(iface: &Iface, routes: &[Route]) -> Vec<Net> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_macs_vpn_reaches_its_range_and_not_broadcast_or_multicast() {
+        let text = "Destination        Gateway            Flags               Netif Expire\ndefault            192.168.1.1        UGScg                 en0\n100.64/10          link#21            UCS                 utun6\n100.64.1.2      100.64.1.2      UH                  utun6\n224.0.0/4          link#21            UmCS                utun6\n255.255.255.255/32 link#21            UCS                 utun6\n";
+        let routes = parse_netstat(text);
+        let utun = Iface { name: "utun6".into(), addr: Ipv4Addr::new(100, 64, 1, 2), prefix: 32, tunnel: true, virtual_bridge: false, default_route: false };
+        assert_eq!(reach(&utun, &routes), vec![Net::parse("100.64.0.0/10").unwrap()]);
+    }
 
     #[test]
     fn netstat_routes_name_the_interface_and_fill_short_destinations() {

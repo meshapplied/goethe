@@ -219,6 +219,16 @@ fn heartbeat_check(home: &Path) {
     }
 }
 
+pub fn login_question(link: &crate::platform_cli::Link) -> Option<&'static str> {
+    // Asked when the node is not linked, or its login was revoked or expired (uninstall logs out, so a reinstall lands here); a working link is left alone.
+    use crate::platform_cli::Link;
+    match link {
+        Link::Linked { revoked: false, .. } | Link::Unreadable(_) => None,
+        Link::Linked { revoked: true, .. } => Some("\nThis node's platform login was revoked or has expired. Log in again now?"),
+        Link::NotLinked => Some("\nLog in to the Goethe platform now? Logged-in nodes get optimised kernels for supported models."),
+    }
+}
+
 fn login_step(home: &Path, platform_url: Option<&str>) {
     // An auth key from the installer links without a browser; otherwise a terminal is offered the device login.
     let goethe = home.join("bin/goethe");
@@ -240,11 +250,11 @@ fn login_step(home: &Path, platform_url: Option<&str>) {
         }
         return;
     }
-    if crate::platform_cli::is_linked(home) {
+    let Some(question) = login_question(&crate::platform_cli::link_state(home, false)) else {
         return;
-    }
+    };
     let later = "run goethe login any time to link this node to the Goethe platform (logged-in nodes get optimised kernels for supported models)";
-    if !ask("\nLog in to the Goethe platform now? Logged-in nodes get optimised kernels for supported models.", "GOETHE_LOGIN") {
+    if !ask(question, "GOETHE_LOGIN") {
         println!("Not logged in: {later}");
         return;
     }
@@ -392,6 +402,15 @@ mod tests {
         fs::remove_file(dir.join("goethe")).unwrap();
         fs::write(dir.join("goethe"), "copy").unwrap();
         assert!(link_commands(&home, &dir).unwrap_err().contains("is a file"));
+    }
+
+    #[test]
+    fn login_is_offered_unless_the_link_works() {
+        use crate::platform_cli::Link;
+        let linked = |revoked| Link::Linked { workspace: "w".into(), revoked, heartbeat: String::new(), ok: true };
+        assert!(login_question(&Link::NotLinked).unwrap().contains("Log in to the Goethe platform now?"));
+        assert!(login_question(&linked(true)).unwrap().contains("revoked or has expired"), "a token uninstall revoked");
+        assert_eq!(login_question(&linked(false)), None);
     }
 
     #[test]
