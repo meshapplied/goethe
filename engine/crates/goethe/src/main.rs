@@ -323,6 +323,19 @@ enum Commands {
     },
     #[command(display_order = 20, about = "Unlink this node from the Goethe platform and remove its local credentials.")]
     Logout,
+    #[command(hide = true, about = "Finish an install: run by install.sh once it verified this goethe; safe to run again to repair or upgrade.")]
+    Setup {
+        #[arg(long = "pkg-url", value_name = "URL", help = "The package host to keep using (default pkg.goethe.sh).")]
+        pkg_url: Option<String>,
+        #[arg(long, value_name = "URL", help = "Where this run downloads from, for example one release's folder.")]
+        from: Option<String>,
+        #[arg(long = "keep-file-url", help = "Keep a file:// package host for later updates.")]
+        keep_file_url: bool,
+        #[arg(long = "platform-url", value_name = "URL", help = "Platform to log in to.")]
+        platform_url: Option<String>,
+        #[arg(long = "no-link", help = "Do not link goethe and goethed onto PATH.")]
+        no_link: bool,
+    },
     #[command(display_order = 21, about = "Tab completion for bash, zsh and fish: models, keys, GPUs and interfaces complete too.")]
     Completion {
         #[arg(value_parser = ["install", "remove", "status"], help = "install, remove, or status (the default).")]
@@ -958,6 +971,13 @@ fn main() {
             }
         }
         Commands::Logout => goethe_core::platform_cli::logout(),
+        Commands::Setup { pkg_url, from, keep_file_url, platform_url, no_link } => goethe_core::setup::run(goethe_core::setup::Opts {
+            pkg: pkg_url.or_else(|| std::env::var("GOETHE_PKG_URL").ok().filter(|v| !v.is_empty())).unwrap_or_else(|| goethe_core::setup::DEFAULT_PKG_URL.to_string()),
+            from,
+            keep_file_url,
+            platform_url,
+            no_link,
+        }),
         Commands::Completion { action, shell } => complete::run(action.as_deref(), shell.as_deref()),
         Commands::Registry { cmd } => match cmd {
             RegistryCommands::Validate {

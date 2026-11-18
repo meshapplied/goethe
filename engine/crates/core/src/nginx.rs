@@ -569,6 +569,11 @@ pub(crate) fn self_signed(key: &Path, crt: &Path, ec: bool, days: u32, cn: &str,
     fs::set_permissions(key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())
 }
 
+pub fn ensure_certs(home: &Path) -> Result<(), String> {
+    // The gateway's self-signed certificate for this host's names, made at install so it exists before the first goethe up.
+    ensure_tls(home, &san_extension(&tls_names()), false)
+}
+
 fn ensure_tls(home: &Path, san: &str, stale: bool) -> Result<(), String> {
     // Self-signed certificate on first use, or again when the names changed; the key is always 0600 in a 0700 directory.
     let cert_dir = nginx_prefix(home).join("certs");

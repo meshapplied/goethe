@@ -289,11 +289,12 @@ jobs:
           sleep 1
           docker run --rm --network host -e GOETHE_PKG_URL=http://127.0.0.1:8999 -e GOETHE_NO_AUTOSTART=1 ubuntu:22.04 bash -c '
             set -e
-            apt-get update -qq && apt-get install -y -qq curl zstd openssl ca-certificates nginx-core >/dev/null
+            apt-get update -qq && apt-get install -y -qq curl >/dev/null
             curl -fsSL http://127.0.0.1:8999/install.sh | bash
-            export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
             goethe --version
-            goethe doctor --json >/dev/null || true
+            test -x /var/lib/goethe/nginx-root/usr/sbin/nginx
+            test ! -e /var/lib/goethe/py-env
+            goethe up --no-boot && goethe status
           '
 
   publish:

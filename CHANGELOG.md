@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The installer is one short script for Linux and macOS: it checks the machine, verifies the signed package and `goethe`, and hands over to `goethe setup`, which does the rest and is safe to run again to repair or upgrade. It installs no system packages beyond `openssl` and CA certificates (as root, when missing), no nginx from the distribution (goethe ships its own for Linux too), and no Python environment (the first model install sets it up).
+- `goethe doctor --fix` makes the system changes the installer used to make: the NVIDIA driver (load, install, open module for Blackwell), NVIDIA's CUDA 13 forward-compatibility libraries for 535-579 drivers, and a C++ compiler once SGLang is installed, each asked for.
+- `GOETHE_VERSION=0.3.3` installs one release; every install reads all its files from one release folder. `goethe.env` keeps only settings that differ from the defaults, and doctor names the line to delete when one breaks the registry. `goethe` and `goethed` are linked onto a folder already on PATH (or PATH is offered for the shell's startup file).
 - The command line is regrouped: every action is a word (`goethe api keys create NAME`, `goethe gpu deny gpu2`, `goethe models alias set A M`, `goethe api allow add CIDR`, `goethe api domain check D`, `goethe update engine`), and flags only change how it runs. The older forms are removed rather than kept as hidden aliases; docs/cli.md has the full tree.
 - `goethe` alone on a terminal is the entry point: the guided setup while nothing is installed, the home screen after. `goethe start` is gone.
 - Network access lives under `goethe api`: `expose` (local, vpn, public, or an address or interface; replaces `api configure` and `api gateway --bind`), `allow` (was `allowlist`), `domain`, and `share` (was `goethe serve --public`; `share stop` closes it).

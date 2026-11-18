@@ -8,7 +8,7 @@ REPO="$(cd "${ROOT}/.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/goethe-mac-e2e.XXXXXX")"
 CDN="${WORK}/cdn"
 export GOETHE_HOME="${WORK}/home"
-export GOETHE_NO_LINK=1 GOETHE_NO_COMPLETION=1 GOETHE_NO_AUTOSTART=1
+export GOETHE_NO_LINK=1 GOETHE_NO_COMPLETION=1 GOETHE_NO_AUTOSTART=1 GOETHE_KEEP_PKG_URL=1 GOETHE_LOGIN=0
 export GOETHE_MUX_PORT="${GOETHE_MUX_PORT:-31180}" GOETHE_PUBLIC_PORT="${GOETHE_PUBLIC_PORT:-38443}"
 MODEL="${MODEL:-bartowski/SmolLM2-135M-Instruct-GGUF}"
 G="${GOETHE_HOME}/bin/goethe"
@@ -26,12 +26,15 @@ trap cleanup EXIT
 
 mkdir -p "${CDN}/bin" "${CDN}/v1"
 cp -R "${ROOT}/dist/cdn/bin/darwin-aarch64" "${CDN}/bin/"
+(cd "${ROOT}" && cargo build --release --locked --features goethe/test-release-key --bin goethe --bin goethed -q)
+cp "${ROOT}/target/release/goethe" "${ROOT}/target/release/goethed" "${CDN}/bin/darwin-aarch64/"
 cp "${ROOT}/cdn/v1/registry.json" "${CDN}/v1/registry.json"
 for f in LICENSE NOTICE; do [[ -f "${REPO}/${f}" ]] && cp "${REPO}/${f}" "${CDN}/${f}"; done
 grep -E '^version\s*=' "${ROOT}/crates/goethe/Cargo.toml" | head -n1 | sed 's/.*"\(.*\)".*/\1/' >"${CDN}/VERSION"
 
 openssl ecparam -genkey -name prime256v1 -noout -out "${WORK}/test.key"
 openssl ec -in "${WORK}/test.key" -pubout -out "${WORK}/test_pub.pem" 2>/dev/null
+export GOETHE_RELEASE_PUB="${WORK}/test_pub.pem"
 bash "${ROOT}/packaging/subst_install_pubkey.sh" "${ROOT}/cdn/install.sh" "${WORK}/test_pub.pem" "${CDN}/install.sh"
 (cd "${CDN}" && find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
   echo "$(shasum -a 256 "${f}" | awk '{print $1}')  ${f}"
@@ -51,6 +54,9 @@ check "no Python environment was set up" test ! -e "${GOETHE_HOME}/py-env"
 check "no uv was installed" test ! -e "${GOETHE_HOME}/bin/uv"
 check "our nginx is in place" test -x "${GOETHE_HOME}/nginx-root/usr/sbin/nginx"
 check "the gateway certificate exists" test -s "${GOETHE_HOME}/nginx/certs/server.crt"
+check "goethe setup finished the install" grep -q "Goethe install complete" "${WORK}/install.log"
+GOETHE_PKG_URL="file://${CDN}" bash "${CDN}/install.sh" </dev/null >"${WORK}/again.log" 2>&1
+check "a second install changes nothing" grep -q "already installed; nothing to replace" "${WORK}/again.log"
 
 echo "== machine"
 hw="$("${G}" doctor --hardware --json)"

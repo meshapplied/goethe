@@ -112,7 +112,7 @@ Loaded models are restored after a daemon restart or reboot unless you unloaded 
 - Health: `/health` (public), `/health/ready?model=<id>` (200 only when that model's engine answers), `/health/admin` (admin key only; other callers get 404) returns GPU VRAM, instances with in-flight counts, and inactive models.
 - Engines listen on loopback only and each one gets its own random API key, so a local process cannot use an engine without going through the gateway. SGLang refuses keys with `--tokenizer-worker-num` above 1; such engines run keyless (still loopback only).
 - nginx rate-limits every client address (20 requests/s, burst 40) on all routes; per-key `--rpm` limits are enforced in the mux. Request bodies are capped at `GOETHE_MAX_BODY_MB` (default 10). Errors are OpenAI-style JSON, Anthropic-style on `/v1/messages`. Public routes are the OpenAI ones (`/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/rerank`, `/v1/models`), Anthropic `/v1/messages` and LiteLLM's spellings (the same routes without `/v1`, `/model/info`, `/model_group/info`, `/health/liveliness`, `/health/readiness`); keys are read from `Authorization: Bearer`, `x-litellm-api-key`, `x-api-key` or `api-key`. `/metrics` stays on loopback.
-- Installer requirements: glibc 2.30+, curl 7.50+, zstd 1.3+, openssl 1.1.1+, and an NVIDIA driver 580+ (CUDA 13) when `nvidia-smi` is present (set `GOETHE_REQUIRE_GPU=1` to require it).
+- Installer: `install.sh` checks the machine (glibc 2.30+ or macOS 14+ on Apple Silicon), verifies the signed `SHA256SUMS` with `openssl` and the downloaded `goethe` against it, then runs `goethe setup`, which places goethed and goethe's own nginx, writes `goethe.env` (only settings that differ from the defaults), links `goethe` and `goethed` onto PATH and offers `goethe doctor --fix` and the platform login. Releases are also served under `/v/<version>/`; `GOETHE_VERSION` pins one.
 - Prometheus metrics at `http://127.0.0.1:<mux port>/metrics` on loopback only.
 
 ## Registry
@@ -142,7 +142,7 @@ Add models without writing numbers by hand:
 
 ## Environment
 
-`GOETHE_HOME`, `GOETHE_SOCK`, `GOETHE_MUX_PORT`, `GOETHE_PUBLIC_PORT`, `GOETHE_ENGINE_PORTS`, `GOETHE_DRAIN_SECS`, `GOETHE_MAX_BODY_MB`, `GOETHE_MARLIN`, `GOETHE_PKG_URL`, `GOETHE_PKG_TOKEN` (private packages), `GOETHE_REGISTRY_URL`, `HF_ENDPOINT`, `HF_HUB_OFFLINE`, `NGINX_BIN`, `GOETHE_REQUIRE_GPU`, `GOETHE_NO_LINK` (installer), `GOETHE_INSECURE` (installer, skips signature checks, development only).
+`GOETHE_HOME`, `GOETHE_SOCK`, `GOETHE_MUX_PORT`, `GOETHE_PUBLIC_PORT`, `GOETHE_ENGINE_PORTS`, `GOETHE_DRAIN_SECS`, `GOETHE_MAX_BODY_MB`, `GOETHE_MARLIN`, `GOETHE_PKG_URL`, `GOETHE_PKG_TOKEN` (private packages), `GOETHE_REGISTRY_URL`, `HF_ENDPOINT`, `HF_HUB_OFFLINE`, `NGINX_BIN`, `GOETHE_NO_LINK` (installer), `GOETHE_VERSION` (installer), `GOETHE_KEEP_PKG_URL=1` (installer, keeps a `file://` package host).
 
 `$GOETHE_HOME/goethe.env` (written by the installer, `KEY=VALUE` lines) supplies `GOETHE_PKG_URL`, `GOETHE_REGISTRY_URL` and `GOETHE_PKG_TOKEN` when the environment does not set them (goethe reads no other keys from it); the systemd unit loads the same file.
 

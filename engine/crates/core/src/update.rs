@@ -18,10 +18,10 @@ pub struct UpdateOpts {
     pub allow_downgrade: bool,
 }
 
-struct Staged {
-    rel: String,
-    part: PathBuf,
-    dest: PathBuf,
+pub(crate) struct Staged {
+    pub(crate) rel: String,
+    pub(crate) part: PathBuf,
+    pub(crate) dest: PathBuf,
 }
 
 pub fn run(opts: UpdateOpts) -> Result<(), String> {
@@ -381,7 +381,7 @@ pub(crate) fn fetch_verified(base: &str, sums: &Path, rel: &str, tmp: &Path) -> 
     Ok(part)
 }
 
-fn stage(base: &str, sums: &Path, rel: &str, tmp: &Path, dest: &Path) -> Result<Staged, String> {
+pub(crate) fn stage(base: &str, sums: &Path, rel: &str, tmp: &Path, dest: &Path) -> Result<Staged, String> {
     Ok(Staged {
         rel: rel.to_string(),
         part: fetch_verified(base, sums, rel, tmp)?,
@@ -389,7 +389,7 @@ fn stage(base: &str, sums: &Path, rel: &str, tmp: &Path, dest: &Path) -> Result<
     })
 }
 
-fn swap_all(staged: &[Staged]) -> Result<(), String> {
+pub(crate) fn swap_all(staged: &[Staged]) -> Result<(), String> {
     // Move every verified file into place, keeping .prev copies; roll back on the first failure.
     let mut done: Vec<&Staged> = Vec::new();
     for s in staged {
@@ -472,6 +472,11 @@ fn unpack_ternary(home: &Path, archive: &Path) -> Result<(), String> {
 fn restart_goethed(home: &Path) -> Result<(), String> {
     // Engines and the gateway carry over: stop the old goethed with keep_engines, then start the new one.
     let (before, kept) = crate::service::stop_keeping_engines()?;
+    start_upgraded(home, before, kept)
+}
+
+pub(crate) fn start_upgraded(home: &Path, before: usize, kept: usize) -> Result<(), String> {
+    // The new goethed after a keep-engines stop, by systemd when a unit starts it, then the engines it adopts.
     match crate::service::systemctl_restart_args() {
         Some(args) => {
             let ok = Command::new("systemctl").args(&args).status().map_err(|e| e.to_string())?.success();

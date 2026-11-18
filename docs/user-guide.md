@@ -382,11 +382,14 @@ GeForce and TITAN cards need driver 580 or newer. Check the driver with `nvidia-
 
 ## Software requirements
 
-- Linux on x86_64 or ARM64 with glibc 2.30 or newer, for example Ubuntu 20.04+ or Debian 11+.
+- Linux on x86_64 or ARM64 with glibc 2.30 or newer, for example Ubuntu 20.04+ or Debian 11+, or a Mac with Apple Silicon and macOS 14+.
+- `curl` and `openssl` to install (as root, the installer adds `openssl` and CA certificates when they are missing). Goethe brings its own nginx; the Python environment comes with the first model you install.
 - Disk space for your models, plus about 2 GB for Goethe itself and about 8 GB more for SGLang, which installs once, with the first model that needs it.
 - No CUDA toolkit: Goethe brings its own CUDA runtime and compiler.
 
-The installer checks the machine first and installs missing pieces, such as a C++ compiler or the NVIDIA driver, after asking. `GOETHE_INSTALL_DEPS=1` and `GOETHE_INSTALL_DRIVER=1` answer yes in advance, `=0` no. Inside a container it never touches the driver, which belongs to the host. A GPU problem never stops the install; `goethe doctor` names the fix afterwards:
+`GOETHE_VERSION=0.3.3` (or `bash -s -- --version 0.3.3`) installs one release instead of the newest. Running the installer again repairs or upgrades an install.
+
+The installer changes nothing outside Goethe's folder except the links to `goethe` and `goethed` (and, after asking, a PATH line in your shell's startup file). When the machine needs a driver or compiler fix, it runs `goethe doctor --fix`, which asks before each change; run it yourself any time. `GOETHE_INSTALL_DRIVER=1` and `GOETHE_INSTALL_DEPS=1` answer yes in advance, `=0` no. Inside a container it never touches the driver, which belongs to the host. A GPU problem never stops the install; `goethe doctor` names the fix afterwards:
 
 | What `goethe doctor` finds | Fix it names |
 |---|---|

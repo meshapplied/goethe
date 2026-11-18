@@ -8,7 +8,6 @@ OUT="${ROOT}/dist/cdn/bin/darwin-aarch64"
 WORK="${WORK:-${ROOT}/target/macos-build}"
 export MACOSX_DEPLOYMENT_TARGET=14.0
 
-# shellcheck source=nginx_versions.sh
 . "${ROOT}/packaging/nginx_versions.sh"
 
 if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
