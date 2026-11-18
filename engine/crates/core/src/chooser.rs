@@ -128,10 +128,8 @@ pub fn engine_args(m: &MemorySpec, ctx: u64, max_conc: u64) -> Vec<String> {
 }
 
 pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
-    // Per GPU: sharded weights, the KV pools SGLang builds, state, overhead.
-    // marlin_extra_gb is not added to steady weights: budgeting a full second Marlin copy refused
-    // NVFP4 models that fit and run on MarlinSmall GPUs (e.g. 27B NVFP4 on a 32 GB card) once ctx/conc shrink.
-    let _ = (cc, input.marlin_extra_gb);
+    // Per GPU: sharded weights (plus the Marlin copy where cc keeps one), the KV pools SGLang builds, state, overhead.
+    let marlin = if gpu_arch::nvfp4_dual_copy(cc) { input.marlin_extra_gb } else { 0.0 };
     let tokens = kv_tokens(input.ctx, input.max_conc) as f64;
     let conc = input.max_conc.max(1);
     let request_table = ((conc + 1) * (input.ctx + 4) * 4) as f64 / GIB;
@@ -139,7 +137,7 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
     let Some(m) = &input.memory else {
         let shard = kv_shard(tp, input.num_kv_heads, &input.attention);
         return Need {
-            weights: input.static_vram_gb / tp as f64,
+            weights: (input.static_vram_gb + marlin) / tp as f64,
             kv: tokens * input.kv_bytes_per_token as f64 / GIB / shard,
             window: conc as f64 * input.window_gb_per_request / shard,
             overhead: oh,
@@ -150,7 +148,7 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
     let swa_tokens = (m.swa_tokens(conc) as f64).min(tokens);
     let slots = if m.state_bytes_per_slot > 0 { state_slots(m, conc) + 1 } else { 0 };
     Need {
-        weights: (input.static_vram_gb - m.static_state_bytes as f64 / GIB).max(0.0) / tp as f64,
+        weights: ((input.static_vram_gb - m.static_state_bytes as f64 / GIB).max(0.0) + marlin) / tp as f64,
         kv: tokens * (m.kv_bytes_for(cc) as f64 / split(m.kv_heads) + m.kv_replicated_bytes_per_token as f64) / GIB,
         window: swa_tokens * m.swa_bytes_per_token as f64 / split(m.swa_heads) / GIB,
         state: ((slots as f64 * m.state_bytes_per_slot as f64 + ((conc + 1) * m.spec_state_bytes_per_request) as f64)
@@ -544,17 +542,17 @@ mod tests {
     }
 
     #[test]
-    fn marlin_extra_does_not_inflate_steady_weights() {
-        // A scanned Marlin copy must not push a model that fits after ctx/conc shrink over the refuse line.
+    fn the_marlin_copy_is_budgeted_only_where_the_architecture_keeps_one() {
         let mut m = inp();
-        m.marlin_extra_gb = 8.0;
-        assert_eq!(need(&m, 2, "12.0").weights, need(&m, 2, "10.0").weights);
-        assert_eq!(need(&m, 1, "12.0").weights, m.static_vram_gb);
+        m.marlin_extra_gb = 4.0;
+        assert_eq!(need(&m, 2, "12.0").weights, 12.0);
+        assert_eq!(need(&m, 2, "10.0").weights, 10.0);
+        assert_eq!(need(&m, 2, "9.0").weights, 10.0);
     }
 
     #[test]
-    fn auto_shrink_places_when_full_ctx_does_not() {
-        // ~23 GB NVFP4 + overhead on a 32 GB card: full 256k ctx refuses; shrink must find a plan.
+    fn auto_shrink_places_nvfp4_with_marlin_on_a_32gb_card() {
+        // Disk ~23 GB + Marlin copy ~7.85 GB on a 5090: full ctx refuses; shrink must still place.
         let mut m = inp();
         m.static_vram_gb = 23.0;
         m.ctx = 262_144;
@@ -571,6 +569,7 @@ mod tests {
         assert_eq!(plan.tp, 1);
         assert!(plan.ctx < m.ctx, "ctx reduced: {}", plan.ctx);
         assert!(plan.ctx >= SHRINK_CTX_FLOOR, "{}", plan.ctx);
+        assert!(plan.max_conc <= m.max_conc);
     }
 
     #[test]

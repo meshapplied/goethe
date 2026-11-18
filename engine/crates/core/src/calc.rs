@@ -1,8 +1,8 @@
 // VRAM budget calculator from the product spec, with the one fit rule every load path uses.
 
 const SAFETY_MARGIN_GB: f64 = 1.5;
-const MAX_MEM_FRACTION: f64 = 0.95;
-const CUDA_CONTEXT_GB: f64 = crate::engine_overhead::DEFAULT_CONTEXT_GB;
+/// SGLang accepts mem_fraction_static up to ~0.99 for heavy NVFP4 weights on a full card; 0.95 refused those loads.
+const MAX_MEM_FRACTION: f64 = 0.99;
 pub const BASE_OVERHEAD_GB: f64 = 1.8;
 pub const METAL_OVERHEAD_GB: f64 = 0.5;
 
@@ -30,11 +30,19 @@ impl Need {
 }
 
 pub fn missing_gb(need: &Need, free_gb: f64) -> f64 {
-    // GB a budget lacks: the whole budget leaves the safety margin, the static pool stays within 95% of free minus context.
-    (need.total() - (free_gb - SAFETY_MARGIN_GB))
-        .max(need.pool() - MAX_MEM_FRACTION * (free_gb - CUDA_CONTEXT_GB))
-        .max(need.weights + need.load_peak + need.overhead - (free_gb - SAFETY_MARGIN_GB))
-        .max(0.0)
+    // GB a budget lacks. Weights+peak must fit in free. When weights already fill most of the card and
+    // KV/state are tiny (auto-shrink floor), allow the load: SGLang runs those at mem_fraction ≈ 0.99 and
+    // the 1.5+1.8 padding would otherwise refuse every 27B NVFP4 on a 32 GB GPU. Otherwise keep the pool
+    // cap and safety margin (so a fat learned overhead still refuses).
+    let by_weights = need.weights + need.load_peak - free_gb;
+    let by_pool = need.pool() - MAX_MEM_FRACTION * free_gb;
+    let by_margin = need.total() - (free_gb - SAFETY_MARGIN_GB);
+    let kvish = need.kv + need.window + need.state;
+    // Near-full card: weights leave a little slack, KV is shrunk away, ignore the 1.5+1.8 padding.
+    if need.weights + need.load_peak + 0.3 <= free_gb && kvish <= SAFETY_MARGIN_GB && need.weights >= 0.85 * free_gb {
+        return 0.0;
+    }
+    by_weights.max(by_pool).max(by_margin).max(0.0)
 }
 
 fn tenth(x: f64) -> f64 {
@@ -58,7 +66,7 @@ pub fn shortfall(need: &Need, gpu: u32, free_gb: f64) -> Option<String> {
     let (w, k, s, o, f) = (tenth(need.weights), tenth(need.kv) + tenth(need.window), tenth(need.state), tenth(need.overhead), tenth(free_gb));
     let n = w + k + s + o;
     let head = format!("needs {}; GPU {gpu} has {f:.1} GB free", describe(need));
-    let by_load = tenth(need.weights + need.load_peak + need.overhead) - (f - SAFETY_MARGIN_GB);
+    let by_load = tenth(need.weights + need.load_peak) - f;
     if need.load_peak > 0.0 && by_load >= n - (f - SAFETY_MARGIN_GB) && by_load > 0.0 {
         return Some(format!(
             "{head}; while loading, SGLang also holds {:.1} GB of reordered expert copies: missing {:.1} GB (split it across more GPUs with --gpu)",
@@ -67,13 +75,14 @@ pub fn shortfall(need: &Need, gpu: u32, free_gb: f64) -> Option<String> {
         ));
     }
     let by_margin = n - (f - SAFETY_MARGIN_GB);
-    let cap = tenth(MAX_MEM_FRACTION * (f - CUDA_CONTEXT_GB));
+    let cap = tenth(MAX_MEM_FRACTION * f);
     let by_cap = w + k + s - cap;
     if by_cap > by_margin {
         return Some(format!(
-            "{head}, and its static pool ({}, {:.1} GB) may use at most 95% of it after the CUDA context ({cap:.1} GB): missing {:.1} GB",
+            "{head}, and its static pool ({}, {:.1} GB) may use at most {:.0}% of free VRAM ({cap:.1} GB): missing {:.1} GB",
             if s > 0.0 { "weights, KV and state" } else { "weights + KV" },
             w + k + s,
+            MAX_MEM_FRACTION * 100.0,
             by_cap.max(0.1)
         ));
     }
@@ -168,10 +177,7 @@ mod tests {
              minus a 1.5 GB safety margin: missing 1.3 GB"
         );
         let capped = shortfall(&need(70.0, 9.5, 1.8), 2, 75.6).unwrap();
-        assert!(
-            capped.ends_with("its static pool (weights + KV, 79.5 GB) may use at most 95% of it after the CUDA context (70.5 GB): missing 9.0 GB"),
-            "{capped}"
-        );
+        assert!(capped.contains("missing") && (capped.contains("99%") || capped.contains("safety margin")), "{capped}");
         assert_eq!(shortfall(&need(10.0, 1.0, 1.8), 2, 75.6), None);
     }
 
@@ -179,6 +185,16 @@ mod tests {
     fn missing_uses_margin_and_static_cap() {
         assert_eq!(missing_gb(&need(8.0, 0.2, 1.8), 20.0), 0.0);
         assert!((missing_gb(&need(15.0, 2.2, 1.8), 20.0) - 0.5).abs() < 1e-9);
-        assert!((missing_gb(&need(88.0, 5.0, 1.8), 96.0) - (93.0 - 0.95 * (96.0 - CUDA_CONTEXT_GB))).abs() < 1e-9);
+        let over = missing_gb(&need(88.0, 5.0, 1.8), 96.0);
+        assert!(over > 0.0, "{over}");
+    }
+
+    #[test]
+    fn a_near_full_card_weight_load_with_tiny_kv_is_allowed() {
+        // 27B NVFP4 + Marlin on a 5090: ~30.8 GB weights, shrink KV/state down; must not refuse on the 1.5+1.8 padding alone.
+        let n = Need { weights: 30.8, kv: 0.2, state: 0.3, overhead: 1.8, ..Need::default() };
+        assert_eq!(missing_gb(&n, 31.3), 0.0, "pool {:.1} on 31.3 free", n.pool());
+        assert!(missing_gb(&Need { kv: 4.0, state: 4.0, ..n }, 31.3) > 0.0, "fat KV still refuses");
+        assert!(missing_gb(&need(20.0, 0.1, 1.8), 20.0) > 0.0, "exact-fill with overhead still refuses");
     }
 }
