@@ -38,10 +38,21 @@ pub fn run() -> Result<(), String> {
     }
 }
 
+#[cfg_attr(target_os = "macos", allow(unreachable_code, unused_mut))]
 fn readiness() -> (Vec<String>, Vec<String>) {
     // What stops this machine from serving (driver, GPUs that did not start, no supported GPU) and what only limits it.
     let mut blocking = Vec::new();
     let mut notes = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        let g = crate::apple::gpu(&[]);
+        let total = crate::sys::memory().total_kb / 1024;
+        let (status, text) = crate::doctor::mac_hardware_note(&g.name, crate::apple::apple_silicon(), &crate::apple::macos_version(), g.vram_total_mb, g.vram_free_mb, total);
+        if status == "FAIL" {
+            blocking.push(text);
+        }
+        return (blocking, notes);
+    }
     let probe = crate::nvidia_driver::probe();
     if let Some(why) = crate::nvidia_driver::diagnose(&probe) {
         blocking.push(why);

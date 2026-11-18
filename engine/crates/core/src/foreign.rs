@@ -48,8 +48,15 @@ fn device_procs(dev: &Device) -> Vec<(i32, u64)> {
     out
 }
 
+#[cfg_attr(target_os = "macos", allow(unreachable_code))]
 pub fn snapshot() -> Result<Vec<GpuLive>, String> {
     // One pass over every GPU: name, compute capability, live free VRAM (unified memory aware) and its processes.
+    #[cfg(target_os = "macos")]
+    {
+        // macOS shows no per-process GPU use, so a Mac's one GPU lists no processes.
+        let g = crate::apple::gpu(&[]);
+        return Ok(vec![GpuLive { index: 0, name: g.name, compute_capability: g.compute_capability, free_mb: g.vram_free_mb, procs: Vec::new() }]);
+    }
     let nvml = crate::nvidia_driver::nvml()?;
     let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
     let mut out = Vec::new();
