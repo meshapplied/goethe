@@ -19,25 +19,45 @@ jobs:
     timeout-minutes: 5
     outputs:
       rust: ${{ steps.flags.outputs.rust }}
+      e2e: ${{ steps.flags.outputs.e2e }}
       python: ${{ steps.flags.outputs.python }}
+      ninfer: ${{ steps.flags.outputs.ninfer }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: What the pull request touches (anything else than a pull request runs everything)
+      - name: What the pull request touches (push/schedule/dispatch runs everything)
         id: flags
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          rust=true python=true
+          # Three buckets, nothing fancier: unit/clippy, heavy e2e, python package, ninfer patches.
+          rust=true e2e=true python=true ninfer=true
           if [[ -n "${BASE}" ]]; then
-            files="$(git diff --name-only "${BASE}" HEAD)"
-            grep -qE '^(engine/|\.github/)' <<<"${files}" || rust=false
-            grep -qE '^(goethe/|tests/|pyproject|requirements|\.github/)' <<<"${files}" || python=false
+            rust=false e2e=false python=false ninfer=false
+            while IFS= read -r f; do
+              [[ -z "$f" ]] && continue
+              case "$f" in
+                .github/*)
+                  rust=true; e2e=true; python=true; ninfer=true ;;
+                engine/tests/*|engine/pyenv/*|engine/cdn/*|engine/packaging/*)
+                  rust=true; e2e=true ;;
+                engine/crates/*|engine/Cargo.toml|engine/Cargo.lock|engine/rust-toolchain*)
+                  rust=true ;;
+                nvfp4-kernels/*)
+                  ninfer=true ;;
+                goethe/*|tests/*|pyproject*|requirements*)
+                  python=true ;;
+              esac
+            done <<<"$(git diff --name-only "${BASE}" HEAD)"
           fi
-          echo "rust=${rust}" >>"${GITHUB_OUTPUT}"
-          echo "python=${python}" >>"${GITHUB_OUTPUT}"
-          echo "rust=${rust} python=${python}"
+          {
+            echo "rust=${rust}"
+            echo "e2e=${e2e}"
+            echo "python=${python}"
+            echo "ninfer=${ninfer}"
+          } >>"${GITHUB_OUTPUT}"
+          echo "rust=${rust} e2e=${e2e} python=${python} ninfer=${ninfer}"
 
   python:
     needs: changes
@@ -102,6 +122,8 @@ jobs:
           echo "no AI co-author lines in ${BASE:0:7}..${HEAD:0:7}"
 
   ninfer-patch:
+    needs: changes
+    if: ${{ needs.changes.outputs.ninfer == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -162,7 +184,7 @@ jobs:
 
   fresh-user:
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -184,7 +206,7 @@ jobs:
 
   user-paths:
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -243,7 +265,12 @@ jobs:
             .changes.outputs as $f
             | to_entries[]
             | select(.value.result != "success")
-            | select((.value.result == "skipped" and ((.key == "python" and $f.python != "true") or (.key | IN("engine-test", "engine-clippy", "fresh-user", "user-paths") and $f.rust != "true"))) | not)
+            | select((.value.result == "skipped" and (
+                (.key == "python" and $f.python != "true")
+                or (.key == "ninfer-patch" and $f.ninfer != "true")
+                or (.key | IN("engine-test", "engine-clippy") and $f.rust != "true")
+                or (.key | IN("fresh-user", "user-paths") and $f.e2e != "true")
+              )) | not)
             | "\(.key): \(.value.result)"' <<<"$NEEDS")
           [ -z "$bad" ] || { echo "$bad"; exit 1; }
 
