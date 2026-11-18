@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -37,34 +38,13 @@ impl Identity {
     }
 }
 
-struct Stat {
-    state: char,
-    ppid: i32,
-    start_ticks: u64,
-}
-
 pub fn boot_id() -> &'static str {
     static BOOT: OnceLock<String> = OnceLock::new();
-    BOOT.get_or_init(|| {
-        std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default()
-    })
+    BOOT.get_or_init(crate::sys::boot_id)
 }
 
-fn read_stat(pid: i32) -> Option<Stat> {
-    // Parse state, ppid and start time (fields 3, 4 and 22) of /proc/<pid>/stat.
-    if pid <= 0 {
-        return None;
-    }
-    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rest = text.get(text.rfind(')')? + 2..)?;
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-    Some(Stat {
-        state: fields.first()?.chars().next()?,
-        ppid: fields.get(1)?.parse().ok()?,
-        start_ticks: fields.get(19)?.parse().ok()?,
-    })
+fn read_stat(pid: i32) -> Option<crate::sys::ProcStat> {
+    crate::sys::stat(pid)
 }
 
 pub fn start_ticks(pid: i32) -> Option<u64> {
@@ -76,7 +56,7 @@ pub fn ppid(pid: i32) -> Option<i32> {
 }
 
 pub fn capture(instance_id: &str, pid: i32) -> Option<Identity> {
-    // Record the identity of a just-spawned leader; None when /proc cannot vouch for it.
+    // Record the identity of a just-spawned leader; None when the process table cannot vouch for it.
     let start_ticks = start_ticks(pid)?;
     if boot_id().is_empty() {
         return None;
@@ -98,12 +78,8 @@ pub fn leader_matches(id: &Identity) -> bool {
 }
 
 pub fn instance_tag(pid: i32) -> Option<String> {
-    // Value of GOETHE_INSTANCE_ID in /proc/<pid>/environ, when the process carries one.
-    let data = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
-    let prefix = format!("{INSTANCE_ENV}=");
-    data.split(|b| *b == 0)
-        .find_map(|kv| kv.strip_prefix(prefix.as_bytes()))
-        .map(|v| String::from_utf8_lossy(v).into_owned())
+    // Value of GOETHE_INSTANCE_ID in the process environment, when the process carries one.
+    crate::sys::environ_var(pid, INSTANCE_ENV)
 }
 
 fn safe_target(pid: i32) -> bool {
@@ -111,11 +87,20 @@ fn safe_target(pid: i32) -> bool {
 }
 
 enum Pin {
+    #[cfg(target_os = "linux")]
     Fd(OwnedFd),
     Unsupported,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Refused,
 }
 
+#[cfg(not(target_os = "linux"))]
+fn pin(_pid: i32) -> Pin {
+    // No pidfd here: the leader identity check (boot session and start time) guards every signal instead.
+    Pin::Unsupported
+}
+
+#[cfg(target_os = "linux")]
 fn pin(pid: i32) -> Pin {
     // Pin the process with a pidfd so a recycled pid is never hit; plain pids only where pidfd_open does not exist.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
@@ -143,6 +128,7 @@ pub fn signal(id: &Identity, pid: i32, sig: i32) -> bool {
         return false;
     }
     match pinned {
+        #[cfg(target_os = "linux")]
         Pin::Fd(fd) => {
             let rc = unsafe {
                 libc::syscall(
@@ -174,6 +160,7 @@ fn reap_leader(id: &Identity) {
     }
     let mut status = 0;
     match pinned {
+        #[cfg(target_os = "linux")]
         Pin::Fd(fd) => unsafe {
             let mut info: libc::siginfo_t = std::mem::zeroed();
             libc::waitid(libc::P_PIDFD, fd.as_raw_fd() as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG);
@@ -190,15 +177,9 @@ pub fn leader_alive(id: &Identity) -> bool {
 }
 
 fn tagged(instance_ids: &HashSet<String>) -> HashMap<String, Vec<(i32, u64)>> {
-    // One /proc pass collecting every process tagged with one of these instance ids.
+    // One pass over the process list collecting every process tagged with one of these instance ids.
     let mut out: HashMap<String, Vec<(i32, u64)>> = HashMap::new();
-    let Ok(rd) = std::fs::read_dir("/proc") else {
-        return out;
-    };
-    for ent in rd.flatten() {
-        let Some(pid) = ent.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else {
-            continue;
-        };
+    for pid in crate::sys::pids() {
         let Some(tag) = instance_tag(pid).filter(|t| instance_ids.contains(t)) else {
             continue;
         };

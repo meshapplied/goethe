@@ -261,6 +261,9 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         no_verify: opts.no_verify,
         only: None,
     };
+    if cfg!(target_os = "macos") && entry.as_ref().is_some_and(|e| e.effective_runtime() == "ternary") {
+        return Err(format!("{} runs on NVIDIA GPUs only; on a Mac goethe serves GGUF models with llama.cpp", opts.model_id));
+    }
     if let Some(e) = entry.as_ref().filter(|e| e.effective_runtime() == "ternary") {
         crate::runtime::require_ternary_runtime(home)?;
         let pack = e.pack_id.as_deref().ok_or("ternary registry entry has no pack_id")?;
@@ -381,6 +384,11 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     let built = crate::packs::catalog(home).map(|ix| crate::packs::built_for(&ix, &opts.model_id)).unwrap_or_default();
     pack_only_gate(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)) && opts.quant.is_none(), declined, no_pack_gpu.as_deref(), &built)?;
     let gguf = engine_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), (declined, no_pack_gpu.as_deref()), opts.quant.as_deref())?;
+    if gguf.is_none() && !cfg!(target_os = "macos") {
+        if let crate::host_compiler::Verdict::Unusable(why) = crate::host_compiler::verdict(crate::host_compiler::find().as_ref(), &crate::nvidia_driver::probe().distro) {
+            eprintln!("note: SGLang builds GPU kernels when this model first loads: {why}");
+        }
+    }
     if !hf::offline_mode() {
         if let Ok(pre) = hf::preflight_model(&opts.model_id, dl.revision.as_deref()) {
             let bytes = match &gguf {
@@ -393,7 +401,12 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 (_, true) => "its kernel pack does not run on this GPU",
                 _ => "none for this model on this GPU",
             };
-            confirm(opts, &format!("{} ({fmt}, {:.1} GB) with {engine} (no kernel pack: {why})", opts.model_id, bytes as f64 / GIB))?;
+            let line = if cfg!(target_os = "macos") {
+                format!("{} ({fmt}, {:.1} GB) with llama.cpp on Metal", opts.model_id, bytes as f64 / GIB)
+            } else {
+                format!("{} ({fmt}, {:.1} GB) with {engine} (no kernel pack: {why})", opts.model_id, bytes as f64 / GIB)
+            };
+            confirm(opts, &line)?;
         }
     }
     fetch_weights(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf.clone(), ..dl })?;
@@ -674,6 +687,76 @@ fn ask_login(offer: &crate::packs::Offer, opts: &InstallOpts) -> Result<bool, St
     Ok(a.to_ascii_lowercase().starts_with('y'))
 }
 
+const GIB_MB: f64 = 1024.0;
+
+pub fn gguf_need_mb(bytes: u64) -> u64 {
+    // Weights plus room for a modest context and llama.cpp's buffers: what a GGUF needs to load on the GPU.
+    let mb = bytes / (1024 * 1024);
+    mb + mb / 7 + 512
+}
+
+pub fn pick_fitting(sizes: &[(String, u64)], quant: Option<&str>, limit_mb: u64) -> Result<Vec<String>, String> {
+    // The quant asked for, else the first of Q4_K_M, Q4_0, MXFP4, Q8_0 that fits, else the largest that fits (splits count together).
+    let names: Vec<&str> = sizes.iter().map(|(n, _)| n.as_str()).collect();
+    let bytes = |files: &[String]| files.iter().filter_map(|f| sizes.iter().find(|(n, _)| n == f)).map(|(_, b)| *b).sum::<u64>();
+    let fits = |files: &[String]| gguf_need_mb(bytes(files)) <= limit_mb;
+    let gb = |mb: u64| mb as f64 / GIB_MB;
+    if let Some(q) = quant {
+        let files = crate::engines::llama_cpp::pick_gguf(&names, Some(q))?;
+        if !fits(&files) {
+            return Err(format!("{q} needs about {:.1} GB and this Mac lets the GPU use {:.1} GB; pick a smaller quant", gb(gguf_need_mb(bytes(&files))), gb(limit_mb)));
+        }
+        return Ok(files);
+    }
+    for q in ["Q4_K_M", "Q4_0", "MXFP4", "Q8_0"] {
+        if let Ok(files) = crate::engines::llama_cpp::pick_gguf(&names, Some(q)) {
+            if !files.is_empty() && fits(&files) {
+                return Ok(files);
+            }
+        }
+    }
+    let mut options: Vec<Vec<String>> = Vec::new();
+    for n in names.iter().filter(|n| crate::engines::llama_cpp::is_model_gguf(n) && !n.contains("-0000") || n.contains("-00001-of-")) {
+        if let Ok(files) = crate::engines::llama_cpp::pick_gguf(&names, Some(n.trim_end_matches(".gguf"))) {
+            if !options.contains(&files) {
+                options.push(files);
+            }
+        }
+    }
+    options.sort_by_key(|f| std::cmp::Reverse(bytes(f)));
+    if let Some(best) = options.iter().find(|f| fits(f)) {
+        return Ok(best.clone());
+    }
+    let smallest = options.iter().map(|f| gguf_need_mb(bytes(f))).min().unwrap_or(0);
+    Err(format!("its smallest GGUF needs about {:.1} GB and this Mac lets the GPU use {:.1} GB", gb(smallest), gb(limit_mb)))
+}
+
+fn gguf_suggestion(model_id: &str) -> Option<String> {
+    // A GGUF repo of the same model on Hugging Face, the most downloaded first.
+    let name = model_id.rsplit('/').next()?.trim_end_matches("-Instruct").to_string();
+    let url = format!("{}/api/models?search={}&filter=gguf&sort=downloads&limit=1", hf::hf_endpoint(), name.replace(' ', "%20"));
+    let body = crate::net::agent().get(&url).call().ok()?.into_string().ok()?;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).ok()?;
+    rows.first()?.get("id")?.as_str().map(str::to_string)
+}
+
+fn mac_gguf(home: &Path, model_id: &str, revision: &str, quant: Option<&str>) -> Result<Vec<String>, String> {
+    // On a Mac, before any download: the repo must ship GGUF files, and the quant must fit the unified memory macOS lets the GPU use.
+    if hf::offline_mode() {
+        return Err(format!("{model_id}: HF_HUB_OFFLINE=1, so goethe cannot see which GGUF files it has"));
+    }
+    let pre = hf::preflight_model(model_id, Some(revision))?;
+    let sizes: Vec<(String, u64)> = pre.siblings.iter().filter(|s| s.rfilename.ends_with(".gguf")).map(|s| (s.rfilename.clone(), s.size)).collect();
+    if !sizes.iter().any(|(n, _)| crate::engines::llama_cpp::is_model_gguf(n)) {
+        let hint = gguf_suggestion(model_id).map(|g| format!(" A GGUF version: goethe install {g}")).unwrap_or_else(|| " Look for a GGUF version of it on Hugging Face.".to_string());
+        return Err(format!("{model_id} has no GGUF files. On a Mac goethe serves GGUF models with llama.cpp.{hint}"));
+    }
+    let limit = crate::hw::profile(home).ok().and_then(|h| h.gpus.first().map(|g| g.vram_total_mb)).unwrap_or(u64::MAX);
+    let files = pick_fitting(&sizes, quant, limit).map_err(|e| format!("{model_id} does not fit: {e}"))?;
+    crate::engines::llama_cpp::server_ready(home).map_err(|why| format!("{model_id}: {why}"))?;
+    Ok(files)
+}
+
 fn engine_check(
     home: &Path,
     model_id: &str,
@@ -683,6 +766,9 @@ fn engine_check(
     quant: Option<&str>,
 ) -> Result<Option<Vec<String>>, String> {
     // Before any download: SGLang must serve the model's architecture and quantization (catalog entries are vetted); a GGUF-only repo, or a :quant, gets llama.cpp and the files to fetch. A model with no plain runtime and no pack for this GPU is refused with the GPUs its packs are built for.
+    if cfg!(target_os = "macos") {
+        return mac_gguf(home, model_id, revision.unwrap_or("main"), quant).map(Some);
+    }
     if (entry.is_some() && quant.is_none()) || hf::offline_mode() {
         return Ok(None);
     }
@@ -1923,6 +2009,32 @@ fn print_reply_text(reply: &crate::rpc::RpcReply) {
 mod tests {
     use super::*;
 
+    fn ggufs(v: &[(&str, u64)]) -> Vec<(String, u64)> {
+        v.iter().map(|(n, b)| (n.to_string(), *b)).collect()
+    }
+
+    #[test]
+    fn a_mac_gets_the_preferred_quant_when_it_fits_else_the_largest_that_does() {
+        const G: u64 = 1 << 30;
+        let repo = ggufs(&[("m-Q2_K.gguf", 3 * G), ("m-Q4_K_M.gguf", 5 * G), ("m-Q8_0.gguf", 8 * G), ("m-F16.gguf", 15 * G)]);
+        assert_eq!(pick_fitting(&repo, None, 16 * 1024).unwrap(), ["m-Q4_K_M.gguf"], "Q4_K_M fits a 16 GB limit");
+        assert_eq!(pick_fitting(&repo, None, 5 * 1024).unwrap(), ["m-Q2_K.gguf"], "else the largest that fits");
+        assert_eq!(pick_fitting(&repo, Some("Q8_0"), 16 * 1024).unwrap(), ["m-Q8_0.gguf"]);
+        let err = pick_fitting(&repo, Some("F16"), 10 * 1024).unwrap_err();
+        assert!(err.contains("F16 needs about") && err.contains("10.0 GB"), "{err}");
+        let err = pick_fitting(&repo, None, 2 * 1024).unwrap_err();
+        assert!(err.contains("smallest GGUF needs about 3.9 GB"), "{err}");
+        let split = ggufs(&[("big-Q4_K_M-00001-of-00002.gguf", 30 * G), ("big-Q4_K_M-00002-of-00002.gguf", 30 * G), ("big-Q2_K.gguf", 25 * G)]);
+        assert_eq!(pick_fitting(&split, None, 48 * 1024).unwrap(), ["big-Q2_K.gguf"], "split files count together");
+        assert_eq!(pick_fitting(&split, None, 96 * 1024).unwrap().len(), 2);
+        assert_eq!(gguf_need_mb(7 * G), 7 * 1024 + 1024 + 512);
+        let gemma = ggufs(&[("g-BF16.gguf", 9 * G), ("g-Q4_0.gguf", 3 * G), ("g-Q8_0.gguf", 5 * G), ("mtp-g-Q4_0.gguf", G / 16)]);
+        assert_eq!(pick_fitting(&gemma, None, 16 * 1024).unwrap(), ["g-Q4_0.gguf"], "Q4_0 before Q8_0, never the drafter");
+        let oss = ggufs(&[("gpt-oss-20b-MXFP4.gguf", 11 * G), ("eagle3-gpt-oss-20b-Q8_0.gguf", G)]);
+        assert_eq!(pick_fitting(&oss, None, 16 * 1024).unwrap(), ["gpt-oss-20b-MXFP4.gguf"]);
+        assert!(pick_fitting(&oss, None, 8 * 1024).is_err(), "the eagle3 drafter is not a model");
+    }
+
     fn gguf_home(server: bool) -> (tempfile::TempDir, PathBuf) {
         // A GOETHE_HOME with a GGUF-only model dir, and llama-server installed when asked.
         let home = tempfile::tempdir().unwrap();
@@ -2383,7 +2495,8 @@ mod tests {
         fs::write(first.card_dir.join(CARD_FILE), format!("model_id = \"x/y\"\nsource_dir = \"{}\"\n", a.path().display())).unwrap();
         let clash = InstallOpts { model_id: b.path().display().to_string(), name: Some("x__y".into()), ..Default::default() };
         assert!(install_local(home.path(), &clash).err().unwrap().contains("would share it"));
-        assert!(fs::read_link(first.card_dir.join("m-Q8_0.gguf")).unwrap().starts_with(a.path()), "the first install still points at its own folder");
+        let own = fs::read_link(first.card_dir.join("m-Q8_0.gguf")).unwrap();
+        assert!(own.starts_with(a.path()) || own.starts_with(a.path().canonicalize().unwrap()), "the first install still points at its own folder");
         assert!(install_local(home.path(), &InstallOpts { name: Some("x/y".into()), ..clash }).is_ok(), "the same id reinstalls");
     }
 

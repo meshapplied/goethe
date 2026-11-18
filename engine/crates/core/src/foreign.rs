@@ -6,7 +6,6 @@ use nvml_wrapper::enums::device::UsedGpuMemory;
 use nvml_wrapper::Device;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::os::unix::fs::MetadataExt;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,8 +48,15 @@ fn device_procs(dev: &Device) -> Vec<(i32, u64)> {
     out
 }
 
+#[cfg_attr(target_os = "macos", allow(unreachable_code))]
 pub fn snapshot() -> Result<Vec<GpuLive>, String> {
     // One pass over every GPU: name, compute capability, live free VRAM (unified memory aware) and its processes.
+    #[cfg(target_os = "macos")]
+    {
+        // macOS shows no per-process GPU use, so a Mac's one GPU lists no processes.
+        let g = crate::apple::gpu(&[]);
+        return Ok(vec![GpuLive { index: 0, name: g.name, compute_capability: g.compute_capability, free_mb: g.vram_free_mb, procs: Vec::new() }]);
+    }
     let nvml = crate::nvidia_driver::nvml()?;
     let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
     let mut out = Vec::new();
@@ -90,16 +96,14 @@ fn user_name(uid: u32) -> String {
 }
 
 pub fn process_owner(pid: i32) -> (String, String, Option<u32>) {
-    // Command name, owning user name and uid of a process from /proc ("unknown" when it is gone or hidden).
-    let argv0 = std::fs::read(format!("/proc/{pid}/cmdline")).ok().and_then(|raw| {
-        let first = raw.split(|b| *b == 0).next().map(|a| String::from_utf8_lossy(a).into_owned())?;
+    // Command name, owning user name and uid of a process from the process table ("unknown" when it is gone or hidden).
+    let argv0 = crate::sys::argv(pid).and_then(|argv| {
+        let first = argv.into_iter().next()?;
         let base = first.split_whitespace().next()?.rsplit('/').next()?.to_string();
         (!base.is_empty()).then(|| base.chars().take(32).collect::<String>())
     });
-    let name = argv0
-        .or_else(|| std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|s| s.trim().to_string()))
-        .unwrap_or_else(|| "unknown".to_string());
-    let uid = std::fs::metadata(format!("/proc/{pid}")).map(|m| m.uid()).ok();
+    let name = argv0.or_else(|| crate::sys::comm(pid)).unwrap_or_else(|| "unknown".to_string());
+    let uid = crate::sys::uid(pid);
     (name, uid.map(user_name).unwrap_or_else(|| "unknown".to_string()), uid)
 }
 
@@ -224,8 +228,8 @@ mod tests {
         // exec sets the name before the new environment is mapped, so wait until sleep's environment is readable too.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
-            let named = std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "sleep");
-            if named && std::fs::read(format!("/proc/{pid}/environ")).is_ok_and(|e| !e.is_empty()) {
+            let named = crate::sys::comm(pid as i32).is_some_and(|c| c == "sleep");
+            if named && crate::sys::environ(pid as i32).is_some_and(|e| !e.is_empty()) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -254,10 +258,10 @@ mod tests {
         assert!(
             is_ours(pid as i32, &none, &live),
             "tagged child {pid}: comm={:?} tag={:?} environ_readable={} alive={}",
-            std::fs::read_to_string(format!("/proc/{pid}/comm")).ok(),
+            crate::sys::comm(pid as i32),
             proc_ident::instance_tag(pid as i32),
-            std::fs::read(format!("/proc/{pid}/environ")).is_ok(),
-            std::path::Path::new(&format!("/proc/{pid}")).exists()
+            crate::sys::environ(pid as i32).is_some(),
+            crate::sys::exists(pid as i32)
         );
         assert!(!is_ours(tagged.id() as i32, &none, &HashSet::from(["inst-dead".to_string()])));
         assert!(!is_ours(plain.id() as i32, &none, &live));

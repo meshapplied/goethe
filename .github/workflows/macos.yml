@@ -1,0 +1,57 @@
+# macOS (Apple Silicon): unit tests, clippy, the macOS package build (goethe, goethed, nginx) and the end-to-end test.
+name: macos
+
+on:
+  push:
+    branches: [mac-support, "mac/**"]
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - "engine/crates/**"
+      - "engine/cdn/install.sh"
+      - "engine/packaging/build_macos.sh"
+      - "engine/tests/macos_e2e.sh"
+      - "engine/llama-cpp/PIN"
+      - ".github/workflows/macos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        working-directory: engine
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+      - name: Unit tests
+        working-directory: engine
+        run: cargo test --workspace --locked
+      - name: Clippy
+        working-directory: engine
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
+      - name: Build the macOS package
+        run: bash engine/packaging/build_macos.sh
+      - name: End to end
+        run: bash engine/tests/macos_e2e.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: darwin-aarch64
+          path: engine/dist/cdn/bin/darwin-aarch64
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snapshot-mac
+          path: engine/dist/snapshot-mac.json
+          if-no-files-found: ignore
+          retention-days: 7

@@ -78,9 +78,10 @@ pub fn spawn_mux() -> Result<tokio::task::JoinHandle<()>, String> {
     })?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let listener = TcpListener::from_std(listener).map_err(|e| e.to_string())?;
-    let public = std::net::TcpListener::bind(SocketAddr::from((public_share::PUBLIC_MUX_IP, port)))
+    let public_addr = public_share::public_mux_addr(port);
+    let public = std::net::TcpListener::bind(public_addr)
         .and_then(|l| l.set_nonblocking(true).map(|()| l))
-        .map_err(|e| eprintln!("goethe mux: public gateway listener on {}:{port} unavailable ({e})", public_share::PUBLIC_MUX_IP))
+        .map_err(|e| eprintln!("goethe mux: public gateway listener on {public_addr} unavailable ({e})"))
         .ok()
         .and_then(|l| TcpListener::from_std(l).ok());
     let max_body = nginx::persist_max_body_mb(&home) as usize * 1024 * 1024;
@@ -951,9 +952,7 @@ fn request_id(headers: &HeaderMap) -> String {
     }
     let prefix = PREFIX.get_or_init(|| {
         let mut b = [0u8; 8];
-        unsafe {
-            libc::getrandom(b.as_mut_ptr().cast(), b.len(), 0);
-        }
+        goethe_core::sys::random_bytes(&mut b);
         b.iter().fold(String::from("req-"), |mut s, x| {
             let _ = write!(s, "{x:02x}");
             s

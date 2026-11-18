@@ -663,13 +663,7 @@ fn wait_engine_ready(s: &Starting) -> Startup {
 
 fn tree_cpu_ticks(pids: &[i32]) -> u64 {
     // CPU time of the engine's processes and their reaped children: kernel builds show up here while the log is quiet.
-    pids.iter()
-        .filter_map(|p| std::fs::read_to_string(format!("/proc/{p}/stat")).ok())
-        .map(|stat| {
-            let fields: Vec<&str> = stat.rsplit_once(')').map_or("", |(_, rest)| rest).split_whitespace().collect();
-            (11..=14).filter_map(|i| fields.get(i)?.parse::<u64>().ok()).sum::<u64>()
-        })
-        .sum()
+    pids.iter().filter_map(|p| crate::sys::cpu_ticks(*p)).sum()
 }
 
 fn learn_overhead(s: &Starting) {
@@ -1835,7 +1829,7 @@ mod tests {
             let (mut stale, stale_ticks) = sleeper();
             let (mut squat, squat_ticks) = sleeper();
             insert_running(con, "i-good", me.pid, me.start_ticks, port);
-            insert_running(con, "i-stale", stale.id() as i32, stale_ticks + 9, port + 1);
+            insert_running(con, "i-stale", stale.id() as i32, stale_ticks + 9, 1);
             insert_running(con, "i-squat", squat.id() as i32, squat_ticks, squatted);
             let stale_id = Identity {
                 instance_id: "i-orphan".to_string(),

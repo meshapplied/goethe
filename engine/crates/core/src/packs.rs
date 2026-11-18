@@ -343,6 +343,9 @@ pub fn platform_base(home: &Path) -> Result<String, String> {
 
 pub fn catalog(home: &Path) -> Option<Vec<u8>> {
     // The platform's public pack index (unverified bytes), revalidated with its ETag and cached under packs/catalog. Only decides what to offer: everything installed is verified by goethe-engine against the signed index again. None when the platform is unreachable and nothing is cached; a failure is remembered for a few minutes.
+    if cfg!(target_os = "macos") {
+        return None;
+    }
     let dir = home.join("packs").join("catalog");
     let (body, etag, miss) = (dir.join("index.json"), dir.join("etag"), dir.join("miss"));
     let cached = || std::fs::read(&body).ok();

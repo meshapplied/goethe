@@ -136,7 +136,7 @@ pub fn require(home: &Path, layer: Layer, model_id: &str) -> Result<(), String> 
         return Ok(());
     }
     match layer {
-        Layer::Base => Err("the Python environment is missing: run the installer again".to_string()),
+        Layer::Base => Err(format!("the Python environment is not set up yet: run goethe install {model_id} to set it up")),
         Layer::Engine => Err(format!(
             "{model_id} runs on goethe-engine {ENGINE_VERSION}, which is not installed: run goethe install {model_id} to install it"
         )),

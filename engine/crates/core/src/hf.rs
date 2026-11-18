@@ -279,7 +279,13 @@ pub fn ensure_model(home: &Path, model_id: &str, local_dir: &Path, opts: &Downlo
     disk_preflight(home, bytes_needed(&files, local_dir))?;
     let existed = local_dir.exists();
     fs::create_dir_all(local_dir).map_err(|e| format!("{}: {e}", local_dir.display()))?;
-    if let Err(e) = download_with_retries(home, model_id, local_dir, &revision, &excludes, bytes_missing(&files, local_dir)) {
+    let fetched = if native_download() {
+        native_with_retries(model_id, local_dir, &revision, &files)
+    } else {
+        crate::pyenv::ensure(home, crate::pyenv::Layer::Base)
+            .and_then(|_| download_with_retries(home, model_id, local_dir, &revision, &excludes, bytes_missing(&files, local_dir)))
+    };
+    if let Err(e) = fetched {
         drop_empty_new_dir(local_dir, existed);
         return Err(e);
     }
@@ -360,6 +366,115 @@ pub fn disk_preflight(home: &Path, needed: u64) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+pub fn native_download() -> bool {
+    // goethe's own downloader: always on macOS (no Python there), on Linux only when GOETHE_NATIVE_DOWNLOAD=1.
+    cfg!(target_os = "macos") || std::env::var("GOETHE_NATIVE_DOWNLOAD").is_ok_and(|v| v == "1")
+}
+
+static FETCHED: AtomicU64 = AtomicU64::new(0);
+
+pub fn resolve_url(model_id: &str, revision: &str, file: &str) -> String {
+    let path: Vec<String> = file.split('/').map(|p| p.replace('%', "%25").replace(' ', "%20").replace('#', "%23").replace('?', "%3F")).collect();
+    format!("{}/{model_id}/resolve/{revision}/{}", hf_endpoint(), path.join("/"))
+}
+
+fn native_with_retries(model_id: &str, local_dir: &Path, revision: &str, files: &[&HfSibling]) -> Result<(), String> {
+    // Each missing file over HTTPS, resumed where a partial download stopped; three tries with growing waits.
+    let missing: Vec<&HfSibling> = files.iter().copied().filter(|f| fs::metadata(local_dir.join(&f.rfilename)).map(|m| m.len()).ok() != Some(f.size)).collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let total: u64 = missing.iter().map(|f| f.size).sum();
+    let base = FETCHED.load(Ordering::Relaxed);
+    let have: u64 = missing.iter().map(|f| fs::metadata(partial(local_dir, &f.rfilename)).map(|m| m.len()).unwrap_or(0)).sum();
+    let _ticker = (total >= 64 << 20).then(|| {
+        let done = move || have + FETCHED.load(Ordering::Relaxed).saturating_sub(base);
+        crate::progress::Ticker::start("downloading", Some(total), crate::progress::every(), done, crate::progress::eprint_line)
+    });
+    for f in missing {
+        let mut last = String::new();
+        for (i, delay) in [2u64, 5, 10].iter().enumerate() {
+            match fetch_file(model_id, local_dir, revision, f) {
+                Ok(()) => {
+                    last.clear();
+                    break;
+                }
+                Err(e) if is_auth_error(&e) => return Err(e),
+                Err(e) => {
+                    last = e;
+                    if i < 2 {
+                        thread::sleep(Duration::from_secs(*delay));
+                    }
+                }
+            }
+        }
+        if !last.is_empty() {
+            return Err(last);
+        }
+    }
+    Ok(())
+}
+
+fn partial(dir: &Path, file: &str) -> std::path::PathBuf {
+    let name = Path::new(file).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    dir.join(Path::new(file).parent().unwrap_or(Path::new(""))).join(format!(".{name}.part"))
+}
+
+fn fetch_file(model_id: &str, dir: &Path, revision: &str, f: &HfSibling) -> Result<(), String> {
+    // One file into a hidden .part beside it, appended from where it stopped (Range), renamed when complete.
+    use std::io::Write;
+    let dest = dir.join(&f.rfilename);
+    let part = partial(dir, &f.rfilename);
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let mut start = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+    if start > f.size {
+        let _ = fs::remove_file(&part);
+        start = 0;
+    }
+    if start < f.size || f.size == 0 {
+        let url = resolve_url(model_id, revision, &f.rfilename);
+        let agent = crate::net::agent_builder().timeout_connect(Duration::from_secs(20)).timeout_read(Duration::from_secs(60)).build();
+        let mut req = agent.get(&url);
+        if let Some(t) = token() {
+            req = req.set("Authorization", &format!("Bearer {t}"));
+        }
+        if start > 0 {
+            req = req.set("Range", &format!("bytes={start}-"));
+        }
+        let resp = match req.call() {
+            Ok(r) => r,
+            Err(ureq::Error::Status(401 | 403, _)) => return Err(format!("{model_id}: {}", crate::messages::GATED)),
+            Err(ureq::Error::Status(416, _)) if start == f.size => return finish(&part, &dest),
+            Err(ureq::Error::Status(code, _)) => return Err(format!("{}: HTTP {code} from Hugging Face", f.rfilename)),
+            Err(e) => return Err(format!("cannot reach huggingface.co (network or proxy): {e}")),
+        };
+        let resumed = resp.status() == 206;
+        let mut out = fs::OpenOptions::new().create(true).append(resumed).write(true).truncate(!resumed).open(&part).map_err(|e| format!("{}: {e}", part.display()))?;
+        let mut src = crate::progress::Counted(resp.into_reader());
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            let n = std::io::Read::read(&mut src, &mut buf).map_err(|e| format!("{}: download stopped: {e}", f.rfilename))?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&buf[..n]).map_err(|e| format!("{}: {e}", part.display()))?;
+            FETCHED.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        out.flush().map_err(|e| e.to_string())?;
+    }
+    let got = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+    if f.size > 0 && got != f.size {
+        return Err(format!("{}: got {got} of {} bytes", f.rfilename, f.size));
+    }
+    finish(&part, &dest)
+}
+
+fn finish(part: &Path, dest: &Path) -> Result<(), String> {
+    fs::rename(part, dest).map_err(|e| format!("{}: {e}", dest.display()))
 }
 
 fn download_with_retries(home: &Path, model_id: &str, local_dir: &Path, revision: &str, excludes: &[String], total: u64) -> Result<(), String> {
@@ -463,6 +578,7 @@ fn run_guarded(cmd: &mut Command) -> std::io::Result<(ExitStatus, Vec<u8>)> {
     // The downloader in its own process group, killed with goethe: SIGINT and SIGTERM stop the group, a SIGKILL of goethe stops the child (parent-death signal). Its stderr is shown live up to a Python traceback, which is kept for one line instead.
     cmd.stderr(Stdio::piped()).stdout(Stdio::null()).stdin(Stdio::null());
     cmd.process_group(0);
+    #[cfg(target_os = "linux")]
     unsafe {
         cmd.pre_exec(|| {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);

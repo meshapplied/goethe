@@ -2,6 +2,7 @@
 
 use crate::host::{self, EnvironmentInfo, HostInfo};
 use crate::paths::{ensure_layout, goethe_home};
+#[cfg(target_os = "linux")]
 use nvml_wrapper::enum_wrappers::device::TopologyLevel;
 use nvml_wrapper::enums::device::UsedGpuMemory;
 use nvml_wrapper::Nvml;
@@ -63,8 +64,14 @@ pub struct LinkState {
     pub topo: String,
 }
 
+#[cfg_attr(target_os = "macos", allow(unreachable_code))]
 pub fn profile(home: &Path) -> Result<HardwareState, String> {
     // Probe every GPU and pair over NVML (a GPU that does not answer is listed as unavailable), then the host.
+    #[cfg(target_os = "macos")]
+    {
+        ensure_layout(home).map_err(|e| format!("layout: {e}"))?;
+        return Ok(crate::apple::profile(home, &[]));
+    }
     ensure_layout(home).map_err(|e| format!("layout: {e}"))?;
     let nvml = crate::nvidia_driver::nvml()?;
     let driver = nvml.sys_driver_version().map_err(|e| format!("driver version: {e}"))?;
@@ -167,9 +174,12 @@ fn fake_unified_enabled() -> bool {
 }
 
 fn host_unified_mem_mb() -> Result<(u64, u64, u64), String> {
-    let text = std::fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
-    let m = host::parse_meminfo(&text);
-    Ok((m.total_mb, m.total_mb.saturating_sub(m.available_mb), m.available_mb))
+    let m = crate::sys::memory();
+    if m.total_kb == 0 {
+        return Err("host memory unreadable".to_string());
+    }
+    let (total, avail) = (m.total_kb / 1024, m.available_kb / 1024);
+    Ok((total, total.saturating_sub(avail), avail))
 }
 
 pub fn memory_from_nvml_or_unified(
@@ -247,8 +257,14 @@ pub struct GpuPlacementSnapshot {
     pub free_vram_mb: u64,
 }
 
+#[cfg_attr(target_os = "macos", allow(unreachable_code))]
 pub fn list_gpus_for_placement(managed: &HashSet<i32>) -> Result<Vec<GpuPlacementSnapshot>, String> {
     // Free memory (after the unified-memory reserve) and foreign-process presence per GPU.
+    #[cfg(target_os = "macos")]
+    {
+        let g = crate::apple::gpu(&mac_managed(managed));
+        return Ok(vec![GpuPlacementSnapshot { index: 0, foreign_compute: false, free_vram_mb: g.vram_free_mb }]);
+    }
     let nvml = crate::nvidia_driver::nvml()?;
     let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
     let mut out = Vec::new();
@@ -269,6 +285,14 @@ pub fn list_gpus_for_placement(managed: &HashSet<i32>) -> Result<Vec<GpuPlacemen
     Ok(out)
 }
 
+#[cfg(target_os = "macos")]
+fn mac_managed(managed: &HashSet<i32>) -> Vec<(i32, u64)> {
+    // goethe's engine processes with their memory footprint in MB (Metal memory included).
+    let mut out: Vec<(i32, u64)> = managed.iter().filter_map(|&p| crate::sys::footprint_bytes(p).map(|b| (p, b / (1024 * 1024)))).collect();
+    out.sort_unstable();
+    out
+}
+
 pub struct LiveGpu {
     pub index: u32,
     pub uuid: String,
@@ -276,8 +300,14 @@ pub struct LiveGpu {
     pub pids: Vec<i32>,
 }
 
+#[cfg_attr(target_os = "macos", allow(unreachable_code))]
 pub fn live_gpus() -> Result<Vec<LiveGpu>, String> {
     // Live free VRAM (after the unified-memory reserve), uuid and process ids per GPU.
+    #[cfg(target_os = "macos")]
+    {
+        let g = crate::apple::gpu(&[]);
+        return Ok(vec![LiveGpu { index: 0, uuid: g.uuid, free_mb: g.vram_free_mb, pids: Vec::new() }]);
+    }
     let nvml = crate::nvidia_driver::nvml()?;
     let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
     let mut out = Vec::new();
@@ -311,8 +341,23 @@ pub struct GpuUsage {
     pub memory_util: Option<u32>,
 }
 
+#[cfg_attr(target_os = "macos", allow(unreachable_code))]
 pub fn gpu_usage(managed: &HashSet<i32>) -> Result<Vec<GpuUsage>, String> {
     // One NVML session: used and goethe-owned VRAM, process ids with ownership, and memory bandwidth use per GPU.
+    #[cfg(target_os = "macos")]
+    {
+        // The GPU's memory in use and busy %, and goethe's own engines by their footprint; other apps' GPU use is not listed per process.
+        let ours = mac_managed(managed);
+        let accel = crate::apple::accel();
+        let managed_mb: u64 = ours.iter().map(|(_, mb)| mb).sum();
+        return Ok(vec![GpuUsage {
+            index: 0,
+            used_mb: accel.in_use_mb.max(managed_mb),
+            managed_mb,
+            processes: ours.iter().map(|(p, _)| (*p as u32, true)).collect(),
+            memory_util: accel.busy_pct,
+        }]);
+    }
     let nvml = crate::nvidia_driver::nvml()?;
     let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
     let mut out = Vec::new();
@@ -343,8 +388,14 @@ pub fn gpu_usage(managed: &HashSet<i32>) -> Result<Vec<GpuUsage>, String> {
     Ok(out)
 }
 
+#[cfg_attr(target_os = "macos", allow(unreachable_code))]
 pub fn managed_vram_listed_mb(gpu_index: u32, managed: &HashSet<i32>) -> Result<u64, String> {
     // VRAM NVML attributes to goethe-managed PIDs on one GPU.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = gpu_index;
+        return Ok(mac_managed(managed).iter().map(|(_, mb)| mb).sum());
+    }
     let nvml = crate::nvidia_driver::nvml()?;
     let dev = nvml.device_by_index(gpu_index).map_err(|e| format!("device {gpu_index}: {e}"))?;
     let mut sum = 0u64;
@@ -364,18 +415,41 @@ pub fn managed_vram_listed_mb(gpu_index: u32, managed: &HashSet<i32>) -> Result<
     Ok(sum)
 }
 
+#[cfg_attr(target_os = "macos", allow(unreachable_code))]
 pub fn gpu_free_mb_live(gpu_index: u32) -> Result<u64, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = gpu_index;
+        return Ok(crate::apple::gpu(&[]).vram_free_mb);
+    }
     let nvml = crate::nvidia_driver::nvml()?;
     let dev = nvml.device_by_index(gpu_index).map_err(|e| format!("device {gpu_index}: {e}"))?;
     let (_, _, free, unified) = device_memory(&dev)?;
     Ok(if unified { free.saturating_sub(UNIFIED_OS_RESERVE_GB * 1024) } else { free })
 }
 
+#[cfg_attr(target_os = "macos", allow(unreachable_code))]
 pub fn refresh_gpu_vram(gpu_index: u32) -> Result<(u64, u64, u64, Vec<RunningProcess>), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = gpu_index;
+        let g = crate::apple::gpu(&[]);
+        return Ok((g.vram_total_mb, g.vram_used_mb, g.vram_free_mb, g.running_processes));
+    }
     let nvml = crate::nvidia_driver::nvml()?;
     let dev = nvml.device_by_index(gpu_index).map_err(|e| format!("device {gpu_index}: {e}"))?;
     let (total, used, free, unified) = device_memory(&dev)?;
     Ok((total, used, free, compute_processes(&dev, unified)?))
+}
+
+#[cfg(target_os = "linux")]
+fn common_ancestor(a: &nvml_wrapper::Device, b: nvml_wrapper::Device) -> Result<String, String> {
+    a.topology_common_ancestor(b).map(|level| topology_level_label(level).to_string()).map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn common_ancestor(_: &nvml_wrapper::Device, _: nvml_wrapper::Device) -> Result<String, String> {
+    Err("no NVIDIA topology on this system".to_string())
 }
 
 fn classify_link(nvml: &Nvml, a: u32, b: u32) -> Result<LinkState, String> {
@@ -386,10 +460,7 @@ fn classify_link(nvml: &Nvml, a: u32, b: u32) -> Result<LinkState, String> {
     let topo = if nvlinks > 0 {
         format!("NV{nvlinks}")
     } else {
-        match dev_a.topology_common_ancestor(dev_b) {
-            Ok(level) => topology_level_label(level).to_string(),
-            Err(e) => return Err(format!("topology {a}-{b}: {e}")),
-        }
+        common_ancestor(&dev_a, dev_b).map_err(|e| format!("topology {a}-{b}: {e}"))?
     };
     Ok(LinkState {
         a,
@@ -399,6 +470,7 @@ fn classify_link(nvml: &Nvml, a: u32, b: u32) -> Result<LinkState, String> {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn topology_level_label(level: TopologyLevel) -> &'static str {
     match level {
         TopologyLevel::Internal | TopologyLevel::Single => "PIX",
@@ -489,21 +561,30 @@ fn gb(mb: u64) -> String {
 }
 
 fn gpu_table(gpus: &[GpuState]) -> crate::term::Table {
-    // One row per GPU: name with SM, NUMA and unified memory below it, VRAM and PCIe; processes are in goethe gpu.
-    let mut table = crate::term::Table::new(&["GPU", "NAME", "VRAM TOTAL", "VRAM FREE", "PCIE"]);
+    // One row per GPU: name with its architecture, NUMA and unified memory below it, memory, and PCIe when the GPU has a link.
+    let word = crate::gpu_kind::host_memory_word(gpus).to_uppercase();
+    let pcie = gpus.iter().any(crate::gpu_kind::has_pcie);
+    let (total, free) = (format!("{word} TOTAL"), format!("{word} FREE"));
+    let mut head = vec!["GPU", "NAME", total.as_str(), free.as_str()];
+    if pcie {
+        head.push("PCIE");
+    }
+    let mut table = crate::term::Table::new(&head);
     for gpu in gpus {
-        let mut notes = vec![format!("SM {}", gpu.compute_capability)];
+        let mut notes: Vec<String> = crate::gpu_kind::arch_label(&gpu.compute_capability).into_iter().collect();
         notes.extend(gpu.numa_node.map(|n| format!("NUMA {n}")));
-        if gpu.unified_memory {
+        if crate::gpu_kind::is_unified(gpu) {
             notes.push("unified memory".to_string());
         }
-        table.row(vec![
-            format!("gpu{}", gpu.index),
-            format!("{}\n{}", gpu.name, notes.join(", ")),
-            gb(gpu.vram_total_mb),
-            gb(gpu.vram_free_mb),
-            format!("PCIe {} x{}", gpu.pcie_gen_max.max(gpu.pcie_gen), gpu.pcie_width_max.max(gpu.pcie_width)),
-        ]);
+        let mut row = vec![format!("gpu{}", gpu.index), format!("{}\n{}", gpu.name, notes.join(", ")), gb(gpu.vram_total_mb), gb(gpu.vram_free_mb)];
+        if pcie {
+            row.push(if crate::gpu_kind::has_pcie(gpu) {
+                format!("PCIe {} x{}", gpu.pcie_gen_max.max(gpu.pcie_gen), gpu.pcie_width_max.max(gpu.pcie_width))
+            } else {
+                "-".to_string()
+            });
+        }
+        table.row(row);
     }
     table
 }
@@ -511,7 +592,8 @@ fn gpu_table(gpus: &[GpuState]) -> crate::term::Table {
 fn print_summary(state: &HardwareState) {
     // GPUs, then host and environment lines; links and processes stay in the JSON.
     println!("Goethe hardware profile at {}", state.profiled_at);
-    println!("Driver: {}", state.driver);
+    let metal = state.gpus.iter().any(|g| crate::gpu_kind::Backend::of(&g.compute_capability) == crate::gpu_kind::Backend::Metal);
+    println!("{}: {}", if metal { "System" } else { "Driver" }, state.driver);
     gpu_table(&state.gpus).print();
     if let (Some(h), Some(e)) = (&state.host, &state.environment) {
         let home = crate::paths::goethe_home();

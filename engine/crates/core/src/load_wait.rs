@@ -183,6 +183,9 @@ fn likely_cause(engine: &[String]) -> Option<String> {
             "the GPU ran out of memory; free memory on it, lower --ctx or --max-conc, or split the model across more GPUs with --gpu".into()
         });
     }
+    if has(&["kIOGPUCommandBufferCallbackErrorOutOfMemory", "ggml_metal_buffer_init: error", "failed to allocate Metal buffer"]) || (has(&["ggml_metal"]) && has(&["failed to allocate"])) {
+        return Some("the Mac ran out of GPU memory; quit some apps, or lower --ctx or --max-conc".into());
+    }
     if has(&["no kernel image is available"]) {
         return Some("the engine has no kernels for this GPU's architecture; goethe doctor lists the supported ones".into());
     }
@@ -213,6 +216,8 @@ mod tests {
         assert!(likely_cause(&lines(&["RuntimeError: CUDA error: no kernel image is available for execution"])).unwrap().contains("architecture"));
         assert!(likely_cause(&lines(&["Error building extension 'x'", "ninja: build stopped"])).unwrap().contains("kernel build failed"));
         assert!(likely_cause(&lines(&["error -- unsupported GNU version! gcc versions later than 15"])).is_some());
+        let metal = likely_cause(&lines(&["ggml_metal_init: allocating", "llama_kv_cache: failed to allocate buffer for kv cache", "ggml_metal_buffer_init: error: failed to allocate buffer"])).unwrap();
+        assert!(metal.contains("Mac ran out of GPU memory") && !metal.contains("NVIDIA") && !metal.contains("CUDA"), "{metal}");
         assert_eq!(likely_cause(&lines(&["Traceback", "ValueError: bad config"])), None);
     }
 

@@ -1,0 +1,58 @@
+# The curl | bash install in a Rocky 9 VM (SELinux, systemd, sudo's PATH): root and user installs, reinstall, upgrade, tampering, pinning, uninstall.
+name: installer
+
+on:
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - "engine/cdn/install.sh"
+      - "engine/crates/core/src/setup.rs"
+      - "engine/crates/core/src/fix.rs"
+      - "engine/crates/core/src/fix_driver.sh"
+      - "engine/crates/core/src/update.rs"
+      - "engine/crates/core/src/service.rs"
+      - "engine/crates/core/src/nginx.rs"
+      - "engine/crates/core/src/release_key.rs"
+      - "engine/packaging/build_nginx_linux.sh"
+      - "engine/packaging/nginx_versions.sh"
+      - "engine/tests/vm/**"
+      - ".github/workflows/installer.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/goethe-build
+          key: portable-${{ hashFiles('engine/Cargo.lock', 'engine/rust-toolchain.toml') }}
+          restore-keys: portable-
+      - uses: actions/cache@v4
+        id: nginx
+        with:
+          path: engine/dist/cdn/bin/linux-x86_64/nginx
+          key: nginx-linux-${{ hashFiles('engine/packaging/nginx_versions.sh', 'engine/packaging/build_nginx_linux.sh') }}
+      - uses: actions/cache@v4
+        with:
+          path: engine/tests/vm/.work/images
+          key: vm-images-rocky9-v1
+      - name: Portable goethe and goethed with the test release key
+        run: GOETHE_CARGO_FEATURES=goethe/test-release-key bash engine/packaging/build_bin.sh
+      - name: goethe's nginx
+        if: steps.nginx.outputs.cache-hit != 'true'
+        run: bash engine/packaging/build_nginx_linux.sh
+      - name: Rocky 9 VM
+        run: DISTROS=rocky bash engine/tests/vm/run.sh
+      - name: VM console on failure
+        if: failure()
+        run: tail -n 60 engine/tests/vm/.work/console-rocky.log engine/tests/vm/.work/result-rocky.log 2>/dev/null || true

@@ -176,6 +176,9 @@ for a in "${ARCH_LIST[@]}"; do
   GOETHE_ARCH="${a}" "${ROOT}/packaging/build_bin.sh"
   cp "${ROOT}/target-portable/${a}-unknown-linux-gnu/release/goethe" \
     "${ROOT}/target-portable/${a}-unknown-linux-gnu/release/goethed" "${DIST}/bin/linux-${a}/"
+  if [[ "${a}" == "$(uname -m)" ]]; then
+    "${ROOT}/packaging/build_nginx_linux.sh"
+  fi
 done
 
 cp "${ROOT}/cdn/goethed.service" "${DIST}/goethed.service"

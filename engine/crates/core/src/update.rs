@@ -18,10 +18,10 @@ pub struct UpdateOpts {
     pub allow_downgrade: bool,
 }
 
-struct Staged {
-    rel: String,
-    part: PathBuf,
-    dest: PathBuf,
+pub(crate) struct Staged {
+    pub(crate) rel: String,
+    pub(crate) part: PathBuf,
+    pub(crate) dest: PathBuf,
 }
 
 pub fn run(opts: UpdateOpts) -> Result<(), String> {
@@ -48,7 +48,7 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     if let Some(note) = &kept {
         println!("{note}");
     }
-    let (sglang, engine) = if opts.engine { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
+    let (sglang, engine) = if opts.engine && !cfg!(target_os = "macos") { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
     let ternary = if opts.ternary { ternary_delta(home, &sums) } else { None };
     let local_commit = option_env!("GOETHE_GIT_COMMIT").unwrap_or("unknown");
     let remote_commit = fetch_verified(pkg, &sums, "BUILDINFO", tmp)
@@ -75,7 +75,7 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     crate::host::confirm(&question, opts.yes)?;
     let mut staged = Vec::new();
     for bin in ["goethe", "goethed"].into_iter().filter(|_| bins) {
-        let rel = format!("bin/linux-{arch}/{bin}");
+        let rel = format!("bin/{}/{bin}", platform_dir(&arch));
         staged.push(stage(pkg, &sums, &rel, tmp, &home.join("bin").join(bin))?);
     }
     let differs = |what: &str| pending.iter().any(|(w, d)| *w == what && d.differs);
@@ -134,7 +134,7 @@ fn binaries_due(order: Ordering, opts: &UpdateOpts, local: &str, remote: &str, d
 fn binaries_differ(home: &Path, sums: &Path, arch: &str) -> Result<bool, String> {
     // Another build at the same version: the installed bin/goethe or bin/goethed differs from the signed entry.
     for bin in ["goethe", "goethed"] {
-        let want = lookup_sum(sums, &format!("bin/linux-{arch}/{bin}"))?;
+        let want = lookup_sum(sums, &format!("bin/{}/{bin}", platform_dir(arch)))?;
         if sha256_file(&home.join("bin").join(bin)).ok().as_deref() != Some(want.as_str()) {
             return Ok(true);
         }
@@ -198,7 +198,7 @@ impl Delta {
 fn pyenv_deltas(home: &Path, base: &str, sums: &Path, tmp: &Path) -> Result<(Option<Delta>, Option<Delta>), String> {
     // The py-env layers that are present, against what is published; an absent layer is never installed here.
     if !pyenv::has(home, Layer::Base) {
-        println!("no Python environment at {}; run the installer", home.join("py-env").display());
+        println!("no Python environment yet; goethe install sets it up when a model needs it");
         return Ok((None, None));
     }
     let sglang = if pyenv::has(home, Layer::Sglang) { Some(engine_delta(home, base, sums, tmp)?) } else { None };
@@ -292,6 +292,11 @@ pub fn compare_versions(a: &str, b: &str) -> Ordering {
     })
 }
 
+pub fn platform_dir(arch: &str) -> String {
+    // The package folder of this system's binaries: darwin-aarch64 on a Mac, linux-<arch> elsewhere.
+    if cfg!(target_os = "macos") { format!("darwin-{arch}") } else { format!("linux-{arch}") }
+}
+
 pub(crate) fn normalize_arch() -> String {
     let raw = std::env::var("GOETHE_ARCH")
         .ok()
@@ -321,8 +326,18 @@ fn fetch_pkg_file(base: &str, rel: &str, dest: &Path) -> Result<(), String> {
 }
 
 fn fetch_pkg_file_max(base: &str, rel: &str, dest: &Path, max: u64, idle: Duration) -> Result<(), String> {
-    // GET one CDN file into dest, streamed (never held in memory) and refused past `max` bytes; it fails when the host goes quiet for `idle`, never for being slow. GOETHE_PKG_TOKEN goes as a bearer token when set.
+    // GET one CDN file into dest, streamed (never held in memory) and refused past `max` bytes; it fails when the host goes quiet for `idle`, never for being slow. GOETHE_PKG_TOKEN goes as a bearer token when set; a file:// package is read from disk.
     let url = format!("{base}/{rel}");
+    if let Some(path) = url.strip_prefix("file://") {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let len = fs::metadata(path).map_err(|e| format!("fetch {rel}: {path}: {e}"))?.len();
+        if len > max {
+            return Err(format!("fetch {rel}: the file is longer than {max} bytes; refused"));
+        }
+        return fs::copy(path, dest).map(|_| ()).map_err(|e| format!("fetch {rel}: {path}: {e}"));
+    }
     let mut req = crate::net::agent_builder().timeout_read(idle).build().get(&url);
     if let Some(tok) = crate::paths::setting("GOETHE_PKG_TOKEN") {
         req = req.set("Authorization", &format!("Bearer {}", tok.trim()));
@@ -376,7 +391,7 @@ pub(crate) fn fetch_verified(base: &str, sums: &Path, rel: &str, tmp: &Path) -> 
     Ok(part)
 }
 
-fn stage(base: &str, sums: &Path, rel: &str, tmp: &Path, dest: &Path) -> Result<Staged, String> {
+pub(crate) fn stage(base: &str, sums: &Path, rel: &str, tmp: &Path, dest: &Path) -> Result<Staged, String> {
     Ok(Staged {
         rel: rel.to_string(),
         part: fetch_verified(base, sums, rel, tmp)?,
@@ -384,7 +399,7 @@ fn stage(base: &str, sums: &Path, rel: &str, tmp: &Path, dest: &Path) -> Result<
     })
 }
 
-fn swap_all(staged: &[Staged]) -> Result<(), String> {
+pub(crate) fn swap_all(staged: &[Staged]) -> Result<(), String> {
     // Move every verified file into place, keeping .prev copies; roll back on the first failure.
     let mut done: Vec<&Staged> = Vec::new();
     for s in staged {
@@ -467,6 +482,12 @@ fn unpack_ternary(home: &Path, archive: &Path) -> Result<(), String> {
 fn restart_goethed(home: &Path) -> Result<(), String> {
     // Engines and the gateway carry over: stop the old goethed with keep_engines, then start the new one.
     let (before, kept) = crate::service::stop_keeping_engines()?;
+    start_upgraded(home, before, kept)
+}
+
+pub(crate) fn start_upgraded(home: &Path, before: usize, kept: usize) -> Result<(), String> {
+    // The new goethed after a keep-engines stop, by systemd when a unit starts it, then the engines it adopts.
+    crate::service::label_programs(home);
     match crate::service::systemctl_restart_args() {
         Some(args) => {
             let ok = Command::new("systemctl").args(&args).status().map_err(|e| e.to_string())?.success();
@@ -510,6 +531,17 @@ fn upgrade_summary(before: usize, kept: usize, running: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_package_is_read_from_disk() {
+        let t = tempfile::tempdir().unwrap();
+        fs::create_dir_all(t.path().join("cdn/bin")).unwrap();
+        fs::write(t.path().join("cdn/bin/x"), "hi").unwrap();
+        let base = format!("file://{}", t.path().join("cdn").display());
+        fetch_pkg_file(&base, "bin/x", &t.path().join("out/x")).unwrap();
+        assert_eq!(fs::read_to_string(t.path().join("out/x")).unwrap(), "hi");
+        assert!(fetch_pkg_file(&base, "missing", &t.path().join("out/y")).unwrap_err().contains("fetch missing"));
+    }
 
     #[test]
     fn a_response_past_the_cap_is_refused_and_not_kept() {
@@ -608,7 +640,8 @@ mod tests {
             sha256_file(&p).unwrap()
         };
         let sums = home.join("SHA256SUMS");
-        fs::write(&sums, format!("{}  bin/linux-x86_64/goethe\n{}  bin/linux-x86_64/goethed\n", sha(b"cli"), sha(b"daemon"))).unwrap();
+        let dir = platform_dir("x86_64");
+        fs::write(&sums, format!("{}  bin/{dir}/goethe\n{}  bin/{dir}/goethed\n", sha(b"cli"), sha(b"daemon"))).unwrap();
         assert!(!binaries_differ(home, &sums, "x86_64").unwrap());
         fs::write(home.join("bin/goethed"), b"older daemon").unwrap();
         assert!(binaries_differ(home, &sums, "x86_64").unwrap());

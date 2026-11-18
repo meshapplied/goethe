@@ -66,10 +66,11 @@ fn vram_bar(goethe_mb: u64, used_mb: u64, total_mb: u64) -> String {
 
 pub fn legend() -> String {
     format!(
-        "{} goethe models   \u{2588} other processes   {} free   {} memory bandwidth",
+        "{} goethe models   \u{2588} other processes   {} free   {} {}",
         sgr(&crate::theme::main(), "\u{2588}"),
         paint("\u{2591}", Color::Gray),
-        sgr(&crate::theme::secondary(), "\u{2588}")
+        sgr(&crate::theme::secondary(), "\u{2588}"),
+        if cfg!(target_os = "macos") { "GPU busy" } else { "memory bandwidth" }
     )
 }
 
@@ -123,6 +124,7 @@ pub struct Summary {
     pub environment: String,
     pub gpus: usize,
     pub vram_mb: u64,
+    pub memory_word: &'static str,
     pub disk_gb: Option<f64>,
     pub os: String,
 }
@@ -141,13 +143,23 @@ pub struct StatusView {
 }
 
 fn environment(home: &Path) -> String {
-    // Bare metal, a cloud VM (by provider) or a container, from the hardware profile.
+    // Bare metal, a cloud VM (by provider) or a container, from the hardware profile; a Mac says laptop or desktop.
+    if cfg!(target_os = "macos") {
+        return mac_environment();
+    }
     let env = crate::hw::load_hardware_state(home).ok().and_then(|h| h.environment);
     match env {
         Some(e) if e.container.is_some() => format!("container ({})", e.container.unwrap_or_default()),
         Some(e) if e.cloud != "none" && !e.cloud.is_empty() => format!("cloud VM ({})", e.cloud),
         _ => "bare metal".to_string(),
     }
+}
+
+fn mac_environment() -> String {
+    #[cfg(target_os = "macos")]
+    return crate::apple::environment_label(crate::apple::form_factor());
+    #[cfg(not(target_os = "macos"))]
+    String::new()
 }
 
 fn disk_gb(path: &Path) -> Option<f64> {
@@ -157,12 +169,7 @@ fn disk_gb(path: &Path) -> Option<f64> {
 }
 
 fn proc_stat() -> Option<(Vec<u64>, Vec<Vec<u64>>)> {
-    // The total and per-core jiffies from /proc/stat.
-    let text = std::fs::read_to_string("/proc/stat").ok()?;
-    let nums = |l: &str| l.split_whitespace().skip(1).filter_map(|v| v.parse().ok()).collect::<Vec<u64>>();
-    let total = nums(text.lines().next()?);
-    let cores = text.lines().skip(1).take_while(|l| l.starts_with("cpu")).map(nums).collect();
-    Some((total, cores))
+    crate::sys::cpu_times()
 }
 
 fn busy(before: &[u64], after: &[u64]) -> f64 {
@@ -182,9 +189,7 @@ pub fn meminfo(text: &str) -> Memory {
 }
 
 fn load() -> (f64, f64, f64) {
-    let text = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
-    let v: Vec<f64> = text.split_whitespace().take(3).filter_map(|x| x.parse().ok()).collect();
-    (v.first().copied().unwrap_or(0.0), v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0))
+    crate::sys::loadavg()
 }
 
 fn instance_of(pid: i32, models: &HashMap<i32, String>) -> Option<(i32, String)> {
@@ -201,7 +206,7 @@ fn instance_of(pid: i32, models: &HashMap<i32, String>) -> Option<(i32, String)>
 
 fn role(pid: i32) -> String {
     // What a child of an engine does, from its process title: sglang::scheduler_TP1 is "scheduler TP1".
-    let title = std::fs::read(format!("/proc/{pid}/cmdline")).ok().and_then(|b| b.split(|c| *c == 0).next().map(|a| String::from_utf8_lossy(a).into_owned())).unwrap_or_default();
+    let title = crate::sys::argv(pid).and_then(|a| a.into_iter().next()).unwrap_or_default();
     let name = title.rsplit("::").next().unwrap_or("").trim();
     if name.is_empty() || name.contains('/') { "worker".to_string() } else { name.replace('_', " ") }
 }
@@ -300,6 +305,7 @@ impl StatusView {
             environment: environment(&home),
             gpus: self.totals.len(),
             vram_mb: self.totals.values().sum(),
+            memory_word: hw.as_ref().map_or("VRAM", |h| crate::gpu_kind::host_memory_word(&h.gpus)),
             disk_gb: disk_gb(&home),
             os: hw.and_then(|h| h.host).map(|h| h.os.distro).unwrap_or_default(),
         };
@@ -314,7 +320,8 @@ impl StatusView {
             }
             self.stat = Some(now);
         }
-        self.memory = meminfo(&std::fs::read_to_string("/proc/meminfo").unwrap_or_default());
+        let m = crate::sys::memory();
+        self.memory = Memory { total_kb: m.total_kb, available_kb: m.available_kb, cached_kb: m.cached_kb };
     }
 }
 
@@ -329,14 +336,14 @@ pub fn width_for(terminal: usize) -> usize {
 }
 
 pub fn summary_line(s: &Summary, width: usize) -> String {
-    // Status, environment, GPUs, VRAM, disk and OS on one line; the last items give way when the terminal is narrow.
+    // Status, environment, GPUs, VRAM (GPU memory when unified), disk and OS on one line; the last items give way when the terminal is narrow.
     let state = if s.running { paint("running", Color::Green) } else { paint("stopped", Color::Red) };
     let label = |t: &str| paint(t, Color::Gray);
     let mut parts = vec![
         format!("{} {state}", blue("Status")),
         format!("{} {}", label("Environment"), s.environment),
         format!("{} {}", label("GPUs"), s.gpus),
-        format!("{} {}", label("VRAM"), gb(s.vram_mb)),
+        format!("{} {}", label(s.memory_word), gb(s.vram_mb)),
     ];
     if let Some(d) = s.disk_gb {
         parts.push(format!("{} {}", label("Disk"), size(d)));
@@ -390,7 +397,7 @@ pub fn gpu_lines(gpus: &[GpuLine], width: usize) -> Vec<String> {
         }
     }
     if gpus.is_empty() {
-        out.push(paint("no NVIDIA GPU found (goethe doctor says why)", Color::Gray));
+        out.push(paint("no GPU found (goethe doctor says why)", Color::Gray));
     }
     out
 }
@@ -486,7 +493,7 @@ mod tests {
 
     fn view() -> StatusView {
         StatusView {
-            summary: Summary { running: true, environment: "bare metal".into(), gpus: 2, vram_mb: 2 * 97_887, disk_gb: Some(6000.0), os: "Ubuntu 24.04.4 LTS".into() },
+            summary: Summary { running: true, environment: "bare metal".into(), gpus: 2, vram_mb: 2 * 97_887, memory_word: "VRAM", disk_gb: Some(6000.0), os: "Ubuntu 24.04.4 LTS".into() },
             gpus: vec![
                 GpuLine { index: 0, used_mb: 93_696, goethe_mb: 0, total_mb: 97_887, processes: vec![Proc::Foreign(3909)], denied: true, bandwidth: Some(7) },
                 GpuLine { index: 3, used_mb: 40_000, goethe_mb: 38_000, total_mb: 97_887, processes: vec![Proc::Model(3164098, "nvidia/Qwen3.8-27B-NVFP4".into()), Proc::Model(3164111, "nvidia/Qwen3.8-27B-NVFP4".into())], denied: false, bandwidth: Some(63) },
@@ -563,12 +570,18 @@ mod tests {
     }
 
     #[test]
+    fn a_unified_host_says_gpu_memory() {
+        let mac = Summary { memory_word: "GPU memory", environment: "macOS laptop".into(), gpus: 1, ..view().summary };
+        assert!(strip(&summary_line(&mac, 200)).contains("Environment macOS laptop   GPUs 1   GPU memory 191.2 GB"));
+    }
+
+    #[test]
     fn goethe_vram_is_its_own_part_of_the_bar_and_a_legend_ends_the_page() {
         assert_eq!(strip(&vram_bar(38_000, 40_000, 97_887)), "\u{2588}\u{2588}\u{2588}\u{2588}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}");
         assert_eq!(strip(&vram_bar(500, 50_000, 100_000)), "\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}", "a small share still gets a block");
         let t = plain(&render(&view(), 124));
         let last = t.iter().rposition(|l| !l.is_empty()).unwrap();
-        assert!(t[last].contains("goethe models") && t[last].contains("other processes") && t[last].contains("free") && t[last].contains("memory bandwidth"), "{}", t[last]);
+        assert!(t[last].contains("goethe models") && t[last].contains("other processes") && t[last].contains("free") && t[last].contains(if cfg!(target_os = "macos") { "GPU busy" } else { "memory bandwidth" }), "{}", t[last]);
         let g = plain(&gpu_render(&view(), 124));
         assert!(g.iter().any(|l| l.contains("gpu3")) && g.iter().any(|l| l.contains("other processes")) && !g.iter().any(|l| l.contains("CPU")));
     }

@@ -81,7 +81,7 @@ pub fn install_hint(distro: &str) -> String {
     } else {
         "install gcc and g++ from your distribution"
     };
-    format!("install one with {cmd} (or rerun the Goethe installer, which offers it)")
+    format!("install one with {cmd}")
 }
 
 pub fn engine_env(c: Option<&Compiler>, inherited_nvcc_flags: Option<&str>) -> Vec<(String, String)> {

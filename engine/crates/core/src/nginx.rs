@@ -503,7 +503,7 @@ fn write_configs(home: &Path, bin: &Path) -> Result<(), String> {
     write_private(&gateway, render_gateway_on(home, bin, bind)?.as_bytes())?;
     write_private(&dir.join("listen_ip"), format!("{bind}\n").as_bytes())?;
     let main_conf = format!(
-        "pid nginx.pid;\nerror_log logs/error.log warn;\n\
+        "{}pid nginx.pid;\nerror_log logs/error.log warn;\n\
          events {{ worker_connections 4096; }}\nhttp {{\n\
          client_body_temp_path logs/b;\n\
          proxy_temp_path logs/p;\n\
@@ -513,6 +513,7 @@ fn write_configs(home: &Path, bin: &Path) -> Result<(), String> {
          access_log logs/access.log;\n\
          map_hash_bucket_size 128;\n\
          include {};\n}}\n",
+        worker_user_line(unsafe { libc::geteuid() } == 0, nobody_group().as_deref()),
         quote(&gateway)
     );
     write_private(&dir.join("nginx.conf"), main_conf.as_bytes())?;
@@ -548,6 +549,51 @@ fn san_extension(names: &[String]) -> String {
     format!("subjectAltName={}", entries.join(","))
 }
 
+pub(crate) fn self_signed(key: &Path, crt: &Path, ec: bool, days: u32, cn: &str, extensions: &[&str]) -> Result<(), String> {
+    // A self-signed certificate from a config file, which OpenSSL and macOS's LibreSSL read alike; EC keys via ecparam.
+    let cfg = crt.with_extension("cnf");
+    let text = format!("[req]\nprompt = no\ndistinguished_name = dn\nx509_extensions = ext\n[dn]\nCN = {cn}\n[ext]\n{}\n", extensions.join("\n"));
+    fs::write(&cfg, text).map_err(|e| e.to_string())?;
+    let quiet = |c: &mut Command| c.stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    let mut req = Command::new("openssl");
+    req.args(["req", "-x509", "-config"]).arg(&cfg).args(["-days", &days.to_string(), "-nodes", "-out"]).arg(crt);
+    let made = if ec {
+        quiet(Command::new("openssl").args(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out"]).arg(key))
+            && quiet(req.arg("-key").arg(key))
+    } else {
+        quiet(req.args(["-newkey", "rsa:2048", "-keyout"]).arg(key))
+    };
+    let _ = fs::remove_file(&cfg);
+    if !made {
+        return Err("openssl could not create a self-signed certificate".to_string());
+    }
+    fs::set_permissions(key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())
+}
+
+fn nobody_group() -> Option<String> {
+    // The primary group of the nobody user by name: nogroup on Debian and Ubuntu, nobody on RHEL, Fedora and macOS.
+    let user = std::ffi::CString::new("nobody").ok()?;
+    let pw = unsafe { libc::getpwnam(user.as_ptr()) };
+    if pw.is_null() {
+        return None;
+    }
+    let gr = unsafe { libc::getgrgid((*pw).pw_gid) };
+    (!gr.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr((*gr).gr_name) }.to_string_lossy().into_owned())
+}
+
+fn worker_user_line(root: bool, group: Option<&str>) -> String {
+    // A root master hands its workers to nobody; naming the group keeps goethe's own nginx off a group name its build machine had.
+    match (root, group) {
+        (true, Some(g)) => format!("user nobody {g};\n"),
+        _ => String::new(),
+    }
+}
+
+pub fn ensure_certs(home: &Path) -> Result<(), String> {
+    // The gateway's self-signed certificate for this host's names, made at install so it exists before the first goethe up.
+    ensure_tls(home, &san_extension(&tls_names()), false)
+}
+
 fn ensure_tls(home: &Path, san: &str, stale: bool) -> Result<(), String> {
     // Self-signed certificate on first use, or again when the names changed; the key is always 0600 in a 0700 directory.
     let cert_dir = nginx_prefix(home).join("certs");
@@ -555,21 +601,7 @@ fn ensure_tls(home: &Path, san: &str, stale: bool) -> Result<(), String> {
     let crt = cert_dir.join("server.crt");
     let key = cert_dir.join("server.key");
     if stale || !(crt.is_file() && key.is_file()) {
-        let status = Command::new("openssl")
-            .args(["req", "-x509", "-newkey", "rsa:2048", "-keyout"])
-            .arg(&key)
-            .arg("-out")
-            .arg(&crt)
-            .args(["-days", "365", "-nodes", "-subj", "/CN=goethe-local"])
-            .arg("-addext")
-            .arg(san)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|e| e.to_string())?;
-        if !status.success() {
-            return Err("openssl cert generation failed".to_string());
-        }
+        self_signed(&key, &crt, false, 365, "goethe-local", &[san])?;
     }
     fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())
 }
@@ -666,22 +698,19 @@ fn read_record(home: &Path) -> Option<MasterRecord> {
 }
 
 fn boot_id() -> String {
-    fs::read_to_string("/proc/sys/kernel/random/boot_id")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    crate::sys::boot_id()
 }
 
 fn proc_stat(pid: i32) -> Option<(char, i32, u64)> {
-    // (state, process group, start ticks) from /proc/<pid>/stat, parsed after the comm field.
-    let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rest = text.get(text.rfind(')')? + 2..)?;
-    let f: Vec<&str> = rest.split_whitespace().collect();
-    Some((f.first()?.chars().next()?, f.get(2)?.parse().ok()?, f.get(19)?.parse().ok()?))
+    // (state, process group, start ticks) of a process.
+    let st = crate::sys::stat(pid)?;
+    let pgrp = unsafe { libc::getpgid(pid) };
+    (pgrp > 0).then_some((st.state, pgrp, st.start_ticks))
 }
 
 fn proc_exe(pid: i32) -> Option<PathBuf> {
-    // /proc/<pid>/exe without the " (deleted)" suffix an upgraded binary gets.
-    let exe = fs::read_link(format!("/proc/{pid}/exe")).ok()?.to_string_lossy().to_string();
+    // The executable without the " (deleted)" suffix an upgraded binary gets on Linux.
+    let exe = crate::sys::exe(pid)?.to_string_lossy().to_string();
     Some(PathBuf::from(exe.strip_suffix(" (deleted)").unwrap_or(&exe)))
 }
 
@@ -699,10 +728,10 @@ fn active_bin(home: &Path) -> PathBuf {
 }
 
 fn cmdline_has_prefix(pid: i32, prefix: &Path) -> bool {
-    let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) else {
+    let Some(argv) = crate::sys::argv(pid) else {
         return false;
     };
-    let text = String::from_utf8_lossy(&raw).replace('\0', " ");
+    let text = argv.join(" ");
     format!("{} ", text.trim_end()).contains(&format!(" -p {} ", prefix.display()))
 }
 
@@ -753,11 +782,8 @@ fn terminate(pids: &[i32], still_ours: impl Fn(i32) -> bool, grace: Duration) {
 
 fn orphan_workers(rec: &MasterRecord) -> Vec<i32> {
     // Live nginx processes still in a dead master's process group, started after it during this boot.
-    let Ok(rd) = fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    rd.flatten()
-        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+    crate::sys::pids()
+        .into_iter()
         .filter(|&pid| {
             proc_stat(pid).is_some_and(|(state, pgrp, start)| {
                 state != 'Z' && pgrp == rec.pid && start >= rec.start_ticks
@@ -883,9 +909,7 @@ fn spawn_private(home: &Path) -> Result<(), String> {
 }
 
 fn worker_pids(master: i32) -> Vec<i32> {
-    fs::read_to_string(format!("/proc/{master}/task/{master}/children"))
-        .map(|s| s.split_whitespace().filter_map(|p| p.parse().ok()).collect())
-        .unwrap_or_default()
+    crate::sys::children(master)
 }
 
 fn wait_reloaded(master: i32, before: &[i32]) {
@@ -895,8 +919,7 @@ fn wait_reloaded(master: i32, before: &[i32]) {
         return;
     }
     let retired = |pid: &i32| {
-        fs::read(format!("/proc/{pid}/cmdline"))
-            .map_or(true, |c| c.is_empty() || String::from_utf8_lossy(&c).contains("shutting down"))
+        crate::sys::argv(*pid).is_none_or(|a| a.is_empty() || a.join(" ").contains("shutting down"))
     };
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -1007,6 +1030,15 @@ pub fn ensure_gateway_running(home: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_root_nginx_names_the_group_of_nobody_on_this_machine() {
+        assert_eq!(worker_user_line(true, Some("nogroup")), "user nobody nogroup;\n");
+        assert_eq!(worker_user_line(true, Some("nobody")), "user nobody nobody;\n");
+        assert_eq!(worker_user_line(false, Some("nogroup")), "", "a user's nginx runs as that user");
+        assert_eq!(worker_user_line(true, None), "");
+        assert!(nobody_group().is_some_and(|g| !g.is_empty()), "this machine has a nobody user");
+    }
 
     #[test]
     fn render_uses_persisted_ports_and_quotes_paths() {

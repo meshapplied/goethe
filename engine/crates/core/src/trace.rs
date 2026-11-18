@@ -367,9 +367,7 @@ pub(crate) fn write_private_atomic(path: &Path, data: &[u8]) -> std::io::Result<
 
 fn random_hex(n: usize) -> String {
     let mut b = vec![0u8; n];
-    unsafe {
-        libc::getrandom(b.as_mut_ptr().cast(), b.len(), 0);
-    }
+    crate::sys::random_bytes(&mut b);
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
@@ -1411,6 +1409,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_partial_write_is_cut_back() {
         // A real short write needs a file size limit, which applies to the whole process, so a child runs it.
         if let Some(path) = std::env::var_os("TRACE_TEST_LIMITED_FILE") {

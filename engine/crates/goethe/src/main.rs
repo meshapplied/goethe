@@ -285,6 +285,12 @@ enum Commands {
         public: bool,
         #[arg(long, help = "Print the hardware profile instead: GPUs and links, CPU, RAM, disk, OS, container and cloud.")]
         hardware: bool,
+        #[arg(long, hide = true, help = "Print the heartbeat goethed would send the platform now, without sending it.")]
+        snapshot: bool,
+        #[arg(long, help = "Fix what doctor finds on this machine (NVIDIA driver, CUDA forward compatibility, a C++ compiler), asking before each change.")]
+        fix: bool,
+        #[arg(long, requires = "fix", help = "With --fix, make every change without asking.")]
+        yes: bool,
         #[arg(long, help = "Emit JSON.")]
         json: bool,
     },
@@ -317,6 +323,19 @@ enum Commands {
     },
     #[command(display_order = 20, about = "Unlink this node from the Goethe platform and remove its local credentials.")]
     Logout,
+    #[command(hide = true, about = "Finish an install: run by install.sh once it verified this goethe; safe to run again to repair or upgrade.")]
+    Setup {
+        #[arg(long = "pkg-url", value_name = "URL", help = "The package host to keep using (default pkg.goethe.sh).")]
+        pkg_url: Option<String>,
+        #[arg(long, value_name = "URL", help = "Where this run downloads from, for example one release's folder.")]
+        from: Option<String>,
+        #[arg(long = "keep-file-url", help = "Keep a file:// package host for later updates.")]
+        keep_file_url: bool,
+        #[arg(long = "platform-url", value_name = "URL", help = "Platform to log in to.")]
+        platform_url: Option<String>,
+        #[arg(long = "no-link", help = "Do not link goethe and goethed onto PATH.")]
+        no_link: bool,
+    },
     #[command(display_order = 21, about = "Tab completion for bash, zsh and fish: models, keys, GPUs and interfaces complete too.")]
     Completion {
         #[arg(value_parser = ["install", "remove", "status"], help = "install, remove, or status (the default).")]
@@ -910,7 +929,12 @@ fn main() {
             Some(a) => usage(format!("name the GPUs to {a}, for example goethe gpu {a} gpu2")),
             None => do_gpu_list(json),
         },
-        Commands::Doctor { public, hardware, json } => match hardware {
+        Commands::Doctor { snapshot: true, .. } => {
+            let snap = goethe_core::snapshot::Collector::new(goethe_core::snapshot::now_rfc3339()).build(&goethe_home(), "interval", None);
+            goethe_core::snapshot::encode(&snap).map(|data| println!("{}", String::from_utf8_lossy(&data)))
+        }
+        Commands::Doctor { fix: true, yes, .. } => goethe_core::fix::run(yes),
+        Commands::Doctor { public, hardware, json, .. } => match hardware {
             true => hw::run_profile(json),
             false => goethe_core::doctor::run(json, public),
         },
@@ -947,6 +971,13 @@ fn main() {
             }
         }
         Commands::Logout => goethe_core::platform_cli::logout(),
+        Commands::Setup { pkg_url, from, keep_file_url, platform_url, no_link } => goethe_core::setup::run(goethe_core::setup::Opts {
+            pkg: pkg_url.or_else(|| std::env::var("GOETHE_PKG_URL").ok().filter(|v| !v.is_empty())).unwrap_or_else(|| goethe_core::setup::DEFAULT_PKG_URL.to_string()),
+            from,
+            keep_file_url,
+            platform_url,
+            no_link,
+        }),
         Commands::Completion { action, shell } => complete::run(action.as_deref(), shell.as_deref()),
         Commands::Registry { cmd } => match cmd {
             RegistryCommands::Validate {

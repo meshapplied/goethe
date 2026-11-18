@@ -94,19 +94,9 @@ pub struct EngineSpec<'a> {
 pub fn new_engine_key() -> Result<String, String> {
     // 32 random hex characters from the kernel CSPRNG.
     let mut buf = [0u8; 16];
-    let mut filled = 0;
-    while filled < buf.len() {
-        let n = unsafe {
-            libc::getrandom(
-                buf[filled..].as_mut_ptr().cast(),
-                buf.len() - filled,
-                0,
-            )
-        };
-        if n <= 0 {
-            return Err(format!("getrandom: {}", std::io::Error::last_os_error()));
-        }
-        filled += n as usize;
+    crate::sys::random_bytes(&mut buf);
+    if buf.iter().all(|b| *b == 0) {
+        return Err(format!("random bytes: {}", std::io::Error::last_os_error()));
     }
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }

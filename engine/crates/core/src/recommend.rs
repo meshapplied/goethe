@@ -126,9 +126,13 @@ impl View {
     }
 
     pub fn free_text(&self) -> String {
-        // "VRAM on allowed GPUs: 191.2 GB (gpu2 95.6, gpu3 95.6)" for a capacity view.
+        // "VRAM on allowed GPUs: 191.2 GB (gpu2 95.6, gpu3 95.6)" for a capacity view; a one-GPU host just says what is free.
+        let word = crate::gpu_kind::host_memory_word(&self.hw.gpus);
+        if self.hw.gpus.len() == 1 && self.gpus.len() == 1 {
+            return format!("{word} free: {:.1} GB", self.free_allowed_gb());
+        }
         let each: Vec<String> = self.gpus.iter().map(|g| format!("gpu{} {:.1}", g.index, g.free_vram_mb as f64 / 1024.0)).collect();
-        format!("VRAM on allowed GPUs: {:.1} GB ({})", self.free_allowed_gb(), each.join(", "))
+        format!("{word} on allowed GPUs: {:.1} GB ({})", self.free_allowed_gb(), each.join(", "))
     }
 
     pub fn fit(&self, model_id: &str, input: &ChooserInput, pinned_tp: Option<usize>) -> Result<Fit, String> {
@@ -223,6 +227,7 @@ pub fn run(json_out: bool) -> Result<(), String> {
         print!("{}", crate::term::commands("No catalog model fits these GPUs. See why with:", &["goethe models"]));
         return Ok(());
     }
+    let multi = view.hw.gpus.len() > 1;
     let rows = out
         .recommended
         .iter()
@@ -233,15 +238,17 @@ pub fn run(json_out: bool) -> Result<(), String> {
                 Some(n) => format!("{} ({n})", item.model_id),
                 None => item.model_id.clone(),
             };
-            (total, vec![
-                name,
-                format!("{total:.1} GB"),
-                format_gpu_list(&item.gpus),
-                download.map_or_else(|| "-".to_string(), |g| format!("{g:.1} GB")),
-            ])
+            let mut cells = vec![name, format!("{total:.1} GB")];
+            if multi {
+                cells.push(format_gpu_list(&item.gpus));
+            }
+            cells.push(download.map_or_else(|| "-".to_string(), |g| format!("{g:.1} GB")));
+            (total, cells)
         })
         .collect();
-    print!("{}", banded(&["MODEL", "VRAM", "GPUS", "DOWNLOAD"], rows));
+    let mem = if crate::gpu_kind::host_memory_word(&view.hw.gpus) == "VRAM" { "VRAM" } else { "MEMORY" };
+    let header: &[&str] = if multi { &["MODEL", mem, "GPUS", "DOWNLOAD"] } else { &["MODEL", mem, "DOWNLOAD"] };
+    print!("{}", banded(header, rows));
     Ok(())
 }
 
@@ -468,6 +475,7 @@ mod tests {
                 entry("org/small", with(serde_json::json!({"static_vram_gb": 5.6}))),
                 entry("org/gated", with(serde_json::json!({"static_vram_gb": 2.0, "gated": true}))),
             ],
+            gguf_models: Vec::new(),
         };
         let home = tempfile::tempdir().unwrap();
         assert_eq!(suggested_model(home.path(), &reg), "org/small", "no hardware profile: the smallest downloadable model, never a gated one");
@@ -491,6 +499,7 @@ mod tests {
                 entry("meshapplied/open", serde_json::json!({})),
                 entry("meshapplied/huge", serde_json::json!({"static_vram_gb": 900.0})),
             ],
+            gguf_models: Vec::new(),
         };
         let out = recommend(std::path::Path::new("/none"), &v, &reg);
         let ids: Vec<&str> = out.recommended.iter().map(|r| r.model_id.as_str()).collect();
@@ -510,7 +519,7 @@ mod tests {
         assert!(!whole.gpus[0].foreign_process);
         let m = entry("nvidia/Llama-3.1-8B-Instruct-NVFP4", serde_json::json!({}));
         assert!(busy.fit(&m.id, &registry_input(&m), None).is_err() && whole.fit(&m.id, &registry_input(&m), None).is_ok());
-        assert_eq!(whole.free_text(), "VRAM on allowed GPUs: 96.0 GB (gpu2 96.0)");
+        assert_eq!(whole.free_text(), "VRAM free: 96.0 GB", "one GPU needs no list");
     }
 
     #[test]

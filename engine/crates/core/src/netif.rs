@@ -2,11 +2,14 @@
 
 use std::fmt;
 use std::net::Ipv4Addr;
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 const ARPHRD_NONE: &str = "65534";
+#[cfg(target_os = "linux")]
 const IFF_POINTOPOINT: u32 = 0x10;
 const WIDEST_RANGE: u8 = 8;
 const PRIVATE_BLOCKS: [(Ipv4Addr, u8); 4] = [
@@ -133,6 +136,39 @@ fn output_within(cmd: &mut Command, limit: Duration) -> Option<String> {
     }
 }
 
+pub fn parse_netstat(text: &str) -> Vec<Route> {
+    // `netstat -rn -f inet` on macOS: Destination, Gateway, Flags, Netif; "default" has no destination, short ones drop zero octets.
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let (dst, dev) = (*f.first()?, *f.get(3)?);
+            if dst == "Destination" || dev.is_empty() {
+                return None;
+            }
+            if dst == "default" {
+                return Some(Route { dev: dev.to_string(), dst: None });
+            }
+            let (addr, prefix) = match dst.split_once('/') {
+                Some((a, p)) => (a, p.parse::<u8>().ok()?),
+                None => (dst, 8 * dst.split('.').count() as u8),
+            };
+            let mut octets: Vec<&str> = addr.split('.').collect();
+            if octets.len() > 4 || octets.iter().any(|o| o.parse::<u8>().is_err()) {
+                return None;
+            }
+            octets.resize(4, "0");
+            Some(Route { dev: dev.to_string(), dst: Net::parse(&format!("{}/{prefix}", octets.join("."))) })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+pub fn routes() -> Vec<Route> {
+    // The IPv4 routing table from the built-in netstat.
+    output_within(Command::new("/usr/sbin/netstat").args(["-rn", "-f", "inet"]), Duration::from_secs(3)).map(|t| parse_netstat(&t)).unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
 pub fn routes() -> Vec<Route> {
     // Every IPv4 route in every table from iproute2, or the main table from /proc when ip is missing or fails.
     output_within(Command::new("ip").args(["-j", "-4", "route", "show", "table", "all"]), Duration::from_secs(3))
@@ -150,16 +186,31 @@ pub struct Iface {
     pub default_route: bool,
 }
 
+#[cfg(target_os = "linux")]
 fn sys(name: &str, file: &str) -> Option<String> {
     std::fs::read_to_string(Path::new("/sys/class/net").join(name).join(file)).ok().map(|s| s.trim().to_string())
 }
 
+#[cfg(target_os = "macos")]
+pub fn is_tunnel(name: &str) -> bool {
+    // VPN clients on macOS (WireGuard, Tailscale and the built-in VPN) use utun, ipsec or ppp interfaces.
+    ["utun", "ipsec", "ppp", "tun", "wg"].iter().any(|p| name.starts_with(p))
+}
+
+#[cfg(target_os = "macos")]
+fn is_virtual_bridge(name: &str) -> bool {
+    // Internet Sharing and virtual machines put their networks on bridge and vmenet interfaces.
+    name.starts_with("bridge") || name.starts_with("vmenet")
+}
+
+#[cfg(target_os = "linux")]
 pub fn is_tunnel(name: &str) -> bool {
     // No link layer (WireGuard, tun, most VPN clients) or a point-to-point link.
     let flags = sys(name, "flags").and_then(|f| u32::from_str_radix(f.trim_start_matches("0x"), 16).ok()).unwrap_or(0);
     sys(name, "type").as_deref() == Some(ARPHRD_NONE) || flags & IFF_POINTOPOINT != 0
 }
 
+#[cfg(target_os = "linux")]
 fn is_virtual_bridge(name: &str) -> bool {
     // A bridge none of whose ports is a physical device: container and VM networks, not a network clients sit on.
     let base = Path::new("/sys/class/net").join(name);
@@ -209,7 +260,7 @@ pub fn candidates(ifaces: &[Iface]) -> Vec<Iface> {
     // Networks the API could serve: tunnels and interfaces on private addresses, tunnels first; container bridges and public NICs are left out.
     let mut out: Vec<Iface> = ifaces
         .iter()
-        .filter(|i| i.name != "lo" && !i.virtual_bridge && (i.tunnel || private_block(i.addr).is_some()))
+        .filter(|i| i.name != "lo" && i.name != "lo0" && !i.virtual_bridge && (i.tunnel || private_block(i.addr).is_some()))
         .cloned()
         .collect();
     out.sort_by(|a, b| b.tunnel.cmp(&a.tunnel).then_with(|| a.name.cmp(&b.name)));
@@ -247,6 +298,16 @@ pub fn reach(iface: &Iface, routes: &[Route]) -> Vec<Net> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn netstat_routes_name_the_interface_and_fill_short_destinations() {
+        let text = "Routing tables\n\nInternet:\nDestination        Gateway            Flags               Netif Expire\ndefault            192.168.1.1        UGScg                 en0\n100.64/10          link#21            UCS                 utun4\n127                127.0.0.1          UCS                   lo0\n192.168.1          link#11            UCS                   en0      !\n";
+        let r = parse_netstat(text);
+        assert_eq!(r[0], Route { dev: "en0".into(), dst: None });
+        assert_eq!(r[1], Route { dev: "utun4".into(), dst: Net::parse("100.64.0.0/10") });
+        assert_eq!(r[2].dst, Net::parse("127.0.0.0/8"));
+        assert_eq!(r[3], Route { dev: "en0".into(), dst: Net::parse("192.168.1.0/24") });
+    }
 
     fn iface(name: &str, addr: &str, prefix: u8, tunnel: bool) -> Iface {
         Iface { name: name.into(), addr: addr.parse().unwrap(), prefix, tunnel, virtual_bridge: false, default_route: false }

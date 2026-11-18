@@ -7,7 +7,6 @@ import os
 import platform
 import shutil
 import subprocess
-import threading
 from pathlib import Path
 
 from lib.goethe_test import (
@@ -17,15 +16,18 @@ from lib.goethe_test import (
     http_get,
     main_exit,
     run_temp_prefix,
-    sign_cdn_tree,
     spawn,
     temp_home,
     wait_until,
 )
 
 ARCH = "aarch64" if platform.machine() in ("aarch64", "arm64") else platform.machine()
-LOCK = "requirements.aarch64.lock" if ARCH == "aarch64" else "requirements.lock"
 PACKAGING = GOETHE_PKG / "packaging"
+STUB = b"""#!/bin/sh
+[ "$1" = --version ] && { echo "goethe 0.0.0"; exit 0; }
+echo "$*" >"$GOETHE_HOME/setup.ran"
+echo SETUP_OK
+"""
 
 
 def _sh(*cmd: str | Path) -> subprocess.CompletedProcess[str]:
@@ -33,51 +35,29 @@ def _sh(*cmd: str | Path) -> subprocess.CompletedProcess[str]:
 
 
 def _mini_cdn(cdn: Path, pub: Path) -> None:
-    """A CDN tree with real pyenv files, stub binaries and an install.sh embedding pub."""
-    shutil.copytree(GOETHE_PKG / "cdn" / "v1", cdn / "v1")
-    (cdn / "pyenv").mkdir()
-    for layer in ("", ".base", ".engine"):
-        for arch in ("", ".aarch64"):
-            lock = f"requirements{layer}{arch}.lock"
-            shutil.copy2(GOETHE_PKG / "pyenv" / lock, cdn / "pyenv" / lock)
-    for name in ("bootstrap.sh",):
-        shutil.copy2(GOETHE_PKG / "pyenv" / name, cdn / "pyenv" / name)
+    """A package with a stub goethe that records how install.sh calls goethe setup; install.sh embeds pub."""
+    cdn.mkdir(parents=True)
     bindir = cdn / "bin" / f"linux-{ARCH}"
     bindir.mkdir(parents=True)
-    for name in ("goethe", "goethed", "uv"):
-        (bindir / name).write_bytes(b"#!/bin/sh\necho stub\n")
+    for name in ("goethe", "goethed", "nginx"):
+        (bindir / name).write_bytes(STUB)
         (bindir / name).chmod(0o755)
     rr = _sh("bash", PACKAGING / "subst_install_pubkey.sh", GOETHE_PKG / "cdn" / "install.sh", pub, cdn / "install.sh")
     if rr.returncode != 0:
         raise RuntimeError(f"subst_install_pubkey failed: {rr.stderr}")
 
 
-def _mid_release(tampered: Path, good: Path, url: str, home: Path) -> None:
-    """A stale file that the CDN replaces during the install is retried until it matches."""
-    boot = tampered / "pyenv" / "bootstrap.sh"
-    stale = boot.read_text()
-    timer = threading.Timer(2.0, lambda: shutil.copy2(good / "pyenv" / "bootstrap.sh", boot))
-    timer.start()
-    try:
-        out = _install(tampered / "install.sh", url, home, {"GOETHE_VERIFY_ONLY": "1", "GOETHE_FETCH_RETRIES": "10",
-                                                            "GOETHE_FETCH_RETRY_SECS": "1"})
-    finally:
-        timer.join()
-        boot.write_text(stale)
-    if not out.startswith("rc=0") or "retrying every 30 s" not in out or "verified CDN artifacts" not in out:
-        raise RuntimeError(f"mid-release retry: {out[-500:]}")
-
-
 def _install(install_sh: Path, pkg_url: str, home: Path, extra: dict[str, str] | None = None) -> str:
-    """Run install.sh against pkg_url into home; return rc-prefixed combined output."""
+    """Run install.sh against pkg_url into home like curl | bash (stdin closed); rc, output and the setup call."""
     env = {
-        "GOETHE_HOME": str(home / "g"), "GOETHE_PKG_URL": pkg_url, "GOETHE_NO_LINK": "1",
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home),
-        "GOETHE_FETCH_RETRIES": "1", "GOETHE_FETCH_RETRY_SECS": "0", **(extra or {}),
+        "GOETHE_HOME": str(home / "g"), "GOETHE_PKG_URL": pkg_url,
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home), **(extra or {}),
     }
     rr = subprocess.run(["bash", str(install_sh)], env=env, capture_output=True, text=True, timeout=120,
                         stdin=subprocess.DEVNULL)
-    return f"rc={rr.returncode}\n{rr.stdout}{rr.stderr}"
+    ran = home / "g" / "setup.ran"
+    setup = ran.read_text().strip() if ran.exists() else "not run"
+    return f"rc={rr.returncode}\n{rr.stdout}{rr.stderr}\nsetup: {setup}"
 
 
 def _variant(root: Path, name: str, cdn: Path) -> Path:
@@ -120,19 +100,28 @@ def main() -> None:
         if rr.returncode != 0:
             raise RuntimeError(f"sign_cdn.sh failed: {rr.stderr}")
         tampered = _variant(root, "cdn-tamper", cdn)
-        marker = root / "bootstrap.ran"
-        boot = tampered / "pyenv" / "bootstrap.sh"
-        boot.write_text(boot.read_text() + f'\necho ran >"{marker}"\n')
+        with open(tampered / "bin" / f"linux-{ARCH}" / "goethe", "ab") as f:
+            f.write(b"# changed\n")
         badsums = _variant(root, "cdn-badsums", cdn)
         text = (badsums / "SHA256SUMS").read_text()
         (badsums / "SHA256SUMS").write_text(text.replace("a", "b", 1))
-        nolock = _variant(root, "cdn-nolock", cdn)
-        (nolock / "pyenv" / LOCK).unlink()
-        sign_cdn_tree(nolock, keys / "release.key")
-        unsigned = _variant(root, "cdn-unsigned", cdn)
-        for name in ("SHA256SUMS", "SHA256SUMS.sig", "VERSION"):
-            (unsigned / name).unlink()
-        shutil.copy2(GOETHE_PKG / "cdn" / "install.sh", unsigned / "install.sh")
+        nokey = _variant(root, "cdn-nokey", cdn)
+        shutil.copy2(GOETHE_PKG / "cdn" / "install.sh", nokey / "install.sh")
+        ver = (cdn / "VERSION").read_text().strip()
+        versioned = _variant(root, "cdn-versioned", cdn)
+        shutil.copytree(cdn, versioned / "v" / ver)
+        older = root / "cdn-older"
+        shutil.copytree(cdn, older)
+        old_bin = older / "bin" / f"linux-{ARCH}" / "goethe"
+        old_bin.write_bytes(b'#!/bin/sh\n[ "$1" = --version ] && { echo "goethe 0.3.2"; exit 0; }\nexit 2\n')
+        template = root / "old-install.sh"
+        template.write_text("#!/usr/bin/env bash\nGOETHE_RELEASE_PUB_PEM='__GOETHE_RELEASE_PUB_PEM__'\n"
+                            "echo OLD_INSTALLER \"$GOETHE_PKG_URL\"\n")
+        _sh("bash", PACKAGING / "subst_install_pubkey.sh", template, keys / "release_pub.pem", older / "install.sh")
+        rr = _sh("bash", PACKAGING / "sign_cdn.sh", older, keys / "release.key")
+        shutil.copy2(cdn / "install.sh", older / "new-install.sh")
+        if rr.returncode != 0:
+            raise RuntimeError(f"sign_cdn.sh failed for the older release: {rr.stderr}")
         port = free_port()
         srv = spawn(
             [os.environ.get("GOETHE_PYTHON", "python3"), "-m", "http.server", str(port), "--bind", "127.0.0.1"],
@@ -142,27 +131,31 @@ def main() -> None:
         base = f"http://127.0.0.1:{port}"
         if not wait_until(lambda: _answers(f"{base}/"), timeout=30):
             raise RuntimeError(f"local CDN server on port {port} did not come up")
-        verify = {"GOETHE_VERIFY_ONLY": "1"}
         cases = [
-            ("valid", cdn, verify, "rc=0", "verified CDN artifacts"),
-            ("tampered", tampered, {}, "checksum mismatch", None),
-            ("bad sums", badsums, verify, "signature verification failed", None),
-            ("missing lock", nolock, verify, f"CDN missing pyenv/{LOCK}", None),
-            ("unsigned", unsigned, verify, "unsigned install.sh", None),
-            ("insecure", unsigned, {**verify, "GOETHE_INSECURE": "1"}, "rc=0", "GOETHE_INSECURE=1 skips"),
+            ("valid", cdn, {}, ["rc=0", "SETUP_OK", f"setup: setup --pkg-url {base}/cdn --from {base}/cdn"]),
+            ("tampered", tampered, {}, ["does not match the signed package list", "setup: not run"]),
+            ("bad sums", badsums, {}, ["not signed by the Goethe release key", "setup: not run"]),
+            ("no key", nokey, {}, ["has no release key", "setup: not run"]),
+            ("newest release folder", versioned, {}, ["rc=0", f"--from {base}/cdn-versioned/v/{ver}"]),
+            ("pinned", versioned, {"GOETHE_VERSION": f"v{ver}"},
+             ["rc=0", f"--pkg-url {base}/cdn-versioned --from {base}/cdn-versioned/v/{ver}"]),
+            ("unknown version", versioned, {"GOETHE_VERSION": "1.2.3"},
+             ["is 1.2.3 a published version?", "setup: not run"]),
+            ("bad version", cdn, {"GOETHE_VERSION": "latest; rm"}, ["is not a version like", "setup: not run"]),
+            ("release before goethe setup", older, {},
+             ["rc=0", "predates goethe setup", f"OLD_INSTALLER {base}/cdn-older"]),
         ]
         with temp_home(stub_python=False, tag="integrity", pyenv=False) as home:
-            for name, tree, extra, want, also in cases:
+            for name, tree, extra, wants in cases:
                 out = ""
                 for _ in range(20):
-                    out = _install(tree / "install.sh", f"{base}/{tree.name}", home / name.replace(" ", "-"), extra)
+                    script = tree / "new-install.sh" if (tree / "new-install.sh").exists() else tree / "install.sh"
+                    out = _install(script, f"{base}/{tree.name}", home / name.replace(" ", "-"), extra)
                     if "Connection refused" not in out and "Couldn't connect" not in out:
                         break
-                if want not in out or (also and also not in out) or (want != "rc=0" and out.startswith("rc=0")):
-                    raise RuntimeError(f"{name}: expected {want!r}: {out[-500:]}")
-            if marker.exists():
-                raise RuntimeError("bootstrap executed after checksum failure")
-            _mid_release(tampered, cdn, f"{base}/{tampered.name}", home / "mid-release")
+                missing = [w for w in wants if w not in out]
+                if missing or ("rc=0" not in wants and out.startswith("rc=0")):
+                    raise RuntimeError(f"{name}: expected {missing}: {out[-600:]}")
     finally:
         if srv is not None:
             srv.stop()

@@ -40,8 +40,16 @@ pub fn run(json: bool, probe_public: bool) -> Result<(), String> {
         if !folded.is_empty() {
             println!("also OK: {} (goethe -v doctor lists them)", folded.join(", "));
         }
-        println!("\nGPU architectures goethe supports: {}", crate::gpu_arch::microarchitectures_text());
-        println!("Architectures of this machine: {}", crate::packs::local_archs(&home).join(", "));
+        let fixes = crate::fix::pending(&crate::paths::goethe_home());
+        if !fixes.is_empty() {
+            println!("\ngoethe doctor --fix can fix: {}", fixes.iter().map(|(_, why)| why.as_str()).collect::<Vec<_>>().join("; "));
+        }
+        if cfg!(target_os = "macos") {
+            println!("\nOn a Mac goethe serves GGUF models with llama.cpp on Metal.");
+        } else {
+            println!("\nGPU architectures goethe supports: {}", crate::gpu_arch::microarchitectures_text());
+            println!("Architectures of this machine: {}", crate::packs::local_archs(&home).join(", "));
+        }
     }
     if probe_public {
         probe_public_reachability(&home);
@@ -103,9 +111,93 @@ const CHECKS: &[(&str, CheckFn)] = &[
     ("compiler", |_| check_compiler()),
 ];
 
+const MAC_CHECKS: &[(&str, CheckFn)] = &[
+    ("hardware", check_mac_hardware),
+    ("platform", check_platform),
+    ("llama.cpp", check_llama_cpp),
+    ("nginx", check_nginx),
+    ("goethe_home", check_goethe_home),
+    ("disk", check_disk),
+    ("state_db", check_state_db),
+    ("environment", |_| check("environment", "OK", "macOS: goethe up adds a LaunchAgent, so goethed starts when you log in")),
+    ("ports", check_ports),
+    ("goethed", |_| check_goethed()),
+    ("gateway", check_gateway),
+    ("network", check_network),
+    ("tls", check_tls),
+    ("huggingface", check_hf),
+    ("registry", check_registry),
+];
+
+pub fn mac_hardware_note(chip: &str, arm64: bool, version: &str, limit_mb: u64, free_mb: u64, total_mb: u64) -> (&'static str, String) {
+    // Apple Silicon and macOS 14 or newer, then the memory the GPU may use and how much of it is free now.
+    if !arm64 {
+        return ("FAIL", format!("{chip}: Intel Macs are not supported; goethe needs Apple Silicon (M1 or newer)"));
+    }
+    let major = crate::apple::parse_version(version).map_or(0, |v| v.0);
+    let gb = |mb: u64| mb as f64 / 1024.0;
+    let text = format!(
+        "{chip}, macOS {version}\nGPU may use {:.1} of {:.1} GB unified memory; {:.1} GB free now",
+        gb(limit_mb),
+        gb(total_mb),
+        gb(free_mb)
+    );
+    if major < 14 {
+        return ("FAIL", format!("{text}\nmacOS {version} is too old: llama.cpp's Metal build needs macOS 14 or newer"));
+    }
+    ("OK", text)
+}
+
+pub fn mac_memory_warning(free_mb: u64, smallest: Option<(f64, &str)>) -> Option<String> {
+    // RAM and GPU memory are one pool on a Mac, so the only memory warning is: even the smallest installed model does not fit now.
+    let (weights_gb, id) = smallest?;
+    let need = weights_gb + crate::calc::METAL_OVERHEAD_GB;
+    let free = free_mb as f64 / 1024.0;
+    (free < need).then(|| format!("{id} needs about {need:.1} GB and only {free:.1} GB is free; quit some apps before loading it"))
+}
+
+#[cfg(target_os = "macos")]
+fn smallest_installed(home: &Path) -> Option<(f64, String)> {
+    let con = crate::db::open(home).ok()?;
+    crate::models::disk_gb_by_model(&con).into_iter().filter(|(_, gb)| *gb > 0.0).map(|(id, gb)| (gb, id)).min_by(|a, b| a.0.total_cmp(&b.0))
+}
+
+#[cfg(target_os = "macos")]
+fn check_mac_hardware(home: &Path) -> Check {
+    let g = crate::apple::gpu(&[]);
+    let total = crate::sys::memory().total_kb / 1024;
+    let (status, mut text) = mac_hardware_note(&g.name, crate::apple::apple_silicon(), &crate::apple::macos_version(), g.vram_total_mb, g.vram_free_mb, total);
+    let smallest = smallest_installed(home);
+    match mac_memory_warning(g.vram_free_mb, smallest.as_ref().map(|(gb, id)| (*gb, id.as_str()))) {
+        Some(w) if status == "OK" => {
+            text.push('\n');
+            text.push_str(&w);
+            check("hardware", "WARN", text)
+        }
+        _ => check("hardware", status, text),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn check_mac_hardware(home: &Path) -> Check {
+    check_hardware(home)
+}
+
+fn check_llama_cpp(home: &Path) -> Check {
+    // The Metal build of llama-server, installed or fetched on the first model install.
+    match crate::engines::llama_cpp::server_bin(home) {
+        Ok(p) => check("llama.cpp", "OK", p.display().to_string()),
+        Err(_) => match crate::engines::llama_cpp::server_ready(home) {
+            Ok(()) => check("llama.cpp", "INFO", format!("llama.cpp {} is downloaded on the first model install", crate::engines::llama_cpp::TAG)),
+            Err(why) => check("llama.cpp", "FAIL", why),
+        },
+    }
+}
+
 fn collect_checks(home: &Path) -> Vec<Check> {
     // Run every check in parallel; each result carries the check's fixed name even on timeout.
-    let pending: Vec<_> = CHECKS
+    let list = if cfg!(target_os = "macos") { MAC_CHECKS } else { CHECKS };
+    let pending: Vec<_> = list
         .iter()
         .map(|(name, f)| {
             let h = home.to_path_buf();
@@ -278,10 +370,10 @@ fn check_hardware(home: &Path) -> Check {
         let um = if g.unified_memory { ", unified memory" } else { "" };
         let sm_note = why.map_or_else(String::new, |w| format!("; {w}"));
         lines.push(format!(
-            "gpu{} {} (SM {}): {:.1} of {:.1} GB free{um}, {foreign} foreign process{plural}{sm_note}",
+            "gpu{} {} ({}): {:.1} of {:.1} GB free{um}, {foreign} foreign process{plural}{sm_note}",
             g.index,
             g.name,
-            g.compute_capability,
+            crate::gpu_kind::arch_label(&g.compute_capability).unwrap_or_else(|| g.compute_capability.clone()),
             g.vram_free_mb as f64 / 1024.0,
             g.vram_total_mb as f64 / 1024.0
         ));
@@ -490,15 +582,11 @@ fn check_pyenv(home: &Path) -> Check {
     // The hermetic py-env's python and base layer, then SGLang and goethe-engine when installed, read from disk.
     let env = home.join("py-env");
     if !env.join("bin/python").is_file() {
-        let release = std::env::current_exe().ok().and_then(|e| crate::paths::home_of_binary(&e)).is_some();
-        return match release {
-            true => check("py-env", "FAIL", "run the installer"),
-            false => check("py-env", "INFO", "created on first goethe install (or goethe update engine)"),
-        };
+        return check("py-env", "INFO", "not set up yet: the first goethe install of a model sets it up (about 30 MB, more for engines)");
     }
     let (python, sglang) = pyenv_versions(&env);
     if !pyenv::has(home, Layer::Base) {
-        return check("py-env", "FAIL", format!("python {python} but no huggingface_hub (the hf CLI); run the installer again"));
+        return check("py-env", "WARN", format!("python {python} but no huggingface_hub (the hf CLI); the next goethe install puts it back"));
     }
     let engine = match pyenv::engine_installed(home) {
         Some(v) if v == pyenv::ENGINE_VERSION => format!(", goethe-engine {v}"),
@@ -679,6 +767,15 @@ fn check_hf(_home: &Path) -> Check {
     }
 }
 
+fn registry_warning(url: &str, e: &str, home: &Path) -> String {
+    // An unreachable registry, and when the address comes from goethe.env, the line to delete to go back to the default.
+    let from_file = ["GOETHE_REGISTRY_URL", "GOETHE_PKG_URL"].into_iter().find(|k| crate::paths::setting_from_file(k));
+    match from_file {
+        Some(key) => format!("{url} unreachable ({e}); it comes from {key} in {}: delete that line to use pkg.goethe.sh", home.join("goethe.env").display()),
+        None => format!("{url} unreachable ({e}); check network access, or set GOETHE_REGISTRY_URL (file:// works)"),
+    }
+}
+
 fn check_registry(home: &Path) -> Check {
     if hf::offline_mode() {
         let cache = home.join("registry.cache.json");
@@ -704,10 +801,7 @@ fn check_registry(home: &Path) -> Check {
         Err(e) => Check {
             name: "registry".into(),
             status: "WARN".into(),
-            hint: format!(
-                "{} unreachable ({e}); check network access, or set GOETHE_REGISTRY_URL (file:// works) in the environment or in GOETHE_HOME/goethe.env",
-                registry_url()
-            ),
+            hint: registry_warning(&registry_url(), &e, home),
         },
     }
 }
@@ -748,6 +842,24 @@ fn available_gb(path: &Path) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mac_needs_apple_silicon_and_macos_14() {
+        let (st, text) = mac_hardware_note("Apple M3 Max (40-core GPU)", true, "15.1", 48 * 1024, 40 * 1024, 64 * 1024);
+        assert_eq!(st, "OK");
+        assert!(text.contains("Apple M3 Max") && text.contains("macOS 15.1") && text.contains("GPU may use 48.0 of 64.0 GB") && text.contains("40.0 GB free"), "{text}");
+        assert_eq!(mac_hardware_note("Intel Core i9", false, "14.0", 0, 0, 0).0, "FAIL");
+        let (st, text) = mac_hardware_note("Apple M1", true, "13.6", 10_000, 8_000, 16_000);
+        assert!(st == "FAIL" && text.contains("macOS 14 or newer"), "{text}");
+    }
+
+    #[test]
+    fn a_mac_warns_only_when_no_installed_model_fits_now() {
+        assert_eq!(mac_memory_warning(4_000, None), None, "nothing installed, nothing to warn about");
+        assert_eq!(mac_memory_warning(4_000, Some((0.3, "small"))), None);
+        let w = mac_memory_warning(4_000, Some((8.0, "big"))).unwrap();
+        assert!(w.contains("big needs about 8.5 GB") && w.contains("3.9 GB is free"), "{w}");
+    }
 
     #[test]
     fn plain_ok_rows_fold_into_one_line_unless_everything_is_asked_for() {
@@ -793,10 +905,11 @@ mod tests {
     }
 
     #[test]
-    fn a_source_install_without_a_py_env_is_told_when_it_comes() {
+    fn a_missing_py_env_is_told_when_it_comes() {
         let home = tempfile::tempdir().unwrap();
         let c = check_pyenv(home.path());
-        assert_eq!((c.status.as_str(), c.hint.as_str()), ("INFO", "created on first goethe install (or goethe update engine)"), "the test binary is not a release install");
+        assert_eq!(c.status, "INFO", "the installer no longer sets it up");
+        assert!(c.hint.contains("the first goethe install of a model sets it up"), "{}", c.hint);
     }
 
     #[test]

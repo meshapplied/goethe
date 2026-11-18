@@ -118,7 +118,7 @@ pub fn load_hw(home: &Path) -> Option<HardwareState> {
 
 pub fn ensure_hw_profile(home: &Path) -> Result<bool, String> {
     // Write hardware_state.json when it is missing or older than this boot; true when a new profile was written.
-    let booted = std::fs::read_to_string("/proc/stat").ok().as_deref().and_then(boot_epoch).unwrap_or(0);
+    let booted = crate::sys::boot_epoch().unwrap_or(0).max(0) as u64;
     if profile_since(home, booted) {
         return Ok(false);
     }
@@ -133,10 +133,6 @@ fn profile_since(home: &Path, booted: u64) -> bool {
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .is_some_and(|d| d.as_secs() >= booted)
-}
-
-fn boot_epoch(stat: &str) -> Option<u64> {
-    stat.lines().find_map(|l| l.strip_prefix("btime "))?.trim().parse().ok()
 }
 
 pub fn format_gpu_list(gpus: &[u32]) -> String {
@@ -177,14 +173,9 @@ pub fn managed_pids(con: &Connection) -> HashSet<i32> {
         return roots;
     }
     let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
-    if let Ok(rd) = std::fs::read_dir("/proc") {
-        for ent in rd.flatten() {
-            let Some(pid) = ent.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else {
-                continue;
-            };
-            if let Some(pp) = proc_ident::ppid(pid) {
-                children.entry(pp).or_default().push(pid);
-            }
+    for pid in crate::sys::pids() {
+        if let Some(pp) = proc_ident::ppid(pid) {
+            children.entry(pp).or_default().push(pid);
         }
     }
     let mut out = roots.clone();
@@ -244,7 +235,7 @@ mod tests {
 
     #[test]
     fn hardware_profile_is_stale_when_missing_or_older_than_boot() {
-        assert_eq!(boot_epoch("cpu  1 2 3\nbtime 1729700000\nprocesses 9\n"), Some(1729700000));
+        assert!(crate::sys::boot_epoch().is_some_and(|b| b > 1_600_000_000), "the boot time is known");
         let td = tempfile::tempdir().unwrap();
         assert!(!profile_since(td.path(), 0), "a missing profile is stale");
         let path = td.path().join("hardware_state.json");
@@ -311,5 +302,13 @@ mod tests {
         let denied = HashSet::from([4u32]);
         let got = placement_inputs(&snap, &HashSet::new(), &HashSet::new(), &denied, |g| if g == 3 { 5.0 } else { 0.0 });
         assert_eq!(got, vec![inp(2, true, 20480), inp(3, false, 15360)]);
+    }
+
+    #[test]
+    fn the_one_gpu_of_a_mac_is_a_set() {
+        let mac = GpuPlacementInput { index: 0, cc: "metal".into(), foreign_process: false, free_vram_mb: 10_000 };
+        let sets = rank_sets(&[mac], None, 1);
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].gpus, vec![0]);
     }
 }

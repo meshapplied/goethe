@@ -17,11 +17,14 @@ pub fn run_enable() -> Result<(), String> {
 }
 
 pub fn enable_boot(home: &Path) -> Result<Vec<String>, String> {
-    // Prefer systemd when it is PID 1 (with lingering for a user unit); containers without it get cron and a nohup start.
+    // Prefer systemd when it is PID 1 (with lingering for a user unit); containers without it get cron and a nohup start; macOS a LaunchAgent.
     let goethed = home.join("bin/goethed");
     if !goethed.is_file() {
         return Err(format!("goethed not found at {}", goethed.display()));
     }
+    #[cfg(target_os = "macos")]
+    return launchd::enable(home);
+    #[cfg_attr(target_os = "macos", allow(unreachable_code))]
     let env = crate::host::probe_environment(crate::nginx::public_port_u16(home));
     if env.systemd_pid1 {
         if try_system_unit(home)? {
@@ -82,6 +85,9 @@ pub fn run_disable() -> Result<(), String> {
 
 pub fn disable_boot(home: &Path) -> Result<Vec<String>, String> {
     // Remove only the autostart entries that start this GOETHE_HOME; other homes keep theirs.
+    #[cfg(target_os = "macos")]
+    return launchd::disable(home);
+    #[cfg_attr(target_os = "macos", allow(unreachable_code))]
     let mut lines = Vec::new();
     if remove_system_unit(home) {
         lines.push("disabled goethed systemd (system unit)".to_string());
@@ -117,6 +123,9 @@ pub fn run_status() -> Result<(), String> {
 
 fn active_method(home: &Path) -> String {
     // This home's boot method, naming a unit that belongs to another home.
+    #[cfg(target_os = "macos")]
+    return launchd::method(home);
+    #[cfg_attr(target_os = "macos", allow(unreachable_code))]
     let mut other = String::new();
     for (path, label) in [(system_unit_path(), "systemd (system)"), (user_unit_path(), "systemd (--user)")] {
         match unit_owner(&path, home) {
@@ -151,7 +160,7 @@ pub fn live_engine_pids() -> Vec<i64> {
 }
 
 pub fn pid_alive(pid: i64) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    i32::try_from(pid).is_ok_and(crate::sys::exists)
 }
 
 pub fn stop_keeping_engines() -> Result<(usize, usize), String> {
@@ -180,6 +189,10 @@ pub fn run_up(boot: bool) -> Result<(), String> {
     if goethed_running() {
         return Ok(());
     }
+    #[cfg(target_os = "macos")]
+    if launchd::start(&home) {
+        return wait_goethed(std::time::Duration::from_secs(60));
+    }
     match systemctl_restart_args() {
         Some(args) => {
             let args: Vec<String> = args.into_iter().map(|a| if a == "restart" { "start".to_string() } else { a }).collect();
@@ -207,6 +220,9 @@ pub fn wait_goethed(timeout: std::time::Duration) -> Result<(), String> {
 
 pub fn refresh_unit(home: &Path) {
     // Rewrite this home's unit when it predates the current template (KillMode=process lets engines outlive goethed).
+    #[cfg(target_os = "macos")]
+    return launchd::refresh(home);
+    #[cfg_attr(target_os = "macos", allow(unreachable_code))]
     let units = [(system_unit_path(), "multi-user.target", false), (user_unit_path(), "default.target", true)];
     for (path, wanted_by, user) in units {
         let current = fs::read_to_string(&path).ok();
@@ -261,6 +277,9 @@ fn spawn(home: &Path, port_env: bool) -> Result<(), String> {
 
 pub fn systemctl_restart_args() -> Option<Vec<String>> {
     // Restart through systemd only when the real unit starts this GOETHE_HOME.
+    if cfg!(target_os = "macos") {
+        return None;
+    }
     let home = goethe_home();
     let ours = |path: PathBuf| matches!(unit_owner(&path, &home), UnitOwner::Ours);
     if unsafe { libc::geteuid() } == 0 && system_unit_dir() == default_system_unit_dir() && ours(system_unit_path()) {
@@ -270,6 +289,134 @@ pub fn systemctl_restart_args() -> Option<Vec<String>> {
         return Some(vec!["--user".into(), "restart".into(), "goethed.service".into()]);
     }
     None
+}
+
+#[cfg(target_os = "macos")]
+pub mod launchd {
+    // macOS: a LaunchAgent starts goethed at login and after a crash; engines outlive it (AbandonProcessGroup).
+    use super::*;
+
+    pub const LABEL: &str = "sh.goethe.goethed";
+
+    pub fn plist_path() -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_default();
+        PathBuf::from(home).join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
+    }
+
+    fn xml(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+
+    pub fn plist_text(home: &Path) -> String {
+        let h = xml(&home.display().to_string());
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{LABEL}</string>
+  <key>ProgramArguments</key><array><string>{h}/bin/goethed</string></array>
+  <key>EnvironmentVariables</key><dict><key>GOETHE_HOME</key><string>{h}</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>AbandonProcessGroup</key><true/>
+  <key>ProcessType</key><string>Standard</string>
+  <key>StandardOutPath</key><string>{h}/logs/goethed.log</string>
+  <key>StandardErrorPath</key><string>{h}/logs/goethed.log</string>
+</dict>
+</plist>
+"#
+        )
+    }
+
+    fn domain() -> String {
+        format!("gui/{}", unsafe { libc::getuid() })
+    }
+
+    fn launchctl(args: &[&str]) -> bool {
+        Command::new("/bin/launchctl").args(args).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+    }
+
+    pub(crate) fn owner(home: &Path) -> UnitOwner {
+        let Ok(text) = fs::read_to_string(plist_path()) else { return UnitOwner::Absent };
+        if text.contains(&format!("<key>GOETHE_HOME</key><string>{}</string>", xml(&home.display().to_string()))) {
+            UnitOwner::Ours
+        } else {
+            let other = text.split("<key>GOETHE_HOME</key><string>").nth(1).and_then(|r| r.split('<').next()).map(PathBuf::from);
+            UnitOwner::Other(other)
+        }
+    }
+
+    fn loaded() -> bool {
+        launchctl(&["print", &format!("{}/{LABEL}", domain())])
+    }
+
+    pub fn enable(home: &Path) -> Result<Vec<String>, String> {
+        if let UnitOwner::Other(other) = owner(home) {
+            return Err(format!(
+                "{} already starts goethed for {}; run goethe down in that home first",
+                plist_path().display(),
+                describe_home(other.as_deref())
+            ));
+        }
+        let path = plist_path();
+        fs::create_dir_all(path.parent().unwrap_or(Path::new("/"))).map_err(|e| e.to_string())?;
+        fs::create_dir_all(home.join("logs")).map_err(|e| e.to_string())?;
+        let fresh = fs::read_to_string(&path).ok().as_deref() != Some(plist_text(home).as_str());
+        if fresh {
+            fs::write(&path, plist_text(home)).map_err(|e| format!("write {}: {e}", path.display()))?;
+        }
+        if !loaded() || fresh {
+            if loaded() {
+                launchctl(&["bootout", &format!("{}/{LABEL}", domain())]);
+            }
+            if !launchctl(&["bootstrap", &domain(), &path.display().to_string()]) {
+                return Err(format!("launchctl bootstrap {} failed", path.display()));
+            }
+        }
+        Ok(vec!["goethed starts when you log in (LaunchAgent sh.goethe.goethed)".to_string()])
+    }
+
+    pub fn start(home: &Path) -> bool {
+        // Start through the agent when it is ours and loaded.
+        matches!(owner(home), UnitOwner::Ours) && loaded() && launchctl(&["kickstart", &format!("{}/{LABEL}", domain())])
+    }
+
+    pub fn disable(home: &Path) -> Result<Vec<String>, String> {
+        if !matches!(owner(home), UnitOwner::Ours) {
+            return Ok(vec!["goethed boot was not enabled".to_string()]);
+        }
+        launchctl(&["bootout", &format!("{}/{LABEL}", domain())]);
+        fs::remove_file(plist_path()).map_err(|e| e.to_string())?;
+        Ok(vec!["goethed no longer starts when you log in".to_string()])
+    }
+
+    pub fn refresh(home: &Path) {
+        if matches!(owner(home), UnitOwner::Ours) && fs::read_to_string(plist_path()).ok().as_deref() != Some(plist_text(home).as_str()) {
+            let _ = fs::write(plist_path(), plist_text(home));
+        }
+    }
+
+    pub fn method(home: &Path) -> String {
+        match owner(home) {
+            UnitOwner::Ours => "launchd (LaunchAgent)".to_string(),
+            UnitOwner::Other(h) => format!("none (the LaunchAgent starts {})", describe_home(h.as_deref())),
+            UnitOwner::Absent => "none".to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_agent_starts_this_home_and_lets_engines_outlive_it() {
+            let t = plist_text(Path::new("/Users/me/.goethe"));
+            assert!(t.contains("<string>/Users/me/.goethe/bin/goethed</string>"));
+            assert!(t.contains("<key>GOETHE_HOME</key><string>/Users/me/.goethe</string>"));
+            assert!(t.contains("<key>AbandonProcessGroup</key><true/>") && t.contains("<key>RunAtLoad</key><true/>"));
+        }
+    }
 }
 
 fn default_system_unit_dir() -> PathBuf {
@@ -333,7 +480,7 @@ fn try_user_unit(home: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-enum UnitOwner {
+pub(crate) enum UnitOwner {
     Absent,
     Ours,
     Other(Option<PathBuf>),
@@ -440,7 +587,26 @@ pub fn unit_text(home: &Path, wanted_by: &str) -> String {
 }
 
 fn write_unit(path: &Path, home: &Path, wanted_by: &str) -> Result<(), String> {
-    fs::write(path, unit_text(home, wanted_by)).map_err(|e| format!("{}: {e}", path.display()))
+    fs::write(path, unit_text(home, wanted_by)).map_err(|e| format!("{}: {e}", path.display()))?;
+    if path == system_unit_path() {
+        label_programs(home);
+    }
+    Ok(())
+}
+
+pub fn label_programs(home: &Path) {
+    // With SELinux, systemd runs only files labelled as programs, and a home under /var/lib is data: root's goethe binaries get bin_t, kept across a relabel when semanage is there.
+    if unsafe { libc::geteuid() } != 0 || !Path::new("/sys/fs/selinux/enforce").exists() {
+        return;
+    }
+    let bin = home.join("bin");
+    let quiet = |c: &mut Command| c.stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    let spec = format!("{}(/.*)?", bin.display());
+    let recorded = quiet(Command::new("semanage").args(["fcontext", "-a", "-t", "bin_t", &spec]))
+        || quiet(Command::new("semanage").args(["fcontext", "-m", "-t", "bin_t", &spec]));
+    if !(recorded && quiet(Command::new("restorecon").arg("-R").arg(&bin))) {
+        quiet(Command::new("chcon").args(["-R", "-t", "bin_t"]).arg(&bin));
+    }
 }
 
 pub fn cron_line(home: &Path) -> String {

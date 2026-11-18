@@ -1,6 +1,7 @@
 // goethe-core shared library for the Goethe CLI and daemon.
 
 pub mod alias;
+pub mod apple;
 pub mod calc;
 pub mod chooser;
 pub mod config;
@@ -17,6 +18,7 @@ pub mod messages;
 pub mod models;
 pub mod progress;
 pub mod step;
+pub mod sys;
 pub mod net;
 pub mod pack_update;
 pub mod packs;
@@ -65,6 +67,7 @@ pub mod update;
 pub mod uninstall;
 pub mod autostart;
 pub mod service;
+pub mod setup;
 pub mod watchdog_policy;
 pub mod watchdog_liveness;
 pub mod slots;
@@ -89,3 +92,5 @@ pub mod trace;
 pub mod trace_assemble;
 pub mod configure;
 pub mod gpu_arch;
+pub mod gpu_kind;
+pub mod fix;
