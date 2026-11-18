@@ -430,7 +430,7 @@ fn quote(path: &Path) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn nginx_version(bin: &Path) -> Option<(u32, u32, u32)> {
+pub(crate) fn nginx_version(bin: &Path) -> Option<(u32, u32, u32)> {
     let out = Command::new(bin).arg("-v").output().ok()?;
     let text = String::from_utf8_lossy(&out.stderr).to_string();
     let v = text.split("nginx/").nth(1)?.split_whitespace().next()?.to_string();

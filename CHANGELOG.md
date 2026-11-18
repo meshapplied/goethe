@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Bundled nginx pin is 1.30.7 (was 1.30.6) for the HTTP/2 fixes (CVE-2026-123007 and related). `goethe doctor` warns when the on-disk nginx is older. Rebuild/republish the package so `goethe update` can refresh the binary.
 - `goethe api expose public --yes` without `--allow` no longer binds every interface on a leftover allowlist; name the clients and confirm (`--yes` or `y`). Raw `goethe api expose 0.0.0.0` is refused (use `expose public`). World-open clients need the hidden `--dangerously-allow-all-inbound --yes`.
 - The gateway TLS certificate SAN includes this host's interface IPs (tailnet, LAN), so `curl --cacert` to the bind address verifies; the cert refreshes when that list changes.
 - `goethe models scan <foldername>` resolves the name under `GOETHE_HOME/models`, not the current working directory.
