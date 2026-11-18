@@ -409,8 +409,18 @@ pub fn may_match(index: &[u8], archs: &[String], gguf_arch: Option<&str>, config
 }
 
 pub fn offers(index: &[u8], model_id: &str, archs: &[String]) -> Vec<Offer> {
-    // Packs of `index` for `model_id` (case-insensitive) on one of `archs`, in `archs` order, that the pinned engine can run.
-    dedup(entries(index, archs, |repo| repo.eq_ignore_ascii_case(model_id)).into_iter().filter(runnable).map(|e| e.offer).collect())
+    offers_for(index, model_id, archs, crate::pyenv::ENGINE_VERSION)
+}
+
+pub fn offers_for(index: &[u8], model_id: &str, archs: &[String], engine: &str) -> Vec<Offer> {
+    // Packs of `index` for `model_id` on one of `archs` that `engine` can run.
+    dedup(
+        entries(index, archs, |repo| repo.eq_ignore_ascii_case(model_id))
+            .into_iter()
+            .filter(|e| runnable_at(e, engine))
+            .map(|e| e.offer)
+            .collect(),
+    )
 }
 
 pub fn offers_any(index: &[u8], archs: &[String]) -> Vec<Offer> {
@@ -428,19 +438,37 @@ fn dedup(v: Vec<Offer>) -> Vec<Offer> {
     out
 }
 
+pub fn pack_engine_version(home: &Path) -> String {
+    // Installed wheel when present (fail-closed against pin/installed skew); else the pin this binary will install.
+    crate::pyenv::engine_installed(home).unwrap_or_else(|| crate::pyenv::ENGINE_VERSION.to_string())
+}
+
 pub fn runnable(e: &Entry) -> bool {
-    // The pinned goethe-engine (the one goethe installs) is at least the pack's min_engine.
-    Some(e.min_engine) <= version(crate::pyenv::ENGINE_VERSION)
+    runnable_at(e, crate::pyenv::ENGINE_VERSION)
+}
+
+pub fn runnable_at(e: &Entry, engine: &str) -> bool {
+    // `engine` is the goethe-engine that can actually load the pack (installed, or the pin when none is).
+    Some(e.min_engine) <= version(engine)
 }
 
 pub fn engine_too_old(index: &[u8], model_id: &str, archs: &[String]) -> Option<String> {
-    // A note when the index has packs for `model_id` on `archs` but each needs a newer goethe-engine than the pinned one.
+    engine_too_old_at(index, model_id, archs, crate::pyenv::ENGINE_VERSION)
+}
+
+pub fn engine_too_old_at(index: &[u8], model_id: &str, archs: &[String], engine: &str) -> Option<String> {
+    // A note when the index has packs for `model_id` on `archs` but each needs a newer goethe-engine than `engine`.
     let es = entries(index, archs, |r| r.eq_ignore_ascii_case(model_id));
-    if es.iter().any(runnable) {
+    if es.iter().any(|e| runnable_at(e, engine)) {
         return None;
     }
     let (a, b, c) = es.iter().map(|e| e.min_engine).min()?;
-    Some(format!("engine_too_old: {model_id} needs goethe-engine >= {a}.{b}.{c}, installed {}: run goethe update", crate::pyenv::ENGINE_VERSION))
+    let hint = if engine == crate::pyenv::ENGINE_VERSION {
+        "run goethe update"
+    } else {
+        "run goethe update engine"
+    };
+    Some(format!("engine_too_old: {model_id} needs goethe-engine >= {a}.{b}.{c}, installed {engine}: {hint}"))
 }
 
 pub fn pack_archs(index: &[u8], model_id: &str) -> Vec<String> {
@@ -1384,6 +1412,11 @@ mod tests {
         ix["entries"][0]["min_engine"] = "9.0.0".into();
         let e = engine_too_old(ix.to_string().as_bytes(), "org/m-gguf", &archs).unwrap();
         assert!(e.starts_with("engine_too_old: org/m-gguf needs goethe-engine >= 9.0.0, installed "), "{e}");
+        let raw = ix.to_string();
+        let old = engine_too_old_at(raw.as_bytes(), "org/m-gguf", &archs, "0.0.1").unwrap();
+        assert!(old.contains("goethe update engine"), "{old}");
+        assert!(offers_for(raw.as_bytes(), "org/m-gguf", &archs, "0.0.1").is_empty());
+        assert!(!offers_for(raw.as_bytes(), "org/m-gguf", &archs, "9.0.0").is_empty());
     }
 
     #[test]

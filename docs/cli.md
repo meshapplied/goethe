@@ -420,9 +420,11 @@ Installs the latest Goethe. Loaded models keep serving. It then checks the kerne
 
 | Command | Description |
 |---|---|
-| `goethe update` | Update Goethe and the kernel packs |
+| `goethe update` | Update Goethe, bundled nginx when its sha differs, already-installed engines, and kernel packs |
 | `goethe update engine` | Update only the installed engines (the ternary runtime too, when it is installed) |
 | `goethe update rollback` | Put the previous kernel pack of every model that has one back |
+
+CLI help text stays the source of truth for flags and examples. A later pass can regenerate the command tables from clap while keeping the prose paragraphs above hand-written.
 
 | Option | Description |
 |---|---|

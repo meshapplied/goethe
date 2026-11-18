@@ -655,9 +655,10 @@ fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String
     }
     let Some(index) = crate::packs::catalog(home) else { return Ok(PackDecision::None) };
     let archs = crate::packs::local_archs(home);
-    let Some(offer) = crate::packs::offers(&index, &opts.model_id, &archs).into_iter().next() else {
+    let engine = crate::packs::pack_engine_version(home);
+    let Some(offer) = crate::packs::offers_for(&index, &opts.model_id, &archs, &engine).into_iter().next() else {
         let theirs = crate::packs::pack_archs(&index, &opts.model_id);
-        if let Some(note) = crate::packs::engine_too_old(&index, &opts.model_id, &archs) {
+        if let Some(note) = crate::packs::engine_too_old_at(&index, &opts.model_id, &archs, &engine) {
             eprintln!("{note}");
         } else if !theirs.is_empty() && !theirs.iter().any(|a| archs.contains(a)) {
             eprintln!("note: kernel packs for {} exist for {} only, not for this machine's GPUs ({})", opts.model_id, theirs.join(", "), archs.join(", "));

@@ -130,10 +130,12 @@ pub fn refresh(home: &Path, model_id: &str, dir: &Path, arch: &str, broker: &dyn
     let have = installed_overlays(dir);
     let (index, serial) = verified_index(home, broker, run).map_err(|e| format!("{model_id}: {e}; the installed pack is kept"))?;
     let Some(entry) = pending(&index, model_id, arch, &installed, &have) else { return Ok(Outcome::Unchanged) };
-    if !crate::packs::runnable(&entry) {
+    let engine = crate::packs::pack_engine_version(home);
+    if !crate::packs::runnable_at(&entry, &engine) {
+        let hint = if engine == crate::pyenv::ENGINE_VERSION { "goethe update" } else { "goethe update engine" };
         return Ok(Outcome::Skipped(format!(
-            "the new pack of {model_id} needs goethe-engine {}.{}.{}, installed {}: run goethe update",
-            entry.min_engine.0, entry.min_engine.1, entry.min_engine.2, crate::pyenv::ENGINE_VERSION
+            "the new pack of {model_id} needs goethe-engine {}.{}.{}, installed {engine}: run {hint}",
+            entry.min_engine.0, entry.min_engine.1, entry.min_engine.2
         )));
     }
     if entry.manifest_sha256 == installed {
