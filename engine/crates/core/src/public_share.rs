@@ -22,8 +22,33 @@ pub fn public_mux_addr(mux_port: u16) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(PUBLIC_MUX_IP), mux_port)
     }
 }
-const RATE_PER_IP: u64 = 10;
-const CONN_PER_IP: u64 = 16;
+const DEFAULT_RATE_PER_IP: u64 = 10;
+const DEFAULT_CONN_PER_IP: u64 = 16;
+
+fn share_rate(home: &Path) -> u64 {
+    nginx::gateway_limit(home, "share_rate_per_ip", DEFAULT_RATE_PER_IP)
+}
+
+fn share_conn(home: &Path) -> u64 {
+    nginx::gateway_limit(home, "share_conn_per_ip", DEFAULT_CONN_PER_IP)
+}
+
+fn persist_share_limits(home: &Path) {
+    // Hidden: GOETHE_SHARE_RATE_PER_IP / GOETHE_SHARE_CONN_PER_IP (1-65535); same shape as the private gateway.
+    for (var, name, default) in [
+        ("GOETHE_SHARE_RATE_PER_IP", "share_rate_per_ip", DEFAULT_RATE_PER_IP),
+        ("GOETHE_SHARE_CONN_PER_IP", "share_conn_per_ip", DEFAULT_CONN_PER_IP),
+    ] {
+        let value = std::env::var(var)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| (1..=65535).contains(v))
+            .unwrap_or(default);
+        if let Err(e) = nginx::write_private(&nginx::nginx_prefix(home).join(name), format!("{value}\n").as_bytes()) {
+            eprintln!("goethe api share: {e}");
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Share {
@@ -383,10 +408,12 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
         grants.retain(|g| g.key != k.id);
         grants.push(Grant { key: k.id.clone(), until, allow });
     }
+    persist_share_limits(home);
+    let (rate, conn) = (share_rate(home), share_conn(home));
     if a.dangerously_allow_all_inbound {
         warnings.push(format!(
-            "every address may connect; rate limit is {RATE_PER_IP} requests/s per client (burst {}), {CONN_PER_IP} connections",
-            2 * RATE_PER_IP
+            "every address may connect; rate limit is {rate} requests/s per client (burst {}), {conn} connections",
+            2 * rate
         ));
     }
     if reopen {
@@ -579,9 +606,9 @@ pub fn nginx_block(home: &Path, mux_port: u16, modern_http2: bool, max_body_mb: 
         .replace("{{CERT}}", &quote(&dir.join("certs/public.crt")))
         .replace("{{KEY}}", &quote(&dir.join("certs/public.key")))
         .replace("{{ALLOW}}", &allow)
-        .replace("{{RATE_PER_IP}}", &RATE_PER_IP.to_string())
-        .replace("{{BURST_PER_IP}}", &(2 * RATE_PER_IP).to_string())
-        .replace("{{CONN_PER_IP}}", &CONN_PER_IP.to_string())
+        .replace("{{RATE_PER_IP}}", &share_rate(home).to_string())
+        .replace("{{BURST_PER_IP}}", &(2 * share_rate(home)).to_string())
+        .replace("{{CONN_PER_IP}}", &share_conn(home).to_string())
         .replace("{{MAX_BODY_MB}}", &max_body_mb.to_string())
         .replace("{{PUBLIC_MUX}}", &public_mux_addr(mux_port).to_string())
 }
@@ -805,8 +832,26 @@ mod tests {
         store(h, &Share { allow: vec!["0.0.0.0/0".into()], ..share(true, now() + 600) }).unwrap();
         let block = nginx_block(h, 30000, true, 64);
         assert!(block.contains("allow 0.0.0.0/0;\n    deny all;"), "{block}");
-        assert!(block.contains(&format!("rate={RATE_PER_IP}r/s")), "{block}");
-        assert!(block.contains(&format!("limit_conn goethe_pub_conn {CONN_PER_IP}")), "{block}");
+        assert!(block.contains(&format!("rate={DEFAULT_RATE_PER_IP}r/s")), "{block}");
+        assert!(block.contains(&format!("limit_conn goethe_pub_conn {DEFAULT_CONN_PER_IP}")), "{block}");
+    }
+
+    #[test]
+    fn share_limits_follow_env_when_persisted() {
+        let dir = home_with_keys();
+        let h = dir.path();
+        std::env::set_var("GOETHE_SHARE_RATE_PER_IP", "25");
+        std::env::set_var("GOETHE_SHARE_CONN_PER_IP", "40");
+        persist_share_limits(h);
+        std::env::remove_var("GOETHE_SHARE_RATE_PER_IP");
+        std::env::remove_var("GOETHE_SHARE_CONN_PER_IP");
+        assert_eq!(share_rate(h), 25);
+        assert_eq!(share_conn(h), 40);
+        store(h, &Share { allow: vec!["203.0.113.7/32".into()], ..share(true, now() + 600) }).unwrap();
+        let block = nginx_block(h, 30000, true, 64);
+        assert!(block.contains("rate=25r/s"), "{block}");
+        assert!(block.contains("burst=50"), "{block}");
+        assert!(block.contains("limit_conn goethe_pub_conn 40"), "{block}");
     }
 
     #[test]
