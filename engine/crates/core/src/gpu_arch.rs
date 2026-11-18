@@ -152,7 +152,7 @@ pub fn unsupported_reason(cc: &str) -> Option<String> {
 }
 
 pub fn same_cc(a: &str, b: &str) -> bool {
-    parse_cc(a).is_some_and(|x| parse_cc(b) == Some(x))
+    (is_apple(a) && is_apple(b)) || parse_cc(a).is_some_and(|x| parse_cc(b) == Some(x))
 }
 
 pub fn supported_list() -> Vec<String> {

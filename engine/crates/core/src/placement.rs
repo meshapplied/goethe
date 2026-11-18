@@ -303,4 +303,12 @@ mod tests {
         let got = placement_inputs(&snap, &HashSet::new(), &HashSet::new(), &denied, |g| if g == 3 { 5.0 } else { 0.0 });
         assert_eq!(got, vec![inp(2, true, 20480), inp(3, false, 15360)]);
     }
+
+    #[test]
+    fn the_one_gpu_of_a_mac_is_a_set() {
+        let mac = GpuPlacementInput { index: 0, cc: "metal".into(), foreign_process: false, free_vram_mb: 10_000 };
+        let sets = rank_sets(&[mac], None, 1);
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].gpus, vec![0]);
+    }
 }

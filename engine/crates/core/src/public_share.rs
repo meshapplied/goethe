@@ -13,6 +13,15 @@ pub const DEFAULT_PORT: u16 = 8444;
 pub const MIN_SECS: i64 = 60;
 pub const MAX_SECS: i64 = 7 * 86_400;
 pub const PUBLIC_MUX_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
+
+pub fn public_mux_addr(mux_port: u16) -> SocketAddr {
+    // Public-gateway traffic: 127.0.0.2:mux, or on macOS (no 127.0.0.2) 127.0.0.1 at mux+200, past the engine ports.
+    if cfg!(target_os = "macos") {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), mux_port.wrapping_add(200))
+    } else {
+        SocketAddr::new(IpAddr::V4(PUBLIC_MUX_IP), mux_port)
+    }
+}
 const RATE_PER_IP: u64 = 10;
 const CONN_PER_IP: u64 = 16;
 
@@ -248,7 +257,7 @@ fn port_free(port: u16) -> bool {
 
 fn mux_public_listening(home: &Path) -> bool {
     nginx::persisted_mux_port(home)
-        .is_ok_and(|p| TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V4(PUBLIC_MUX_IP), p), Duration::from_millis(500)).is_ok())
+        .is_ok_and(|p| TcpStream::connect_timeout(&public_mux_addr(p), Duration::from_millis(500)).is_ok())
 }
 
 fn wait_listening(port: u16, timeout: Duration) -> bool {
@@ -510,7 +519,7 @@ pub fn nginx_block(home: &Path, mux_port: u16, modern_http2: bool, max_body_mb: 
         .replace("{{BURST_PER_IP}}", &(2 * RATE_PER_IP).to_string())
         .replace("{{CONN_PER_IP}}", &CONN_PER_IP.to_string())
         .replace("{{MAX_BODY_MB}}", &max_body_mb.to_string())
-        .replace("{{PUBLIC_MUX}}", &format!("{PUBLIC_MUX_IP}:{mux_port}"))
+        .replace("{{PUBLIC_MUX}}", &public_mux_addr(mux_port).to_string())
 }
 
 fn quote(path: &Path) -> String {
@@ -646,7 +655,7 @@ mod tests {
         store(h, &Share { allow: vec!["203.0.113.7/32".into()], ..share(true, now() + 600) }).unwrap();
         let block = nginx_block(h, 30000, true, 64);
         assert!(block.contains("listen 0.0.0.0:8444 ssl"), "{block}");
-        assert!(block.contains("127.0.0.2:30000"));
+        assert!(block.contains(&public_mux_addr(30000).to_string()), "{block}");
         assert!(block.contains("allow 203.0.113.7/32;\n    deny all;"));
         assert!(block.contains("public.crt"));
     }
