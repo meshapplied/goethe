@@ -2,6 +2,7 @@
 
 use crate::host::{self, EnvironmentInfo, HostInfo};
 use crate::paths::{ensure_layout, goethe_home};
+#[cfg(target_os = "linux")]
 use nvml_wrapper::enum_wrappers::device::TopologyLevel;
 use nvml_wrapper::enums::device::UsedGpuMemory;
 use nvml_wrapper::Nvml;
@@ -378,6 +379,16 @@ pub fn refresh_gpu_vram(gpu_index: u32) -> Result<(u64, u64, u64, Vec<RunningPro
     Ok((total, used, free, compute_processes(&dev, unified)?))
 }
 
+#[cfg(target_os = "linux")]
+fn common_ancestor(a: &nvml_wrapper::Device, b: nvml_wrapper::Device) -> Result<String, String> {
+    a.topology_common_ancestor(b).map(|level| topology_level_label(level).to_string()).map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn common_ancestor(_: &nvml_wrapper::Device, _: nvml_wrapper::Device) -> Result<String, String> {
+    Err("no NVIDIA topology on this system".to_string())
+}
+
 fn classify_link(nvml: &Nvml, a: u32, b: u32) -> Result<LinkState, String> {
     // CONTRACT C class plus the raw nvidia-smi topo code (NV#, PIX, PXB, PHB, NODE, SYS).
     let dev_a = nvml.device_by_index(a).map_err(|e| format!("device {a}: {e}"))?;
@@ -386,10 +397,7 @@ fn classify_link(nvml: &Nvml, a: u32, b: u32) -> Result<LinkState, String> {
     let topo = if nvlinks > 0 {
         format!("NV{nvlinks}")
     } else {
-        match dev_a.topology_common_ancestor(dev_b) {
-            Ok(level) => topology_level_label(level).to_string(),
-            Err(e) => return Err(format!("topology {a}-{b}: {e}")),
-        }
+        common_ancestor(&dev_a, dev_b).map_err(|e| format!("topology {a}-{b}: {e}"))?
     };
     Ok(LinkState {
         a,
@@ -399,6 +407,7 @@ fn classify_link(nvml: &Nvml, a: u32, b: u32) -> Result<LinkState, String> {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn topology_level_label(level: TopologyLevel) -> &'static str {
     match level {
         TopologyLevel::Internal | TopologyLevel::Single => "PIX",

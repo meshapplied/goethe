@@ -17,6 +17,7 @@ pub mod messages;
 pub mod models;
 pub mod progress;
 pub mod step;
+pub mod sys;
 pub mod net;
 pub mod pack_update;
 pub mod packs;

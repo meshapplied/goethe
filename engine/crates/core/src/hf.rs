@@ -463,6 +463,7 @@ fn run_guarded(cmd: &mut Command) -> std::io::Result<(ExitStatus, Vec<u8>)> {
     // The downloader in its own process group, killed with goethe: SIGINT and SIGTERM stop the group, a SIGKILL of goethe stops the child (parent-death signal). Its stderr is shown live up to a Python traceback, which is kept for one line instead.
     cmd.stderr(Stdio::piped()).stdout(Stdio::null()).stdin(Stdio::null());
     cmd.process_group(0);
+    #[cfg(target_os = "linux")]
     unsafe {
         cmd.pre_exec(|| {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);

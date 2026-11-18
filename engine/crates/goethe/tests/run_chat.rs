@@ -45,8 +45,8 @@ fn fake_engine() -> u16 {
 
 fn pty() -> (OwnedFd, OwnedFd) {
     let (mut master, mut slave) = (0, 0);
-    let size = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let ok = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &size) };
+    let mut size = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let ok = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut size as *mut libc::winsize as _) };
     assert_eq!(ok, 0, "openpty");
     unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) }
 }

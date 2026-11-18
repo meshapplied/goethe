@@ -400,6 +400,12 @@ pub fn os_release_name(text: &str) -> String {
         .unwrap_or_default()
 }
 
+#[cfg(not(target_os = "linux"))]
+fn glibc_version() -> String {
+    String::new()
+}
+
+#[cfg(target_os = "linux")]
 fn glibc_version() -> String {
     // Runtime glibc version of this process.
     let p = unsafe { libc::gnu_get_libc_version() };

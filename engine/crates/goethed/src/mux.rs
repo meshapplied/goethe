@@ -951,9 +951,7 @@ fn request_id(headers: &HeaderMap) -> String {
     }
     let prefix = PREFIX.get_or_init(|| {
         let mut b = [0u8; 8];
-        unsafe {
-            libc::getrandom(b.as_mut_ptr().cast(), b.len(), 0);
-        }
+        goethe_core::sys::random_bytes(&mut b);
         b.iter().fold(String::from("req-"), |mut s, x| {
             let _ = write!(s, "{x:02x}");
             s

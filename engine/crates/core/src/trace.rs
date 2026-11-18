@@ -367,9 +367,7 @@ pub(crate) fn write_private_atomic(path: &Path, data: &[u8]) -> std::io::Result<
 
 fn random_hex(n: usize) -> String {
     let mut b = vec![0u8; n];
-    unsafe {
-        libc::getrandom(b.as_mut_ptr().cast(), b.len(), 0);
-    }
+    crate::sys::random_bytes(&mut b);
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
