@@ -269,7 +269,7 @@ fn need_client_allow(home: &Path) -> String {
         .map(|ip| format!(" this machine's public address is {ip} (that becomes the URL, not --allow);"))
         .unwrap_or_default();
     format!(
-        "name who may connect with --allow <their-ip>/32 (their phone or laptop's public IP, not this machine's).{here} ask them"
+        "name who may connect with --allow <their-ip>/32 (their phone or laptop's public IP, not this machine's).{here} ask them; to open to every address use --dangerously-allow-all-inbound"
     )
 }
 
@@ -277,7 +277,10 @@ fn reject_bad_share_cidrs(home: &Path, allow: &[String]) -> Result<(), String> {
     let machine = crate::platform::lookup_public_ip(home).ok();
     for c in allow {
         if c.ends_with("/0") {
-            return Err("the public gateway will not open to every address; name the client's public IP with --allow <their-ip>/32".into());
+            return Err(
+                "the public gateway will not open to every address unless you pass --dangerously-allow-all-inbound; otherwise name the client's public IP with --allow <their-ip>/32"
+                    .into(),
+            );
         }
         if let Some(ip) = machine {
             let host = format!("{ip}/{}", if ip.is_ipv4() { 32 } else { 128 });
@@ -289,6 +292,28 @@ fn reject_bad_share_cidrs(home: &Path, allow: &[String]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Addresses for one share open: CLI --allow, remembered grant, or --dangerously-allow-all-inbound.
+fn resolve_share_cidrs(
+    home: &Path,
+    cli_allow: &[String],
+    reuse_keys: bool,
+    kept: &[String],
+    dangerously_allow_all_inbound: bool,
+) -> Result<Vec<String>, String> {
+    if dangerously_allow_all_inbound {
+        if !cli_allow.is_empty() {
+            return Err("--dangerously-allow-all-inbound cannot be combined with --allow".into());
+        }
+        return Ok(vec!["0.0.0.0/0".into()]);
+    }
+    let allow = share_allow(cli_allow, reuse_keys, kept);
+    if allow.is_empty() {
+        return Err(need_client_allow(home));
+    }
+    reject_bad_share_cidrs(home, &allow)?;
+    Ok(allow)
 }
 
 fn mux_public_listening(home: &Path) -> bool {
@@ -312,6 +337,7 @@ pub struct OpenArgs<'a> {
     pub keys: &'a [String],
     pub allow: &'a [String],
     pub port: Option<u16>,
+    pub dangerously_allow_all_inbound: bool,
 }
 
 pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
@@ -343,13 +369,15 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
         .unwrap_or_default();
     for k in &keys {
         let kept = previous.as_ref().and_then(|p| p.grant(&k.id)).map(|g| g.allow).unwrap_or_default();
-        let allow = share_allow(&cli_allow, a.keys.is_empty(), &kept);
-        if allow.is_empty() {
-            return Err(need_client_allow(home));
-        }
-        reject_bad_share_cidrs(home, &allow)?;
+        let allow = resolve_share_cidrs(home, &cli_allow, a.keys.is_empty(), &kept, a.dangerously_allow_all_inbound)?;
         grants.retain(|g| g.key != k.id);
         grants.push(Grant { key: k.id.clone(), until, allow });
+    }
+    if a.dangerously_allow_all_inbound {
+        warnings.push(format!(
+            "every address may connect; rate limit is {RATE_PER_IP} requests/s per client (burst {}), {CONN_PER_IP} connections",
+            2 * RATE_PER_IP
+        ));
     }
     let gateway_port = nginx::public_port_u16(home);
     let mux_port = nginx::persisted_mux_port(home)?;
@@ -709,21 +737,51 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let msg = need_client_allow(dir.path());
         assert!(msg.contains("their phone or laptop") && msg.contains("--allow"), "{msg}");
+        assert!(msg.contains("dangerously-allow-all-inbound"), "{msg}");
         assert!(!msg.contains("goethe api allow"), "{msg}");
     }
 
     #[test]
-    fn share_refuses_everyone_and_this_machines_public_ip() {
+    fn share_refuses_everyone_and_this_machines_public_ip_unless_dangerously() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
-        assert!(reject_bad_share_cidrs(home, &["0.0.0.0/0".into()]).unwrap_err().contains("every address"));
-        assert!(reject_bad_share_cidrs(home, &["::/0".into()]).unwrap_err().contains("every address"));
+        assert!(reject_bad_share_cidrs(home, &["0.0.0.0/0".into()]).unwrap_err().contains("dangerously-allow-all-inbound"));
+        assert!(reject_bad_share_cidrs(home, &["::/0".into()]).unwrap_err().contains("dangerously-allow-all-inbound"));
         let ip: IpAddr = "203.0.113.50".parse().unwrap();
         std::env::set_var("GOETHE_PUBLIC_IP", ip.to_string());
         let err = reject_bad_share_cidrs(home, &[format!("{ip}/32")]).unwrap_err();
         std::env::remove_var("GOETHE_PUBLIC_IP");
         assert!(err.contains("this machine's public address"), "{err}");
         assert!(reject_bad_share_cidrs(home, &["198.51.100.7/32".into()]).is_ok());
+
+        let all = resolve_share_cidrs(home, &[], false, &[], true).unwrap();
+        assert_eq!(all, vec!["0.0.0.0/0".to_string()]);
+        assert!(resolve_share_cidrs(home, &["198.51.100.7/32".into()], false, &[], true)
+            .unwrap_err()
+            .contains("cannot be combined"));
+        assert!(resolve_share_cidrs(home, &["0.0.0.0/0".into()], false, &[], false)
+            .unwrap_err()
+            .contains("dangerously-allow-all-inbound"));
+        assert_eq!(
+            resolve_share_cidrs(home, &["198.51.100.7/32".into()], false, &[], false).unwrap(),
+            vec!["198.51.100.7/32".to_string()]
+        );
+        assert_eq!(
+            resolve_share_cidrs(home, &[], true, &["203.0.113.9/32".into()], false).unwrap(),
+            vec!["203.0.113.9/32".to_string()]
+        );
+        assert!(resolve_share_cidrs(home, &[], false, &[], false).unwrap_err().contains("--allow"));
+    }
+
+    #[test]
+    fn nginx_block_with_everyone_still_ends_in_deny_all() {
+        let dir = home_with_keys();
+        let h = dir.path();
+        store(h, &Share { allow: vec!["0.0.0.0/0".into()], ..share(true, now() + 600) }).unwrap();
+        let block = nginx_block(h, 30000, true, 64);
+        assert!(block.contains("allow 0.0.0.0/0;\n    deny all;"), "{block}");
+        assert!(block.contains(&format!("rate={RATE_PER_IP}r/s")), "{block}");
+        assert!(block.contains(&format!("limit_conn goethe_pub_conn {CONN_PER_IP}")), "{block}");
     }
 
     #[test]

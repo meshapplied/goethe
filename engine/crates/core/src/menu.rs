@@ -479,7 +479,16 @@ impl SharePage {
         };
         let allow: Vec<String> = self.allow.split([',', ' ']).map(str::trim).filter(|c| !c.is_empty()).map(str::to_string).collect();
         let home = goethe_home();
-        match share::open(&home, share::OpenArgs { secs, keys: std::slice::from_ref(&name), allow: &allow, port: None }) {
+        match share::open(
+            &home,
+            share::OpenArgs {
+                secs,
+                keys: std::slice::from_ref(&name),
+                allow: &allow,
+                port: None,
+                dangerously_allow_all_inbound: false,
+            },
+        ) {
             Ok(o) => {
                 self.reload();
                 self.key.clear();

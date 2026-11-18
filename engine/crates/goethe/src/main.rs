@@ -86,10 +86,11 @@ goethe api expose alone shows where the API listens and who may connect.";
 const SHARE_HELP: &str = "Examples:
 
 \t→ goethe api share 5h --key my-app --allow <their-ip>/32
+\t→ goethe api share 5h --key my-app --dangerously-allow-all-inbound
 \t→ goethe api share             (status)
 \t→ goethe api share stop
 
---allow is who may connect (their public IP: ask them, or https://ifconfig.me on their device). This machine's IP is only the URL goethe prints. Reopening the same keys keeps their last addresses. Closes when the last key ends.";
+--allow is who may connect (their public IP: ask them, or https://ifconfig.me on their device). This machine's IP is only the URL goethe prints. Reopening the same keys keeps their last addresses. --dangerously-allow-all-inbound opens to every address (rate limits still apply). Closes when the last key ends.";
 
 #[derive(Parser)]
 #[command(
@@ -478,8 +479,10 @@ struct ShareArgs {
     duration: Option<String>,
     #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::key_names), long, value_name = "NAME_OR_ID", num_args = 1.., value_delimiter = ',', help = "API keys to share (not admin keys), each until DURATION; with stop, the keys to stop sharing.")]
     key: Vec<String>,
-    #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Their public IP or range (phone/laptop), such as 203.0.113.7/32 — not this machine. Required unless reopening keys that already have addresses from last share.")]
+    #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Only these client addresses or ranges may use the keys given, such as 203.0.113.7.")]
     allow: Vec<String>,
+    #[arg(long, help = "Allow every address on the public gateway (0.0.0.0/0). Rate limits still apply. Not with --allow.")]
+    dangerously_allow_all_inbound: bool,
     #[arg(long, help = "The public port (default 8444, or the last one used).")]
     port: Option<u16>,
 }
@@ -909,9 +912,22 @@ fn main() {
             Some(domain) => goethe_core::domain::check(&domain).map(|text| print!("{text}")),
             None => goethe_core::domain::explain().map(|text| print!("{text}")),
         },
-        Commands::Api { cmd: Some(ApiCommands::Share(ShareArgs { duration, key, allow, port })), .. } => {
-            do_share(duration.as_deref().unwrap_or("status"), &key, &allow, port)
-        }
+        Commands::Api {
+            cmd: Some(ApiCommands::Share(ShareArgs {
+                duration,
+                key,
+                allow,
+                dangerously_allow_all_inbound,
+                port,
+            })),
+            ..
+        } => do_share(
+            duration.as_deref().unwrap_or("status"),
+            &key,
+            &allow,
+            dangerously_allow_all_inbound,
+            port,
+        ),
         Commands::Learn(LearnArgs { action, model, print, json }) => do_learn(action.as_deref(), &model, print.as_deref(), json),
         Commands::Trace(TraceArgs {
             action,
@@ -1708,7 +1724,13 @@ fn do_status() -> Result<(), String> {
     Ok(())
 }
 
-fn do_share(public: &str, keys: &[String], allow: &[String], port: Option<u16>) -> Result<(), String> {
+fn do_share(
+    public: &str,
+    keys: &[String],
+    allow: &[String],
+    dangerously_allow_all_inbound: bool,
+    port: Option<u16>,
+) -> Result<(), String> {
     // goethe api share <duration> | stop | (status).
     use goethe_core::public_share as share;
     let home = goethe_home();
@@ -1753,7 +1775,16 @@ fn do_share(public: &str, keys: &[String], allow: &[String], port: Option<u16>) 
         }
         dur => {
             let secs = share::parse_duration(dur)?;
-            let o = share::open(&home, share::OpenArgs { secs, keys, allow, port })?;
+            let o = share::open(
+                &home,
+                share::OpenArgs {
+                    secs,
+                    keys,
+                    allow,
+                    port,
+                    dangerously_allow_all_inbound,
+                },
+            )?;
             let ip = o.public_ip.map(|i| i.to_string()).unwrap_or_else(|| "<public IP>".into());
             let url = format!("https://{}/v1", host_port(&ip, o.share.port));
             println!("Shared until {} ({}); the public gateway is open until {}\n", share::local_time(share::now() + secs), left(secs), share::local_time(o.share.until));
@@ -1764,7 +1795,9 @@ fn do_share(public: &str, keys: &[String], allow: &[String], port: Option<u16>) 
                 println!("Key:  {} {token}  models: {models}", k.name);
             }
             let clients: Vec<String> = o.share.allow.clone();
-            if !clients.is_empty() {
+            if clients.iter().any(|c| c.ends_with("/0")) {
+                println!("Only these clients: every address (--dangerously-allow-all-inbound)");
+            } else if !clients.is_empty() {
                 println!("Only these clients: {}", clients.join(", "));
             }
             println!("\nTLS:  self-signed for this address. Send {} with the key (it holds no secret); the recipient", o.cert.display());
@@ -2028,6 +2061,12 @@ mod tests {
         assert!(parse(&["api", "expose", "vpn", "--interface", "wg0"]).is_ok() && parse(&["api", "expose", "wg0"]).is_ok());
         assert!(matches!(parse(&["api", "share", "5h", "--key", "a,b"]).unwrap().command,
             Commands::Api { cmd: Some(ApiCommands::Share(ShareArgs { duration: Some(_), .. })), .. }));
+        let Commands::Api { cmd: Some(ApiCommands::Share(s)), .. } =
+            parse(&["api", "share", "5h", "--key", "my-app", "--dangerously-allow-all-inbound"]).unwrap().command
+        else {
+            panic!()
+        };
+        assert!(s.dangerously_allow_all_inbound && s.allow.is_empty());
         assert!(parse(&["models", "alias", "set", "fast", "org/m"]).is_ok() && parse(&["models", "scan", "mydir"]).is_ok());
         assert!(parse(&["models", "--json", "scan"]).is_err() && parse(&["api", "--json", "keys"]).is_err());
         assert!(parse(&["learn", "on", "--model", "m"]).is_ok() && parse(&["trace", "on", "--all-keys"]).is_ok());

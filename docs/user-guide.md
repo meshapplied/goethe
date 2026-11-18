@@ -337,7 +337,7 @@ goethe api allow remove 192.168.1.0/24
 To give someone outside your network access for a limited time, without changing how the API is normally reached:
 
 ```bash
-goethe api share 5h --key my-app --allow 203.0.113.7/32   # their public IP, not this machine's
+goethe api share 5h --key my-app --allow 203.0.113.7/32   # prints the URL, the key and the certificate to send
 goethe api share 1d --key ci --allow 203.0.113.7/32       # another key on the same address, for a day
 goethe api share stop --key ci                            # stop sharing one key
 goethe api share stop                                     # close early
