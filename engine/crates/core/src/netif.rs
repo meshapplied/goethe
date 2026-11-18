@@ -137,8 +137,7 @@ fn output_within(cmd: &mut Command, limit: Duration) -> Option<String> {
 }
 
 pub fn parse_netstat(text: &str) -> Vec<Route> {
-    // `netstat -rn -f inet` on macOS: Destination, Gateway, Flags, Netif; "default" has no destination, 10.8/16 style
-    // destinations drop trailing zero octets.
+    // `netstat -rn -f inet` on macOS: Destination, Gateway, Flags, Netif; "default" has no destination, short ones drop zero octets.
     text.lines()
         .filter_map(|l| {
             let f: Vec<&str> = l.split_whitespace().collect();

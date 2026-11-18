@@ -183,8 +183,7 @@ pub fn nvfp4_dual_copy(cc: &str) -> bool {
 }
 
 pub fn model_runs_on(model_sm: &[String], gpu_cc: &str) -> bool {
-    // Listed for this capability, or for one on the same NVFP4 path with no more shared memory; empty means any.
-    // A Mac runs models that name no NVIDIA capability (GGUF with llama.cpp), or that name Metal.
+    // Listed for this capability, or one on the same NVFP4 path with no more shared memory; empty means any (Metal: none or metal).
     if is_apple(gpu_cc) {
         return model_sm.is_empty() || model_sm.iter().any(|s| is_apple(s));
     }

@@ -27,6 +27,15 @@ default_home() {
   fi
 }
 
+sha256_of() {
+  # The sha256 of a file: sha256sum on Linux, shasum on macOS.
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
 normalize_arch() {
   case "${1:-}" in
     arm64 | aarch64) echo aarch64 ;;
@@ -254,7 +263,7 @@ compiler_packages() {
 }
 
 check_compiler() {
-  # nvcc builds kernels on a model's first load with the system C++ compiler (gcc 9 to 15); offer one when missing.
+  # nvcc builds kernels on an SGLang model's first load with the system C++ compiler (gcc 9 to 15); reported, never installed.
   local cxx major pkgs=()
   for cxx in "${CXX:-}" c++ g++ clang++; do
     if [[ -n "${cxx}" ]] && command -v "${cxx}" >/dev/null 2>&1; then
@@ -268,10 +277,7 @@ check_compiler() {
     fi
   done
   read -r -a pkgs <<<"$(compiler_packages)"
-  if install_packages "no C++ compiler, which Goethe needs to build GPU kernels on a model's first load" "${pkgs[@]}"; then
-    return 0
-  fi
-  echo "WARNING: without a C++ compiler, models whose kernels are built on first load (NVFP4) cannot start; goethe doctor shows the fix" >&2
+  echo "  No C++ compiler: only SGLang models that build GPU kernels on their first load (NVFP4) need one; goethe install says how to add it (${pkgs[*]:-a C++ compiler}) when such a model is installed"
 }
 
 no_gpu() {
@@ -535,7 +541,7 @@ install_cuda_compat() {
       echo "  Downloading NVIDIA's CUDA 13 forward-compatibility libraries (about 60 MB)"
     fi
     if ! curl -fL "${bar[@]}" "${COMPAT_URL}/${pkg}" -o "${tmp}/compat.deb" ||
-      [[ "$(sha256sum "${tmp}/compat.deb" | awk '{print $1}')" != "${want}" ]]; then
+      [[ "$(sha256_of "${tmp}/compat.deb")" != "${want}" ]]; then
       rm -rf "${tmp}"
       CUDA_COMPAT=0
       echo "WARNING: could not download NVIDIA's forward-compatibility package (or its checksum did not match)" >&2
@@ -619,7 +625,7 @@ sum_matches() {
     echo "SHA256SUMS missing entry for ${rel}" >&2
     exit 1
   fi
-  [[ "$(sha256sum "${path}" | awk '{print $1}')" == "${expected}" ]]
+  [[ "$(sha256_of "${path}")" == "${expected}" ]]
 }
 
 verify_file_sum() {
@@ -687,10 +693,15 @@ verify_cdn() {
   SUMS_FILE="${GOETHE_HOME}/SHA256SUMS"
   load_sums
   local rel
-  for rel in "bin/linux-${ARCH}/goethe" "bin/linux-${ARCH}/goethed" "bin/linux-${ARCH}/uv" "pyenv/${LOCK}" \
-    "pyenv/${BASE_LOCK}" "pyenv/${ENGINE_LOCK}"; do
+  local wanted=("bin/${PLATFORM}/goethe" "bin/${PLATFORM}/goethed")
+  if [[ "${OS}" == Darwin ]]; then
+    wanted+=("bin/${PLATFORM}/nginx")
+  else
+    wanted+=("bin/${PLATFORM}/uv" "pyenv/${LOCK}" "pyenv/${BASE_LOCK}" "pyenv/${ENGINE_LOCK}")
+  fi
+  for rel in "${wanted[@]}"; do
     if ! awk -v a="${rel}" '$2 == a { found = 1; exit } END { exit !found }' "${SUMS_FILE}"; then
-      echo "CDN missing ${rel} for arch ${ARCH}" >&2
+      echo "CDN missing ${rel} for ${PLATFORM}" >&2
       exit 1
     fi
   done
@@ -743,7 +754,7 @@ install_ternary() {
     verify_file_sum "goethe/ternary-kernels.tar.zst" "${tar}.part"
   fi
   zstd -dc "${tar}.part" | tar -xf - -C "${GOETHE_HOME}/goethe"
-  sha256sum "${tar}.part" | awk '{print $1}' >"${GOETHE_HOME}/goethe/ternary-kernels.sha256"
+  sha256_of "${tar}.part" >"${GOETHE_HOME}/goethe/ternary-kernels.sha256"
   rm -f "${tar}.part"
 }
 
@@ -753,8 +764,8 @@ binary_current() {
   if [[ "${SECURE}" -ne 1 || ! -x "${GOETHE_HOME}/bin/$1" ]]; then
     return 1
   fi
-  want="$(awk -v p="bin/linux-${ARCH}/$1" '$2 == p { print $1; exit }' "${SUMS_FILE}")"
-  [[ -n "${want}" && "$(sha256sum "${GOETHE_HOME}/bin/$1" | awk '{print $1}')" == "${want}" ]]
+  want="$(awk -v p="bin/${PLATFORM}/$1" '$2 == p { print $1; exit }' "${SUMS_FILE}")"
+  [[ -n "${want}" && "$(sha256_of "${GOETHE_HOME}/bin/$1")" == "${want}" ]]
 }
 
 install_binaries() {
@@ -765,7 +776,7 @@ install_binaries() {
     if binary_current "${bin}"; then
       continue
     fi
-    fetch "bin/linux-${ARCH}/${bin}" "${GOETHE_HOME}/bin/.${bin}.new" "Downloading ${bin}"
+    fetch "bin/${PLATFORM}/${bin}" "${GOETHE_HOME}/bin/.${bin}.new" "Downloading ${bin}"
     chmod +x "${GOETHE_HOME}/bin/.${bin}.new"
     if [[ "${bin}" == goethe ]] && ! "${GOETHE_HOME}/bin/.goethe.new" --version >/dev/null; then
       echo "the downloaded goethe does not run on this host; nothing was replaced" >&2
@@ -1155,6 +1166,83 @@ BANNER
   echo
 }
 
+check_macos() {
+  # Apple Silicon and macOS 14 or newer, else stop before anything is downloaded; then what this Mac gives models.
+  local version major mem_gb chip
+  if [[ "${ARCH}" != "aarch64" ]]; then
+    echo "this is an Intel Mac: goethe needs Apple Silicon (M1 or newer)" >&2
+    exit 1
+  fi
+  version="$(sw_vers -productVersion 2>/dev/null || echo 0)"
+  major="${version%%.*}"
+  if ! [[ "${major}" =~ ^[0-9]+$ ]] || ((major < 14)); then
+    echo "macOS ${version} is too old: goethe needs macOS 14 (Sonoma) or newer for llama.cpp's Metal build" >&2
+    exit 1
+  fi
+  chip="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "Apple Silicon")"
+  mem_gb="$(($(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 / 1024 / 1024))"
+  done_line "${chip}, ${mem_gb} GB unified memory, macOS ${version}"
+  for tool in curl openssl shasum tar; do
+    command -v "${tool}" >/dev/null 2>&1 || { echo "${tool} is missing from this Mac; it is part of macOS, so check your PATH" >&2; exit 1; }
+  done
+}
+
+install_nginx_macos() {
+  # goethe's own nginx build for Apple Silicon, verified like the binaries; a set NGINX_BIN is used as it is.
+  local dest="${GOETHE_HOME}/nginx-root/usr/sbin/nginx"
+  if [[ -n "${NGINX_BIN:-}" && -x "${NGINX_BIN}" ]]; then
+    return
+  fi
+  mkdir -p "${GOETHE_HOME}/nginx-root/usr/sbin"
+  if ! { [[ "${SECURE}" -eq 1 && -x "${dest}" ]] && sum_matches "bin/${PLATFORM}/nginx" "${dest}"; }; then
+    fetch "bin/${PLATFORM}/nginx" "${dest}.new" "Downloading nginx"
+    chmod +x "${dest}.new"
+    mv -f "${dest}.new" "${dest}"
+  fi
+  NGINX_BIN="${dest}"
+}
+
+main_macos() {
+  # macOS: the same signed package without Python, CUDA or a package manager; llama.cpp comes with the first model.
+  STAGES=4
+  stage 1 "Checking this Mac"
+  check_macos
+  GOETHE_HOME="${GOETHE_HOME:-${HOME}/.goethe}"
+  export GOETHE_HOME
+  mkdir -p "${GOETHE_HOME}/bin" "${GOETHE_HOME}/logs" "${GOETHE_HOME}/models" "${GOETHE_HOME}/nginx/certs" "${GOETHE_HOME}/goethe"
+  check_disk
+  stage 2 "Verifying the signed package"
+  verify_cdn
+  if [[ "${SECURE}" -eq 1 ]]; then
+    done_line "SHA256SUMS signed by the Goethe release key; every download is checked against it"
+  fi
+  stage 3 "Installing goethe and goethed"
+  install_binaries
+  local staged="${GOETHE_HOME}/bin/.goethe.new"
+  [[ -x "${staged}" ]] || staged="${GOETHE_HOME}/bin/goethe"
+  done_line "$("${staged}" --version 2>/dev/null || echo goethe)"
+  export PATH="${GOETHE_HOME}/bin:${PATH}"
+  stage 4 "Setting up the gateway"
+  install_nginx_macos
+  export NGINX_BIN
+  done_line "nginx: ${NGINX_BIN}"
+  ensure_certs
+  done_line "TLS certificate: ${GOETHE_HOME}/nginx/certs/server.crt"
+  install_notices
+  write_goethe_env
+  apply_binaries
+  if [[ "${RESTART}" -eq 1 ]]; then
+    restart_goethed
+    wait_goethed
+    wait_gateway
+  fi
+  if [[ -n "${UPGRADE_NOTE}" ]]; then
+    echo "${UPGRADE_NOTE}"
+  fi
+  "${GOETHE_HOME}/bin/goethe" doctor --hardware >/dev/null 2>&1 || true
+  summary
+}
+
 main() {
   # Verify prerequisites and the signed CDN, install everything under GOETHE_HOME; goethed stays down unless upgraded.
   HOME="${HOME:-$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)}"
@@ -1164,6 +1252,21 @@ main() {
   CDN="${GOETHE_PKG_URL:-${DEFAULT_PKG_URL}}"
   CDN="${CDN%/}"
   ARCH="$(normalize_arch "${GOETHE_ARCH:-$(uname -m)}")"
+  OS="$(uname -s)"
+  PLATFORM="linux-${ARCH}"
+  SECURE=0
+  SUMS_FILE=""
+  LINK_DIR=""
+  PROGRESS=0
+  [[ -t 2 ]] && PROGRESS=1
+  if [[ "${OS}" == Darwin ]]; then
+    PLATFORM="darwin-${ARCH}"
+    main_macos
+    link_platform
+    offer_login
+    get_started
+    return
+  fi
   if [[ "${ARCH}" != "x86_64" && "${ARCH}" != "aarch64" ]]; then
     echo "unsupported architecture: ${ARCH} (need x86_64 or aarch64)" >&2
     exit 1

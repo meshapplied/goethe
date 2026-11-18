@@ -384,6 +384,11 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     let built = crate::packs::catalog(home).map(|ix| crate::packs::built_for(&ix, &opts.model_id)).unwrap_or_default();
     pack_only_gate(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)) && opts.quant.is_none(), declined, no_pack_gpu.as_deref(), &built)?;
     let gguf = engine_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), (declined, no_pack_gpu.as_deref()), opts.quant.as_deref())?;
+    if gguf.is_none() && !cfg!(target_os = "macos") {
+        if let crate::host_compiler::Verdict::Unusable(why) = crate::host_compiler::verdict(crate::host_compiler::find().as_ref(), &crate::nvidia_driver::probe().distro) {
+            eprintln!("note: SGLang builds GPU kernels when this model first loads: {why}");
+        }
+    }
     if !hf::offline_mode() {
         if let Ok(pre) = hf::preflight_model(&opts.model_id, dl.revision.as_deref()) {
             let bytes = match &gguf {
@@ -691,8 +696,7 @@ pub fn gguf_need_mb(bytes: u64) -> u64 {
 }
 
 pub fn pick_fitting(sizes: &[(String, u64)], quant: Option<&str>, limit_mb: u64) -> Result<Vec<String>, String> {
-    // The quant asked for, or the preferred one (Q4_K_M, then Q8_0) when it fits, else the largest model file that fits; split
-    // files count together. Err names what the GPU may use and what the smallest file would need.
+    // The quant asked for, else the first of Q4_K_M, Q4_0, MXFP4, Q8_0 that fits, else the largest that fits (splits count together).
     let names: Vec<&str> = sizes.iter().map(|(n, _)| n.as_str()).collect();
     let bytes = |files: &[String]| files.iter().filter_map(|f| sizes.iter().find(|(n, _)| n == f)).map(|(_, b)| *b).sum::<u64>();
     let fits = |files: &[String]| gguf_need_mb(bytes(files)) <= limit_mb;

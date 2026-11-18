@@ -284,7 +284,7 @@ mod imp {
         let mut v: u64 = 0;
         let mut len = std::mem::size_of::<u64>();
         let rc = unsafe { libc::sysctlbyname(c.as_ptr(), (&mut v as *mut u64).cast(), &mut len, std::ptr::null_mut(), 0) };
-        (rc == 0).then(|| if len == 4 { v & 0xffff_ffff } else { v })
+        (rc == 0).then_some(if len == 4 { v & 0xffff_ffff } else { v })
     }
 
     pub fn sysctl_text(name: &str) -> Option<String> {

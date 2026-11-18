@@ -32,8 +32,7 @@ pub fn parse_ioreg(text: &str) -> Accel {
 }
 
 pub fn gpu_limit_mb(total_mb: u64, wired_limit_mb: u64) -> u64 {
-    // The unified memory the GPU may use: the iogpu.wired_limit_mb setting when set, else what macOS allows by default
-    // (about two thirds of memory up to 36 GB, three quarters above).
+    // The unified memory the GPU may use: iogpu.wired_limit_mb when set, else macOS's default (2/3 up to 36 GB, 3/4 above).
     if wired_limit_mb > 0 {
         return wired_limit_mb.min(total_mb);
     }

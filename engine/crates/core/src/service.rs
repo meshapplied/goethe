@@ -293,8 +293,7 @@ pub fn systemctl_restart_args() -> Option<Vec<String>> {
 
 #[cfg(target_os = "macos")]
 pub mod launchd {
-    // macOS: a LaunchAgent starts goethed when the user logs in and restarts it after a crash; engines outlive it
-    // (AbandonProcessGroup), like KillMode=process on Linux.
+    // macOS: a LaunchAgent starts goethed at login and after a crash; engines outlive it (AbandonProcessGroup).
     use super::*;
 
     pub const LABEL: &str = "sh.goethe.goethed";

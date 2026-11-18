@@ -303,7 +303,6 @@ pub fn run_validate(source: &str, opts: &ValidateOpts) -> Result<(), String> {
         validate_entry(m, &mut errors);
     }
     for m in &reg.gguf_models {
-        // GGUF models (the catalog of a Mac): served by llama.cpp, the size of the default quant, a repo with GGUF files.
         if !ids.insert(m.id.clone()) {
             errors.push(format!("duplicate id {}", m.id));
         }
