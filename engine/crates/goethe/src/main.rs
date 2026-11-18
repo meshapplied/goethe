@@ -287,6 +287,10 @@ enum Commands {
         hardware: bool,
         #[arg(long, hide = true, help = "Print the heartbeat goethed would send the platform now, without sending it.")]
         snapshot: bool,
+        #[arg(long, help = "Fix what doctor finds on this machine (NVIDIA driver, CUDA forward compatibility, a C++ compiler), asking before each change.")]
+        fix: bool,
+        #[arg(long, requires = "fix", help = "With --fix, make every change without asking.")]
+        yes: bool,
         #[arg(long, help = "Emit JSON.")]
         json: bool,
     },
@@ -916,6 +920,7 @@ fn main() {
             let snap = goethe_core::snapshot::Collector::new(goethe_core::snapshot::now_rfc3339()).build(&goethe_home(), "interval", None);
             goethe_core::snapshot::encode(&snap).map(|data| println!("{}", String::from_utf8_lossy(&data)))
         }
+        Commands::Doctor { fix: true, yes, .. } => goethe_core::fix::run(yes),
         Commands::Doctor { public, hardware, json, .. } => match hardware {
             true => hw::run_profile(json),
             false => goethe_core::doctor::run(json, public),

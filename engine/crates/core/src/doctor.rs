@@ -40,6 +40,10 @@ pub fn run(json: bool, probe_public: bool) -> Result<(), String> {
         if !folded.is_empty() {
             println!("also OK: {} (goethe -v doctor lists them)", folded.join(", "));
         }
+        let fixes = crate::fix::pending(&crate::paths::goethe_home());
+        if !fixes.is_empty() {
+            println!("\ngoethe doctor --fix can fix: {}", fixes.iter().map(|(_, why)| why.as_str()).collect::<Vec<_>>().join("; "));
+        }
         if cfg!(target_os = "macos") {
             println!("\nOn a Mac goethe serves GGUF models with llama.cpp on Metal.");
         } else {
