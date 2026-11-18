@@ -177,6 +177,29 @@ pub fn has_flag(args: &[String], flag: &str) -> bool {
         .unwrap_or(false)
 }
 
+pub fn drop_quantization_when_config_declares(args: &[String], cfg: &Value) -> (Vec<String>, Option<String>) {
+    // SGLang reads quantization_config itself; a registry --quantization that disagrees (e.g. modelopt_fp4
+    // on a compressed-tensors checkpoint) aborts startup. User CLI can still pass --quantization later.
+    if cfg
+        .get("quantization_config")
+        .and_then(|q| q.get("quant_method"))
+        .and_then(|v| v.as_str())
+        .is_none()
+    {
+        return (args.to_vec(), None);
+    }
+    match take_flag(args, "--quantization") {
+        Ok((rest, Some(v))) => (
+            rest,
+            Some(format!(
+                "registry --quantization {v} ignored: config.json has quantization_config (SGLang detects it)"
+            )),
+        ),
+        Ok((rest, None)) => (rest, None),
+        Err(_) => (args.to_vec(), None),
+    }
+}
+
 pub fn flag_value(args: &[String], flag: &str) -> Option<String> {
     parse_groups(args)
         .ok()?
@@ -397,5 +420,10 @@ mod tests {
         assert!(!wants_remote_code(&ct));
         let registry = s(&["--quantization", "modelopt_fp4"]);
         assert_eq!(merge_extra_args(&registry, &[]).unwrap(), registry);
+        let (stripped, note) = drop_quantization_when_config_declares(&registry, &ct);
+        assert!(stripped.is_empty(), "{stripped:?}");
+        assert!(note.unwrap().contains("modelopt_fp4"));
+        let bare = s(&["--reasoning-parser", "qwen3"]);
+        assert_eq!(drop_quantization_when_config_declares(&bare, &ct).0, bare);
     }
 }

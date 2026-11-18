@@ -102,7 +102,14 @@ fn sglang_command(spec: &EngineSpec) -> Command {
         .arg(spec.served_name)
         .arg("--uvicorn-access-log-exclude-prefixes")
         .args(QUIET_PATHS);
-    let extras: Vec<String> = card_extra_args(spec.card).into_iter().chain(spec.load_extra.iter().cloned()).collect();
+    let card_extras = {
+        let raw = card_extra_args(spec.card);
+        match crate::model_facts::read_config(spec.model_path) {
+            Ok(cfg) => crate::sglang_infer::drop_quantization_when_config_declares(&raw, &cfg).0,
+            Err(_) => raw,
+        }
+    };
+    let extras: Vec<String> = card_extras.into_iter().chain(spec.load_extra.iter().cloned()).collect();
     cmd.args(memory_args(spec, &extras));
     cmd.args(graph_args(spec.max_conc, &extras));
     if let Some(dtype) = spec
