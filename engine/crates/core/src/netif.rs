@@ -306,9 +306,9 @@ mod tests {
 
     #[test]
     fn a_macs_vpn_reaches_its_range_and_not_broadcast_or_multicast() {
-        let text = "Destination        Gateway            Flags               Netif Expire\ndefault            192.168.1.1        UGScg                 en0\n100.64/10          link#21            UCS                 utun6\n100.100.1.2      100.100.1.2      UH                  utun6\n224.0.0/4          link#21            UmCS                utun6\n255.255.255.255/32 link#21            UCS                 utun6\n";
+        let text = "Destination        Gateway            Flags               Netif Expire\ndefault            192.168.1.1        UGScg                 en0\n100.64/10          link#21            UCS                 utun6\n100.64.1.2      100.64.1.2      UH                  utun6\n224.0.0/4          link#21            UmCS                utun6\n255.255.255.255/32 link#21            UCS                 utun6\n";
         let routes = parse_netstat(text);
-        let utun = Iface { name: "utun6".into(), addr: Ipv4Addr::new(100, 100, 1, 2), prefix: 32, tunnel: true, virtual_bridge: false, default_route: false };
+        let utun = Iface { name: "utun6".into(), addr: Ipv4Addr::new(100, 64, 1, 2), prefix: 32, tunnel: true, virtual_bridge: false, default_route: false };
         assert_eq!(reach(&utun, &routes), vec![Net::parse("100.64.0.0/10").unwrap()]);
     }
 
