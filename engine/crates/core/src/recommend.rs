@@ -146,6 +146,7 @@ impl View {
         let mut trial = input.clone();
         trial.ctx = plan.ctx;
         trial.max_conc = plan.max_conc;
+        trial.overhead_gb = crate::engines::by_id(runtime).map_or(calc::BASE_OVERHEAD_GB, |e| e.overhead_gb);
         let base = chooser::need(&trial, plan.tp, &plan.cc);
         let learned = self.con.as_ref().map(|c| crate::engine_overhead::read_learned(c, model_id, &self.gpu_name(plan.gpus[0]), plan.tp as u64, runtime));
         let learned = learned.unwrap_or_default();
@@ -406,6 +407,7 @@ pub fn registry_input(m: &RegistryModel) -> ChooserInput {
             crate::memory_spec::apply_engine_args(&mut spec, None, &m.extra_sglang_args);
             spec
         }),
+        overhead_gb: crate::engines::by_id(m.effective_runtime()).map_or(crate::calc::BASE_OVERHEAD_GB, |e| e.overhead_gb),
     }
 }
 

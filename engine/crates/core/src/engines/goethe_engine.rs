@@ -1,11 +1,12 @@
 // goethe-engine: a signed kernel pack plus the weights its verification lists, served by python -m goethe_engine.
 
-use super::{card_env, kept_env, placement_env, resolve_python, EngineSpec};
+use super::{card_env, engine_key_env, kept_env, placement_env, resolve_python, EngineSpec};
 use std::path::PathBuf;
 use std::process::Command;
 
 pub const ENGINE: super::Engine = super::Engine {
     id: "goethe-engine",
+    overhead_gb: crate::calc::METAL_OVERHEAD_GB,
     layer: Some(crate::pyenv::Layer::Engine),
     params: None,
     command: goethe_engine_command,
@@ -54,6 +55,7 @@ fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
         .envs(card_env(spec))
         .envs(placement_env(spec))
         .env_remove("GOETHE_ENGINE_ALLOW_UNSIGNED");
+    engine_key_env(&mut cmd, spec.engine_key);
     Ok(cmd)
 }
 

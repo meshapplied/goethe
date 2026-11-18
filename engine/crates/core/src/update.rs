@@ -28,6 +28,7 @@ pub fn run(opts: UpdateOpts) -> Result<(), String> {
     // Fetch and verify the signed manifest, compare versions, stage files, then swap atomically.
     let home = goethe_home();
     ensure_layout(&home).map_err(|e| e.to_string())?;
+    let _ = crate::setup::migrate_retired_pkg_env(&home);
     let pkg = pkg_base_url();
     let tmp = home.join(".update-staging");
     let _ = fs::remove_dir_all(&tmp);

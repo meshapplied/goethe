@@ -1,6 +1,6 @@
 // llama.cpp: llama-server on one GGUF, one GPU, OpenAI-compatible; the universal engine for GGUF models.
 
-use super::{card_env, kept_env, placement_env, EngineSpec};
+use super::{card_env, engine_key_env, kept_env, placement_env, EngineSpec};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -18,6 +18,7 @@ type Get<'a> = &'a dyn Fn(&str) -> Result<Box<dyn Read>, String>;
 
 pub const ENGINE: super::Engine = super::Engine {
     id: "llama.cpp",
+    overhead_gb: crate::calc::METAL_OVERHEAD_GB,
     layer: None,
     params: Some(&[
         "temperature", "top_p", "top_k", "min_p", "max_tokens", "max_completion_tokens", "n", "stop", "seed",
@@ -332,8 +333,6 @@ fn llama_command(spec: &EngineSpec) -> Result<Command, String> {
         .arg(gguf_in(spec.model_path, spec.card, None)?)
         .args(["--host", "127.0.0.1", "--port"])
         .arg(spec.port.to_string())
-        .arg("--api-key")
-        .arg(spec.engine_key)
         .arg("--alias")
         .arg(spec.served_name)
         .arg("-c")
@@ -354,6 +353,7 @@ fn llama_command(spec: &EngineSpec) -> Result<Command, String> {
         .envs(kept_env())
         .envs(card_env(spec))
         .envs(placement_env(spec));
+    engine_key_env(&mut cmd, spec.engine_key);
     Ok(cmd)
 }
 
@@ -404,8 +404,11 @@ mod tests {
         assert_eq!((at("--host").as_str(), at("--alias").as_str(), at("-np").as_str()), ("127.0.0.1", "org/m", "4"));
         assert_eq!((at("-c"), at("--kv-unified-per-slot")), (crate::chooser::kv_tokens(4096, 4).to_string(), "4096".to_string()));
         assert!(!a.iter().any(|x| x == "--embeddings"));
+        assert!(!a.iter().any(|x| x == "--api-key"), "key stays off argv: {a:?}");
         let env = |k: &str| c.get_envs().find(|(n, _)| *n == k).and_then(|(_, v)| v).map(|v| v.to_string_lossy().into_owned());
         assert_eq!(env("CUDA_VISIBLE_DEVICES").as_deref(), Some("2"));
+        assert_eq!(env("LLAMA_API_KEY").as_deref().map(|s| s.len()), Some(32));
+        assert_eq!(env(super::super::ENGINE_KEY_ENV).as_deref().map(|s| s.len()), Some(32));
         let emb: toml::Value = toml::from_str("runtime = \"llama.cpp\"\ntask = \"embed\"").unwrap();
         assert!(command(&test_spec(d.path(), &emb, &[2])).unwrap().get_args().any(|x| x == "--embeddings"));
         assert!(command(&test_spec(d.path(), &card, &[2, 3])).unwrap_err().contains("one GPU"));

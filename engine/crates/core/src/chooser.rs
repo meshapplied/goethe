@@ -1,6 +1,6 @@
 // Tensor parallel size and GPU set selection for goethe load.
 
-use crate::calc::{base_overhead_gb, missing_gb, shortfall, Need};
+use crate::calc::{missing_gb, shortfall, Need, METAL_OVERHEAD_GB};
 use crate::memory_spec::MemorySpec;
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -22,6 +22,7 @@ pub struct ChooserInput {
     pub marlin_extra_gb: f64,
     pub supported_sm: Vec<String>,
     pub memory: Option<MemorySpec>,
+    pub overhead_gb: f64,
 }
 
 pub struct CardFacts {
@@ -48,6 +49,7 @@ impl ChooserInput {
             marlin_extra_gb: crate::install::card_marlin_extra_gb(card),
             supported_sm: crate::install::card_supported_sm(card),
             memory,
+            overhead_gb: crate::engines::of_card(card).map_or(crate::calc::BASE_OVERHEAD_GB, |e| e.overhead_gb),
         }
     }
 }
@@ -129,12 +131,13 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
     let tokens = kv_tokens(input.ctx, input.max_conc) as f64;
     let conc = input.max_conc.max(1);
     let request_table = ((conc + 1) * (input.ctx + 4) * 4) as f64 / GIB;
+    let oh = if gpu_arch::is_apple(cc) { METAL_OVERHEAD_GB } else { input.overhead_gb } + request_table;
     let Some(m) = &input.memory else {
         let shard = kv_shard(tp, input.num_kv_heads, &input.attention);
         return Need {
             weights: (input.static_vram_gb + marlin) / tp as f64,
             kv: tokens * input.kv_bytes_per_token as f64 / GIB / shard,
-            overhead: base_overhead_gb(cc) + request_table,
+            overhead: oh,
             ..Need::default()
         };
     };
@@ -149,7 +152,7 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
             / tp as f64
             + ((conc + 1) * m.request_bytes + m.fixed_bytes) as f64)
             / GIB,
-        overhead: base_overhead_gb(cc) + request_table,
+        overhead: oh,
         load_peak: m.load_peak_bytes as f64 / tp as f64 / GIB,
     }
 }
@@ -461,13 +464,16 @@ mod tests {
             marlin_extra_gb: 0.0,
             supported_sm: Vec::new(),
             memory: None,
+            overhead_gb: crate::calc::BASE_OVERHEAD_GB,
         }
     }
 
     #[test]
     fn metal_pays_no_cuda_overhead() {
         let (cuda, metal) = (need(&inp(), 1, "12.0"), need(&inp(), 1, "metal"));
-        assert!((cuda.overhead - metal.overhead - (crate::calc::BASE_OVERHEAD_GB - crate::calc::METAL_OVERHEAD_GB)).abs() < 1e-9);
+        assert!((cuda.overhead - metal.overhead - (crate::calc::BASE_OVERHEAD_GB - METAL_OVERHEAD_GB)).abs() < 1e-9);
+        let llama = need(&ChooserInput { overhead_gb: METAL_OVERHEAD_GB, ..inp() }, 1, "12.0");
+        assert!((llama.overhead - metal.overhead).abs() < 1e-9);
     }
 
     fn gpu(idx: u32, free_gb: f64, foreign: bool) -> GpuPlacementInput {

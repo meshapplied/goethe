@@ -446,6 +446,7 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
                     marlin_extra_gb: install::card_marlin_extra_gb(&card),
                     supported_sm: install::card_supported_sm(&card),
                     memory: crate::memory_spec::installed(&home.join(r.get::<_, String>(11)?), &card, &[]),
+                    overhead_gb: crate::engines::of_card(&card).map_or(crate::calc::BASE_OVERHEAD_GB, |e| e.overhead_gb),
                 },
             })
         })

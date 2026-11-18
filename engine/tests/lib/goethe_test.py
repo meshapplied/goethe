@@ -728,8 +728,10 @@ def write_stub_python(pyenv_bin: Path, real: Path) -> None:
         "#!/bin/bash\n"
         f'REAL="{real}"\n'
         f'STUB="{STUB_ENGINE}"\n'
-        'if [[ "$1" == "-m" && "$2" == "sglang.launch_server" ]]; then\n'
-        '  exec "$REAL" "$STUB" "${@:3}"\n'
+        'if [[ "$1" == "-m" && ( "$2" == "sglang.launch_server" || "$2" == "goethe_sglang_boot" ) ]]; then\n'
+        '  EXTRA=()\n'
+        '  if [[ -n "${GOETHE_ENGINE_API_KEY:-}" ]]; then EXTRA=(--api-key "$GOETHE_ENGINE_API_KEY"); fi\n'
+        '  exec "$REAL" "$STUB" "${@:3}" "${EXTRA[@]}"\n'
         "fi\n"
         'if [[ "$1" == "-c" && "$2" == *sglang* ]]; then echo ok; exit 0; fi\n'
         'exec "$REAL" "$@"\n',

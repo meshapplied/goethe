@@ -18,6 +18,7 @@ from typing import Any
 
 RECORDED_ENV = (
     "CUDA_VISIBLE_DEVICES", "GOETHE_HOME", "PYTHONPATH", "GOETHE_INSTANCE_ID", "GOETHE_KERNEL_DIR", "SPT_NOENV",
+    "GOETHE_ENGINE_API_KEY", "LLAMA_API_KEY",
 )
 FILE_KNOBS = ("STUB_START_DELAY", "STUB_IGNORE_SIGTERM", "STUB_SIGTERM_DELAY", "STUB_TOKEN_INTERVAL")
 AUTH_EXEMPT = ("/health", "/ready", "/metrics")
@@ -39,6 +40,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--api-key")
     parser.add_argument("--disable-custom-all-reduce", action="store_true")
     args, _unknown = parser.parse_known_args(argv)
+    if not args.api_key:
+        args.api_key = os.environ.get("GOETHE_ENGINE_API_KEY") or os.environ.get("LLAMA_API_KEY")
     return args
 
 

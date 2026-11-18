@@ -85,13 +85,13 @@ goethe api expose alone shows where the API listens and who may connect.";
 
 const SHARE_HELP: &str = "Examples:
 
-\t→ goethe api share 5h --key my-app
-\t→ goethe api share 1d          (the keys of the last opening)
+\t→ goethe api share 5h --key my-app --allow <their-ip>/32
+\t→ goethe api allow add <their-ip>/32
+\t   goethe api share 5h --key my-app
 \t→ goethe api share             (status)
-\t→ goethe api share stop --key my-app   (that key only)
 \t→ goethe api share stop
 
-Every shared key uses the one public gateway, each until its own time and from its own addresses; it closes when the last one ends.";
+--allow is who may connect (their public IP: ask them, or https://ifconfig.me). This machine's IP is only the URL goethe prints. Or add them with goethe api allow first, then share without --allow. Closes when the last key ends.";
 
 #[derive(Parser)]
 #[command(
@@ -1736,7 +1736,7 @@ fn do_share(public: &str, keys: &[String], allow: &[String], port: Option<u16>) 
         }
         "status" => {
             if !keys.is_empty() || !allow.is_empty() || port.is_some() {
-                usage("give a duration to open the public gateway, such as goethe api share 5h --key my-app");
+                usage("give a duration to open the public gateway, such as goethe api share 5h --key my-app --allow <their-ip>/32");
             }
             match share::active(&home) {
                 Some(s) => {
@@ -1744,12 +1744,12 @@ fn do_share(public: &str, keys: &[String], allow: &[String], port: Option<u16>) 
                     println!("Public gateway: open until {} ({} left)", share::local_time(s.until), left(s.until - share::now()));
                     println!("URL:  https://{}/v1", host_port(&ip, s.port));
                     for (name, g) in share::shared(&home) {
-                        let from = if g.allow.is_empty() { "any address".to_string() } else { g.allow.join(", ") };
+                        let from = if g.allow.is_empty() { "no addresses (unreachable)".to_string() } else { g.allow.join(", ") };
                         println!("Key:  {name} until {} ({} left), from {from}", share::local_time(g.until), left(g.until - share::now()));
                     }
                     println!("\nStop one key with: goethe api share stop --key <name>; close it with: goethe api share stop");
                 }
-                None => println!("The public gateway is closed. Open it with: goethe api share 5h --key <key name>"),
+                None => println!("The public gateway is closed. Open it with: goethe api share 5h --key <name> --allow <their-ip>/32"),
             }
             Ok(())
         }
@@ -1765,8 +1765,9 @@ fn do_share(public: &str, keys: &[String], allow: &[String], port: Option<u16>) 
                 let token = k.token.as_deref().unwrap_or("(shown when it was created)");
                 println!("Key:  {} {token}  models: {models}", k.name);
             }
-            if !allow.is_empty() {
-                println!("Only: {}", allow.join(", "));
+            let clients: Vec<String> = o.share.allow.clone();
+            if !clients.is_empty() {
+                println!("Only these clients: {}", clients.join(", "));
             }
             println!("\nTLS:  self-signed for this address. Send {} with the key (it holds no secret); the recipient", o.cert.display());
             println!("      verifies the gateway with it, for example:");

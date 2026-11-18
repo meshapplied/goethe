@@ -256,12 +256,14 @@ fn arch_runs(arch: &str, cc: &str) -> String {
 }
 
 pub fn sku_why(dev: &Device, req: &SkuReq) -> String {
-    // Why one GPU cannot run one variant ("" when it can), by goethe-engine's rule: the arch on the compute capability, the grid's SMs co-resident, the shared memory per block; an unknown SM count or shared memory never refuses.
+    // Why one GPU cannot run one variant ("" when it can): arch, SM count, shared memory. Unknown device limits refuse when the pack asks for any.
     let why = arch_runs(&req.arch, &dev.cc);
     if !why.is_empty() {
         return format!("device cc {}: {why}", dev.cc);
     }
     match (dev.sms, dev.smem_block) {
+        (None, _) if req.sms > 0 => format!("the plan's grid needs {} SMs co-resident; this device's SM count is unknown", req.sms),
+        (_, None) if req.smem_block > 0 => format!("the plan needs {} B shared memory per block; this device's shared-memory limit is unknown", req.smem_block),
         (Some(have), _) if req.sms > have => format!("the plan's grid needs {} SMs co-resident, the device has {have}", req.sms),
         (_, Some(have)) if req.smem_block > have => format!("the plan needs {} B shared memory per block, the device allows {have}", req.smem_block),
         _ => String::new(),
@@ -1074,7 +1076,7 @@ mod tests {
         let line = sku_refusal(&reqs, &[gpu("NVIDIA GeForce RTX 5090", "12.0", Some(170))]).unwrap();
         assert_eq!(line, "the kernel pack is built for rtx_pro_6000_maxq (sm_120a, 188 SMs); none runs on NVIDIA GeForce RTX 5090 (cc 12.0, 170 SMs) (rtx_pro_6000_maxq: the plan's grid needs 188 SMs co-resident, the device has 170)");
         assert_eq!(sku_refusal(&reqs, &[gpu("NVIDIA RTX PRO 6000 Blackwell Max-Q", "12.0", Some(188))]), None, "the card it was built for runs it");
-        assert_eq!(sku_refusal(&reqs, &[gpu("a card CUDA does not show", "12.0", None)]), None, "an unknown SM count never refuses");
+        assert!(sku_refusal(&reqs, &[gpu("a card CUDA does not show", "12.0", None)]).unwrap().contains("SM count is unknown"));
         assert!(sku_refusal(&reqs, &[gpu("an Ada card", "8.9", Some(128))]).unwrap().contains("sm_120a SASS runs only on cc 12.0"));
     }
 

@@ -1,10 +1,14 @@
 // SGLang: python -m sglang.launch_server with Goethe-owned flags, card and load extras; ternary is SGLang plus its kernel env.
 
-use super::{arch_env, card_env, compiler_env, default_cuda_home, engine_path, expand_home, kept_env, placement_env, resolve_python, EngineSpec};
+use super::{
+    arch_env, card_env, compiler_env, default_cuda_home, engine_key_env, engine_path, expand_home, kept_env, placement_env,
+    resolve_python, EngineSpec,
+};
 use std::process::Command;
 
 pub const SGLANG: super::Engine = super::Engine {
     id: "sglang",
+    overhead_gb: crate::calc::BASE_OVERHEAD_GB,
     layer: Some(crate::pyenv::Layer::Sglang),
     params: None,
     command: |spec| Ok(sglang_command(spec)),
@@ -76,11 +80,19 @@ fn memory_args(spec: &EngineSpec, extras: &[String]) -> Vec<String> {
     args.chunks(2).filter(|p| !(user_chunk && p[0] == "--chunked-prefill-size")).flatten().cloned().collect()
 }
 
+const SGLANG_BOOT: &str = "import os,runpy,sys\nsys.argv=['sglang.launch_server',*sys.argv[1:],'--api-key',os.environ['GOETHE_ENGINE_API_KEY']]\nrunpy.run_module('sglang.launch_server',run_name='__main__')\n";
+
 fn sglang_command(spec: &EngineSpec) -> Command {
     // Goethe flags, then checked card and load extras, in a cleared env; probe paths stay out of the access log.
+    let lib = spec.home.join("lib");
+    let boot = lib.join("goethe_sglang_boot.py");
+    if !boot.is_file() {
+        let _ = std::fs::create_dir_all(&lib);
+        let _ = crate::platform::write_private(&boot, SGLANG_BOOT.as_bytes());
+    }
     let mut cmd = Command::new(resolve_python(spec.home));
     cmd.arg("-m")
-        .arg("sglang.launch_server")
+        .arg("goethe_sglang_boot")
         .arg("--model-path")
         .arg(spec.model_path)
         .arg("--host")
@@ -101,7 +113,6 @@ fn sglang_command(spec: &EngineSpec) -> Command {
         .args(QUIET_PATHS);
     let extras: Vec<String> = card_extra_args(spec.card).into_iter().chain(spec.load_extra.iter().cloned()).collect();
     cmd.args(memory_args(spec, &extras));
-    cmd.arg("--api-key").arg(spec.engine_key);
     if let Some(dtype) = spec
         .card
         .get("kv_cache_dtype")
@@ -116,6 +127,10 @@ fn sglang_command(spec: &EngineSpec) -> Command {
     }
     cmd.args(&extras);
     let card_vars = card_env(spec);
+    let mut py_path = lib.display().to_string();
+    if let Some((_, v)) = card_vars.iter().find(|(k, _)| k == "PYTHONPATH") {
+        py_path = format!("{py_path}:{v}");
+    }
     cmd.env_clear()
         .envs(kept_env())
         .env("PATH", engine_path(spec.home))
@@ -125,8 +140,10 @@ fn sglang_command(spec: &EngineSpec) -> Command {
         .envs(compiler_env())
         .envs(card_vars)
         .envs(placement_env(spec))
+        .env("PYTHONPATH", py_path)
         .env("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         .env("SPT_NOENV", "1");
+    engine_key_env(&mut cmd, spec.engine_key);
     cmd
 }
 

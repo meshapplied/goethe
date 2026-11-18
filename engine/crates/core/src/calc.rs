@@ -6,10 +6,6 @@ const CUDA_CONTEXT_GB: f64 = crate::engine_overhead::DEFAULT_CONTEXT_GB;
 pub const BASE_OVERHEAD_GB: f64 = 1.8;
 pub const METAL_OVERHEAD_GB: f64 = 0.5;
 
-pub fn base_overhead_gb(cc: &str) -> f64 {
-    // llama.cpp on Metal has no CUDA context or graph pools, only its compute buffers.
-    if crate::gpu_arch::is_apple(cc) { METAL_OVERHEAD_GB } else { BASE_OVERHEAD_GB }
-}
 const LEARN_SLACK_GB: f64 = 0.25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
