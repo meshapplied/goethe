@@ -770,13 +770,15 @@ fn verify_model(
         })
     });
     let total: u64 = lfs.iter().map(|s| s.size).sum();
-    let base = HASHED.load(Ordering::Relaxed);
-    let hashing = (total >= 256 << 20).then(|| {
-        let done = move || HASHED.load(Ordering::Relaxed).saturating_sub(base);
-        crate::progress::Ticker::start("verifying", Some(total), crate::progress::every(), done, crate::progress::eprint_line)
-    });
+    let say = total >= 256 << 20;
+    if say {
+        crate::progress::eprint_line("verifying".to_string());
+    }
     let mut results = hash_all(local_dir, &lfs);
-    drop(hashing);
+    if say {
+        crate::progress::eprint_line("verifying done".to_string());
+        crate::progress::end_line();
+    }
     if let Some(prev) = &previous {
         for s in &reused {
             if let Some(e) = prev.files.get(&s.rfilename) {

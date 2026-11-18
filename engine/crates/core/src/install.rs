@@ -294,7 +294,6 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             pack: None,
         });
     }
-    let mut pack_refused = false;
     let declined = match pack_decision(home, opts)? {
         PackDecision::Use(mut choice) => 'packed: {
             // Only the files the pack was built for, at its pinned revision; a pack no allowed GPU runs is refused from its manifest before anything is installed, the engine layer once, on first use.
@@ -310,7 +309,6 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             let early = crate::packs::unverified_prefix(&opts.model_id, &choice.offer.arch, &broker).ok().flatten().and_then(|(_, prefix)| sku_refused(home, &prefix));
             if let Some(why) = early {
                 println!("{}", refuse(why));
-                pack_refused = true;
                 break 'packed false;
             }
             crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
@@ -318,7 +316,6 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 .ok_or_else(|| format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch))?;
             if let Some(why) = refused_before_download(home, &plan, &crate::packs::python_runner(home)) {
                 println!("{}", refuse(why));
-                pack_refused = true;
                 break 'packed false;
             }
             let rev = choice.offer.revision.clone();
@@ -407,15 +404,10 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 None => hf::download_bytes(&pre.siblings),
             };
             let (fmt, engine) = if gguf.is_some() { ("gguf", "llama.cpp") } else { ("safetensors", "SGLang") };
-            let why = match (declined, pack_refused) {
-                (true, _) => "not logged in",
-                (_, true) => "its kernel pack does not run on this GPU",
-                _ => "none for this model on this GPU",
-            };
             let line = if cfg!(target_os = "macos") {
                 format!("{} ({fmt}, {:.1} GB) with llama.cpp on Metal", opts.model_id, bytes as f64 / GIB)
             } else {
-                format!("{} ({fmt}, {:.1} GB) with {engine} (no kernel pack: {why})", opts.model_id, bytes as f64 / GIB)
+                format!("{} ({fmt}, {:.1} GB) with {engine}", opts.model_id, bytes as f64 / GIB)
             };
             confirm(opts, &line)?;
         }
@@ -434,12 +426,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
 }
 
 fn fetch_weights(home: &Path, repo: &str, dir: &Path, dl: &DownloadOpts) -> Result<(), String> {
-    // The model files, with one line for the result: how many, how big, and how long when that was over 3 s.
-    let started = std::time::Instant::now();
-    hf::ensure_model(home, repo, dir, dl)?;
-    let (files, bytes) = crate::progress::weights_in(dir);
-    println!("{}", crate::step::row("weights", &format!("{files} files {}{}", crate::progress::size(bytes), crate::step::took(started.elapsed()))));
-    Ok(())
+    hf::ensure_model(home, repo, dir, dl)
 }
 
 fn readable<T>(choice: Option<T>, meta: impl FnOnce(&T) -> Result<(), String>, allow: bool) -> Result<Option<T>, String> {
@@ -825,7 +812,6 @@ fn engine_check(
     let config = names.contains(&"config.json");
     let has_gguf = names.iter().any(|n| crate::engines::llama_cpp::is_model_gguf(n));
     let llama = |why_sglang: &str| -> Result<Choice, String> {
-        // llama.cpp on this repo's GGUF files, after the reason SGLang does not serve it.
         if let Some(why) = llama_cpp_refusal(&pre) {
             return Err(format!("{model_id} is not supported: {why_sglang}{why}.{hint}"));
         }
@@ -1476,6 +1462,10 @@ fn pack_card(home: &Path, p: &mut Planned, arch: &str, variant: &str, cli_ctx: O
     t.insert("extra_sglang_args".into(), toml::Value::Array(Vec::new()));
     t.insert("kv_cache_dtype".into(), toml::Value::String("auto".into()));
     t.insert("supported_sm".into(), toml::Value::Array(crate::packs::arch_ccs(arch).into_iter().map(toml::Value::String).collect()));
+    let embedding = crate::engines::llama_cpp::gguf_paths(&p.dir).iter().any(|g| crate::engines::llama_cpp::is_embedding(g));
+    if embedding {
+        t.insert("task".into(), toml::Value::String("embed".into()));
+    }
     p.engine = Some(format!("goethe-engine with optimised kernels for {arch} (verified)"));
     Ok(None)
 }
@@ -1769,9 +1759,6 @@ pub fn commit(home: &Path, p: &Planned, verb: &str, out: &mut dyn Write) -> Resu
     }
     if p.vram.host_offload_gb > 0.0 {
         lines.push(format!("{:.1} GB of weights are offloaded to pinned host memory", p.vram.host_offload_gb));
-    }
-    if !p.extra.is_empty() {
-        lines.push(format!("sglang args: {}", p.extra.join(" ")));
     }
     lines.extend(p.notes.iter().map(|n| format!("note: {n}")));
     if verb == "installed" {

@@ -35,6 +35,7 @@ pub struct Snapshot {
     learn: Arc<LearnConfig>,
     contexts: HashMap<String, u64>,
     engines: HashMap<String, &'static crate::engines::Engine>,
+    tasks: HashMap<String, String>,
 }
 
 impl Snapshot {
@@ -52,6 +53,11 @@ impl Snapshot {
 
     pub fn engine(&self, model_id: &str) -> Option<&'static crate::engines::Engine> {
         self.engines.get(model_id).copied()
+    }
+
+    pub fn task(&self, model_id: &str) -> Option<&str> {
+        // The card's task (embed, transcribe), so a request a model cannot answer gets a plain error instead of the engine's.
+        self.tasks.get(model_id).map(String::as_str)
     }
 
     pub fn has_key(&self, key: &ResolvedKey) -> bool {
@@ -273,9 +279,14 @@ fn load_snapshot(con: &Connection, home: &Path) -> rusqlite::Result<Snapshot> {
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?)))?;
     for row in rows {
         let (model_id, created, ctx, local) = row?;
-        let card = || toml::from_str(&std::fs::read_to_string(home.join(&local).join("goethe_card.toml")).ok()?).ok();
-        if let Some(e) = snap.routes.contains_key(&model_id).then(card).flatten().and_then(|c| crate::engines::of_card(&c).ok()) {
-            snap.engines.insert(model_id.clone(), e);
+        let card = || toml::from_str::<toml::Value>(&std::fs::read_to_string(home.join(&local).join("goethe_card.toml")).ok()?).ok();
+        if let Some(c) = snap.routes.contains_key(&model_id).then(card).flatten() {
+            if let Ok(e) = crate::engines::of_card(&c) {
+                snap.engines.insert(model_id.clone(), e);
+            }
+            if let Some(t) = c.get("task").and_then(|v| v.as_str()) {
+                snap.tasks.insert(model_id.clone(), t.to_string());
+            }
         }
         if let Some(ctx) = u64::try_from(ctx).ok().filter(|c| *c > 0) {
             snap.contexts.insert(model_id.clone(), ctx);
@@ -398,12 +409,13 @@ mod tests {
         assert_eq!(snap.serving_models(), vec!["org/m"]);
         assert!(snap.engine("org/m").is_none(), "no card: the engine checks its own parameters");
         std::fs::create_dir_all(dir.path().join("models/m")).unwrap();
-        std::fs::write(dir.path().join("models/m/goethe_card.toml"), "runtime = \"llama.cpp\"").unwrap();
+        std::fs::write(dir.path().join("models/m/goethe_card.toml"), "runtime = \"llama.cpp\"\ntask = \"embed\"").unwrap();
         other
             .execute("INSERT INTO installed_models (model_id, local_path, architecture, static_vram_gb, kv_bytes_per_token, default_ctx,
                       default_max_conc, default_tp) VALUES ('org/m', 'models/m', 'dense', 1.0, 1, 512, 1, 1)", [])
             .unwrap();
         assert_eq!(cache.exact().engine("org/m").map(|e| e.id), Some("llama.cpp"));
+        assert_eq!(cache.exact().task("org/m"), Some("embed"), "the card's task, for requests the model cannot answer");
         other
             .execute("UPDATE loaded_instances SET status = 'DRAINING' WHERE model_id = 'org/m'", [])
             .unwrap();

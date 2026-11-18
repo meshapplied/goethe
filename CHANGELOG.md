@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- goethe picks the engine before downloading: a goethe kernel pack on a logged-in node, else SGLang when it supports the model, else llama.cpp on the repo's GGUF files or on the GGUF build Hugging Face lists for the model (the name typed becomes an alias), else a refusal with each engine's reason. Embedding models like embeddinggemma install this way. On a Mac, llama.cpp with the same GGUF lookup instead of a name search.
+- A kernel pack that cannot run gives way to the plain runtime by default, saying why (`GOETHE_ALLOW_FALLBACK=0` restores the error). The pack structure check after a download, and the goethe-engine install it needs, run only when a pack of the model's architecture exists for the GPU.
+- `goethe models` shows each model's engine.
+- GGUF memory plans count sliding-window and shared-KV layers as llama.cpp allocates them (gemma-4-E2B: 0.8 GB of KV per request instead of 8.8 GB), and a load on a fixed GPU count shrinks the context to fit like any other.
+- The menu has Load/Unload under Quick setup: installed models beside it, a load runs in place with its bar next to the model and then says "loaded", and loaded models unload one or several at a time. It is grayed out until a model is installed.
+- API keys and gateway has API schema: OpenAI, Anthropic and LiteLLM calls with API_KEY and MODEL_ID placeholders on the gateway's address (VPN, else local, else public). Quick setup ends on the same three schemas.
+- q quits goethe from any menu screen and the left arrow goes back; the right arrow opens only what is already shown on the right.
+- Install and gateway setup print less: no engine-layer, weights or SGLang-args summary lines, "verifying" instead of a byte count, and "Gateway updated and live" after the gateway changes.
+- A load only says it is loading into VRAM until the model is ready. Embedding models warm up with an embedding request, and a chat request to one gets a plain 400 naming /v1/embeddings. SGLang captures CUDA graphs only up to the model's concurrency, which shortens loads.
+
 ## 0.3.3 (2026-11-18)
 
 - The installer is one short script for Linux and macOS: it checks the machine, verifies the signed package and `goethe`, and hands over to `goethe setup`, which does the rest and is safe to run again to repair or upgrade. It installs no system packages beyond `openssl` and CA certificates (as root, when missing), no nginx from the distribution (goethe ships its own for Linux too), and no Python environment (the first model install sets it up).

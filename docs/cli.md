@@ -96,7 +96,7 @@ Downloads a model from Hugging Face, or registers a model folder on this machine
 | `--hf-token` | Ask for a Hugging Face token, for gated or private models; used for this download only, never stored |
 | `--yes` | Don't ask: download without confirming, and with `--load` load next to other programs on the GPU |
 | `--force` | Download again, or replace an existing install, and rebuild the model's saved settings from the defaults |
-| `--fallback` | If the model's kernel pack cannot run here, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also `GOETHE_ALLOW_FALLBACK=1` |
+| `--fallback` | Serve the model with its plain runtime (llama.cpp or SGLang) when its kernel pack cannot run here, even with `GOETHE_ALLOW_FALLBACK=0` (the plain runtime takes over by default) |
 | `--name <id>` | Id for a local folder |
 | `--copy` | Copy a local folder instead of linking to it |
 | `-- <options>` | Extra engine options, after `--`, saved with the model |
@@ -160,7 +160,7 @@ Loads a model and waits until it answers. Goethe picks the GPUs and sizes the me
 | `--dry-run` | Show where the model would be placed now and the memory it needs, and load nothing; with `--save` it only stores the defaults |
 | `--replica` | Start another copy, to serve more traffic |
 | `--yes` | Don't ask: load on busy GPUs, or next to other programs on the GPU |
-| `--fallback` | If the model's kernel pack fails to open, serve it with the plain runtime instead of failing |
+| `--fallback` | Serve the model with its plain runtime when its kernel pack fails to open, even with `GOETHE_ALLOW_FALLBACK=0` |
 | `--no-wait` | Return without waiting until it's ready |
 | `--json` | Print the instance as JSON |
 | `-- <options>` | Extra engine options, after `--` |

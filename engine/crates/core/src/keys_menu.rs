@@ -193,6 +193,7 @@ enum Armed {
 enum Effect {
     Nothing,
     Quit,
+    Exit,
     Create { name: String, scope: Option<String>, rpm: i64, expires: Option<String> },
     Save { id: String, scope: Option<String>, rpm: i64, expires: Option<String> },
     Delete { id: String, name: String },
@@ -323,13 +324,16 @@ impl App {
     fn handle(&mut self, input: Input) -> Effect {
         // One key press; anything that touches stored keys comes back as an Effect for the caller to carry out.
         if input == Input::Interrupt {
-            return Effect::Quit;
+            return Effect::Exit;
         }
         if self.editing.is_some() {
             return self.edit(input);
         }
         let armed = self.armed.take();
-        if input == Input::Char('q') || (!self.focus_right && matches!(input, Input::Esc | Input::Left | Input::Char('h'))) {
+        if input == Input::Char('q') {
+            return Effect::Exit;
+        }
+        if !self.focus_right && matches!(input, Input::Esc | Input::Left | Input::Char('h')) {
             return Effect::Quit;
         }
         self.status.clear();
@@ -791,7 +795,7 @@ fn carry_out(app: &mut App, effect: Effect, made: &mut Vec<(String, String)>) ->
             .and_then(|()| security::key_set_limits(id, *rpm, expires.as_deref()))
             .map(|()| "Saved. The gateway uses it from the next request.".to_string()),
         Effect::Delete { id, name } => security::key_revoke(id).map(|()| format!("Deleted {name}.")),
-        Effect::Nothing | Effect::Quit => return Ok(()),
+        Effect::Nothing | Effect::Quit | Effect::Exit => return Ok(()),
     };
     let hover = match &effect {
         Effect::Create { name, .. } => Some(name.clone()),
@@ -817,6 +821,7 @@ fn carry_out(app: &mut App, effect: Effect, made: &mut Vec<(String, String)>) ->
 pub struct Session {
     pub created: Vec<(String, String)>,
     pub unsaved: Option<String>,
+    pub exit: bool,
 }
 
 impl Session {
@@ -853,6 +858,7 @@ pub fn session() -> Result<Session, String> {
     let mut last: Vec<String> = Vec::new();
     draw(&app, &mut last);
     let mut buf = [0u8; 16];
+    let mut exit = false;
     let outcome = 'outer: loop {
         let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
         if unsafe { libc::poll(&mut fds, 1, 250) } <= 0 {
@@ -871,6 +877,10 @@ pub fn session() -> Result<Session, String> {
         for input in parse_input(&buf[..n]) {
             match app.handle(input) {
                 Effect::Quit => break 'outer Ok(()),
+                Effect::Exit => {
+                    exit = true;
+                    break 'outer Ok(());
+                }
                 effect => {
                     if let Err(e) = carry_out(&mut app, effect, &mut made) {
                         break 'outer Err(e);
@@ -883,7 +893,7 @@ pub fn session() -> Result<Session, String> {
     let unsaved = app.unsaved_note();
     drop(screen);
     drop(raw);
-    outcome.map(|()| Session { created: made, unsaved })
+    outcome.map(|()| Session { created: made, unsaved, exit })
 }
 
 #[cfg(test)]
@@ -1032,14 +1042,15 @@ mod tests {
         assert_eq!(press(&mut a, &[Input::Left]), Effect::Quit, "the left arrow on the list leaves");
         let mut c = app();
         press(&mut c, &[Input::Enter, Input::Char('x'), Input::Down]);
-        assert_eq!(press(&mut c, &[Input::Esc, Input::Esc, Input::Char('q')]), Effect::Quit);
+        assert_eq!(press(&mut c, &[Input::Esc, Input::Esc, Input::Char('q')]), Effect::Exit, "q leaves goethe, not just the keys");
         assert_eq!(c.unsaved_note(), None, "discarded on the way out");
         let mut e = app();
         press(&mut e, &[Input::Enter]);
         assert_eq!(press(&mut e, &[Input::Char('q')]), Effect::Nothing, "while typing, q is a letter");
         assert_eq!(e.editing.as_ref().map(|(_, t)| t.as_str()), Some("q"));
-        assert_eq!(press(&mut app(), &[Input::Char('q')]), Effect::Quit);
-        assert_eq!(press(&mut app(), &[Input::Interrupt]), Effect::Quit);
+        assert_eq!(press(&mut app(), &[Input::Char('q')]), Effect::Exit);
+        assert_eq!(press(&mut app(), &[Input::Interrupt]), Effect::Exit);
+        assert_eq!(press(&mut app(), &[Input::Left]), Effect::Quit, "the left arrow goes back");
     }
 
     #[test]
@@ -1106,9 +1117,9 @@ mod tests {
 
     #[test]
     fn the_session_summary_lists_new_keys_then_what_was_dropped() {
-        let none = Session { created: Vec::new(), unsaved: None };
+        let none = Session { created: Vec::new(), unsaved: None, exit: false };
         assert_eq!(none.summary(), None);
-        let some = Session { created: vec![("ci".into(), "goethe_sk_x".into())], unsaved: Some("Unsaved changes to dev were not saved.".into()) };
+        let some = Session { created: vec![("ci".into(), "goethe_sk_x".into())], unsaved: Some("Unsaved changes to dev were not saved.".into()), exit: false };
         assert_eq!(
             some.summary().as_deref(),
             Some("Created ci: goethe_sk_x\ngoethe api shows every key again.\nUnsaved changes to dev were not saved.")

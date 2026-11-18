@@ -76,6 +76,15 @@ fn memory_args(spec: &EngineSpec, extras: &[String]) -> Vec<String> {
     args.chunks(2).filter(|p| !(user_chunk && p[0] == "--chunked-prefill-size")).flatten().cloned().collect()
 }
 
+fn graph_args(max_conc: u64, extras: &[String]) -> Vec<String> {
+    // Decode CUDA graphs captured only up to the batch the model runs (its concurrency), not SGLang's default range: a shorter load and less VRAM; graph flags the user set win.
+    let theirs = extras.iter().any(|a| a.starts_with("--cuda-graph") || a == "--disable-cuda-graph");
+    if theirs {
+        return Vec::new();
+    }
+    vec!["--cuda-graph-max-bs-decode".to_string(), max_conc.max(1).to_string()]
+}
+
 fn sglang_command(spec: &EngineSpec) -> Command {
     // Goethe flags, then checked card and load extras, in a cleared env; probe paths stay out of the access log.
     let mut cmd = Command::new(resolve_python(spec.home));
@@ -101,6 +110,7 @@ fn sglang_command(spec: &EngineSpec) -> Command {
         .args(QUIET_PATHS);
     let extras: Vec<String> = card_extra_args(spec.card).into_iter().chain(spec.load_extra.iter().cloned()).collect();
     cmd.args(memory_args(spec, &extras));
+    cmd.args(graph_args(spec.max_conc, &extras));
     cmd.arg("--api-key").arg(spec.engine_key);
     if let Some(dtype) = spec
         .card
@@ -145,6 +155,16 @@ fn ternary_command(spec: &EngineSpec) -> Result<Command, String> {
 #[cfg(test)]
 mod tests {
     use super::super::test_spec;
+    use super::graph_args;
+
+    #[test]
+    fn graphs_are_captured_up_to_the_concurrency_unless_the_user_says_otherwise() {
+        assert_eq!(graph_args(4, &[]), ["--cuda-graph-max-bs-decode", "4"], "the pinned SGLang splits the flag into -decode and -prefill");
+        assert_eq!(graph_args(0, &[]), ["--cuda-graph-max-bs-decode", "1"]);
+        for theirs in ["--cuda-graph-max-bs-decode=16", "--cuda-graph-bs-prefill", "--cuda-graph-config", "--disable-cuda-graph"] {
+            assert!(graph_args(4, &[theirs.to_string()]).is_empty(), "{theirs}");
+        }
+    }
 
     #[test]
     fn ternary_gets_its_kernel_env_once_installed() {

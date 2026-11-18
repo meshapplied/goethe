@@ -280,7 +280,7 @@ fn step_access(model: &str) -> Result<(), String> {
     heading(3, "Configure API access", Some("Choose who can reach the API:"));
     let api = configure::apply_access(&ApiOpts { mode: None, vpn_ip: None, interface: None, allow: Vec::new(), yes: false })?;
     let token = choose_key(model)?;
-    print!("\x1b[2J\x1b[H{}", ready_text(&api, model, &token));
+    READY.lock().unwrap_or_else(|e| e.into_inner()).replace((api.clone(), model.to_string(), token.clone()));
     Ok(())
 }
 
@@ -328,20 +328,13 @@ fn choose_key(model: &str) -> Result<String, String> {
     crate::security::key_create(&name, true, None, None, None, false)
 }
 
-fn ready_text(api: &str, model: &str, token: &str) -> String {
-    let curl = format!(
-        "curl -k {api}/chat/completions -H \"Authorization: Bearer {token}\" -H \"Content-Type: application/json\" \
-         -d '{{\"model\": \"{model}\", \"messages\": [{{\"role\": \"user\", \"content\": \"Hello!\"}}]}}'"
-    );
-    format!(
-        "{}\n\n  Base URL   {api}\n  Model      {model}\n  API key    {token}\n\n{}\n\
-         Any OpenAI SDK works with the base URL and the key. The certificate is self-signed: skip verification (curl -k)\n\
-         or trust $GOETHE_HOME/nginx/certs/server.crt.\n\n{}",
-        paint("Your API is ready", Color::Bold),
-        term::commands("Try it:", &[&curl]),
-        term::commands("See all models and keys, or add, scope and delete keys:", &["goethe api", "goethe api keys"])
-    )
+static READY: std::sync::Mutex<Option<(String, String, String)>> = std::sync::Mutex::new(None);
+
+pub fn take_ready() -> Option<(String, String, String)> {
+    // The base URL, model and key Quick setup ended with, for the menu to show in each API schema.
+    READY.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
+
 
 fn advanced() -> Result<(), String> {
     // Each part on its own, in any order, until Finish; an error shows on the next screen.
@@ -460,16 +453,6 @@ fn no_terminal_text(example: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_ready_text_fills_in_the_real_key() {
-        let text = ready_text("https://10.0.0.2:8443/v1", "org/m", "goethe_sk_abc");
-        assert!(text.contains("Base URL   https://10.0.0.2:8443/v1\n  Model      org/m\n  API key    goethe_sk_abc"), "{text}");
-        assert!(text.contains("-H \"Authorization: Bearer goethe_sk_abc\""), "{text}");
-        assert!(text.contains("\"model\": \"org/m\""), "{text}");
-        assert!(!text.contains("<key>"));
-        assert!(text.ends_with("\t\u{2192} goethe api\n\t\u{2192} goethe api keys\n"), "{text}");
-    }
 
     #[test]
     fn only_keys_that_may_call_the_model_are_offered() {
