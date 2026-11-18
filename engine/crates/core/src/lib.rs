@@ -1,6 +1,7 @@
 // goethe-core shared library for the Goethe CLI and daemon.
 
 pub mod alias;
+pub mod apple;
 pub mod calc;
 pub mod chooser;
 pub mod config;

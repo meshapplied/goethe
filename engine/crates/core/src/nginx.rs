@@ -666,22 +666,19 @@ fn read_record(home: &Path) -> Option<MasterRecord> {
 }
 
 fn boot_id() -> String {
-    fs::read_to_string("/proc/sys/kernel/random/boot_id")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    crate::sys::boot_id()
 }
 
 fn proc_stat(pid: i32) -> Option<(char, i32, u64)> {
-    // (state, process group, start ticks) from /proc/<pid>/stat, parsed after the comm field.
-    let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rest = text.get(text.rfind(')')? + 2..)?;
-    let f: Vec<&str> = rest.split_whitespace().collect();
-    Some((f.first()?.chars().next()?, f.get(2)?.parse().ok()?, f.get(19)?.parse().ok()?))
+    // (state, process group, start ticks) of a process.
+    let st = crate::sys::stat(pid)?;
+    let pgrp = unsafe { libc::getpgid(pid) };
+    (pgrp > 0).then_some((st.state, pgrp, st.start_ticks))
 }
 
 fn proc_exe(pid: i32) -> Option<PathBuf> {
-    // /proc/<pid>/exe without the " (deleted)" suffix an upgraded binary gets.
-    let exe = fs::read_link(format!("/proc/{pid}/exe")).ok()?.to_string_lossy().to_string();
+    // The executable without the " (deleted)" suffix an upgraded binary gets on Linux.
+    let exe = crate::sys::exe(pid)?.to_string_lossy().to_string();
     Some(PathBuf::from(exe.strip_suffix(" (deleted)").unwrap_or(&exe)))
 }
 
@@ -699,10 +696,10 @@ fn active_bin(home: &Path) -> PathBuf {
 }
 
 fn cmdline_has_prefix(pid: i32, prefix: &Path) -> bool {
-    let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) else {
+    let Some(argv) = crate::sys::argv(pid) else {
         return false;
     };
-    let text = String::from_utf8_lossy(&raw).replace('\0', " ");
+    let text = argv.join(" ");
     format!("{} ", text.trim_end()).contains(&format!(" -p {} ", prefix.display()))
 }
 
@@ -753,11 +750,8 @@ fn terminate(pids: &[i32], still_ours: impl Fn(i32) -> bool, grace: Duration) {
 
 fn orphan_workers(rec: &MasterRecord) -> Vec<i32> {
     // Live nginx processes still in a dead master's process group, started after it during this boot.
-    let Ok(rd) = fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    rd.flatten()
-        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+    crate::sys::pids()
+        .into_iter()
         .filter(|&pid| {
             proc_stat(pid).is_some_and(|(state, pgrp, start)| {
                 state != 'Z' && pgrp == rec.pid && start >= rec.start_ticks
@@ -883,9 +877,7 @@ fn spawn_private(home: &Path) -> Result<(), String> {
 }
 
 fn worker_pids(master: i32) -> Vec<i32> {
-    fs::read_to_string(format!("/proc/{master}/task/{master}/children"))
-        .map(|s| s.split_whitespace().filter_map(|p| p.parse().ok()).collect())
-        .unwrap_or_default()
+    crate::sys::children(master)
 }
 
 fn wait_reloaded(master: i32, before: &[i32]) {
@@ -895,8 +887,7 @@ fn wait_reloaded(master: i32, before: &[i32]) {
         return;
     }
     let retired = |pid: &i32| {
-        fs::read(format!("/proc/{pid}/cmdline"))
-            .map_or(true, |c| c.is_empty() || String::from_utf8_lossy(&c).contains("shutting down"))
+        crate::sys::argv(*pid).is_none_or(|a| a.is_empty() || a.join(" ").contains("shutting down"))
     };
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {

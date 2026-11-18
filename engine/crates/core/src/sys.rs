@@ -99,6 +99,17 @@ mod imp {
         Some(kb * 1024)
     }
 
+    pub fn footprint_bytes(pid: i32) -> Option<u64> {
+        rss_bytes(pid)
+    }
+
+    pub fn cpu_ticks(pid: i32) -> Option<u64> {
+        // User and system time of the process and its reaped children, in clock ticks (fields 14 to 17 of stat).
+        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let fields: Vec<&str> = text.rsplit_once(')').map_or("", |(_, rest)| rest).split_whitespace().collect();
+        Some((11..=14).filter_map(|i| fields.get(i)?.parse::<u64>().ok()).sum())
+    }
+
     pub fn boot_id() -> String {
         std::fs::read_to_string("/proc/sys/kernel/random/boot_id").map(|s| s.trim().to_string()).unwrap_or_default()
     }
@@ -233,11 +244,26 @@ mod imp {
         bsdinfo(pid).map(|i| i.pbi_uid)
     }
 
+    pub fn footprint_bytes(pid: i32) -> Option<u64> {
+        // Physical footprint, which on Apple Silicon includes the process's Metal (GPU) memory.
+        let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V4, (&mut info as *mut libc::rusage_info_v4).cast()) };
+        (rc == 0).then_some(info.ri_phys_footprint)
+    }
+
     pub fn rss_bytes(pid: i32) -> Option<u64> {
         let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
         let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, (&mut info as *mut libc::proc_taskinfo).cast(), size) };
         (got == size).then_some(info.pti_resident_size)
+    }
+
+    pub fn cpu_ticks(pid: i32) -> Option<u64> {
+        // User and system time in hundredths of a second, the unit Linux clock ticks usually have.
+        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+        let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, (&mut info as *mut libc::proc_taskinfo).cast(), size) };
+        (got == size).then(|| (info.pti_total_user + info.pti_total_system) / 10_000_000)
     }
 
     fn sysctl_string(name: &str) -> Option<String> {

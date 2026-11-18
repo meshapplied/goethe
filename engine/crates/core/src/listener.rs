@@ -1,4 +1,4 @@
-// Who listens on an engine port: LISTEN sockets in /proc/net/tcp and tcp6 matched to process fds.
+// Who listens on an engine port: LISTEN sockets in /proc/net/tcp and tcp6 matched to process fds on Linux, lsof on macOS.
 
 use crate::proc_ident::{self, Identity};
 use std::collections::HashSet;
@@ -48,6 +48,7 @@ pub fn parse_listen_inodes(table: &str, port: u16) -> Vec<(u64, bool)> {
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 fn listen_inodes(port: u16) -> Vec<(u64, bool)> {
     ["/proc/net/tcp", "/proc/net/tcp6"]
         .iter()
@@ -56,6 +57,7 @@ fn listen_inodes(port: u16) -> Vec<(u64, bool)> {
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 fn socket_inodes(pid: i32) -> HashSet<u64> {
     // Socket inodes among the open fds of pid ("socket:[N]" links); empty when the fds are not readable.
     let Ok(rd) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
@@ -70,6 +72,7 @@ fn socket_inodes(pid: i32) -> HashSet<u64> {
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 fn holder(inode: u64) -> Option<i32> {
     // The process holding a socket inode, from every /proc/<pid>/fd this user can read.
     std::fs::read_dir("/proc")
@@ -79,6 +82,45 @@ fn holder(inode: u64) -> Option<i32> {
         .find(|pid| socket_inodes(*pid).contains(&inode))
 }
 
+#[cfg(target_os = "macos")]
+pub fn parse_lsof(text: &str) -> Vec<(i32, String, String)> {
+    // `lsof -F pcn`: each p<pid> starts a process, c<name> is its command, every n<address> is one of its listeners.
+    let (mut out, mut pid, mut cmd) = (Vec::new(), 0, String::new());
+    for line in text.lines() {
+        match line.split_at_checked(1) {
+            Some(("p", v)) => pid = v.parse().unwrap_or(0),
+            Some(("c", v)) => cmd = v.to_string(),
+            Some(("n", v)) if pid > 0 => out.push((pid, cmd.clone(), v.to_string())),
+            _ => {}
+        }
+    }
+    out
+}
+
+#[cfg(target_os = "macos")]
+pub fn port_owner(id: &Identity, port: u16) -> PortOwner {
+    // The listeners a connection to 127.0.0.1:port reaches (loopback or any address), from the built-in lsof.
+    let out = std::process::Command::new("/usr/sbin/lsof").args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-F", "pcn"]).output();
+    let rows: Vec<(i32, String, String)> = out
+        .map(|o| parse_lsof(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, _, addr)| addr.starts_with("127.") || addr.starts_with("*:") || addr.starts_with("[::]") || addr.starts_with("[::1]"))
+        .collect();
+    let ours: HashSet<i32> = proc_ident::instance_pids(id).into_iter().collect();
+    if let Some((pid, name, _)) = rows.iter().find(|(p, _, _)| !ours.contains(p)) {
+        return PortOwner::Foreign { pid: Some(*pid), name: name.clone() };
+    }
+    if !rows.is_empty() {
+        return PortOwner::Ours;
+    }
+    if std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), std::time::Duration::from_millis(200)).is_ok() {
+        return PortOwner::Foreign { pid: None, name: "unknown".to_string() };
+    }
+    PortOwner::Nobody
+}
+
+#[cfg(target_os = "linux")]
 pub fn port_owner(id: &Identity, port: u16) -> PortOwner {
     // Every listener that 127.0.0.1:port reaches must be an fd of this instance (verified leader or tagged process).
     let found = listen_inodes(port);
@@ -92,10 +134,7 @@ pub fn port_owner(id: &Identity, port: u16) -> PortOwner {
         return if found.iter().any(|(i, _)| ours.contains(i)) { PortOwner::Ours } else { PortOwner::Nobody };
     };
     let pid = holder(inode);
-    let name = pid
-        .and_then(|p| std::fs::read_to_string(format!("/proc/{p}/comm")).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    let name = pid.and_then(crate::sys::comm).unwrap_or_else(|| "unknown".to_string());
     PortOwner::Foreign { pid, name }
 }
 
@@ -129,12 +168,19 @@ mod tests {
         // Until a spawned child has exec'd it still holds this process's sockets; wait for it to become sleep.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
-            if std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "sleep") {
+            if crate::sys::comm(pid as i32).is_some_and(|c| c == "sleep") {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         panic!("child {pid} did not exec sleep within 5 s");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn lsof_rows_name_each_listener_with_its_process() {
+        let rows = parse_lsof("p4242\ncllama-server\nn127.0.0.1:31070\np99\ncnode\nn*:31070\n");
+        assert_eq!(rows, vec![(4242, "llama-server".into(), "127.0.0.1:31070".into()), (99, "node".into(), "*:31070".into())]);
     }
 
     #[test]

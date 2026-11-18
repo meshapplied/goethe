@@ -151,7 +151,7 @@ pub fn live_engine_pids() -> Vec<i64> {
 }
 
 pub fn pid_alive(pid: i64) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    i32::try_from(pid).is_ok_and(crate::sys::exists)
 }
 
 pub fn stop_keeping_engines() -> Result<(usize, usize), String> {

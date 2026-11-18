@@ -66,10 +66,11 @@ fn vram_bar(goethe_mb: u64, used_mb: u64, total_mb: u64) -> String {
 
 pub fn legend() -> String {
     format!(
-        "{} goethe models   \u{2588} other processes   {} free   {} memory bandwidth",
+        "{} goethe models   \u{2588} other processes   {} free   {} {}",
         sgr(&crate::theme::main(), "\u{2588}"),
         paint("\u{2591}", Color::Gray),
-        sgr(&crate::theme::secondary(), "\u{2588}")
+        sgr(&crate::theme::secondary(), "\u{2588}"),
+        if cfg!(target_os = "macos") { "GPU busy" } else { "memory bandwidth" }
     )
 }
 
@@ -157,12 +158,7 @@ fn disk_gb(path: &Path) -> Option<f64> {
 }
 
 fn proc_stat() -> Option<(Vec<u64>, Vec<Vec<u64>>)> {
-    // The total and per-core jiffies from /proc/stat.
-    let text = std::fs::read_to_string("/proc/stat").ok()?;
-    let nums = |l: &str| l.split_whitespace().skip(1).filter_map(|v| v.parse().ok()).collect::<Vec<u64>>();
-    let total = nums(text.lines().next()?);
-    let cores = text.lines().skip(1).take_while(|l| l.starts_with("cpu")).map(nums).collect();
-    Some((total, cores))
+    crate::sys::cpu_times()
 }
 
 fn busy(before: &[u64], after: &[u64]) -> f64 {
@@ -182,9 +178,7 @@ pub fn meminfo(text: &str) -> Memory {
 }
 
 fn load() -> (f64, f64, f64) {
-    let text = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
-    let v: Vec<f64> = text.split_whitespace().take(3).filter_map(|x| x.parse().ok()).collect();
-    (v.first().copied().unwrap_or(0.0), v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0))
+    crate::sys::loadavg()
 }
 
 fn instance_of(pid: i32, models: &HashMap<i32, String>) -> Option<(i32, String)> {
@@ -201,7 +195,7 @@ fn instance_of(pid: i32, models: &HashMap<i32, String>) -> Option<(i32, String)>
 
 fn role(pid: i32) -> String {
     // What a child of an engine does, from its process title: sglang::scheduler_TP1 is "scheduler TP1".
-    let title = std::fs::read(format!("/proc/{pid}/cmdline")).ok().and_then(|b| b.split(|c| *c == 0).next().map(|a| String::from_utf8_lossy(a).into_owned())).unwrap_or_default();
+    let title = crate::sys::argv(pid).and_then(|a| a.into_iter().next()).unwrap_or_default();
     let name = title.rsplit("::").next().unwrap_or("").trim();
     if name.is_empty() || name.contains('/') { "worker".to_string() } else { name.replace('_', " ") }
 }
@@ -314,7 +308,8 @@ impl StatusView {
             }
             self.stat = Some(now);
         }
-        self.memory = meminfo(&std::fs::read_to_string("/proc/meminfo").unwrap_or_default());
+        let m = crate::sys::memory();
+        self.memory = Memory { total_kb: m.total_kb, available_kb: m.available_kb, cached_kb: m.cached_kb };
     }
 }
 

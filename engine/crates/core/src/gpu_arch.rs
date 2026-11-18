@@ -130,8 +130,13 @@ pub fn lookup(cc: &str) -> Option<Arch> {
     SUPPORTED.iter().copied().find(|a| a.major == major && a.minor == minor)
 }
 
+pub fn is_apple(cc: &str) -> bool {
+    cc == crate::apple::COMPUTE
+}
+
 pub fn is_supported(cc: &str) -> bool {
-    lookup(cc).is_some()
+    // An NVIDIA capability from the table, or the GPU of an Apple Silicon Mac.
+    is_apple(cc) || lookup(cc).is_some()
 }
 
 pub fn unsupported_reason(cc: &str) -> Option<String> {
@@ -179,6 +184,10 @@ pub fn nvfp4_dual_copy(cc: &str) -> bool {
 
 pub fn model_runs_on(model_sm: &[String], gpu_cc: &str) -> bool {
     // Listed for this capability, or for one on the same NVFP4 path with no more shared memory; empty means any.
+    // A Mac runs models that name no NVIDIA capability (GGUF with llama.cpp), or that name Metal.
+    if is_apple(gpu_cc) {
+        return model_sm.is_empty() || model_sm.iter().any(|s| is_apple(s));
+    }
     let Some(arch) = lookup(gpu_cc) else {
         return false;
     };
@@ -192,6 +201,14 @@ mod tests {
 
     fn sm(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn an_apple_gpu_is_supported_and_runs_models_that_name_no_nvidia_capability() {
+        assert!(is_supported("metal") && unsupported_reason("metal").is_none());
+        assert!(model_runs_on(&[], "metal") && model_runs_on(&sm(&["metal"]), "metal"));
+        assert!(!model_runs_on(&sm(&["12.0"]), "metal"), "a kernel built for NVIDIA does not run on a Mac");
+        assert!(!model_runs_on(&sm(&["metal"]), "12.0"));
     }
 
     #[test]
