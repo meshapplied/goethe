@@ -480,7 +480,7 @@ struct ShareArgs {
     duration: Option<String>,
     #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::key_names), long, value_name = "NAME_OR_ID", num_args = 1.., value_delimiter = ',', help = "API keys to share (not admin keys), each until DURATION; with stop, the keys to stop sharing.")]
     key: Vec<String>,
-    #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Only these client addresses or ranges may use the keys given, such as 203.0.113.7.")]
+    #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Their public IP or range (phone/laptop), such as 203.0.113.7/32 — not this machine. Required unless api allow or a remembered grant supplies addresses.")]
     allow: Vec<String>,
     #[arg(long, help = "The public port (default 8444, or the last one used).")]
     port: Option<u16>,
@@ -677,7 +677,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("goethe api expose vpn --interface wg0", "serve a VPN or private network (also local or public)"),
         ("goethe api allow add 203.0.113.7/32", "let a client address in (remove takes it out)"),
         ("goethe api domain check DOMAIN", "check that a domain reaches the API"),
-        ("goethe api share 5h --key my-app", "open a public address for a while (share stop closes it)"),
+        ("goethe api share 5h --key my-app --allow <their-ip>/32", "open a public address for a while (share stop closes it)"),
     ]),
     ("Learning and traces", &[
         ("goethe learn on", "sessions keep what compaction drops (--model M for one model)"),
