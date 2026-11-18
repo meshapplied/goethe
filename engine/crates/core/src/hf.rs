@@ -28,6 +28,8 @@ pub struct ModelPreflight {
     pub gated: bool,
     pub siblings: Vec<HfSibling>,
     pub sha: Option<String>,
+    pub base_models: Vec<String>,
+    pub gguf_arch: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -115,6 +117,8 @@ pub fn preflight_model_opts(model_id: &str, revision: Option<&str>, allow_gated:
             gated: false,
             siblings: Vec::new(),
             sha: None,
+            base_models: Vec::new(),
+            gguf_arch: None,
         });
     }
     let endpoint = hf_endpoint();
@@ -145,7 +149,32 @@ pub fn preflight_model_opts(model_id: &str, revision: Option<&str>, allow_gated:
         gated,
         siblings: parse_siblings(&body),
         sha: body.get("sha").and_then(|v| v.as_str()).map(String::from),
+        base_models: base_models(&body),
+        gguf_arch: body.pointer("/gguf/architecture").and_then(|v| v.as_str()).map(String::from),
     })
+}
+
+pub fn base_models(body: &serde_json::Value) -> Vec<String> {
+    // The models a repo says it derives from (model card base_model: one id or a list), for finding its kernel packs and GGUF builds.
+    match body.pointer("/cardData/base_model") {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(a)) => a.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        _ => Vec::new(),
+    }
+    .into_iter()
+    .filter(|id| crate::paths::validate_model_id(id).is_ok() && id.contains('/'))
+    .collect()
+}
+
+pub fn gguf_builds(model_id: &str) -> Vec<(String, u64)> {
+    // Repos Hugging Face lists as GGUF quantizations of model_id with their downloads, the most downloaded first (an exact relation, not a name search).
+    let url = format!("{}/api/models?filter=base_model:quantized:{model_id}&filter=gguf&sort=downloads&limit=5", hf_endpoint());
+    let Ok(resp) = api_get(&url) else { return Vec::new() };
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&resp.body).unwrap_or_default();
+    rows.iter()
+        .filter_map(|r| Some((r.get("id")?.as_str()?.to_string(), r.get("downloads").and_then(|d| d.as_u64()).unwrap_or(0))))
+        .filter(|(id, _)| crate::paths::validate_model_id(id).is_ok())
+        .collect()
 }
 
 pub fn hf_owner_org(model_id: &str) -> Option<String> {
@@ -740,13 +769,15 @@ fn verify_model(
         })
     });
     let total: u64 = lfs.iter().map(|s| s.size).sum();
-    let base = HASHED.load(Ordering::Relaxed);
-    let hashing = (total >= 256 << 20).then(|| {
-        let done = move || HASHED.load(Ordering::Relaxed).saturating_sub(base);
-        crate::progress::Ticker::start("verifying", Some(total), crate::progress::every(), done, crate::progress::eprint_line)
-    });
+    let say = total >= 256 << 20;
+    if say {
+        crate::progress::eprint_line("verifying".to_string());
+    }
     let mut results = hash_all(local_dir, &lfs);
-    drop(hashing);
+    if say {
+        crate::progress::eprint_line("verifying done".to_string());
+        crate::progress::end_line();
+    }
     if let Some(prev) = &previous {
         for s in &reused {
             if let Some(e) = prev.files.get(&s.rfilename) {

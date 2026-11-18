@@ -1315,7 +1315,8 @@ fn chooser_input(req: &LoadReq, ctx: u64, max_conc: u64) -> ChooserInput {
         attention: row.attention.clone().unwrap_or_else(|| "gqa".to_string()),
         max_ctx: row.max_ctx.unwrap_or(row.default_ctx) as u64,
     };
-    ChooserInput::from_card(facts, &req.card, crate::memory_spec::installed(&req.model_path, &req.card, &req.params.extra_sglang_args), ctx, max_conc)
+    let input = ChooserInput::from_card(facts, &req.card, crate::memory_spec::installed(&req.model_path, &req.card, &req.params.extra_sglang_args), ctx, max_conc);
+    crate::engines::llama_cpp::with_header_kv(input, &req.model_path, &req.card)
 }
 
 fn gpu_name(snap: &[GpuLive], idx: u32) -> String {
@@ -1423,19 +1424,27 @@ fn get(port: u16, path: &str, key: &str, timeout_secs: u64) -> Option<ureq::Resp
     req.call().ok().filter(|r| r.status() == 200)
 }
 
+fn warm_up_request(task: Option<&str>, model_id: &str, ctx: u64) -> Option<(&'static str, Value)> {
+    // The request that warms this model's kernels: a real-length completion, one input for an embedding model, none for speech (it needs audio).
+    let words = (ctx / 3).clamp(256, 3000) as usize;
+    let text = "the engine compiles its kernels for this prompt length now ".repeat(words / 10);
+    match task {
+        Some("transcribe") => None,
+        Some("embed") => Some(("/v1/embeddings", serde_json::json!({"model": model_id, "input": text}))),
+        _ => Some(("/v1/completions", serde_json::json!({"model": model_id, "prompt": text, "max_tokens": 8, "temperature": 0}))),
+    }
+}
+
 fn warm_up(s: &Starting) {
-    // One real-length completion before RUNNING, so the first client request does not pay for first-use kernel builds.
-    let words = (s.ctx / 3).clamp(256, 3000) as usize;
-    let prompt = "the engine compiles its kernels for this prompt length now ".repeat(words / 10);
-    let body = serde_json::json!({"model": s.params.model_id, "prompt": prompt, "max_tokens": 8, "temperature": 0});
-    load_slot::push_instance_notice(&s.instance_id, &crate::progress::warmup_notice(&s.home, &s.params.model_id));
+    // One request before RUNNING, so the first client request does not pay for first-use kernel builds.
+    let Some((path, body)) = warm_up_request(s.card.get("task").and_then(|v| v.as_str()), &s.params.model_id, s.ctx) else { return };
     let started = Instant::now();
     let agent = ureq::AgentBuilder::new()
         .timeout_read(Duration::from_secs(WARM_UP_SECS))
         .timeout_connect(Duration::from_secs(2))
         .build();
     let res = agent
-        .post(&format!("http://127.0.0.1:{}/v1/completions", s.port))
+        .post(&format!("http://127.0.0.1:{}{path}", s.port))
         .set("Authorization", &format!("Bearer {}", s.engine_key))
         .set("Content-Type", "application/json")
         .send_string(&body.to_string());
@@ -1722,6 +1731,15 @@ fn uuid_simple() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_task_warms_up_with_a_request_it_answers() {
+        let (path, body) = warm_up_request(Some("embed"), "org/e", 2048).unwrap();
+        assert_eq!(path, "/v1/embeddings");
+        assert!(body["input"].as_str().is_some_and(|t| !t.is_empty()) && body.get("prompt").is_none());
+        assert_eq!(warm_up_request(None, "org/m", 8192).unwrap().0, "/v1/completions");
+        assert!(warm_up_request(Some("transcribe"), "org/s", 8192).is_none(), "speech needs audio, not text");
+    }
 
     #[test]
     fn ps_names_the_runtime_the_card_serves_with() {

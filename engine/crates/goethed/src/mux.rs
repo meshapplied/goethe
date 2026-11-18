@@ -488,6 +488,10 @@ async fn route_post(
         drop(guard);
         return finish.now(unsupported("unsupported_task", None, format!("{path} is not served by {}", e.id)));
     }
+    if let Some(why) = wrong_task(snap.task(&model), api_tail(path), &model) {
+        drop(guard);
+        return finish.now(unsupported("unsupported_task", None, why));
+    }
     let openai = matches!(api_tail(path), "/chat/completions" | "/completions" | "/embeddings");
     if let Some((e, Err(param))) = engine.filter(|_| openai).map(|e| (e, engines::check_params(e, &body))) {
         drop(guard);
@@ -1193,6 +1197,12 @@ fn not_found() -> Response<MuxBody> {
     error(StatusCode::NOT_FOUND, "Not Found", "invalid_request_error", "not_found")
 }
 
+fn wrong_task(task: Option<&str>, tail: &str, model: &str) -> Option<String> {
+    // An embedding model asked to write text: say which route it answers instead of passing the engine's error on.
+    let writes = matches!(tail, "/chat/completions" | "/completions" | "/responses" | "/messages");
+    (task == Some("embed") && writes).then(|| format!("{model} is an embedding model; send it to /v1/embeddings"))
+}
+
 fn model_not_found() -> Response<MuxBody> {
     error(StatusCode::NOT_FOUND, "Model Not Found", "invalid_request_error", "model_not_found")
 }
@@ -1336,6 +1346,9 @@ mod tests {
             Some((Method::POST, Api::Proxy(up))) => Some(up),
             _ => None,
         };
+        assert_eq!(wrong_task(Some("embed"), "/chat/completions", "org/e").as_deref(), Some("org/e is an embedding model; send it to /v1/embeddings"));
+        assert_eq!(wrong_task(Some("embed"), "/embeddings", "org/e"), None);
+        assert_eq!(wrong_task(None, "/chat/completions", "org/m"), None);
         assert_eq!(proxied("/chat/completions").as_deref(), Some("/v1/chat/completions"));
         assert_eq!(proxied("/v1/chat/completions").as_deref(), Some("/v1/chat/completions"));
         assert_eq!(proxied("/v1/messages").as_deref(), Some("/v1/messages"));

@@ -72,10 +72,16 @@ echo "${hwtext}"
 check "the hardware table says GPU memory and has no PCIe column" bash -c 'grep -q "GPU MEMORY TOTAL" <<<"$0" && ! grep -q "PCIE" <<<"$0" && ! grep -q "SM metal" <<<"$0"' "${hwtext}"
 
 echo "== refusals before any download"
-out="$("${G}" install nvidia/Llama-3.1-8B-Instruct-NVFP4 --yes 2>&1 || true)"
+out="$("${G}" install hf-internal-testing/tiny-random-gpt2 --yes 2>&1 || true)"
 echo "${out}" | tail -2
-check "a model without GGUF files is refused on a Mac" grep -q "no GGUF files" <<<"${out}"
-check "nothing was downloaded for it" test ! -e "${GOETHE_HOME}/models/nvidia__Llama-3.1-8B-Instruct-NVFP4"
+check "a model with no GGUF build is refused on a Mac" grep -q "no GGUF build of it that llama.cpp serves" <<<"${out}"
+check "nothing was downloaded for it" test ! -e "${GOETHE_HOME}/models/hf-internal-testing__tiny-random-gpt2"
+
+echo "== a safetensors model gets its GGUF build"
+out="$("${G}" install HuggingFaceTB/SmolLM2-135M-Instruct --yes 2>&1 || true)"
+echo "${out}" | head -3
+check "goethe picks the model's GGUF build for llama.cpp" grep -q "installing its GGUF build" <<<"${out}"
+check "the name typed is an alias of it" bash -c '"$0" models alias 2>/dev/null | grep -q "HuggingFaceTB/SmolLM2-135M-Instruct"' "${G}"
 
 echo "== install"
 "${G}" install "${MODEL}" --yes </dev/null

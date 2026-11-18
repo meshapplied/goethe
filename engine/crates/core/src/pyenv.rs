@@ -286,16 +286,13 @@ pub(crate) fn install_from(home: &Path, pkg: &str, sums: &Path, tmp: &Path, laye
     if layer == Layer::Engine {
         cmd.env("GOETHE_ENGINE_WHEEL_URL", ENGINE_WHEEL_URL).env("GOETHE_ENGINE_WHEEL_SHA256", ENGINE_WHEEL_SHA256);
     }
-    let py_env = home.join("py-env");
-    let before = crate::progress::dir_bytes(&py_env);
     let (watched, cache) = (home.join("py-env"), std::env::var_os("UV_CACHE_DIR").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/uv"))));
     let held = |watched: &Path, cache: &Option<PathBuf>| crate::progress::dir_bytes(watched) + cache.as_deref().map_or(0, crate::progress::dir_bytes);
     let base = held(&watched, &cache);
     let ticker = crate::progress::Ticker::start(layer_label(layer), None, crate::progress::every(), move || held(&watched, &cache).saturating_sub(base), crate::progress::eprint_line);
-    let started = std::time::Instant::now();
     let done = crate::step::run(&mut cmd).map_err(|e| format!("could not run bootstrap.sh: {e}"));
-    let had_line = crate::progress::updating();
     drop(ticker);
+    crate::progress::end_line();
     let done = done?;
     if !done.status.success() {
         return Err(crate::step::failure(
@@ -304,14 +301,6 @@ pub(crate) fn install_from(home: &Path, pkg: &str, sums: &Path, tmp: &Path, laye
             "what was installed before still works; run the command again to retry",
         ));
     }
-    let grown = crate::progress::size(crate::progress::dir_bytes(&py_env).saturating_sub(before));
-    let version = if layer == Layer::Engine { format!("{ENGINE_VERSION} ") } else { String::new() };
-    let secs = started.elapsed();
-    let time = if secs >= crate::step::SLOW { format!(", {} s", secs.as_secs()) } else { String::new() };
-    if had_line && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        print!("\x1b[1A\x1b[2K");
-    }
-    println!("{}", crate::step::row(layer_label(layer), &format!("{version}ready ({grown}{time})")));
     if let Some(w) = wheel {
         let name = w.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         fs::write(pyenv.join("LATEST"), format!("{name}\n")).map_err(|e| e.to_string())?;

@@ -131,6 +131,7 @@ pub fn run_pick_gpus(tp: Option<u64>, model: Option<&str>) -> Result<(), String>
         None => {
             let t = pinned.unwrap_or(1);
             let empty = crate::chooser::ChooserInput {
+                window_gb_per_request: 0.0,
                 static_vram_gb: 0.0,
                 kv_bytes_per_token: 1,
                 num_attention_heads: t as u64,

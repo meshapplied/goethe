@@ -93,4 +93,5 @@ pub mod trace_assemble;
 pub mod configure;
 pub mod gpu_arch;
 pub mod gpu_kind;
+pub mod api_schema;
 pub mod fix;

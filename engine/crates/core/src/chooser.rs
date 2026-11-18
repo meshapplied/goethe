@@ -22,6 +22,7 @@ pub struct ChooserInput {
     pub marlin_extra_gb: f64,
     pub supported_sm: Vec<String>,
     pub memory: Option<MemorySpec>,
+    pub window_gb_per_request: f64,
     pub overhead_gb: f64,
 }
 
@@ -38,6 +39,7 @@ impl ChooserInput {
     pub fn from_card(f: CardFacts, card: &toml::Value, memory: Option<MemorySpec>, ctx: u64, max_conc: u64) -> ChooserInput {
         // The one way a card and its installed figures become a budget input: goethe load and the install-time fit both use it.
         ChooserInput {
+            window_gb_per_request: 0.0,
             static_vram_gb: f.static_vram_gb,
             kv_bytes_per_token: f.kv_bytes_per_token,
             num_attention_heads: f.num_attention_heads,
@@ -137,6 +139,7 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
         return Need {
             weights: (input.static_vram_gb + marlin) / tp as f64,
             kv: tokens * input.kv_bytes_per_token as f64 / GIB / shard,
+            window: conc as f64 * input.window_gb_per_request / shard,
             overhead: oh,
             ..Need::default()
         };
@@ -249,9 +252,8 @@ pub fn plan_with(
         return Err(PlanError { message: no_arch_message(input, gpus), gpus: Vec::new() });
     }
     if let Some(tp) = pinned_tp {
-        return best_fit(input, &eligible, hw, tp, learned)
-            .map(|set| plan(input, tp, set))
-            .ok_or_else(|| closest_miss(input, &eligible, hw, tp, learned));
+        let fits = |trial: &ChooserInput| best_fit(trial, &eligible, hw, tp, learned).map(|set| plan(trial, tp, set));
+        return fits(input).or_else(|| shrink_until(input, fits)).ok_or_else(|| closest_miss(input, &eligible, hw, tp, learned));
     }
     auto_plan(input, &eligible, hw, learned)
 }
@@ -449,6 +451,7 @@ mod tests {
 
     fn inp() -> ChooserInput {
         ChooserInput {
+            window_gb_per_request: 0.0,
             static_vram_gb: 20.0,
             kv_bytes_per_token: 4096,
             num_attention_heads: 8,
@@ -617,6 +620,20 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_tp_shrinks_context_too() {
+        let m = ChooserInput { ctx: 131072, kv_bytes_per_token: 65536, ..inp() };
+        let p = pick_load_plan(&m, &[gpu(0, 30.0, false)], None, Some(1), None).unwrap();
+        assert_eq!((p.tp, p.ctx, p.max_conc), (1, 65536, 4), "a llama.cpp card pins tp 1 and must still fit a smaller context");
+    }
+
+    #[test]
+    fn sliding_window_kv_is_paid_per_request() {
+        let m = ChooserInput { window_gb_per_request: 0.5, ..inp() };
+        let n = need(&m, 1, "metal");
+        assert!((n.window - 0.5 * m.max_conc as f64).abs() < 1e-9, "{}", n.window);
+    }
+
+    #[test]
     fn learned_budget_drives_placement_and_failure_text() {
         let gpus = vec![gpu(2, 30.0, false), gpu(3, 26.0, false)];
         let fits = pick_load_plan(&inp(), &gpus, None, Some(1), None).unwrap();
@@ -661,6 +678,7 @@ mod tests {
             ..MemorySpec::default()
         };
         let m = ChooserInput {
+            window_gb_per_request: 0.0,
             static_vram_gb: 21.0,
             num_attention_heads: 24,
             num_kv_heads: 4,

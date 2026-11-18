@@ -126,7 +126,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
                 fit: format!("{}{gated}", verdict.label()),
                 custom: None,
                 optimised: packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id)).then_some(true),
-                runtime: None,
+                runtime: Some(if linked && packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id)) { "goethe-engine" } else { m.effective_runtime() }.to_string()),
                 verdict,
             });
         }
@@ -146,7 +146,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
                     .label(),
                     custom: None,
                     optimised: None,
-                    runtime: None,
+                    runtime: Some(crate::engines::ninfer::ENGINE.id.to_string()),
                     verdict: Verdict::Fits {
                         per_gpu: row.vram_per_gpu_gb,
                         total: row.vram_per_gpu_gb * row.tp as f64,
@@ -175,7 +175,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
                 fit: format!("kernel pack for {}", o.arch),
                 custom: None,
                 optimised: Some(true),
-                runtime: None,
+                runtime: Some("goethe-engine".to_string()),
                 verdict: Verdict::Unknown,
             });
         }
@@ -291,6 +291,20 @@ fn packs_text(offers: &[(&crate::packs::Offer, Option<f64>)], linked: bool) -> S
     format!("\n{}\n{}\n{how}\n", paint("Optimised kernels for this machine", Color::Bold), table.render())
 }
 
+pub fn engine_label(runtime: Option<&str>) -> String {
+    // What serves a model, in the words the docs use: goethe's kernel packs, SGLang, llama.cpp.
+    match runtime {
+        Some("goethe-engine") => "goethe kernels",
+        Some("sglang") => "SGLang",
+        Some("llama.cpp") => "llama.cpp",
+        Some("ternary") => "ternary",
+        Some("ninfer") => "ninfer",
+        Some(other) => other,
+        None => "-",
+    }
+    .to_string()
+}
+
 fn list_text(rows: &[ModelRow], free_gb: Option<String>) -> String {
     // Installed models, then available ones grouped by the VRAM they take, then those that do not fit and why.
     use crate::term::{paint, Color, Table};
@@ -299,10 +313,10 @@ fn list_text(rows: &[ModelRow], free_gb: Option<String>) -> String {
         out.push_str(&format!("{free}\n\n"));
     }
     let row = |r: &ModelRow| {
-        let tag = if r.optimised.is_some() { OPTIMISED } else { "" };
-        vec![format!("{}{tag}", r.id), crate::term::status(&r.status), format!("{:.1} GB", r.gb), fit_colored(&r.fit)]
+        let tag = if r.optimised.is_some() && r.runtime.as_deref() != Some("goethe-engine") { OPTIMISED } else { "" };
+        vec![format!("{}{tag}", r.id), crate::term::status(&r.status), engine_label(r.runtime.as_deref()), format!("{:.1} GB", r.gb), fit_colored(&r.fit)]
     };
-    let header = ["MODEL", "STATUS", "DISK", "FIT ON THIS MACHINE"];
+    let header = ["MODEL", "STATUS", "ENGINE", "DISK", "FIT ON THIS MACHINE"];
     let (installed, available): (Vec<&ModelRow>, Vec<&ModelRow>) = rows.iter().partition(|r| r.status != "available");
     if !installed.is_empty() {
         let mut table = Table::new(&header);
@@ -452,7 +466,8 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
                 id: r.get(0)?,
                 default_tp: r.get(5)?,
                 runtime: card.get("runtime").and_then(|v| v.as_str()).unwrap_or("sglang").to_string(),
-                input: ChooserInput {
+                input: crate::engines::llama_cpp::with_header_kv(ChooserInput {
+                    window_gb_per_request: 0.0,
                     static_vram_gb: r.get(1)?,
                     kv_bytes_per_token: card_kv_bytes(&card, elems, kv_bytes.max(0) as u64).max(1),
                     num_attention_heads: r.get::<_, Option<i64>>(7)?.unwrap_or(1) as u64,
@@ -465,7 +480,7 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
                     supported_sm: install::card_supported_sm(&card),
                     memory: crate::memory_spec::installed(&home.join(r.get::<_, String>(11)?), &card, &[]),
                     overhead_gb: crate::engines::of_card(&card).map_or(crate::calc::BASE_OVERHEAD_GB, |e| e.overhead_gb),
-                },
+                }, &home.join(r.get::<_, String>(11)?), &card),
             })
         })
         .map_err(|e| e.to_string())?;

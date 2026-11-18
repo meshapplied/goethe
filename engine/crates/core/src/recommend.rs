@@ -398,6 +398,7 @@ pub fn registry_input(m: &RegistryModel) -> ChooserInput {
     });
     let max_ctx = m.effective_max_ctx().unwrap_or(4096);
     ChooserInput {
+        window_gb_per_request: 0.0,
         static_vram_gb: m.static_vram_gb,
         kv_bytes_per_token: kv_bytes.max(1),
         num_attention_heads: m.num_attention_heads.unwrap_or(1),

@@ -71,6 +71,7 @@ fn screen(mut lines: Vec<String>, width: usize, height: usize, footer: String) -
 enum Flow {
     Stay,
     Leave,
+    Quit,
     Pick(usize),
 }
 
@@ -82,17 +83,22 @@ trait Page {
         None
     }
     fn tick(&mut self) {}
+    fn finished(&self) -> bool {
+        // A page that closes itself (a load that reached RUNNING) once this turns true.
+        false
+    }
 }
 
 struct Tty {
     screen: Option<Screen>,
     raw: Option<RawMode>,
     last: Vec<String>,
+    quit: bool,
 }
 
 impl Tty {
     fn open() -> Result<Tty, String> {
-        let mut t = Tty { screen: None, raw: None, last: Vec::new() };
+        let mut t = Tty { screen: None, raw: None, last: Vec::new(), quit: false };
         t.resume()?;
         Ok(t)
     }
@@ -110,6 +116,10 @@ impl Tty {
     }
 
     fn inside(&mut self, f: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+        self.inside_with(f, true)
+    }
+
+    fn inside_with(&mut self, f: impl FnOnce() -> Result<(), String>, wait: bool) -> Result<(), String> {
         // Something that prints and asks as a normal command does (setup, status, an install), on the cleared menu screen; then the left arrow goes back, at once when it was left with the left arrow.
         self.raw = None;
         print!("\x1b[H\x1b[2J\x1b[?25h");
@@ -118,14 +128,22 @@ impl Tty {
         let cancelled = out.as_ref().is_err_and(|e| e.starts_with("cancelled"));
         report(out.map_err(|e| if cancelled { String::new() } else { e }));
         print!("\x1b[?25l");
-        if !cancelled {
+        if wait && !cancelled {
             print!("\n\n  {}", gray("\u{2190} back"));
         }
         let _ = std::io::stdout().flush();
         self.resume()?;
-        if !cancelled {
-            wait_back();
+        if wait && !cancelled {
+            self.quit |= wait_back();
         }
+        Ok(())
+    }
+
+    fn wait_back(&mut self) -> Result<(), String> {
+        // The back hint under what was printed, in raw mode (so each line starts at the margin), then a key to go back.
+        print!("\r\n\r\n  {}", gray("\u{2190} back"));
+        let _ = std::io::stdout().flush();
+        self.quit |= wait_back();
         Ok(())
     }
 
@@ -142,27 +160,29 @@ impl Tty {
     }
 
     fn run(&mut self, page: &mut impl Page) -> Result<Option<usize>, String> {
-        // Keys go to the page until it leaves or picks something; the screen stays open either way.
+        // Keys go to the page until it leaves, picks something or q quits goethe; a page that refreshes itself is ticked while it is open.
         let mut size = screen_size();
         self.last.clear();
         self.draw(page);
         let mut buf = [0u8; 16];
-        let every = page.every();
-        let wait = every.map_or(250, |d| d.as_millis() as i32);
-        let mut next = std::time::Instant::now() + every.unwrap_or_default();
+        let mut next = std::time::Instant::now();
         loop {
-            let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+            let every = page.every();
             let left = next.saturating_duration_since(std::time::Instant::now()).as_millis() as i32;
-            if unsafe { libc::poll(&mut fds, 1, if every.is_some() { left.max(1) } else { wait }) } <= 0 {
+            let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+            if unsafe { libc::poll(&mut fds, 1, if every.is_some() { left.max(1) } else { 250 }) } <= 0 {
                 if screen_size() != size {
                     size = screen_size();
                     self.last.clear();
                 }
-                if every.is_some() && std::time::Instant::now() >= next {
+                if let Some(e) = every.filter(|_| std::time::Instant::now() >= next) {
                     page.tick();
-                    next = std::time::Instant::now() + every.unwrap_or_default();
+                    next = std::time::Instant::now() + e;
                 }
                 self.draw(page);
+                if page.finished() {
+                    return Ok(None);
+                }
                 continue;
             }
             let n = match crate::term::read_keys(&mut buf) {
@@ -174,6 +194,10 @@ impl Tty {
                 match page.key(input) {
                     Flow::Stay => {}
                     Flow::Leave => return Ok(None),
+                    Flow::Quit => {
+                        self.quit = true;
+                        return Ok(None);
+                    }
                     Flow::Pick(i) => return Ok(Some(i)),
                 }
             }
@@ -191,7 +215,8 @@ impl Page for StatusPage {
 
     fn key(&mut self, input: Input) -> Flow {
         match input {
-            Input::Left | Input::Esc | Input::Interrupt | Input::Char('q') => Flow::Leave,
+            Input::Left | Input::Esc => Flow::Leave,
+            Input::Interrupt | Input::Char('q') => Flow::Quit,
             _ => Flow::Stay,
         }
     }
@@ -222,6 +247,232 @@ impl Page for Notice {
 struct Choice {
     title: &'static str,
     detail: &'static str,
+    side: Option<Side>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Side {
+    Schemas,
+    Models,
+}
+
+struct SideState {
+    kind: Side,
+    at: usize,
+    models: Vec<(String, bool)>,
+    marked: Vec<String>,
+    base: String,
+    focused: bool,
+}
+
+impl SideState {
+    fn open(kind: Side) -> SideState {
+        let models = if kind == Side::Models { installed_and_loaded(&goethe_home()) } else { Vec::new() };
+        SideState { kind, at: 0, models, marked: Vec::new(), base: String::new(), focused: false }
+    }
+
+    fn len(&self) -> usize {
+        match self.kind {
+            Side::Schemas => crate::api_schema::NAMES.len(),
+            Side::Models => self.models.len(),
+        }
+    }
+}
+
+fn installed_and_loaded(home: &std::path::Path) -> Vec<(String, bool)> {
+    // Installed models by id, each with whether an instance of it is loaded (not failed or cancelled), loaded ones first.
+    let Ok(con) = crate::db::open(home) else { return Vec::new() };
+    let loaded: Vec<String> = con
+        .prepare("SELECT DISTINCT model_id FROM loaded_instances WHERE status NOT IN ('FAILED', 'CANCELLED')")
+        .and_then(|mut st| st.query_map([], |r| r.get::<_, String>(0))?.collect())
+        .unwrap_or_default();
+    let mut rows: Vec<(String, bool)> = crate::models::installed_ids(home)
+        .into_iter()
+        .map(|id| {
+            let on = loaded.contains(&id);
+            (id, on)
+        })
+        .collect();
+    rows.sort_by_key(|(_, on)| !*on);
+    rows
+}
+
+fn side_rows(side: &SideState, job: Option<&LoadJob>) -> Vec<String> {
+    // The submenu column: the schema names, or the installed models with "loaded", or the bar of the one loading, beside them.
+    let focused = side.focused;
+    let cursor = |i: usize| if focused && i == side.at { sgr(&hl(), "\u{27a4}") } else { " ".to_string() };
+    let shade = |i: usize, text: &str| match (focused, i == side.at) {
+        (true, true) => sgr(&hl(), text),
+        (true, false) => text.to_string(),
+        (false, _) => gray(text),
+    };
+    match side.kind {
+        Side::Schemas => crate::api_schema::NAMES.iter().enumerate().map(|(i, n)| format!("{} {}", cursor(i), shade(i, n))).collect(),
+        Side::Models => side
+            .models
+            .iter()
+            .enumerate()
+            .map(|(i, (id, loaded))| {
+                let mark = if side.marked.contains(id) { sgr(&mark(), "\u{2713}") } else { " ".to_string() };
+                let state = match job.filter(|j| j.model == *id) {
+                    Some(j) => format!("  {}  {:>3}%", fine_bar(j.shown), j.shown),
+                    None if *loaded => format!("  {}", sgr(&crate::theme::secondary(), "loaded")),
+                    None => String::new(),
+                };
+                format!("{} {mark} {}{state}", cursor(i), shade(i, id))
+            })
+            .collect(),
+    }
+}
+
+fn pad(line: &str, width: usize) -> String {
+    format!("{line}{}", " ".repeat(width.saturating_sub(crate::term::visible_width(line))))
+}
+
+fn columns(out: &mut Vec<String>, start: usize, left_width: usize, middle: &[String], right: &[String]) {
+    // Lay a submenu column, and the content beside it, to the right of the lines from `start` on.
+    let mw = middle.iter().map(|l| crate::term::visible_width(l)).max().unwrap_or(0);
+    for k in 0..middle.len().max(right.len()) {
+        if out.len() <= start + k {
+            out.push(String::new());
+        }
+        let left = pad(&out[start + k], left_width);
+        let mid = middle.get(k).map_or_else(|| " ".repeat(mw), |m| pad(m, mw));
+        let rest = right.get(k).map_or(String::new(), |r| format!("{GAP}{r}"));
+        out[start + k] = format!("{left}{mid}{rest}").trim_end().to_string();
+    }
+}
+
+enum Phase {
+    Up(Option<std::process::Child>),
+    Start,
+    Loading { instance: String, gpus: Vec<u32>, need_mb: u64, base_mb: u64 },
+    Done,
+    Failed(String),
+}
+
+struct LoadJob {
+    model: String,
+    phase: Phase,
+    frac: f64,
+    shown: u32,
+    ticks: u32,
+}
+
+fn fine_bar(percent: u32) -> String {
+    // Ten cells, each filled in eighths, so the bar moves in steps of about one percent without getting wider.
+    let eighths = (percent.min(100) * 80 + 50) / 100;
+    let (full, part) = ((eighths / 8) as usize, (eighths % 8) as usize);
+    let partial = ["", "\u{258f}", "\u{258e}", "\u{258d}", "\u{258c}", "\u{258b}", "\u{258a}", "\u{2589}"][part];
+    let used = full + usize::from(!partial.is_empty());
+    format!("{}{}", sgr(&crate::theme::main(), &format!("{}{partial}", "\u{2588}".repeat(full))), gray(&"\u{2591}".repeat(10 - used)))
+}
+
+fn goethe_cmd() -> std::process::Command {
+    let mut c = std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| "goethe".into()));
+    c.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    c
+}
+
+impl LoadJob {
+    fn new(model: String) -> LoadJob {
+        LoadJob { model, phase: Phase::Up(None), frac: 0.0, shown: 0, ticks: 0 }
+    }
+
+    fn managed_mb(gpus: &[u32]) -> u64 {
+        // VRAM goethe's engines hold on these GPUs now.
+        let home = goethe_home();
+        let managed = crate::db::open(&home).map(|c| crate::placement::managed_pids(&c)).unwrap_or_default();
+        crate::hw::gpu_usage(&managed).unwrap_or_default().iter().filter(|u| gpus.contains(&u.index)).map(|u| u.managed_mb).sum()
+    }
+
+    fn advance(&mut self) {
+        // goethed up (started quietly when down), the load sent, then the instance's VRAM against its budget until it runs.
+        self.phase = match std::mem::replace(&mut self.phase, Phase::Start) {
+            Phase::Up(child) if crate::service::goethed_running() => {
+                drop(child);
+                Phase::Start
+            }
+            Phase::Up(None) => match goethe_cmd().args(["up", "--no-boot"]).stdout(std::process::Stdio::null()).spawn() {
+                Ok(c) => Phase::Up(Some(c)),
+                Err(e) => Phase::Failed(format!("could not start goethed: {e}")),
+            },
+            Phase::Up(Some(mut c)) => match c.try_wait() {
+                Ok(Some(st)) if !st.success() => Phase::Failed("goethed did not start; goethe up shows why".to_string()),
+                _ => Phase::Up(Some(c)),
+            },
+            Phase::Start => match goethe_cmd().args(["load", &self.model, "--no-wait", "--json", "--yes"]).output() {
+                Ok(o) if o.status.success() => match crate::rpc::parse_load_instance_id(&String::from_utf8_lossy(&o.stdout)) {
+                    Some(instance) => Phase::Loading { instance, gpus: Vec::new(), need_mb: 0, base_mb: 0 },
+                    None if String::from_utf8_lossy(&o.stdout).contains("already loaded") => {
+                        self.frac = 1.0;
+                        Phase::Done
+                    }
+                    None => Phase::Failed(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+                },
+                Ok(o) => Phase::Failed(String::from_utf8_lossy(&o.stderr).trim().lines().last().unwrap_or("the load did not start").to_string()),
+                Err(e) => Phase::Failed(e.to_string()),
+            },
+            Phase::Loading { instance, mut gpus, mut need_mb, mut base_mb } => {
+                let ps = crate::rpc::call("ps", serde_json::json!(null)).ok().and_then(|r| serde_json::from_str::<serde_json::Value>(&r.stdout).ok());
+                let row = ps.as_ref().and_then(|v| v.as_array()).and_then(|a| a.iter().find(|r| r["instance_id"] == instance.as_str()).cloned());
+                match row.as_ref().and_then(|r| r["status"].as_str()) {
+                    None => Phase::Failed(format!("{} stopped before it was ready", self.model)),
+                    Some("RUNNING") => {
+                        self.frac = 1.0;
+                        Phase::Done
+                    }
+                    Some("FAILED") | Some("CANCELLED") => Phase::Failed(crate::load_wait::failure_report(&goethe_home(), &instance)),
+                    Some(_) => {
+                        if gpus.is_empty() {
+                            let r = row.as_ref().unwrap_or(&serde_json::Value::Null);
+                            gpus = r["gpu_indices"].as_array().into_iter().flatten().filter_map(|g| g.as_u64()).map(|g| g as u32).collect();
+                            need_mb = (r["allocated_vram_gb_per_gpu"].as_f64().unwrap_or(0.0) * 1024.0) as u64 * gpus.len() as u64;
+                            base_mb = Self::managed_mb(&gpus);
+                        }
+                        if need_mb > 0 {
+                            let grown = Self::managed_mb(&gpus).saturating_sub(base_mb) as f64 / need_mb as f64;
+                            self.frac = self.frac.max(grown.min(0.95));
+                        }
+                        Phase::Loading { instance, gpus, need_mb, base_mb }
+                    }
+                }
+            }
+            other => other,
+        };
+    }
+
+    fn tick(&mut self) {
+        // The percent climbs one at a time toward what the load measured; goethed is asked every half second.
+        if self.ticks.is_multiple_of(8) {
+            self.advance();
+        }
+        self.ticks += 1;
+        if self.shown < (self.frac * 100.0).round() as u32 {
+            self.shown += 1;
+        }
+    }
+
+    fn finished(&self) -> bool {
+        matches!(self.phase, Phase::Done) && self.shown >= 100
+    }
+
+    fn failure(&self) -> Option<String> {
+        // The reason a load failed, in two lines at most: the first, and the one that names the engine log.
+        let Phase::Failed(why) = &self.phase else { return None };
+        let lines: Vec<&str> = why.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        Some(match (lines.first(), lines.iter().rev().find(|l| l.contains("goethe logs"))) {
+            (Some(a), Some(b)) if a != b => format!("{a}\n{b}"),
+            (Some(a), _) => a.to_string(),
+            _ => format!("{} did not load", self.model),
+        })
+    }
+}
+
+fn unload_now(ids: &[String]) -> Result<(), String> {
+    // goethe unload for the chosen models, quietly; its last line when it fails.
+    let o = goethe_cmd().arg("unload").args(ids).output().map_err(|e| e.to_string())?;
+    o.status.success().then_some(()).ok_or_else(|| String::from_utf8_lossy(&o.stderr).trim().lines().last().unwrap_or("unload failed").to_string())
 }
 
 struct Menu {
@@ -230,6 +481,60 @@ struct Menu {
     at: usize,
     hint: &'static str,
     top: bool,
+    gap_before: Option<usize>,
+    side: Option<SideState>,
+    off: Vec<bool>,
+    job: Option<LoadJob>,
+    note: Option<String>,
+}
+
+const INSTALL_FIRST: &str = "(install a model first)";
+
+impl Menu {
+    fn refresh_off(&mut self) {
+        // Load/Unload stays gray and out of reach until a model is installed.
+        let none = self.items.iter().any(|c| c.side == Some(Side::Models)) && crate::models::installed_ids(&goethe_home()).is_empty();
+        self.off = self.items.iter().map(|c| none && c.side == Some(Side::Models)).collect();
+        if self.off.get(self.at).copied().unwrap_or(false) {
+            self.step(true);
+        }
+        self.sync_side();
+    }
+
+    fn is_off(&self, i: usize) -> bool {
+        self.off.get(i).copied().unwrap_or(false)
+    }
+
+    fn step(&mut self, down: bool) {
+        // Up or down to the next choice that is not grayed out.
+        let n = self.items.len();
+        for _ in 0..n {
+            self.at = if down { (self.at + 1) % n } else { (self.at + n - 1) % n };
+            if !self.is_off(self.at) {
+                break;
+            }
+        }
+        self.sync_side();
+    }
+
+    fn sync_side(&mut self) {
+        // The submenu of the choice under the cursor, shown beside it (read once, not on every frame).
+        if self.side.as_ref().is_some_and(|s| s.focused) {
+            return;
+        }
+        self.side = (!self.is_off(self.at)).then(|| self.items[self.at].side.map(SideState::open)).flatten();
+    }
+
+    fn refresh_side(&mut self) {
+        // After a load or unload: the models again, marks cleared, the cursor and focus kept.
+        if let Some(s) = self.side.as_mut() {
+            let (at, kind, focused, base) = (s.at, s.kind, s.focused, std::mem::take(&mut s.base));
+            let _ = std::mem::replace(s, SideState::open(kind));
+            s.at = at.min(s.len().saturating_sub(1));
+            s.focused = focused;
+            s.base = base;
+        }
+    }
 }
 
 impl Page for Menu {
@@ -240,27 +545,155 @@ impl Page for Menu {
             out.push(format!("  {}", paint(h, Color::Bold)));
             out.push(String::new());
         }
+        let side = self.side.as_ref();
+        let focused = side.is_some_and(|s| s.focused);
+        let start = out.len();
         for (i, c) in self.items.iter().enumerate() {
+            if self.gap_before == Some(i) {
+                out.push(String::new());
+            }
             let title = format!("{:<tw$}", c.title);
-            out.push(if i == self.at {
-                format!("{} {}{GAP}{}", sgr(&hl(), "\u{27a4}"), sgr(&hl(), &title), c.detail)
-            } else {
-                format!("  {title}{GAP}{}", gray(c.detail))
+            if self.is_off(i) {
+                out.push(format!("  {}", gray(&format!("{title}{GAP}{INSTALL_FIRST}"))));
+                continue;
+            }
+            let detail = if side.is_some() { "" } else { c.detail };
+            out.push(match (i == self.at, focused) {
+                (true, false) => format!("{} {}{GAP}{}", sgr(&hl(), "\u{27a4}"), sgr(&hl(), &title), detail),
+                (true, true) => format!("  {}", paint(&title, Color::Bold)),
+                _ => format!("  {title}{GAP}{}", gray(detail)),
             });
         }
-        let hint = if self.top { format!("{}{GAP}{}", gray(self.hint), themes_line()) } else { gray(self.hint) };
+        if let Some(s) = side {
+            let right = if focused && s.kind == Side::Schemas { crate::api_schema::example(crate::api_schema::NAMES[s.at], &s.base, crate::api_schema::MODEL, crate::api_schema::KEY) } else { Vec::new() };
+            columns(&mut out, start, 2 + tw + GAP.len(), &side_rows(s, self.job.as_ref()), &right);
+        }
+        if let Some(n) = &self.note {
+            out.push(String::new());
+            out.extend(n.lines().map(|l| format!("  {}", paint(l, Color::Red))));
+        }
+        let hint = match side.filter(|s| s.focused).map(|s| s.kind) {
+            Some(Side::Schemas) => gray("\u{2191}\u{2193} move   \u{2190} back   q quit"),
+            Some(Side::Models) => gray("\u{2191}\u{2193} move   Enter load or unload   Space mark loaded models to unload together   \u{2190} back   q quit"),
+            None if self.top => format!("{}{GAP}{}", gray(self.hint), themes_line()),
+            None => gray(self.hint),
+        };
         screen(out, width, height, hint)
     }
 
     fn key(&mut self, input: Input) -> Flow {
-        let n = self.items.len();
+        if matches!(input, Input::Char('q') | Input::Interrupt) {
+            return Flow::Quit;
+        }
+        if let Some(s) = self.side.as_mut().filter(|s| s.focused) {
+            let n = s.len().max(1);
+            match input {
+                Input::Up | Input::Char('k') => s.at = (s.at + n - 1) % n,
+                Input::Down | Input::Char('j') => s.at = (s.at + 1) % n,
+                Input::Left | Input::Esc => s.focused = false,
+                Input::Space if s.kind == Side::Models => {
+                    if let Some((id, true)) = s.models.get(s.at).cloned() {
+                        match s.marked.iter().position(|m| *m == id) {
+                            Some(i) => drop(s.marked.remove(i)),
+                            None => s.marked.push(id),
+                        }
+                    }
+                }
+                Input::Enter if s.kind == Side::Models => {
+                    self.note = None;
+                    let unload: Vec<String> = match s.models.get(s.at) {
+                        _ if !s.marked.is_empty() => s.marked.clone(),
+                        Some((id, true)) => vec![id.clone()],
+                        _ => Vec::new(),
+                    };
+                    if !unload.is_empty() {
+                        if let Err(e) = unload_now(&unload) {
+                            self.note = Some(e);
+                        }
+                        self.refresh_side();
+                    } else if let Some((id, false)) = s.models.get(s.at).cloned() {
+                        match &self.job {
+                            Some(j) => self.note = Some(format!("{} is loading; one model loads at a time", j.model)),
+                            None => self.job = Some(LoadJob::new(id)),
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return Flow::Stay;
+        }
+        match input {
+            Input::Up | Input::Char('k') => self.step(false),
+            Input::Down | Input::Char('j') => self.step(true),
+            Input::Char(c @ '1'..='3') if self.top => crate::theme::set(crate::theme::ALL[c as usize - '1' as usize]),
+            _ if self.is_off(self.at) => {}
+            Input::Enter | Input::Right if self.side.is_some() => {
+                if let Some(s) = self.side.as_mut() {
+                    s.focused = true;
+                    if s.kind == Side::Schemas {
+                        s.base = crate::api_schema::base_url(&goethe_home());
+                    }
+                }
+            }
+            Input::Enter => return Flow::Pick(self.at),
+            Input::Esc | Input::Left if !self.top => return Flow::Leave,
+            _ => {}
+        }
+        Flow::Stay
+    }
+
+    fn every(&self) -> Option<std::time::Duration> {
+        self.job.as_ref().map(|_| std::time::Duration::from_millis(60))
+    }
+
+    fn tick(&mut self) {
+        // The load beside its model: when it runs, the bar gives way to "loaded"; when it fails, the reason shows under the list.
+        let Some(j) = self.job.as_mut() else { return };
+        j.tick();
+        if j.finished() {
+            self.job = None;
+            self.refresh_side();
+        } else if let Some(why) = j.failure() {
+            self.note = Some(why);
+            self.job = None;
+            self.refresh_side();
+        }
+    }
+}
+
+struct SchemaPage {
+    model: String,
+    key: String,
+    base: String,
+    at: usize,
+}
+
+impl Page for SchemaPage {
+    fn render(&self, width: usize, height: usize) -> Vec<String> {
+        // Quick setup's end: the model and key, then the three schemas with the chosen one's request and SDK call beside them.
+        let mut out = brand();
+        out.push(format!("  {}", paint("Your API is ready", Color::Bold)));
+        out.push(String::new());
+        out.push(format!("  Model      {}", self.model));
+        out.push(format!("  API key    {}", self.key));
+        out.push(String::new());
+        let start = out.len();
+        let names: Vec<String> = crate::api_schema::NAMES
+            .iter()
+            .enumerate()
+            .map(|(i, n)| if i == self.at { format!("{} {}", sgr(&hl(), "\u{27a4}"), sgr(&hl(), n)) } else { format!("  {n}") })
+            .collect();
+        columns(&mut out, start, 0, &names, &crate::api_schema::example(crate::api_schema::NAMES[self.at], &self.base, crate::api_schema::MODEL, crate::api_schema::KEY));
+        screen(out, width, height, gray("\u{2191}\u{2193} move   \u{2190} back"))
+    }
+
+    fn key(&mut self, input: Input) -> Flow {
+        let n = crate::api_schema::NAMES.len();
         match input {
             Input::Up | Input::Char('k') => self.at = (self.at + n - 1) % n,
             Input::Down | Input::Char('j') => self.at = (self.at + 1) % n,
-            Input::Char(c @ '1'..='3') if self.top => crate::theme::set(crate::theme::ALL[c as usize - '1' as usize]),
-            Input::Enter => return Flow::Pick(self.at),
-            Input::Char('q') | Input::Interrupt => return Flow::Leave,
-            Input::Esc | Input::Left if !self.top => return Flow::Leave,
+            Input::Left | Input::Esc => return Flow::Leave,
+            Input::Interrupt | Input::Char('q') => return Flow::Quit,
             _ => {}
         }
         Flow::Stay
@@ -291,14 +724,20 @@ fn main_menu() -> Menu {
     Menu {
         heading: Vec::new(),
         items: vec![
-            Choice { title: "Quick setup", detail: "install a model, serve it and open the API" },
-            Choice { title: "Install models", detail: "pick models that fit your GPUs" },
-            Choice { title: "API keys and gateway", detail: "keys, who can reach the API, a public address" },
-            Choice { title: "Status", detail: "Goethe, the API and the models it serves" },
+            Choice { title: "Quick setup", detail: "install a model, serve it and open the API", side: None },
+            Choice { title: "Load/Unload", detail: "load an installed model, unload loaded ones", side: Some(Side::Models) },
+            Choice { title: "Install models", detail: "pick models that fit your GPUs", side: None },
+            Choice { title: "API keys and gateway", detail: "keys, who can reach the API, a public address", side: None },
+            Choice { title: "Status", detail: "Goethe, the API and the models it serves", side: None },
         ],
         at: 0,
         hint: "\u{2191}\u{2193} move   Enter open   q quit",
         top: true,
+        gap_before: None,
+        side: None,
+        off: Vec::new(),
+        job: None,
+        note: None,
     }
 }
 
@@ -306,24 +745,33 @@ fn access_menu() -> Menu {
     Menu {
         heading: vec!["API keys and gateway"],
         items: vec![
-            Choice { title: "API keys", detail: "create, scope, show or delete keys" },
-            Choice { title: "Network exposure", detail: "local, vpn/private, public" },
-            Choice { title: "Public address", detail: "temporarily share models through a hardened gateway" },
+            Choice { title: "API keys", detail: "create, scope, show or delete keys", side: None },
+            Choice { title: "Network exposure", detail: "local, vpn/private, public", side: None },
+            Choice { title: "Public address", detail: "temporarily share models through a hardened gateway", side: None },
+            Choice { title: "API schema", detail: "how clients call the API: openai, anthropic, litellm", side: Some(Side::Schemas) },
         ],
         at: 0,
         hint: crate::term::MENU_KEYS,
         top: false,
+        gap_before: Some(3),
+        side: None,
+        off: Vec::new(),
+        job: None,
+        note: None,
     }
 }
 
-fn wait_back() {
-    // After a page that printed: the left arrow, Esc, Enter, Backspace or q goes back to the menu.
+fn wait_back() -> bool {
+    // After a page that printed: the left arrow or Esc goes back to the menu; q (or Ctrl-C) quits goethe, which the return value says.
     let mut buf = [0u8; 16];
     loop {
-        let Ok(n) = crate::term::read_keys(&mut buf) else { return };
-        let back = |i: &Input| matches!(i, Input::Left | Input::Esc | Input::Enter | Input::Backspace | Input::Interrupt | Input::Char('q'));
-        if n == 0 || parse_input(&buf[..n]).iter().any(back) {
-            return;
+        let Ok(n) = crate::term::read_keys(&mut buf) else { return false };
+        let keys = parse_input(&buf[..n]);
+        if n == 0 || keys.iter().any(|i| matches!(i, Input::Char('q') | Input::Interrupt)) {
+            return n != 0;
+        }
+        if keys.iter().any(|i| matches!(i, Input::Left | Input::Esc)) {
+            return false;
         }
     }
 }
@@ -344,16 +792,27 @@ pub fn run() -> Result<(), String> {
     let mut tty = Tty::open()?;
     let mut menu = main_menu();
     loop {
+        menu.refresh_off();
         match tty.run(&mut menu)? {
             None => return Ok(()),
-            Some(0) => tty.inside(crate::onboard::run)?,
-            Some(1) => install_page(&mut tty)?,
-            Some(2) => access_page(&mut tty)?,
+            Some(0) => {
+                tty.inside_with(crate::onboard::run, false)?;
+                match crate::onboard::take_ready() {
+                    Some((_, model, key)) => drop(tty.run(&mut SchemaPage { model, key, base: crate::api_schema::base_url(&goethe_home()), at: 0 })?),
+                    None => tty.wait_back()?,
+                }
+            }
+            Some(1) => {}
+            Some(2) => install_page(&mut tty)?,
+            Some(3) => access_page(&mut tty)?,
             Some(_) => {
                 tty.draw(&Notice("Reading the GPUs...".to_string()));
                 let mut page = StatusPage(crate::status_view::StatusView::new());
                 tty.run(&mut page)?;
             }
+        }
+        if tty.quit {
+            return Ok(());
         }
     }
 }
@@ -364,7 +823,10 @@ fn access_page(tty: &mut Tty) -> Result<(), String> {
         match tty.run(&mut menu)? {
             None => return Ok(()),
             Some(0) => {
-                report(crate::keys_menu::session().map(drop));
+                match crate::keys_menu::session() {
+                    Ok(session) => tty.quit = session.exit,
+                    Err(e) => report(Err(e)),
+                }
                 tty.resume()?;
             }
             Some(1) => tty.inside(|| {
@@ -374,6 +836,9 @@ fn access_page(tty: &mut Tty) -> Result<(), String> {
                 let mut page = SharePage::new();
                 tty.run(&mut page)?;
             }
+        }
+        if tty.quit {
+            return Ok(());
         }
     }
 }
@@ -598,7 +1063,8 @@ impl Page for SharePage {
         match input {
             Input::Up => self.at = (self.at + n - 1) % n,
             Input::Down => self.at = (self.at + 1) % n,
-            Input::Left | Input::Esc | Input::Interrupt => return Flow::Leave,
+            Input::Left | Input::Esc => return Flow::Leave,
+            Input::Interrupt => return Flow::Quit,
             Input::Enter => match slot {
                 Slot::Key | Slot::For | Slot::Allow => self.at = (self.at + 1) % n,
                 Slot::Share => self.share(),
@@ -617,7 +1083,7 @@ impl Page for SharePage {
             Input::Char(c) => match self.text() {
                 Some(t) if t.chars().count() < 200 => t.push(c),
                 Some(_) => {}
-                None if c == 'q' => return Flow::Leave,
+                None if c == 'q' => return Flow::Quit,
                 None => {}
             },
             _ => {}
@@ -832,8 +1298,9 @@ impl Page for Picker {
             Input::PageUp => self.at = self.at.saturating_sub(10),
             Input::PageDown => self.at = (self.at + 10).min(n - 1),
             Input::Enter => return self.enter(),
-            Input::Esc | Input::Interrupt | Input::Left => return Flow::Leave,
-            Input::Char('q') if !typing => return Flow::Leave,
+            Input::Esc | Input::Left => return Flow::Leave,
+            Input::Interrupt => return Flow::Quit,
+            Input::Char('q') if !typing => return Flow::Quit,
             Input::Space => match self.spot() {
                 Spot::Model(i) if self.data.rows[i].installed => self.status = format!("{} is already installed", self.data.rows[i].id),
                 Spot::Model(i) => self.chosen[i] = !self.chosen[i],
@@ -934,27 +1401,149 @@ mod tests {
         assert_eq!(t[1].trim_end(), format!("  {}", LOGO[0]).trim_end());
         assert_eq!(t[5].trim(), SITE);
         let first = t.iter().position(|l| l.contains("Quick setup")).unwrap();
-        for (i, title) in ["Quick setup", "Install models", "API keys and gateway", "Status"].iter().enumerate() {
+        for (i, title) in ["Quick setup", "Load/Unload", "Install models", "API keys and gateway", "Status"].iter().enumerate() {
             assert!(t[first + i].contains(title), "no gap between choices: {t:?}");
         }
         assert!(t[first].starts_with('\u{27a4}'));
-        assert!(t[first + 4].is_empty() && t[first + 5].contains("Enter open"), "the keys line follows the menu: {t:?}");
-        assert!(t[first + 5].contains("theme  ") && t[first + 5].contains("2 sea") && t[first + 5].contains("3 earth"), "{}", t[first + 5]);
+        assert!(t[first + 5].is_empty() && t[first + 6].contains("Enter open"), "the keys line follows the menu: {t:?}");
+        assert!(t[first + 6].contains("theme  ") && t[first + 6].contains("2 sea") && t[first + 6].contains("3 earth"), "{}", t[first + 6]);
         let active = crate::theme::current().name();
-        assert!(t[first + 5].contains(&format!("{active}|")), "a bar marks the active theme: {}", t[first + 5]);
+        assert!(t[first + 6].contains(&format!("{active}|")), "a bar marks the active theme: {}", t[first + 6]);
         assert!(!text(access_menu().render(100, 40)).iter().any(|l| l.contains("theme  ")), "themes only on the main menu");
         assert_eq!(t.len(), 40);
+    }
+
+    #[test]
+    fn api_schema_sits_under_a_gap_and_opens_its_schemas_to_the_right() {
+        let mut m = access_menu();
+        let t = text(m.render(160, 40));
+        let public = t.iter().position(|l| l.contains("Public address")).unwrap();
+        assert!(t[public + 1].is_empty() && t[public + 2].contains("API schema"), "an empty line before API schema: {t:?}");
+        m.at = 3;
+        m.sync_side();
+        let preview = text(m.render(160, 40));
+        let row = preview.iter().position(|l| l.contains("API keys") && !l.contains("gateway")).unwrap();
+        assert!(preview[row].contains("openai") && preview[row + 1].contains("anthropic") && preview[row + 2].contains("litellm"), "the submenu starts level with API keys: {preview:?}");
+        assert!(!preview.iter().any(|l| l.contains("curl")), "the schema shows once inside");
+        if let Some(s) = m.side.as_mut() {
+            s.focused = true;
+            s.base = "https://127.0.0.1:8443/v1".into();
+        }
+        let inside = text(m.render(200, 40));
+        assert!(inside.iter().any(|l| l.contains("openai") && l.contains("Base URL")), "{inside:?}");
+        assert!(inside.iter().any(|l| l.contains("Authorization: Bearer API_KEY")));
+        m.key(Input::Down);
+        let anthropic = text(m.render(200, 40));
+        assert!(anthropic.iter().any(|l| l.contains("x-api-key: API_KEY")) && anthropic.iter().any(|l| l.contains("\"model\": \"MODEL_ID\"")));
+        assert!(matches!(m.key(Input::Left), Flow::Stay) && !m.side.as_ref().unwrap().focused, "the left arrow goes back to the menu");
+        assert!(matches!(m.key(Input::Char('q')), Flow::Quit), "q quits goethe from anywhere");
+    }
+
+    fn models_menu() -> Menu {
+        let mut m = main_menu();
+        m.at = 1;
+        m.side = Some(SideState {
+            kind: Side::Models,
+            at: 0,
+            models: vec![("org/a".into(), true), ("org/c".into(), true), ("org/b".into(), false)],
+            marked: Vec::new(),
+            base: String::new(),
+            focused: true,
+        });
+        m
+    }
+
+    #[test]
+    fn a_model_loads_in_place_with_its_bar_beside_it_and_then_says_loaded() {
+        let mut m = models_menu();
+        let t = text(m.render(160, 40));
+        let row = |t: &[String], id: &str| t.iter().find(|l| l.contains(id)).cloned().unwrap();
+        assert!(row(&t, "org/a").ends_with("loaded") && !row(&t, "org/b").contains("loaded"), "{t:?}");
+        assert!(!t.iter().any(|l| l.contains("Not loaded")), "no headings");
+        assert!(t.iter().position(|l| l.contains("org/a")) == t.iter().position(|l| l.contains("Quick setup")), "the list starts level with the first choice");
+        m.key(Input::Down);
+        m.key(Input::Down);
+        assert!(matches!(m.key(Input::Enter), Flow::Stay), "loading keeps the menu on screen");
+        assert_eq!(m.job.as_ref().map(|j| j.model.as_str()), Some("org/b"));
+        assert!(m.every().is_some(), "the menu refreshes while a model loads");
+        m.job.as_mut().unwrap().shown = 30;
+        let t = text(m.render(160, 40));
+        let b = row(&t, "org/b");
+        assert!(b.matches('\u{2588}').count() == 3 && b.contains("30%"), "{b}");
+        m.key(Input::Up);
+        m.key(Input::Up);
+        m.key(Input::Down);
+        m.key(Input::Down);
+        m.key(Input::Enter);
+        assert!(m.note.as_deref().is_some_and(|n| n.contains("one model loads at a time")) || m.job.as_ref().is_some_and(|j| j.model == "org/b"));
+        assert!(matches!(m.key(Input::Char('q')), Flow::Quit), "q quits even while a model loads");
+    }
+
+    #[test]
+    fn only_loaded_models_are_marked_to_unload_together() {
+        let mut m = models_menu();
+        m.key(Input::Space);
+        m.key(Input::Down);
+        m.key(Input::Space);
+        m.key(Input::Down);
+        m.key(Input::Space);
+        assert_eq!(m.side.as_ref().unwrap().marked, vec!["org/a".to_string(), "org/c".to_string()], "org/b is not loaded");
+        assert!(text(m.render(160, 40)).iter().filter(|l| l.contains('\u{2713}')).count() == 2);
+    }
+
+    #[test]
+    fn load_unload_is_gray_and_skipped_until_a_model_is_installed() {
+        let mut m = main_menu();
+        m.off = vec![false, true, false, false, false];
+        let t = text(m.render(160, 40));
+        assert!(t.iter().any(|l| l.contains("Load/Unload") && l.contains("(install a model first)")), "{t:?}");
+        m.key(Input::Down);
+        assert_eq!(m.at, 2, "the arrow keys skip it");
+        m.key(Input::Up);
+        assert_eq!(m.at, 0);
+    }
+
+    #[test]
+    fn a_load_climbs_one_percent_at_a_time_on_a_bar_no_wider() {
+        let mut j = LoadJob::new("org/m".into());
+        j.phase = Phase::Loading { instance: "i".into(), gpus: vec![3], need_mb: 1000, base_mb: 0 };
+        j.frac = 0.3;
+        j.ticks = 1;
+        j.tick();
+        assert_eq!(j.shown, 1, "the percent climbs one at a time");
+        assert_eq!(plain(&fine_bar(31)).chars().count(), 10, "a finer bar, no wider");
+        assert_ne!(plain(&fine_bar(31)), plain(&fine_bar(30)), "one percent shows");
+        j.phase = Phase::Done;
+        assert!(!j.finished(), "not before the bar is full");
+        j.shown = 100;
+        assert!(j.finished());
+        j.phase = Phase::Failed("the engine failed to start (instance i)\n  noise\n  full engine log: goethe logs i -n 200".into());
+        assert_eq!(j.failure().as_deref(), Some("the engine failed to start (instance i)\nfull engine log: goethe logs i -n 200"));
+    }
+
+    #[test]
+    fn quick_setup_ends_with_the_three_schemas_beside_each_other() {
+        let mut p = SchemaPage { model: "org/m".into(), key: "goethe_sk_x".into(), base: "https://100.64.1.2:8443/v1".into(), at: 0 };
+        let t = text(p.render(200, 40));
+        assert!(t.iter().any(|l| l.contains("Your API is ready")) && t.iter().any(|l| l.contains("goethe_sk_x")));
+        assert!(t.iter().any(|l| l.contains("openai") && l.contains("https://100.64.1.2:8443/v1")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("Bearer API_KEY")), "the schema keeps its placeholders");
+        p.key(Input::Down);
+        p.key(Input::Down);
+        assert!(text(p.render(200, 40)).iter().any(|l| l.contains("x-litellm-api-key: API_KEY")));
     }
 
     #[test]
     fn digits_and_enter_pick_and_q_leaves() {
         let mut m = main_menu();
         m.key(Input::Up);
-        assert!(matches!(m.key(Input::Enter), Flow::Pick(3)), "up from the first wraps to the last");
-        assert!(matches!(m.key(Input::Right), Flow::Stay), "only Enter opens");
+        assert!(matches!(m.key(Input::Enter), Flow::Pick(4)), "up from the first wraps to the last");
+        assert!(matches!(m.key(Input::Right), Flow::Stay), "only Enter opens a choice without a submenu");
         assert!(matches!(m.key(Input::Left), Flow::Stay), "the left arrow on the top menu does not quit goethe");
-        assert!(matches!(m.key(Input::Char('q')), Flow::Leave));
+        assert!(matches!(m.key(Input::Char('q')), Flow::Quit), "q quits goethe");
         assert!(matches!(access_menu().key(Input::Left), Flow::Leave), "a submenu goes back with the left arrow");
+        assert!(matches!(access_menu().key(Input::Char('q')), Flow::Quit), "q quits from a submenu too");
+        assert!(matches!(access_menu().key(Input::Right), Flow::Stay), "the right arrow opens only what is already shown on the right");
     }
 
     #[test]
