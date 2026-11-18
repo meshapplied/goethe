@@ -21,7 +21,7 @@ jobs:
       rust: ${{ steps.flags.outputs.rust }}
       e2e: ${{ steps.flags.outputs.e2e }}
       python: ${{ steps.flags.outputs.python }}
-      ninfer: ${{ steps.flags.outputs.ninfer }}
+      patches: ${{ steps.flags.outputs.patches }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,21 +31,21 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          # Three buckets, nothing fancier: unit/clippy, heavy e2e, python package, ninfer patches.
-          rust=true e2e=true python=true ninfer=true
+          # Path buckets: unit/clippy, heavy e2e, python package, out-of-tree kernel patches.
+          rust=true e2e=true python=true patches=true
           if [[ -n "${BASE}" ]]; then
-            rust=false e2e=false python=false ninfer=false
+            rust=false e2e=false python=false patches=false
             while IFS= read -r f; do
               [[ -z "$f" ]] && continue
               case "$f" in
                 .github/*)
-                  rust=true; e2e=true; python=true; ninfer=true ;;
+                  rust=true; e2e=true; python=true; patches=true ;;
                 engine/tests/*|engine/pyenv/*|engine/cdn/*|engine/packaging/*)
                   rust=true; e2e=true ;;
                 engine/crates/*|engine/Cargo.toml|engine/Cargo.lock|engine/rust-toolchain*)
                   rust=true ;;
                 nvfp4-kernels/*)
-                  ninfer=true ;;
+                  patches=true ;;
                 goethe/*|tests/*|pyproject*|requirements*)
                   python=true ;;
               esac
@@ -55,9 +55,9 @@ jobs:
             echo "rust=${rust}"
             echo "e2e=${e2e}"
             echo "python=${python}"
-            echo "ninfer=${ninfer}"
+            echo "patches=${patches}"
           } >>"${GITHUB_OUTPUT}"
-          echo "rust=${rust} e2e=${e2e} python=${python} ninfer=${ninfer}"
+          echo "rust=${rust} e2e=${e2e} python=${python} patches=${patches}"
 
   python:
     needs: changes
@@ -123,7 +123,7 @@ jobs:
 
   ninfer-patch:
     needs: changes
-    if: ${{ needs.changes.outputs.ninfer == 'true' }}
+    if: ${{ needs.changes.outputs.patches == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -267,7 +267,7 @@ jobs:
             | select(.value.result != "success")
             | select((.value.result == "skipped" and (
                 (.key == "python" and $f.python != "true")
-                or (.key == "ninfer-patch" and $f.ninfer != "true")
+                or (.key == "ninfer-patch" and $f.patches != "true")
                 or (.key | IN("engine-test", "engine-clippy") and $f.rust != "true")
                 or (.key | IN("fresh-user", "user-paths") and $f.e2e != "true")
               )) | not)
