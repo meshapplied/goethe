@@ -485,7 +485,19 @@ impl SharePage {
                 self.key.clear();
                 self.allow.clear();
                 let warn = o.warnings.first().map(|w| format!("  Note: {w}")).unwrap_or_default();
-                self.say(format!("Shared {name} until {}; send {} with the key.{warn}", share::local_time(share::now() + secs), o.cert.display()), false);
+                let clients = if o.share.allow.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Only: {}.", o.share.allow.join(", "))
+                };
+                self.say(
+                    format!(
+                        "Shared {name} until {}; send {} with the key.{clients}{warn}",
+                        share::local_time(share::now() + secs),
+                        o.cert.display()
+                    ),
+                    false,
+                );
             }
             Err(e) => self.say(e, true),
         }

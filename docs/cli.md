@@ -319,8 +319,7 @@ Opens the API on a public address for a limited time, for API keys you choose, s
 
 ```
 goethe api share 5h --key my-app --allow 203.0.113.7/32   # share my-app for 5 hours from their public IP
-goethe api allow add 203.0.113.7/32                       # or remember their IP, then:
-goethe api share 5h --key my-app                          # uses the allowlist (still not the world)
+goethe api share 5h --key my-app                          # reopen: keeps addresses from the last share of those keys
 goethe api share                                          # status: URL, each key with its time left and addresses
 goethe api share stop --key ci                            # stop sharing one key
 goethe api share stop                                     # close the public gateway
@@ -332,7 +331,7 @@ Every shared key uses the same public gateway, each until its own time and from 
 |---|---|
 | `<duration>` | How long to share the keys: minutes, hours or days, such as `30m`, `5h` or `1d`, at most `7d`. `stop` stops sharing; nothing shows the status |
 | `--key <name or id>` | API keys to share, each until the duration; repeatable or comma-separated. With `stop`, the keys to stop sharing |
-| `--allow <cidr>` | Who may connect: their phone or laptop's public IP (or range), such as `203.0.113.7/32`; repeatable. This machine's IP is only the URL. Without `--allow`, Goethe uses addresses kept from the last share of those keys, or `goethe api allow`; with none of those it refuses to open |
+| `--allow <cidr>` | Who may connect: their phone or laptop's public IP (or range), such as `203.0.113.7/32`; repeatable. This machine's IP is only the URL. Without `--allow`, Goethe reuses addresses from the last share of those keys; with none it refuses to open. Not the VPN/API allowlist (`goethe api allow`) |
 | `--port <port>` | The public port (default `8444`, or the last one used) |
 
 The recipient verifies the gateway with the certificate goethe prints, `GOETHE_HOME/nginx/certs/public.crt`. It holds no secret: `curl --cacert public.crt https://<address>:8444/v1/models -H "Authorization: Bearer <key>"`. Most OpenAI-compatible clients take it through `SSL_CERT_FILE` or their CA-bundle setting. If nobody can connect, forward the port to this machine on your router or allow it in your cloud firewall; goethe does not open ports on routers. The public listener uses IPv4.
@@ -348,7 +347,7 @@ The recipient verifies the gateway with the certificate goethe prints, `GOETHE_H
 - **API routes only:** health, readiness, admin and metrics endpoints are not served publicly.
 - **HTTPS only:** TLS 1.2 or 1.3, with its own certificate for the public listener. Plain HTTP connections are dropped.
 - **Stricter limits than the normal address:** 10 requests per second per client address (bursts of 20) and 16 connections per address, plus the same body size limit and header and body timeouts.
-- **Client address required:** every shared key has an allowlist (`--allow`, a remembered grant, or `goethe api allow`). Nginx admits only that union and always ends with `deny all`. Goethe also checks the client on every public request.
+- **Client address required:** every shared key has an allowlist (`--allow`, or addresses kept from the last share of those keys). Nginx admits only that union and always ends with `deny all`. Every address (`0.0.0.0/0`) and this machine's own public IP are refused. Goethe also checks the client on every public request.
 - **Checks before opening:** nothing changes unless every check passes: the gateway and goethed are running, the keys are valid, and the port is free and is not the normal gateway's port. If nginx does not accept the new listener, the previous state is restored.
 
 ## Learning and traces

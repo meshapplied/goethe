@@ -86,12 +86,10 @@ goethe api expose alone shows where the API listens and who may connect.";
 const SHARE_HELP: &str = "Examples:
 
 \t→ goethe api share 5h --key my-app --allow <their-ip>/32
-\t→ goethe api allow add <their-ip>/32
-\t   goethe api share 5h --key my-app
 \t→ goethe api share             (status)
 \t→ goethe api share stop
 
---allow is who may connect (their public IP: ask them, or https://ifconfig.me). This machine's IP is only the URL goethe prints. Or add them with goethe api allow first, then share without --allow. Closes when the last key ends.";
+--allow is who may connect (their public IP: ask them, or https://ifconfig.me on their device). This machine's IP is only the URL goethe prints. Reopening the same keys keeps their last addresses. Closes when the last key ends.";
 
 #[derive(Parser)]
 #[command(
@@ -480,7 +478,7 @@ struct ShareArgs {
     duration: Option<String>,
     #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::key_names), long, value_name = "NAME_OR_ID", num_args = 1.., value_delimiter = ',', help = "API keys to share (not admin keys), each until DURATION; with stop, the keys to stop sharing.")]
     key: Vec<String>,
-    #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Their public IP or range (phone/laptop), such as 203.0.113.7/32 — not this machine. Required unless api allow or a remembered grant supplies addresses.")]
+    #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Their public IP or range (phone/laptop), such as 203.0.113.7/32 — not this machine. Required unless reopening keys that already have addresses from last share.")]
     allow: Vec<String>,
     #[arg(long, help = "The public port (default 8444, or the last one used).")]
     port: Option<u16>,

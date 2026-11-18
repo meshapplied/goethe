@@ -251,21 +251,15 @@ fn port_free(port: u16) -> bool {
     TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).is_ok()
 }
 
-fn allowlist_at(home: &Path) -> Vec<String> {
-    let Ok(con) = db::open(home) else { return Vec::new() };
-    let Ok(mut stmt) = con.prepare("SELECT cidr FROM ip_allowlist ORDER BY cidr") else { return Vec::new() };
-    stmt.query_map([], |r| r.get(0)).ok().into_iter().flatten().filter_map(Result::ok).collect()
-}
-
-fn share_allow(cli: &[String], reuse_keys: bool, kept: &[String], gateway: &[String]) -> Vec<String> {
-    // --allow wins; reopening remembered keys keeps their addresses; else the ordinary API allowlist.
+fn share_allow(cli: &[String], reuse_keys: bool, kept: &[String]) -> Vec<String> {
+    // --allow wins; reopening the same keys keeps the addresses from their last share. Never the VPN/API allowlist.
     if !cli.is_empty() {
         return cli.to_vec();
     }
     if reuse_keys && !kept.is_empty() {
         return kept.to_vec();
     }
-    gateway.to_vec()
+    Vec::new()
 }
 
 fn need_client_allow(home: &Path) -> String {
@@ -275,8 +269,26 @@ fn need_client_allow(home: &Path) -> String {
         .map(|ip| format!(" this machine's public address is {ip} (that becomes the URL, not --allow);"))
         .unwrap_or_default();
     format!(
-        "name who may connect with --allow <their-ip>/32 (their phone or laptop's public IP, not this machine's).{here} ask them, or add them first with goethe api allow add <their-ip>/32"
+        "name who may connect with --allow <their-ip>/32 (their phone or laptop's public IP, not this machine's).{here} ask them"
     )
+}
+
+fn reject_bad_share_cidrs(home: &Path, allow: &[String]) -> Result<(), String> {
+    let machine = crate::platform::lookup_public_ip(home).ok();
+    for c in allow {
+        if c.ends_with("/0") {
+            return Err("the public gateway will not open to every address; name the client's public IP with --allow <their-ip>/32".into());
+        }
+        if let Some(ip) = machine {
+            let host = format!("{ip}/{}", if ip.is_ipv4() { 32 } else { 128 });
+            if *c == host {
+                return Err(format!(
+                    "{c} is this machine's public address (the URL), not who may connect; use their phone or laptop's public IP"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn mux_public_listening(home: &Path) -> bool {
@@ -323,7 +335,6 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
     };
     let keys = resolve_keys(home, &wanted, until, &mut warnings)?;
     let cli_allow = a.allow.iter().map(|c| security::canonical_cidr(c)).collect::<Result<Vec<_>, _>>()?;
-    let gateway_allow = allowlist_at(home);
     let port = a.port.or(previous.as_ref().map(|p| p.port)).unwrap_or(DEFAULT_PORT);
     let mut grants: Vec<Grant> = previous
         .as_ref()
@@ -332,10 +343,11 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
         .unwrap_or_default();
     for k in &keys {
         let kept = previous.as_ref().and_then(|p| p.grant(&k.id)).map(|g| g.allow).unwrap_or_default();
-        let allow = share_allow(&cli_allow, a.keys.is_empty(), &kept, &gateway_allow);
+        let allow = share_allow(&cli_allow, a.keys.is_empty(), &kept);
         if allow.is_empty() {
             return Err(need_client_allow(home));
         }
+        reject_bad_share_cidrs(home, &allow)?;
         grants.retain(|g| g.key != k.id);
         grants.push(Grant { key: k.id.clone(), until, allow });
     }
@@ -491,16 +503,17 @@ fn ensure_cert(home: &Path, ip: Option<IpAddr>) -> Result<(), String> {
         names.insert(0, format!("IP:{ip}"));
     }
     let san = format!("subjectAltName={}", names.join(","));
+    let stamp = format!("{san}\nleaf");
     let san_file = dir.join("public_sans.txt");
-    let current = fs::read_to_string(&san_file).map(|s| s.trim() == san).unwrap_or(false);
+    let current = fs::read_to_string(&san_file).map(|s| s.trim() == stamp).unwrap_or(false);
     if current && crt.is_file() && key.is_file() {
         return Ok(());
     }
-    nginx::self_signed(&key, &crt, true, 30, "goethe-public", &[&san, "basicConstraints=critical,CA:TRUE"])
+    nginx::self_signed(&key, &crt, true, 30, "goethe-public", &[&san, "basicConstraints=critical,CA:FALSE"])
         .map_err(|_| "openssl could not create the public gateway certificate".to_string())?;
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&crt, fs::Permissions::from_mode(0o644)).map_err(|e| e.to_string())?;
-    nginx::write_private(&san_file, san.as_bytes())
+    nginx::write_private(&san_file, stamp.as_bytes())
 }
 
 fn fingerprint(crt: &Path) -> Option<String> {
@@ -684,18 +697,33 @@ mod tests {
     }
 
     #[test]
-    fn share_allow_prefers_cli_then_kept_then_gateway() {
-        assert_eq!(share_allow(&["203.0.113.9/32".into()], false, &["198.51.100.1/32".into()], &["192.0.2.1/32".into()]), vec!["203.0.113.9/32".to_string()]);
-        assert_eq!(share_allow(&[], true, &["198.51.100.1/32".into()], &["192.0.2.1/32".into()]), vec!["198.51.100.1/32".to_string()]);
-        assert_eq!(share_allow(&[], false, &[], &["192.0.2.1/32".into()]), vec!["192.0.2.1/32".to_string()]);
-        assert!(share_allow(&[], false, &[], &[]).is_empty());
+    fn share_allow_prefers_cli_then_kept_never_gateway() {
+        assert_eq!(share_allow(&["203.0.113.9/32".into()], false, &["198.51.100.1/32".into()]), vec!["203.0.113.9/32".to_string()]);
+        assert_eq!(share_allow(&[], true, &["198.51.100.1/32".into()]), vec!["198.51.100.1/32".to_string()]);
+        assert!(share_allow(&[], false, &[]).is_empty(), "VPN/API allowlist must not open public share");
+        assert!(share_allow(&[], true, &[]).is_empty());
     }
 
     #[test]
     fn need_client_allow_names_the_client_not_this_machine() {
         let dir = tempfile::tempdir().unwrap();
         let msg = need_client_allow(dir.path());
-        assert!(msg.contains("their phone or laptop") && msg.contains("--allow") && msg.contains("goethe api allow add"), "{msg}");
+        assert!(msg.contains("their phone or laptop") && msg.contains("--allow"), "{msg}");
+        assert!(!msg.contains("goethe api allow"), "{msg}");
+    }
+
+    #[test]
+    fn share_refuses_everyone_and_this_machines_public_ip() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        assert!(reject_bad_share_cidrs(home, &["0.0.0.0/0".into()]).unwrap_err().contains("every address"));
+        assert!(reject_bad_share_cidrs(home, &["::/0".into()]).unwrap_err().contains("every address"));
+        let ip: IpAddr = "203.0.113.50".parse().unwrap();
+        std::env::set_var("GOETHE_PUBLIC_IP", ip.to_string());
+        let err = reject_bad_share_cidrs(home, &[format!("{ip}/32")]).unwrap_err();
+        std::env::remove_var("GOETHE_PUBLIC_IP");
+        assert!(err.contains("this machine's public address"), "{err}");
+        assert!(reject_bad_share_cidrs(home, &["198.51.100.7/32".into()]).is_ok());
     }
 
     #[test]
@@ -734,6 +762,6 @@ mod tests {
         ensure_cert(dir.path(), Some("203.0.113.9".parse().unwrap())).unwrap();
         let out = Command::new("openssl").args(["x509", "-noout", "-text", "-in"]).arg(cert_path(dir.path())).output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout);
-        assert!(text.contains("203.0.113.9") && text.contains("CA:TRUE"), "{text}");
+        assert!(text.contains("203.0.113.9") && text.contains("CA:FALSE"), "{text}");
     }
 }
