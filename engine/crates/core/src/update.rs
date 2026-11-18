@@ -695,4 +695,17 @@ mod tests {
         assert_eq!(compare_versions("v0.1.1+abc", "0.1.1"), Ordering::Equal);
         assert_eq!(compare_versions("0.0.9", "0.1.0"), Ordering::Less);
     }
+
+    #[test]
+    fn one_sha256_file_matches_ninfer_wrapper() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("blob");
+        fs::write(&p, b"goethe-sha256-equiv").unwrap();
+        let a = sha256_file(&p).unwrap();
+        let b = crate::engines::ninfer::sha256_file(&p).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(sha256_file(&t.path().join("missing")).is_err());
+    }
 }

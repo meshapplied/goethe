@@ -56,19 +56,7 @@ pub fn accept_ninfer(len: u64, digest: &str) -> Result<(), String> {
 }
 
 pub fn sha256_file(path: &Path) -> Result<String, String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-    let mut f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut h = Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = f.read(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(format!("{:x}", h.finalize()))
+    crate::update::sha256_file(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 pub fn ninfer_in(dir: &Path) -> Option<PathBuf> {

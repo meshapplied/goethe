@@ -168,10 +168,6 @@ pub fn cap_default_ctx(input: &ChooserInput, tp: usize, cc: &str, free_gb: f64) 
     trial.ctx
 }
 
-pub fn per_gpu_budget_gb(input: &ChooserInput, tp: usize, cc: &str) -> f64 {
-    need(input, tp, cc).total()
-}
-
 pub fn with_learned(base: Need, learned: Learned) -> Need {
     // Fold what a model taught us on a GPU type and tp into the budget parts: static extra and non-static overhead.
     Need {

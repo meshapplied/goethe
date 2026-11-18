@@ -1,7 +1,6 @@
 // Hugging Face download and verify for goethe install; goethe never logs in or sends credentials.
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Write};
@@ -804,18 +803,10 @@ fn verify_one_file(path: &Path, expect_sha: &str) -> Result<VerifiedEntry, Strin
 static HASHED: AtomicU64 = AtomicU64::new(0);
 
 fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut f = fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut h = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-        HASHED.fetch_add(n as u64, Ordering::Relaxed);
-    }
-    Ok(format!("{:x}", h.finalize()))
+    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
+    let digest = crate::update::sha256_file(path)?;
+    HASHED.fetch_add(meta.len(), Ordering::Relaxed);
+    Ok(digest)
 }
 
 fn file_identity(path: &Path) -> Option<(u64, i64)> {

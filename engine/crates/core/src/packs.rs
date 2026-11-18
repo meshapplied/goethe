@@ -551,9 +551,7 @@ pub fn drafter(e: &Entry) -> Option<Drafter> {
 }
 
 fn sha256_file(p: &Path) -> Option<String> {
-    let mut h = Sha256::new();
-    std::io::copy(&mut std::fs::File::open(p).ok()?, &mut h).ok()?;
-    Some(format!("{:x}", h.finalize()))
+    crate::update::sha256_file(p).ok()
 }
 
 pub fn safe_name(f: &str) -> bool {

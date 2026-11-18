@@ -17,17 +17,17 @@ pub struct Engine {
     pub command: fn(&EngineSpec) -> Result<Command, String>,
 }
 
-pub const ENGINES: &[&Engine] = &[&goethe_engine::ENGINE, &ninfer::ENGINE, &sglang::SGLANG, &sglang::TERNARY, &llama_cpp::ENGINE];
+pub const ENGINES: &[&Engine] = &[&goethe_engine::ENGINE, &ninfer::ENGINE, &sglang::SGLANG, &llama_cpp::ENGINE];
 
 const ENVELOPE: &[&str] = &["model", "messages", "prompt", "input", "stream", "stream_options", "user"];
 
 pub fn by_id(id: &str) -> Result<&'static Engine, String> {
+    let id = if id == "ternary" { sglang::SGLANG.id } else { id };
     let ids: Vec<&str> = ENGINES.iter().map(|e| e.id).collect();
     ENGINES.iter().copied().find(|e| e.id == id).ok_or_else(|| format!("engine {id} is not one goethe runs ({})", ids.join(", ")))
 }
 
 pub fn of_card(card: &toml::Value) -> Result<&'static Engine, String> {
-    // The card's runtime; a card without one is SGLang's.
     by_id(card.get("runtime").and_then(|v| v.as_str()).unwrap_or(sglang::SGLANG.id))
 }
 
@@ -337,6 +337,7 @@ mod tests {
         assert!((by_id("ninfer").unwrap().overhead_gb - crate::calc::METAL_OVERHEAD_GB).abs() < 1e-9);
         assert!((by_id("sglang").unwrap().overhead_gb - crate::calc::BASE_OVERHEAD_GB).abs() < 1e-9);
         assert!((by_id("ternary").unwrap().overhead_gb - crate::calc::BASE_OVERHEAD_GB).abs() < 1e-9);
+        assert_eq!(by_id("ternary").unwrap().id, "sglang", "ternary launches as sglang");
     }
 
     #[test]
@@ -358,9 +359,12 @@ mod tests {
     #[test]
     fn every_runtime_a_card_was_ever_written_with_resolves_and_an_unknown_one_is_refused() {
         assert_eq!(of_card(&toml::from_str("").unwrap()).unwrap().id, "sglang");
-        for id in ["sglang", "ternary", "ninfer", "goethe-engine", "llama.cpp"] {
+        for id in ["sglang", "ninfer", "goethe-engine", "llama.cpp"] {
             assert_eq!(of_card(&toml::from_str(&format!("runtime = \"{id}\"")).unwrap()).unwrap().id, id);
         }
+        let ternary: toml::Value = toml::from_str("runtime = \"ternary\"").unwrap();
+        assert_eq!(of_card(&ternary).unwrap().id, "sglang");
+        assert_eq!(crate::engine_overhead::card_runtime(&ternary), "ternary");
         assert!(args(&spec_cmd("", 1)).iter().any(|a| a == "goethe_sglang_boot"));
         assert!(of_card(&toml::from_str("runtime = \"vllm\"").unwrap()).map(|e| e.id).unwrap_err().contains("not one goethe runs"));
     }
