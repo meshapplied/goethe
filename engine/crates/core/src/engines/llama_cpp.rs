@@ -12,6 +12,7 @@ pub const PIN: &str = crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_COMMIT");
 pub const TAG: &str = crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_TAG");
 const MAIN: (&str, &str) = (crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_URL"), crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_SHA256"));
 const CUDART: (&str, &str) = (crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_CUDART_URL"), crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_CUDART_SHA256"));
+const MACOS: (&str, &str) = (crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_MACOS_URL"), crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_MACOS_SHA256"));
 
 type Get<'a> = &'a dyn Fn(&str) -> Result<Box<dyn Read>, String>;
 
@@ -46,12 +47,24 @@ pub fn pinned<'a>(asset: (&'a str, &'a str), arch: &str) -> Option<(&'a str, &'a
     (arch == "x86_64" && url.starts_with("https://") && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())).then_some(asset)
 }
 
+pub fn pinned_macos<'a>(asset: (&'a str, &'a str), arch: &str) -> Option<(&'a str, &'a str)> {
+    // The upstream macOS arm64 build (Metal) of the pin, for Apple Silicon.
+    let (url, sha) = asset;
+    (arch == "aarch64" && url.starts_with("https://") && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())).then_some(asset)
+}
+
+fn platform_asset() -> Option<(&'static str, &'static str)> {
+    // The archive for this machine: the Metal build on a Mac, the CUDA build on Linux x86_64.
+    let arch = crate::update::normalize_arch();
+    if cfg!(target_os = "macos") { pinned_macos(MACOS, &arch) } else { pinned(MAIN, &arch) }
+}
+
 pub fn server_ready(home: &Path) -> Result<(), String> {
     // Installed, or downloadable on first use: what an install plan needs, without touching the network.
     match server_bin(home) {
         Ok(_) => Ok(()),
         Err(why) if std::env::var_os("LLAMA_SERVER").is_some() => Err(why),
-        Err(why) => pinned(MAIN, &crate::update::normalize_arch()).map(|_| ()).ok_or(why),
+        Err(why) => platform_asset().map(|_| ()).ok_or(why),
     }
 }
 
@@ -60,6 +73,10 @@ pub fn ensure_server(home: &Path) -> Result<PathBuf, String> {
     match server_bin(home) {
         Ok(p) => Ok(p),
         Err(why) if std::env::var_os("LLAMA_SERVER").is_some() => Err(why),
+        Err(why) if cfg!(target_os = "macos") => match platform_asset() {
+            Some(main) => provision(home, main, ("", ""), &http_get, &|_| false),
+            None => Err(why),
+        },
         Err(why) => match (pinned(MAIN, &crate::update::normalize_arch()), pinned(CUDART, &crate::update::normalize_arch())) {
             (Some(main), Some(cudart)) => provision(home, main, cudart, &http_get, &cuda_libs_missing),
             _ => Err(why),
@@ -84,7 +101,8 @@ fn provision(home: &Path, main: (&str, &str), cudart: (&str, &str), get: Get, mi
     // The release archive at its pinned sha256, plus the CUDA runtime archive only when this host lacks the libraries, unpacked aside and moved flat into engines/llama.cpp: a failure leaves nothing.
     let dest = home.join("engines/llama.cpp");
     let part = home.join("engines/.llama.cpp.part");
-    println!("llama-server is not installed: downloading llama.cpp {TAG} (CUDA build, once) from {}", main.0);
+    let build = if cfg!(target_os = "macos") { "Metal build" } else { "CUDA build" };
+    println!("llama-server is not installed: downloading llama.cpp {TAG} ({build}, once) from {}", main.0);
     let _ = std::fs::remove_dir_all(&part);
     let done = unpack(&part, &dest, main, cudart, get, missing);
     let _ = std::fs::remove_dir_all(&part);
@@ -491,6 +509,14 @@ mod tests {
         if std::env::var_os("LLAMA_SERVER").is_none() {
             assert_eq!(server_bin(home.path()).unwrap(), bin.join("llama-server"));
         }
+    }
+
+    #[test]
+    fn the_macos_build_is_pinned_for_apple_silicon_only() {
+        let sha = "a".repeat(64);
+        assert_eq!(pinned_macos((URL, &sha), "aarch64"), Some((URL, sha.as_str())));
+        assert_eq!(pinned_macos((URL, &sha), "x86_64"), None, "Intel Macs are not supported");
+        assert!(pinned_macos(MACOS, "aarch64").is_some() && MACOS.0.contains(TAG) && MACOS.0.contains("macos-arm64"));
     }
 
     #[test]
