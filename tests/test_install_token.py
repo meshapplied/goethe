@@ -18,7 +18,7 @@ TOKEN = 'tok"en\\with-quotes'
 
 def functions():
     text = INSTALL.read_text()
-    names = ("auth_conf", "curl_auth", "fetch_raw")
+    names = ("auth_conf", "get")
     found = [re.search(rf"^{name}\(\) \{{.*?^\}}", text, re.S | re.M) for name in names]
     return "\n".join(m.group(0) for m in found if m)
 
@@ -43,9 +43,9 @@ class PackageToken(unittest.TestCase):
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         with tempfile.TemporaryDirectory() as d:
-            script = functions() + '\nfetch_raw SHA256SUMS "$OUT"\n'
-            cdn = f"http://127.0.0.1:{server.server_port}"
-            env = {**os.environ, "GOETHE_PKG_TOKEN": TOKEN, "CDN": cdn, "OUT": f"{d}/out"}
+            script = functions() + '\nget SHA256SUMS "$OUT"\n'
+            base = f"http://127.0.0.1:{server.server_port}"
+            env = {**os.environ, "GOETHE_PKG_TOKEN": TOKEN, "BASE": base, "OUT": f"{d}/out"}
             proc = subprocess.Popen(["bash", "-c", script], env=env)
             self.assertTrue(arrived.wait(10), "curl reached the server")
             files = [Path("/proc") / p / "cmdline" for p in os.listdir("/proc") if p.isdigit()]

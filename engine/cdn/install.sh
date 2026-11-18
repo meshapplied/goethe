@@ -118,6 +118,7 @@ auth_conf() {
   # The optional private-package bearer token as a curl config line, passed through a pipe so it never shows in the process list.
   local t="${GOETHE_PKG_TOKEN:-}"
   t="${t//[$'\r\n']/}"
+  t="${t//\\/\\\\}"
   [[ -z "${t}" ]] || printf 'header = "Authorization: Bearer %s"\n' "${t//\"/\\\"}"
 }
 
