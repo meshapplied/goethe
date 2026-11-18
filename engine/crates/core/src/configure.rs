@@ -52,21 +52,13 @@ pub fn networks() -> Vec<Network> {
 }
 
 fn network_label(n: &Network, width: usize) -> String {
-    // "wg0   10.8.0.2   reaches 10.8.0.0/24 (tunnel)", padded so the menu lines up.
+    // "wg0   10.8.0.2   reaches 10.8.0.0/24", padded so the menu lines up.
     let reaches = if n.ranges.is_empty() {
         "range unknown, you will be asked".to_string()
     } else {
         format!("reaches {}", n.ranges.iter().map(Net::to_string).collect::<Vec<_>>().join(", "))
     };
-    let mut tags = Vec::new();
-    if n.iface.tunnel {
-        tags.push("tunnel");
-    }
-    if n.iface.default_route {
-        tags.push("default route");
-    }
-    let tags = if tags.is_empty() { String::new() } else { format!(" ({})", tags.join(", ")) };
-    format!("{:<width$}  {:<15}  {reaches}{tags}", n.iface.name, n.iface.addr.to_string())
+    format!("{:<width$}  {:<15}  {reaches}", n.iface.name, n.iface.addr.to_string())
 }
 
 const PUBLIC_WARNING: &str = "exposing the API on a public network is not recommended.
@@ -112,7 +104,7 @@ fn current_text() -> Result<String, String> {
     // The bind, port and allowlist as they are before any change.
     let home = goethe_home();
     let list = security::allowlist_list()?;
-    let list = if list.is_empty() { "empty (every client refused)".to_string() } else { list.join(", ") };
+    let list = if list.is_empty() { "empty".to_string() } else { list.join(", ") };
     let follows = nginx::bind_interface(&home).map(|n| format!(" (following {n})")).unwrap_or_default();
     Ok(format!(
         "Gateway now: listening on {}{follows} port {}; allowlist: {list}",
@@ -159,7 +151,7 @@ fn choose_mode(nets: &[Network]) -> Result<Mode, String> {
     }
 }
 
-fn allow(cidr: &str, note: &str) -> Result<(), String> {
+fn allow(cidr: &str, note: &str, say: bool) -> Result<(), String> {
     // Add one allowlist entry unless an equal one is already there; a stopped gateway still keeps the saved entry.
     let canonical = security::canonical_cidr(cidr)?;
     if security::allowlist_list()?.contains(&canonical) {
@@ -168,8 +160,10 @@ fn allow(cidr: &str, note: &str) -> Result<(), String> {
     let added = security::allowlist_add(&canonical, Some(note));
     let saved = security::allowlist_list()?.contains(&canonical);
     match added {
-        Ok(()) => println!("allowed {canonical} ({note})"),
-        Err(e) if saved => println!("allowed {canonical} ({note}); {e}"),
+        Ok(()) if say => println!("allowed {canonical} ({note})"),
+        Ok(()) => {}
+        Err(e) if saved && say => println!("allowed {canonical} ({note}); {e}"),
+        Err(_) if saved => {}
         Err(e) => return Err(e),
     }
     Ok(())
@@ -183,7 +177,7 @@ fn bind(ip: &str) -> Result<(), String> {
 fn configure_local() -> Result<String, String> {
     // Loopback bind and 127.0.0.1 allowed: only programs on this machine reach the API.
     bind("127.0.0.1")?;
-    allow("127.0.0.1/32", "this machine")?;
+    allow("127.0.0.1/32", "this machine", true)?;
     Ok("127.0.0.1".to_string())
 }
 
@@ -336,7 +330,7 @@ fn configure_vpn(opts: &ApiOpts, nets: &[Network]) -> Result<String, String> {
     let target = pick_network(opts, nets)?;
     let ranges = vpn_ranges(opts, &target)?;
     let place = match &target {
-        Target::Interface(n) => format!("{} ({}; follows its address)", n.iface.addr, n.iface.name),
+        Target::Interface(n) => n.iface.addr.to_string(),
         Target::Address(ip, _) => format!("{ip} (fixed)"),
     };
     println!("The gateway will listen on {place} and on 127.0.0.1, and allow {}.", ranges.join(", "));
@@ -344,13 +338,14 @@ fn configure_vpn(opts: &ApiOpts, nets: &[Network]) -> Result<String, String> {
         return Err("nothing changed".to_string());
     }
     match &target {
-        Target::Interface(n) => println!("{}", nginx::set_public_bind_interface(&goethe_home(), &n.iface.name)?),
-        Target::Address(ip, _) => bind(&ip.to_string())?,
+        Target::Interface(n) => drop(nginx::set_public_bind_interface(&goethe_home(), &n.iface.name)?),
+        Target::Address(ip, _) => drop(nginx::set_public_bind(&goethe_home(), &ip.to_string())?),
     }
-    allow("127.0.0.1/32", "this machine")?;
+    allow("127.0.0.1/32", "this machine", false)?;
     for r in &ranges {
-        allow(r, &target.who())?;
+        allow(r, &target.who(), false)?;
     }
+    println!("\n{} Gateway updated and live", crate::term::paint("\u{2713}", crate::term::Color::Green));
     Ok(target.addr().to_string())
 }
 
@@ -388,9 +383,9 @@ fn configure_public(opts: &ApiOpts) -> Result<String, String> {
         }
     }
     bind("0.0.0.0")?;
-    allow("127.0.0.1/32", "this machine")?;
+    allow("127.0.0.1/32", "this machine", true)?;
     for r in &ranges {
-        allow(r, "public client")?;
+        allow(r, "public client", true)?;
     }
     if ranges.is_empty() {
         println!("No client addresses were added: only addresses already on the allowlist can connect (goethe api allow add <ip>/32).");
@@ -419,26 +414,6 @@ fn public_ip_lines(ip: Result<IpAddr, String>, port: u16, local: &[InterfaceAddr
     }
 }
 
-fn offer_key(yes: bool) -> Result<(), String> {
-    // Without any API key no client can call the API, so offer one; goethe api shows it again later.
-    if !security::key_list_detailed()?.is_empty() {
-        println!("API keys: {} exist (goethe api keys; goethe api keys create <client> for each new client)", security::key_list_detailed()?.len());
-        return Ok(());
-    }
-    if !interactive() && !yes {
-        println!("No API keys yet: goethe api keys create <client>");
-        return Ok(());
-    }
-    if !confirm("No API keys exist yet. Create one now?", true, yes)? {
-        return Ok(());
-    }
-    let name = if yes { "default".to_string() } else { ask("Key name [default]:", "default")? };
-    let token = security::key_create(&name, true, None, None, None, false)?;
-    println!("API key ({name}): {token}");
-    println!("goethe api shows it again at any time.");
-    Ok(())
-}
-
 pub fn apply_access(opts: &ApiOpts) -> Result<String, String> {
     // Show the current setup, pick a mode (asked on a terminal), apply bind and allowlist; returns the API base URL.
     println!("{}", current_text()?);
@@ -464,7 +439,6 @@ pub fn apply_access(opts: &ApiOpts) -> Result<String, String> {
 pub fn run_api(opts: ApiOpts) -> Result<(), String> {
     // goethe api expose: who can reach the API, then a key if none exists, then the URL.
     let api = apply_access(&opts)?;
-    offer_key(opts.yes)?;
     println!("\nAPI: {api}\n\n{}", crate::term::commands("For the models and keys run:", &["goethe api"]));
     Ok(())
 }

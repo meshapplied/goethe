@@ -2,7 +2,7 @@
 
 pub const GATED: &str = "is gated or private on Hugging Face";
 pub const NOT_FOUND: &str = "not found on Hugging Face, or private";
-pub const FALLBACK_HINT: &str = "pass --fallback (or set GOETHE_ALLOW_FALLBACK=1) to serve it with the plain runtime instead";
+pub const FALLBACK_HINT: &str = "GOETHE_ALLOW_FALLBACK=0 is set; pass --fallback (or unset it) to serve it with the plain runtime instead";
 pub const NOTHING_DOWNLOADED: &str = "nothing was downloaded";
 pub const ONLY_PACK: &str = "runs only with its kernel pack";
 pub const LOGIN_FIRST: &str = "run goethe login first";

@@ -486,7 +486,7 @@ fn incomplete_download(dir: &Path) -> Option<String> {
     None
 }
 
-fn architectures(cfg: &Value) -> Vec<String> {
+pub fn architectures(cfg: &Value) -> Vec<String> {
     // Root architectures first, then those of a nested language-model config.
     let mut out = Vec::new();
     for v in std::iter::once(cfg).chain(["text_config", "llm_config", "language_config", "thinker_config"].iter().filter_map(|k| cfg.get(k))) {

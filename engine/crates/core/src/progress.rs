@@ -218,12 +218,6 @@ pub fn record_warmup(home: &Path, model_id: &str, secs: u64) {
     let _ = std::fs::write(warmup_file(home), all.to_string());
 }
 
-pub fn warmup_notice(home: &Path, model_id: &str) -> String {
-    match warmup_secs(home, model_id) {
-        Some(s) => format!("warming up kernels with one request, about {} (as last time)", span(s.max(1))),
-        None => "warming up kernels with one request (the first time can take a few minutes)".to_string(),
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -287,10 +281,9 @@ mod tests {
         std::fs::write(d.join("a"), [0u8; 10]).unwrap();
         std::fs::write(d.join(".cache/dl/b.incomplete"), [0u8; 5]).unwrap();
         assert_eq!(dir_bytes(&d), 15);
-        assert!(warmup_notice(&d, "m").contains("first time"));
+        assert_eq!(warmup_secs(&d, "m"), None);
         record_warmup(&d, "m", 42);
         assert_eq!(warmup_secs(&d, "m"), Some(42));
-        assert!(warmup_notice(&d, "m").contains("about 42 s"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

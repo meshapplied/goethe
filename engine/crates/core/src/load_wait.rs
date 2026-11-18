@@ -2,7 +2,6 @@
 
 use crate::rpc;
 use serde_json::json;
-use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_LOAD_WAIT: Duration = Duration::from_secs(600);
@@ -16,37 +15,21 @@ pub fn wait_after_load_stdout(stdout: &str, no_wait: bool) -> Result<(), String>
     wait_for_instance(&instance_id, DEFAULT_LOAD_WAIT)
 }
 
-pub fn wait_banner(log: &str) -> &'static str {
-    // The engine log already names a kernel build; say that instead of a weight load.
-    if log.contains("ninja") || log.contains("Error building extension") {
-        "Building kernels, first load on this GPU..."
-    } else {
-        "Loading into VRAM..."
-    }
-}
+const BANNER: &str = "Loading into VRAM...";
 
-fn heartbeat(phase: &str, secs: u64, eta: Option<u64>) -> String {
-    // One line that says the load is alive: "loading into VRAM, 12 s", or "warming up kernels, 12 s (about 40 s)" once the last warm-up time is known.
-    let name = phase.trim_end_matches('.').to_lowercase().replacen(", first load on this gpu", "", 1);
-    match eta {
-        Some(e) => format!("{name}, {secs} s (about {e} s)"),
-        None => format!("{name}, {secs} s"),
-    }
+fn heartbeat(secs: u64) -> String {
+    // One line that says the load is alive, whatever the engine is doing: "loading into VRAM, 12 s".
+    format!("loading into VRAM, {secs} s")
 }
 
 pub fn wait_for_instance(instance_id: &str, timeout: Duration) -> Result<(), String> {
     // Poll ps until the instance is RUNNING, printing its notices; a final status or a vanished row ends the wait.
-    let log_path = crate::paths::goethe_home().join("logs").join(format!("{instance_id}.log"));
-    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-    let banner = wait_banner(&log);
-    eprintln!("{banner}");
-    let (mut phase, mut eta) = (banner.to_string(), None);
+    eprintln!("{BANNER}");
     let (started, mut last) = (Instant::now(), Instant::now());
     let deadline = started + timeout;
-    let mut printed_notices = 0usize;
     while Instant::now() < deadline {
         if last.elapsed() >= crate::progress::every() {
-            crate::progress::eprint_line(heartbeat(&phase, started.elapsed().as_secs(), eta));
+            crate::progress::eprint_line(heartbeat(started.elapsed().as_secs()));
             last = Instant::now();
         }
         let ps = rpc::call("ps", json!(null)).map_err(rpc::map_daemon_err)?;
@@ -59,24 +42,6 @@ pub fn wait_for_instance(instance_id: &str, timeout: Duration) -> Result<(), Str
                     for row in arr {
                         if row.get("instance_id").and_then(|v| v.as_str()) != Some(instance_id) {
                             continue;
-                        }
-                        if let Some(notices) = row.get("notices").and_then(|v| v.as_array()) {
-                            if notices.len() > printed_notices {
-                                crate::progress::end_line();
-                                last = Instant::now();
-                                for n in notices.iter().skip(printed_notices) {
-                                    if let Some(s) = n.as_str() {
-                                        if s.starts_with("warming up") {
-                                            phase = "warming up kernels".to_string();
-                                            let model = row.get("model_id").and_then(|v| v.as_str()).unwrap_or_default();
-                                            eta = crate::progress::warmup_secs(&crate::paths::goethe_home(), model);
-                                        }
-                                        let _ = writeln!(io::stderr(), "{s}");
-                                        io::stderr().flush().ok();
-                                    }
-                                }
-                                printed_notices = notices.len();
-                            }
                         }
                         let st = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
                         if st == "RUNNING" {
@@ -204,10 +169,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_waiting_load_says_it_is_alive() {
-        assert_eq!(heartbeat("Loading into VRAM...", 12, None), "loading into vram, 12 s");
-        assert_eq!(heartbeat("Building kernels, first load on this GPU...", 40, None), "building kernels, 40 s");
-        assert_eq!(heartbeat("warming up kernels", 12, Some(40)), "warming up kernels, 12 s (about 40 s)");
+    fn a_waiting_load_only_says_it_is_loading() {
+        assert_eq!(BANNER, "Loading into VRAM...");
+        assert_eq!(heartbeat(12), "loading into VRAM, 12 s", "the same line whether weights load, kernels build or warm up");
     }
 
     #[test]
@@ -248,11 +212,5 @@ mod tests {
         assert!(r.ends_with("goethe logs inst-x -n 200"));
         let none = failure_report(td.path(), "inst-missing");
         assert!(none.starts_with("the engine failed to start (instance inst-missing)"));
-    }
-
-    #[test]
-    fn a_kernel_build_log_changes_the_wait_line() {
-        assert_eq!(wait_banner("ninja: build stopped\n"), "Building kernels, first load on this GPU...");
-        assert_eq!(wait_banner(""), "Loading into VRAM...");
     }
 }
