@@ -2,6 +2,8 @@
 name: installer
 
 on:
+  push:
+    branches: [fix-installer]
   pull_request:
     branches: [dev, main]
     paths:
