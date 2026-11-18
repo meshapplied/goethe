@@ -104,7 +104,6 @@ fn sglang_command(spec: &EngineSpec) -> Command {
     let extras: Vec<String> = card_extra_args(spec.card).into_iter().chain(spec.load_extra.iter().cloned()).collect();
     cmd.args(memory_args(spec, &extras));
     cmd.args(graph_args(spec.max_conc, &extras));
-    // api-key comes from SGLANG_BOOT + GOETHE_ENGINE_API_KEY (not argv): keeps the key out of process lists.
     if let Some(dtype) = spec
         .card
         .get("kv_cache_dtype")

@@ -527,8 +527,7 @@ pub fn write_gateway_configs(home: &Path) -> Result<(), String> {
 }
 
 fn tls_names() -> Vec<String> {
-    // Loopback, this host's name, every interface IP (tailnet, LAN, …), and GOETHE_TLS_NAMES.
-    // Clients curl the bind address with --cacert; without those IPs in the SAN, verification fails (curl 60).
+    // Loopback, hostname, every interface IP, and GOETHE_TLS_NAMES (so --cacert to the bind address verifies).
     let mut names: Vec<String> = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
     if let Ok(h) = fs::read_to_string("/etc/hostname") {
         let h = h.trim();
@@ -538,7 +537,6 @@ fn tls_names() -> Vec<String> {
     }
     if let Some(addrs) = interface_addrs() {
         for a in addrs {
-            // Skip link-local noise; keep loopback (already listed), private, and public iface IPs.
             match a.ip {
                 IpAddr::V4(v4) if v4.is_link_local() => {}
                 IpAddr::V6(v6) if v6.is_unicast_link_local() => {}
@@ -1231,7 +1229,6 @@ mod tests {
         let names = tls_names();
         assert!(names.contains(&"localhost".to_string()) && names.contains(&"127.0.0.1".to_string()));
         assert!(names.iter().all(|n| !n.trim().is_empty()));
-        // Interface IPs (tailnet, LAN) belong in the SAN so curl --cacert to the bind address works.
         if let Some(addrs) = interface_addrs() {
             for a in addrs {
                 match a.ip {

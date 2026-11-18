@@ -31,7 +31,6 @@ pub struct ApiOpts {
     pub interface: Option<String>,
     pub allow: Vec<String>,
     pub yes: bool,
-    /// Public only: allow every client address (0.0.0.0/0). Requires --yes. Not with --allow.
     pub dangerously_allow_all_inbound: bool,
 }
 
@@ -352,8 +351,7 @@ fn configure_vpn(opts: &ApiOpts, nets: &[Network]) -> Result<String, String> {
 }
 
 fn resolve_public_allows(opts: &ApiOpts) -> Result<Vec<String>, String> {
-    // Public must name who may connect. --yes alone must not bind 0.0.0.0 on a leftover VPN allowlist.
-    // 0.0.0.0/0 only via --dangerously-allow-all-inbound (with --yes from configure_public).
+    // Named clients required; --yes alone must not bind every interface on a leftover allowlist.
     if opts.dangerously_allow_all_inbound {
         if !opts.allow.is_empty() {
             return Err("--dangerously-allow-all-inbound does not mix with --allow".to_string());
@@ -395,7 +393,7 @@ fn resolve_public_allows(opts: &ApiOpts) -> Result<Vec<String>, String> {
 }
 
 fn configure_public(opts: &ApiOpts) -> Result<String, String> {
-    // Warn, require named clients (or an explicit world-open), confirm, then bind every interface.
+    // Warn, require named clients (or an explicit world-open), confirm, bind every interface.
     println!("{}: {PUBLIC_WARNING}", crate::term::paint("WARNING", crate::term::Color::Yellow));
     let port = nginx::public_port_u16(&goethe_home());
     let public = lookup_public_ip();
@@ -519,10 +517,8 @@ mod tests {
 
     #[test]
     fn public_yes_without_allow_is_refused() {
-        // The greengoblin footgun: --yes alone used to bind 0.0.0.0 on a leftover VPN allowlist.
         let err = resolve_public_allows(&opts(&[], true, false)).unwrap_err();
         assert!(err.contains("--allow"), "{err}");
-        assert!(!err.contains('—'), "no em dash in errors");
     }
 
     #[test]

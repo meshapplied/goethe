@@ -275,7 +275,6 @@ fn candidate_dirs(home: &Path, dir: Option<&str>) -> Result<Vec<PathBuf>, String
         out.sort();
         return Ok(out);
     };
-    // Folder names are under models/ (help text). Only fall back to CWD for paths with a separator or absolute.
     let raw = Path::new(d);
     let candidate = if raw.is_absolute() || d.contains('/') || d.contains('\\') {
         raw.to_path_buf()
@@ -348,7 +347,6 @@ pub fn survey(home: &Path, con: &Connection, dirs: Vec<PathBuf>, m: &Machine) ->
             continue;
         }
         if meta.is_ok_and(|m| m.file_type().is_symlink()) {
-            // Scan does not follow symlinks into a card (install builds the farm). Point at the real tree.
             let why = format!(
                 "a symlink; register it with: goethe install {} --name <org/name>",
                 canonical.display()
@@ -946,7 +944,6 @@ mod tests {
 
     #[test]
     fn folder_name_resolves_under_models_not_cwd() {
-        // Greengoblin footgun: `goethe models scan org__name` used to canonicalize from CWD → ENOENT.
         let home = tempfile::tempdir().unwrap();
         let h = home.path();
         crate::paths::ensure_layout(h).unwrap();

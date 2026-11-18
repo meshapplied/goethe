@@ -239,7 +239,6 @@ pub fn run(json_out: bool) -> Result<(), String> {
                 Some(n) => format!("{} ({n})", item.model_id),
                 None => item.model_id.clone(),
             };
-            // Same shape as goethe models: per-GPU need plus the ctx/concurrency the plan used.
             let mut cells = vec![
                 name,
                 format!("{:.1} GB/GPU · ctx {} · {} conc", item.vram_per_gpu_gb, item.ctx, item.max_conc),

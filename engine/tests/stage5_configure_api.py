@@ -24,7 +24,6 @@ def main() -> None:
         rr = run([goethe, "api", "expose", "local", "--yes"], env=env)
         if rr.returncode != 0 or _status(goethe, env)["bind"] != "127.0.0.1":
             raise RuntimeError(f"local mode with --yes must bind loopback: {rr.stdout} {rr.stderr}")
-        # Greengoblin P0: --yes alone must not bind 0.0.0.0 on a leftover allowlist.
         rr = run([goethe, "api", "expose", "public", "--yes"], env=env)
         if rr.returncode == 0 or _status(goethe, env)["bind"] != "127.0.0.1":
             raise RuntimeError(

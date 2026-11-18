@@ -301,7 +301,6 @@ fn reject_bad_share_cidrs(home: &Path, allow: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Addresses for one share open: CLI --allow, remembered grant, or --dangerously-allow-all-inbound.
 fn resolve_share_cidrs(
     home: &Path,
     cli_allow: &[String],
@@ -742,7 +741,6 @@ mod tests {
 
     #[test]
     fn nginx_block_always_denies_all_even_with_an_empty_allowlist() {
-        // Isolation: render only — no listener, no public bind.
         let dir = home_with_keys();
         let h = dir.path();
         store(h, &Share { allow: vec![], ..share(true, now() + 600) }).unwrap();

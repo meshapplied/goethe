@@ -1628,8 +1628,7 @@ fn do_ps(json: bool) -> Result<(), String> {
 }
 
 fn do_gateway_bind(addr: &str) -> Result<(), String> {
-    // An address, or an interface name whose address the gateway follows; persist, apply, and remind about the allowlist.
-    // Unspecified (0.0.0.0 / ::) is not a shortcut: that path used to open every interface without the public guards.
+    // An address or interface; unspecified binds go through expose public with its guards.
     let home = goethe_home();
     ensure_layout(&home).map_err(|e| format!("layout: {e}"))?;
     let loopback = match addr.trim().parse::<std::net::IpAddr>() {
