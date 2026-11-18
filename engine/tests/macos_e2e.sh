@@ -70,6 +70,7 @@ check "the model runs" bash -c '"$0" ps --json | grep -q RUNNING' "${G}"
 if ! "${G}" ps --json | grep -q RUNNING; then
   for f in "${GOETHE_HOME}"/logs/*; do echo "--- ${f}"; tail -n 40 "${f}"; done
 fi
+"${G}" api allow add 127.0.0.1/32 >/dev/null
 key="$("${G}" api keys create mac-e2e --raw)"
 api="$("${G}" api --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["api"])' 2>/dev/null || echo "https://127.0.0.1:${GOETHE_PUBLIC_PORT:-8443}/v1")"
 reply="$(curl -sS --cacert "${GOETHE_HOME}/nginx/certs/server.crt" "${api}/chat/completions" -H "Authorization: Bearer ${key}" \
