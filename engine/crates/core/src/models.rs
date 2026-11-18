@@ -878,6 +878,13 @@ mod tests {
     }
 
     #[test]
+    fn fit_label_names_ctx_and_concurrency() {
+        let v = Verdict::Fits { per_gpu: 23.3, total: 23.3, ctx: 8192, max_conc: 4 };
+        let label = v.label();
+        assert!(label.contains("23.3 GB per GPU") && label.contains("ctx 8192") && label.contains("4 concurrent"), "{label}");
+    }
+
+    #[test]
     fn a_gated_catalog_model_is_marked_and_explained() {
         let row = |id: &str, fit: String| ModelRow {
             id: id.into(),
