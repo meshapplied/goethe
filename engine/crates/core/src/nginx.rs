@@ -503,7 +503,7 @@ fn write_configs(home: &Path, bin: &Path) -> Result<(), String> {
     write_private(&gateway, render_gateway_on(home, bin, bind)?.as_bytes())?;
     write_private(&dir.join("listen_ip"), format!("{bind}\n").as_bytes())?;
     let main_conf = format!(
-        "pid nginx.pid;\nerror_log logs/error.log warn;\n\
+        "{}pid nginx.pid;\nerror_log logs/error.log warn;\n\
          events {{ worker_connections 4096; }}\nhttp {{\n\
          client_body_temp_path logs/b;\n\
          proxy_temp_path logs/p;\n\
@@ -513,6 +513,7 @@ fn write_configs(home: &Path, bin: &Path) -> Result<(), String> {
          access_log logs/access.log;\n\
          map_hash_bucket_size 128;\n\
          include {};\n}}\n",
+        worker_user_line(unsafe { libc::geteuid() } == 0, nobody_group().as_deref()),
         quote(&gateway)
     );
     write_private(&dir.join("nginx.conf"), main_conf.as_bytes())?;
@@ -567,6 +568,25 @@ pub(crate) fn self_signed(key: &Path, crt: &Path, ec: bool, days: u32, cn: &str,
         return Err("openssl could not create a self-signed certificate".to_string());
     }
     fs::set_permissions(key, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())
+}
+
+fn nobody_group() -> Option<String> {
+    // The primary group of the nobody user by name: nogroup on Debian and Ubuntu, nobody on RHEL, Fedora and macOS.
+    let user = std::ffi::CString::new("nobody").ok()?;
+    let pw = unsafe { libc::getpwnam(user.as_ptr()) };
+    if pw.is_null() {
+        return None;
+    }
+    let gr = unsafe { libc::getgrgid((*pw).pw_gid) };
+    (!gr.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr((*gr).gr_name) }.to_string_lossy().into_owned())
+}
+
+fn worker_user_line(root: bool, group: Option<&str>) -> String {
+    // A root master hands its workers to nobody; naming the group keeps goethe's own nginx off a group name its build machine had.
+    match (root, group) {
+        (true, Some(g)) => format!("user nobody {g};\n"),
+        _ => String::new(),
+    }
 }
 
 pub fn ensure_certs(home: &Path) -> Result<(), String> {
@@ -1010,6 +1030,15 @@ pub fn ensure_gateway_running(home: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_root_nginx_names_the_group_of_nobody_on_this_machine() {
+        assert_eq!(worker_user_line(true, Some("nogroup")), "user nobody nogroup;\n");
+        assert_eq!(worker_user_line(true, Some("nobody")), "user nobody nobody;\n");
+        assert_eq!(worker_user_line(false, Some("nogroup")), "", "a user's nginx runs as that user");
+        assert_eq!(worker_user_line(true, None), "");
+        assert!(nobody_group().is_some_and(|g| !g.is_empty()), "this machine has a nobody user");
+    }
 
     #[test]
     fn render_uses_persisted_ports_and_quotes_paths() {

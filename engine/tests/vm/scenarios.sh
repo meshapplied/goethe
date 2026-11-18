@@ -64,6 +64,11 @@ check "systemd runs goethed" bash -c '[[ "$(systemctl is-active goethed 2>/dev/n
 }
 for _ in $(seq 1 30); do health && break; sleep 1; done
 check "root's gateway answers" health
+health || {
+  sudo tail -n 5 /var/lib/goethe/logs/gateway.log /var/lib/goethe/logs/goethed.log 2>&1 | sed 's/^/    | /'
+  command -v ausearch >/dev/null && sudo ausearch -m avc -ts recent 2>/dev/null | grep -o 'denied.*' | sort -u | head -n 5 | sed 's/^/    | avc /'
+  ps -eZ 2>/dev/null | grep -E "goethed|nginx" | head -n 3 | sed 's/^/    | /'
+}
 sudo /usr/local/bin/goethe uninstall --yes >/tmp/un.log 2>&1 || { fail "root uninstall"; sed 's/^/    | /' /tmp/un.log | tail -5; }
 check "root uninstall removed the links" test ! -e /usr/local/bin/goethe -a ! -e /usr/local/bin/goethed
 check "root uninstall removed the unit" bash -c '! systemctl is-enabled goethed >/dev/null 2>&1'
