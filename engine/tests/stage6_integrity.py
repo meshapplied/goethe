@@ -110,6 +110,18 @@ def main() -> None:
         ver = (cdn / "VERSION").read_text().strip()
         versioned = _variant(root, "cdn-versioned", cdn)
         shutil.copytree(cdn, versioned / "v" / ver)
+        older = root / "cdn-older"
+        shutil.copytree(cdn, older)
+        old_bin = older / "bin" / f"linux-{ARCH}" / "goethe"
+        old_bin.write_bytes(b'#!/bin/sh\n[ "$1" = --version ] && { echo "goethe 0.3.2"; exit 0; }\nexit 2\n')
+        template = root / "old-install.sh"
+        template.write_text("#!/usr/bin/env bash\nGOETHE_RELEASE_PUB_PEM='__GOETHE_RELEASE_PUB_PEM__'\n"
+                            "echo OLD_INSTALLER \"$GOETHE_PKG_URL\"\n")
+        _sh("bash", PACKAGING / "subst_install_pubkey.sh", template, keys / "release_pub.pem", older / "install.sh")
+        rr = _sh("bash", PACKAGING / "sign_cdn.sh", older, keys / "release.key")
+        shutil.copy2(cdn / "install.sh", older / "new-install.sh")
+        if rr.returncode != 0:
+            raise RuntimeError(f"sign_cdn.sh failed for the older release: {rr.stderr}")
         port = free_port()
         srv = spawn(
             [os.environ.get("GOETHE_PYTHON", "python3"), "-m", "http.server", str(port), "--bind", "127.0.0.1"],
@@ -130,12 +142,15 @@ def main() -> None:
             ("unknown version", versioned, {"GOETHE_VERSION": "1.2.3"},
              ["is 1.2.3 a published version?", "setup: not run"]),
             ("bad version", cdn, {"GOETHE_VERSION": "latest; rm"}, ["is not a version like", "setup: not run"]),
+            ("release before goethe setup", older, {},
+             ["rc=0", "predates goethe setup", f"OLD_INSTALLER {base}/cdn-older"]),
         ]
         with temp_home(stub_python=False, tag="integrity", pyenv=False) as home:
             for name, tree, extra, wants in cases:
                 out = ""
                 for _ in range(20):
-                    out = _install(tree / "install.sh", f"{base}/{tree.name}", home / name.replace(" ", "-"), extra)
+                    script = tree / "new-install.sh" if (tree / "new-install.sh").exists() else tree / "install.sh"
+                    out = _install(script, f"{base}/{tree.name}", home / name.replace(" ", "-"), extra)
                     if "Connection refused" not in out and "Couldn't connect" not in out:
                         break
                 missing = [w for w in wants if w not in out]

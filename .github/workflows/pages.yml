@@ -38,12 +38,16 @@ jobs:
         run: |
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$TAG is not a tag like v0.1.9"; exit 1; }
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "goethe-cdn-${TAG#v}.tar.zst"
-      - name: Unpack the package tree served at pkg.goethe.sh
+      - uses: actions/checkout@v4
+        with:
+          path: src
+          sparse-checkout: engine/packaging
+      - name: The package tree served at pkg.goethe.sh, with the newest releases under v/
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         run: |
-          mkdir site && zstd -dc "goethe-cdn-${TAG#v}.tar.zst" | tar -C site --strip-components=1 -xf -
-          test -f site/install.sh && test -f site/SHA256SUMS.sig && test -f site/v1/registry.json
+          bash src/engine/packaging/pages_site.sh "goethe-cdn-${TAG#v}.tar.zst" site
           test "$(cat site/VERSION)" = "${TAG#v}" || { echo "::error::the package is $(cat site/VERSION), not ${TAG#v}"; exit 1; }
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

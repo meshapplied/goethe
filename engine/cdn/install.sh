@@ -157,6 +157,20 @@ verify_package() {
   "${TMP}/goethe" --version >/dev/null 2>&1 || die "the downloaded goethe does not run on this machine; nothing was installed"
 }
 
+older_release() {
+  # A pinned release from before goethe setup: its own signed install.sh installs it, from its folder.
+  local want
+  want="$(awk '$2 == "install.sh" { print $1; exit }' "${TMP}/SHA256SUMS")"
+  [[ -n "${want}" ]] || die "release ${VERSION:-${BASE}} has no installer in its package list"
+  get install.sh "${TMP}/release-install.sh" || die "could not download that release's install.sh"
+  [[ "$(sha256_of "${TMP}/release-install.sh")" == "${want}" ]] || die "that release's install.sh does not match its signed package list"
+  echo "  this release predates goethe setup; running its own installer"
+  local args=()
+  [[ -n "${AUTHKEY}" ]] && args+=(--authkey "${AUTHKEY}")
+  [[ -n "${PLATFORM_URL}" ]] && args+=(--platform-url "${PLATFORM_URL}")
+  GOETHE_PKG_URL="${BASE}" exec bash "${TMP}/release-install.sh" "${args[@]}"
+}
+
 show_banner() {
   [[ -t 1 && ! -x "${GOETHE_HOME}/bin/goethe" ]] || return 0
   [[ -z "${NO_COLOR:-}" ]] && printf '\033[1;38;5;117m'
@@ -196,6 +210,9 @@ main() {
   TMP="$(mktemp -d "${TMPDIR:-/tmp}/goethe-install.XXXXXX")"
   trap 'rm -rf "${TMP}"' EXIT
   verify_package
+  if ! "${TMP}/goethe" setup --help >/dev/null 2>&1; then
+    older_release
+  fi
   mkdir -p "${GOETHE_HOME}"
   local args=(setup --pkg-url "${CDN}" --from "${BASE}")
   [[ -n "${PLATFORM_URL}" ]] && args+=(--platform-url "${PLATFORM_URL}")

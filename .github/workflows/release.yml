@@ -328,16 +328,21 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     permissions:
+      contents: read
       pages: write
       id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: goethe-cdn
-      - name: Unpack the package tree served at pkg.goethe.sh
-        run: |
-          mkdir site && zstd -dc goethe-cdn-*.tar.zst | tar -C site --strip-components=1 -xf -
-          test -f site/install.sh && test -f site/SHA256SUMS.sig && test -f site/v1/registry.json
+      - uses: actions/checkout@v4
+        with:
+          path: src
+          sparse-checkout: engine/packaging
+      - name: The package tree served at pkg.goethe.sh, with the newest releases under v/
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash src/engine/packaging/pages_site.sh goethe-cdn-*.tar.zst site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
