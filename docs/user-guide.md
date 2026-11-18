@@ -464,6 +464,8 @@ Optional. Set them in your shell, or in `goethe.env` inside Goethe's folder so t
 | `GOETHE_MAX_BODY_MB` | Largest request size in MB (default 10) |
 | `GOETHE_GATEWAY_RATE_PER_IP` | Requests per second one client address may send (default 100, bursts up to twice that) |
 | `GOETHE_GATEWAY_CONN_PER_IP` | Open API connections one client address may hold (default 512) |
+| `GOETHE_SHARE_RATE_PER_IP` | Same for `goethe api share` (default 10, bursts up to twice that) |
+| `GOETHE_SHARE_CONN_PER_IP` | Open share connections one client address may hold (default 16) |
 | `GOETHE_PLATFORM_URL` | Platform `goethe login` links to (default `https://goethe.sh`) |
 | `GOETHE_PUBLIC_IP_URL` | Where `goethe api expose`, `goethe api domain` and `goethe doctor` look up the public IP (default: the platform's `/api/ip`; a plain-text or `{"ip": ...}` answer both work) |
 | `GOETHE_PUBLIC_IP_LOOKUP=0` | Never look up the public IP (set `GOETHE_PUBLIC_IP` to name it) |
