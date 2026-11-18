@@ -7,6 +7,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const PIN_FILE: &str = include_str!("../../../../llama-cpp/PIN");
+const ARCHS: &str = include_str!("../../../../llama-cpp/ARCHS");
+
+pub fn serves_arch(arch: &str) -> bool {
+    // A GGUF general.architecture the pinned llama.cpp build has a model for (llama-cpp/ARCHS, written by update_archs.sh).
+    ARCHS.lines().filter(|l| !l.starts_with('#')).any(|l| l == arch)
+}
 
 pub const PIN: &str = crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_COMMIT");
 pub const TAG: &str = crate::pyenv::pin_value(PIN_FILE, "LLAMA_CPP_TAG");
@@ -214,6 +220,11 @@ fn quants(models: &[&str]) -> String {
         true => "none".into(),
         false => q.join(", "),
     }
+}
+
+pub fn architecture(gguf: &Path) -> Option<String> {
+    // general.architecture of a GGUF file, from its header.
+    header(gguf).ok()?.get("general.architecture").map(|v| v.1.clone()).filter(|a| !a.is_empty())
 }
 
 pub fn is_embedding(gguf: &Path) -> bool {
@@ -448,6 +459,13 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn the_architecture_list_is_the_pinned_builds() {
+        assert!(ARCHS.lines().next().unwrap().contains(&format!("llama.cpp {TAG} ")), "rerun llama-cpp/update_archs.sh after a pin change");
+        assert!(serves_arch("gemma-embedding") && serves_arch("gemma4") && serves_arch("llama"));
+        assert!(!serves_arch("clip") && !serves_arch("not-a-model") && !serves_arch(""));
+    }
 
     #[test]
     fn sliding_and_shared_layers_hold_no_full_context_kv() {

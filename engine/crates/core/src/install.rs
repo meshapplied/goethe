@@ -49,12 +49,12 @@ pub struct GoetheCard {
 }
 
 pub fn fallback_allowed(flag: bool) -> bool {
-    // A model with a kernel pack for this card runs on its plain runtime only when the user opts in: --fallback, or GOETHE_ALLOW_FALLBACK=1.
+    // A kernel pack that cannot run here gives way to the model's plain runtime (SGLang or llama.cpp), saying why; GOETHE_ALLOW_FALLBACK=0 makes it an error instead.
     allowed(flag, std::env::var("GOETHE_ALLOW_FALLBACK").ok().as_deref())
 }
 
 fn allowed(flag: bool, env: Option<&str>) -> bool {
-    flag || env == Some("1")
+    flag || env != Some("0")
 }
 
 use crate::messages::{FALLBACK_HINT, LOGIN_FIRST, NOTHING_DOWNLOADED, ONLY_PACK};
@@ -100,7 +100,7 @@ pub fn card_marlin_extra_gb(card: &toml::Value) -> f64 {
     card.get("marlin_extra_gb").and_then(|v| v.as_float()).unwrap_or(0.0)
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct InstallOpts {
     pub model_id: String,
     pub ctx: Option<u64>,
@@ -194,6 +194,10 @@ fn install_model(home: &Path, opts: &InstallOpts) -> Result<String, String> {
     };
     let model_id = target.model_id.clone();
     register(home, opts, target)?;
+    if model_id != opts.model_id && !Path::new(&opts.model_id).is_dir() {
+        let con = crate::db::open(home).map_err(|e| e.to_string())?;
+        con.execute("INSERT OR REPLACE INTO model_aliases (alias, model_id) VALUES (?1, ?2)", rusqlite::params![opts.model_id, model_id]).map_err(|e| e.to_string())?;
+    }
     Ok(model_id)
 }
 
@@ -383,7 +387,14 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     let no_pack_gpu = crate::packs::catalog(home).and_then(|ix| crate::packs::unsupported_here(&ix, &opts.model_id, &crate::packs::local_archs(home), &local));
     let built = crate::packs::catalog(home).map(|ix| crate::packs::built_for(&ix, &opts.model_id)).unwrap_or_default();
     pack_only_gate(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)) && opts.quant.is_none(), declined, no_pack_gpu.as_deref(), &built)?;
-    let gguf = engine_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), (declined, no_pack_gpu.as_deref()), opts.quant.as_deref())?;
+    let gguf = match engine_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), (declined, no_pack_gpu.as_deref()), opts.quant.as_deref())? {
+        Choice::Sglang => None,
+        Choice::Gguf(files) => Some(files),
+        Choice::Build { repo, why } => {
+            println!("{}: {why}; installing its GGUF build {repo} with llama.cpp", opts.model_id);
+            return install_hub(home, &InstallOpts { model_id: repo, ..opts.clone() });
+        }
+    };
     if gguf.is_none() && !cfg!(target_os = "macos") {
         if let crate::host_compiler::Verdict::Unusable(why) = crate::host_compiler::verdict(crate::host_compiler::find().as_ref(), &crate::nvidia_driver::probe().distro) {
             eprintln!("note: SGLang builds GPU kernels when this model first loads: {why}");
@@ -481,6 +492,7 @@ struct OfferDeps<'a> {
     index: &'a dyn Fn() -> Option<Vec<u8>>,
     ensure_engine: &'a dyn Fn() -> Result<(), String>,
     by_structure: &'a dyn Fn(&crate::platform::Credentials) -> Looked,
+    may_match: &'a dyn Fn(&[u8]) -> bool,
 }
 
 fn structure_offer(home: &Path, opts: &InstallOpts, dir: &Path) -> Result<Option<PackChoice>, String> {
@@ -495,6 +507,12 @@ fn structure_offer(home: &Path, opts: &InstallOpts, dir: &Path) -> Result<Option
             let login = crate::packs::Login(creds.clone());
             let broker = crate::packs::HttpBroker::new(&creds.platform_url, &login);
             crate::packs::by_structure(home, dir, &archs, &broker, &run)
+        },
+        may_match: &|index| {
+            let gguf_arch = crate::engines::llama_cpp::gguf_paths(dir).into_iter().find(|p| p.file_name().is_some_and(|n| crate::engines::llama_cpp::is_model_gguf(&n.to_string_lossy()))).and_then(|p| crate::engines::llama_cpp::architecture(&p));
+            let config_archs = if gguf_arch.is_some() { Vec::new() } else { crate::model_facts::read_config(dir).map(|c| crate::scan::architectures(&c)).unwrap_or_default() };
+            let pack_archs = |repo: &str, rev: &str| hf::fetch_config_json(repo, rev).map(|c| crate::scan::architectures(&c)).unwrap_or_default();
+            crate::packs::may_match(index, &archs, gguf_arch.as_deref(), &config_archs, &pack_archs)
         },
         archs: archs.clone(),
     };
@@ -512,18 +530,18 @@ fn offer_for(opts: &InstallOpts, deps: OfferDeps) -> Result<Option<PackChoice>, 
         }
     };
     let miss = |why: String| -> Result<Option<PackChoice>, String> {
-        if fallback_allowed(opts.fallback) {
-            eprintln!("note: {why}; using the plain runtime");
-            Ok(None)
-        } else {
-            Err(format!("{why}; {FALLBACK_HINT}"))
-        }
+        eprintln!("note: {why}; using the plain runtime");
+        Ok(None)
     };
     let Some(index) = (deps.index)() else {
         eprintln!("note: the kernel pack index is not reachable, so these weights are not checked for optimised kernels");
         return Ok(None);
     };
     if crate::packs::offers_any(&index, &deps.archs).is_empty() {
+        return Ok(None);
+    }
+    if !(deps.may_match)(&index) {
+        println!("no optimised kernel pack has the structure of these weights; using the plain runtime");
         return Ok(None);
     }
     if let Err(e) = (deps.ensure_engine)() {
@@ -731,30 +749,54 @@ pub fn pick_fitting(sizes: &[(String, u64)], quant: Option<&str>, limit_mb: u64)
     Err(format!("its smallest GGUF needs about {:.1} GB and this Mac lets the GPU use {:.1} GB", gb(smallest), gb(limit_mb)))
 }
 
-fn gguf_suggestion(model_id: &str) -> Option<String> {
-    // A GGUF repo of the same model on Hugging Face, the most downloaded first.
-    let name = model_id.rsplit('/').next()?.trim_end_matches("-Instruct").to_string();
-    let url = format!("{}/api/models?search={}&filter=gguf&sort=downloads&limit=1", hf::hf_endpoint(), name.replace(' ', "%20"));
-    let body = crate::net::agent().get(&url).call().ok()?.into_string().ok()?;
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).ok()?;
-    rows.first()?.get("id")?.as_str().map(str::to_string)
+pub enum Choice {
+    Sglang,
+    Gguf(Vec<String>),
+    Build { repo: String, why: String },
 }
 
-fn mac_gguf(home: &Path, model_id: &str, revision: &str, quant: Option<&str>) -> Result<Vec<String>, String> {
-    // On a Mac, before any download: the repo must ship GGUF files, and the quant must fit the unified memory macOS lets the GPU use.
+fn gguf_build(model_id: &str, pre: &hf::ModelPreflight) -> Option<String> {
+    // A GGUF build llama.cpp serves: the publisher's own <id>-GGUF repo, else the most downloaded GGUF build Hugging Face lists for the model or a model it derives from.
+    let serves = |repo: &str| {
+        hf::preflight_model(repo, None).is_ok_and(|p| {
+            p.siblings.iter().any(|s| crate::engines::llama_cpp::is_model_gguf(&s.rfilename)) && p.gguf_arch.as_deref().is_none_or(crate::engines::llama_cpp::serves_arch)
+        })
+    };
+    let own = format!("{model_id}-GGUF");
+    if serves(&own) {
+        return Some(own);
+    }
+    let mut found: Vec<(String, u64)> = std::iter::once(model_id.to_string()).chain(pre.base_models.iter().cloned()).flat_map(|b| hf::gguf_builds(&b)).collect();
+    found.sort_by_key(|(_, downloads)| std::cmp::Reverse(*downloads));
+    found.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
+    found.into_iter().take(4).map(|(repo, _)| repo).find(|repo| serves(repo))
+}
+
+fn llama_cpp_refusal(pre: &hf::ModelPreflight) -> Option<String> {
+    // A GGUF whose architecture the pinned llama.cpp does not know, named before any download.
+    pre.gguf_arch.as_deref().filter(|a| !crate::engines::llama_cpp::serves_arch(a)).map(|a| format!("llama.cpp {} does not serve its architecture {a}", crate::engines::llama_cpp::TAG))
+}
+
+fn mac_gguf(home: &Path, model_id: &str, revision: &str, quant: Option<&str>) -> Result<Choice, String> {
+    // On a Mac, before any download: GGUF files in the repo (or the GGUF build Hugging Face lists for it), a llama.cpp architecture, and a quant that fits the unified memory macOS lets the GPU use.
     if hf::offline_mode() {
         return Err(format!("{model_id}: HF_HUB_OFFLINE=1, so goethe cannot see which GGUF files it has"));
     }
     let pre = hf::preflight_model(model_id, Some(revision))?;
     let sizes: Vec<(String, u64)> = pre.siblings.iter().filter(|s| s.rfilename.ends_with(".gguf")).map(|s| (s.rfilename.clone(), s.size)).collect();
     if !sizes.iter().any(|(n, _)| crate::engines::llama_cpp::is_model_gguf(n)) {
-        let hint = gguf_suggestion(model_id).map(|g| format!(" A GGUF version: goethe install {g}")).unwrap_or_else(|| " Look for a GGUF version of it on Hugging Face.".to_string());
-        return Err(format!("{model_id} has no GGUF files. On a Mac goethe serves GGUF models with llama.cpp.{hint}"));
+        return match gguf_build(model_id, &pre) {
+            Some(repo) => Ok(Choice::Build { repo, why: "it has no GGUF files, and on a Mac goethe serves GGUF models with llama.cpp".to_string() }),
+            None => Err(format!("{model_id} is not supported: it has no GGUF files, and Hugging Face lists no GGUF build of it that llama.cpp serves. On a Mac goethe serves GGUF models with llama.cpp.")),
+        };
+    }
+    if let Some(why) = llama_cpp_refusal(&pre) {
+        return Err(format!("{model_id} is not supported: {why}"));
     }
     let limit = crate::hw::profile(home).ok().and_then(|h| h.gpus.first().map(|g| g.vram_total_mb)).unwrap_or(u64::MAX);
     let files = pick_fitting(&sizes, quant, limit).map_err(|e| format!("{model_id} does not fit: {e}"))?;
     crate::engines::llama_cpp::server_ready(home).map_err(|why| format!("{model_id}: {why}"))?;
-    Ok(files)
+    Ok(Choice::Gguf(files))
 }
 
 fn engine_check(
@@ -764,13 +806,13 @@ fn engine_check(
     entry: Option<&RegistryModel>,
     (declined, no_pack_gpu): (bool, Option<&str>),
     quant: Option<&str>,
-) -> Result<Option<Vec<String>>, String> {
-    // Before any download: SGLang must serve the model's architecture and quantization (catalog entries are vetted); a GGUF-only repo, or a :quant, gets llama.cpp and the files to fetch. A model with no plain runtime and no pack for this GPU is refused with the GPUs its packs are built for.
+) -> Result<Choice, String> {
+    // Before any download, in order: SGLang when it serves the architecture and quantization (catalog entries are vetted), else llama.cpp on the repo's GGUF files or the GGUF build Hugging Face lists for it, else refused with each engine's reason. A model with no plain runtime and no pack for this GPU is refused with the GPUs its packs are built for.
     if cfg!(target_os = "macos") {
-        return mac_gguf(home, model_id, revision.unwrap_or("main"), quant).map(Some);
+        return mac_gguf(home, model_id, revision.unwrap_or("main"), quant);
     }
     if (entry.is_some() && quant.is_none()) || hf::offline_mode() {
-        return Ok(None);
+        return Ok(Choice::Sglang);
     }
     let rev = revision.unwrap_or("main");
     let pre = hf::preflight_model(model_id, Some(rev))?;
@@ -781,23 +823,36 @@ fn engine_check(
     };
     let names: Vec<&str> = pre.siblings.iter().map(|s| s.rfilename.as_str()).collect();
     let config = names.contains(&"config.json");
-    if quant.is_some() || (!config && names.iter().any(|n| n.ends_with(".gguf"))) {
+    let has_gguf = names.iter().any(|n| crate::engines::llama_cpp::is_model_gguf(n));
+    let llama = |why_sglang: &str| -> Result<Choice, String> {
+        // llama.cpp on this repo's GGUF files, after the reason SGLang does not serve it.
+        if let Some(why) = llama_cpp_refusal(&pre) {
+            return Err(format!("{model_id} is not supported: {why_sglang}{why}.{hint}"));
+        }
         let files = crate::engines::llama_cpp::pick_gguf(&names, quant).map_err(|e| format!("{model_id}: {e}"))?;
-        let none = if declined { "" } else { ", and no optimised kernel pack exists for it on this machine's GPUs" };
-        let only = if config { "" } else { " only" };
-        return match crate::engines::llama_cpp::server_ready(home) {
-            Ok(_) => Ok(Some(files)),
-            Err(why) => Err(format!("{model_id} is not supported: it ships GGUF files{only}, which SGLang does not serve{none}; {why}.{hint}")),
-        };
+        crate::engines::llama_cpp::server_ready(home).map_err(|why| format!("{model_id} is not supported: {why_sglang}{why}.{hint}"))?;
+        Ok(Choice::Gguf(files))
+    };
+    if quant.is_some() || (!config && has_gguf) {
+        return llama(if config { "" } else { "it ships GGUF files only, which SGLang does not serve; " });
     }
     if !config {
         return match no_pack_gpu {
             Some(n) => Err(format!("{model_id} is not supported: it is not a plain checkpoint (no config.json, no GGUF). {n}.")),
-            None => Ok(None),
+            None => Ok(Choice::Sglang),
         };
     }
     let cfg = hf::fetch_config_json(model_id, rev)?;
-    crate::scan::sglang_serves(&crate::scan::sglang_support(home), &cfg).map(|()| None).map_err(|why| format!("{model_id} is not supported: {why}.{hint}"))
+    let Err(why) = crate::scan::sglang_serves(&crate::scan::sglang_support(home), &cfg) else {
+        return Ok(Choice::Sglang);
+    };
+    if has_gguf {
+        return llama(&format!("{why}; "));
+    }
+    match gguf_build(model_id, &pre) {
+        Some(repo) => Ok(Choice::Build { repo, why }),
+        None => Err(format!("{model_id} is not supported: {why}, and Hugging Face lists no GGUF build of it that llama.cpp serves.{hint}")),
+    }
 }
 
 const GGUF_META: &str = r#"
@@ -2143,7 +2198,8 @@ mod tests {
         assert!(line.starts_with("kernel pack failed to open (a host library is missing") && line.ends_with("instead"), "{line}");
         assert!(line.contains("--fallback") && !line.contains('\n'), "{line}");
         assert_eq!(pack_failure_line(home.path(), "org/none", "x"), None, "no pack: nothing to add");
-        assert!(allowed(true, None) && allowed(false, Some("1")) && !allowed(false, Some("0")) && !allowed(false, None));
+        assert!(allowed(true, None) && allowed(false, Some("1")) && allowed(false, None), "the plain runtime takes over by default");
+        assert!(!allowed(false, Some("0")) && allowed(true, Some("0")), "GOETHE_ALLOW_FALLBACK=0 makes it an error, unless --fallback");
     }
 
     #[test]
@@ -2306,6 +2362,7 @@ mod tests {
                     calls.borrow_mut().push("lookup");
                     look.clone()
                 },
+                may_match: &|_| true,
             },
         );
         (got, calls.into_inner())
@@ -2342,6 +2399,7 @@ mod tests {
                     seen.replace(out);
                     Ok(None)
                 },
+                may_match: &|_| true,
             },
         );
         assert!(got.unwrap().is_none());
@@ -2357,16 +2415,10 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_pack_lookup_on_a_logged_in_node_stops_with_its_reason_unless_fallback_is_on() {
+    fn a_failed_pack_lookup_falls_back_to_the_plain_runtime() {
         let opts = InstallOpts { yes: true, ..Default::default() };
-        let (got, _) = offered(&opts, Some(login()), &["sm_120a"], Err("the platform answered 502".into()), Ok(()));
-        let err = got.err().unwrap();
-        assert!(err.contains("failed: the platform answered 502") && err.contains("--fallback"), "{err}");
-        let (got, _) = offered(&opts, Some(login()), &["sm_120a"], matched(), Err("no space left".into()));
-        let err = got.err().unwrap();
-        assert!(err.contains("goethe-engine could not be installed") && err.contains("no space left") && err.contains("--fallback"), "{err}");
-        let opted = InstallOpts { yes: true, fallback: true, ..Default::default() };
-        assert!(offered(&opted, Some(login()), &["sm_120a"], Err("502".into()), Ok(())).0.unwrap().is_none(), "--fallback serves it plain, after saying why");
+        assert!(offered(&opts, Some(login()), &["sm_120a"], Err("the platform answered 502".into()), Ok(())).0.unwrap().is_none(), "the next engine serves it, after saying why");
+        assert!(offered(&opts, Some(login()), &["sm_120a"], matched(), Err("no space left".into())).0.unwrap().is_none());
     }
 
     #[test]

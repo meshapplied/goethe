@@ -386,6 +386,26 @@ pub fn catalog(home: &Path) -> Option<Vec<u8>> {
     }
 }
 
+pub fn may_match(index: &[u8], archs: &[String], gguf_arch: Option<&str>, config_archs: &[String], pack_archs: &dyn Fn(&str, &str) -> Vec<String>) -> bool {
+    // Whether any pack on these GPUs could have the structure of these weights, before goethe-engine is installed to check exactly: a GGUF pack whose metadata keys are of the weights' architecture, or a safetensors pack whose config names one of theirs.
+    let Ok(ix) = serde_json::from_slice::<Value>(index) else { return false };
+    ix["entries"].as_array().into_iter().flatten().filter(|e| e["arch"].as_str().is_some_and(|a| archs.iter().any(|x| x == a))).any(|e| {
+        let m = &e["model"];
+        match m["format"].as_str() {
+            Some("gguf") => gguf_arch.is_some_and(|arch| {
+                let prefix = format!("{arch}.");
+                m["structure"].as_array().into_iter().flatten().flat_map(|s| s["keys"].as_array().into_iter().flatten()).any(|k| k.as_str().is_some_and(|k| k.starts_with(&prefix)))
+            }),
+            _ => {
+                !config_archs.is_empty() && {
+                    let theirs = pack_archs(m["hf_repo"].as_str().unwrap_or_default(), m["revision"].as_str().unwrap_or("main"));
+                    theirs.iter().any(|a| config_archs.contains(a))
+                }
+            }
+        }
+    })
+}
+
 pub fn offers(index: &[u8], model_id: &str, archs: &[String]) -> Vec<Offer> {
     // Packs of `index` for `model_id` (case-insensitive) on one of `archs`, in `archs` order, that the pinned engine can run.
     dedup(entries(index, archs, |repo| repo.eq_ignore_ascii_case(model_id)).into_iter().filter(runnable).map(|e| e.offer).collect())
