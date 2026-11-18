@@ -41,8 +41,12 @@ pub struct LinkPlan {
     pub on_path: bool,
 }
 
-pub fn link_dir(path_env: &str, user_home: &Path, writable: &dyn Fn(&Path) -> bool) -> LinkPlan {
-    // The first folder on PATH that is a usual place for commands and that this user can write; else ~/.local/bin, which may need adding to PATH.
+pub fn link_dir(path_env: &str, user_home: &Path, root: bool, writable: &dyn Fn(&Path) -> bool) -> LinkPlan {
+    // Root: /usr/local/bin, on every login PATH even when sudo's secure_path hides it. Others: the first usual folder on PATH they can write, else ~/.local/bin.
+    let system = PathBuf::from("/usr/local/bin");
+    if root && writable(&system) {
+        return LinkPlan { dir: system, on_path: true };
+    }
     let local = user_home.join(".local/bin");
     let usual = [local.clone(), user_home.join("bin"), PathBuf::from("/usr/local/bin"), PathBuf::from("/opt/homebrew/bin")];
     for dir in path_env.split(':').filter(|d| !d.is_empty()).map(PathBuf::from) {
@@ -173,7 +177,7 @@ fn stop_old(home: &Path) -> Result<String, String> {
 fn link_step(home: &Path, macos: bool) {
     // Link goethe and goethed onto PATH; when the folder is not on PATH, offer the line for the shell's startup file.
     let user_home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let plan = link_dir(&std::env::var("PATH").unwrap_or_default(), &user_home, &dir_writable);
+    let plan = link_dir(&std::env::var("PATH").unwrap_or_default(), &user_home, unsafe { libc::geteuid() } == 0, &dir_writable);
     if let Err(e) = link_commands(home, &plan.dir) {
         eprintln!("note: {e}");
         return;
@@ -290,6 +294,7 @@ fn run_in(home: &Path, o: &Opts, from: &str, tmp: &Path, macos: bool) -> Result<
     let note = if running { Some(stop_old(home)?) } else { None };
     let old_version = upgrading.then(|| fs::read_to_string(home.join("VERSION")).unwrap_or_default().trim().to_string()).filter(|v| !v.is_empty());
     crate::update::swap_all(&staged)?;
+    crate::service::label_programs(home);
     fs::copy(tmp.join("VERSION"), home.join("VERSION")).map_err(|e| e.to_string())?;
     if running {
         crate::service::refresh_unit(home);
@@ -368,11 +373,12 @@ mod tests {
         let all = |_: &Path| true;
         let none = |_: &Path| false;
         let only_local = |d: &Path| d.starts_with("/home/u");
-        assert_eq!(link_dir("/usr/bin:/usr/local/bin:/home/u/.local/bin", home, &all), LinkPlan { dir: "/usr/local/bin".into(), on_path: true });
-        assert_eq!(link_dir("/usr/local/bin:/home/u/.local/bin", home, &only_local), LinkPlan { dir: "/home/u/.local/bin".into(), on_path: true });
-        assert_eq!(link_dir("/usr/bin:/bin", home, &all), LinkPlan { dir: "/home/u/.local/bin".into(), on_path: false }, "a Mac's PATH has no ~/.local/bin");
-        assert_eq!(link_dir("/opt/homebrew/bin:/usr/bin", home, &all).dir, PathBuf::from("/opt/homebrew/bin"));
-        assert!(!link_dir("/usr/local/bin", home, &none).on_path);
+        assert_eq!(link_dir("/usr/bin:/usr/local/bin:/home/u/.local/bin", home, false, &all), LinkPlan { dir: "/usr/local/bin".into(), on_path: true });
+        assert_eq!(link_dir("/usr/local/bin:/home/u/.local/bin", home, false, &only_local), LinkPlan { dir: "/home/u/.local/bin".into(), on_path: true });
+        assert_eq!(link_dir("/usr/bin:/bin", home, false, &all), LinkPlan { dir: "/home/u/.local/bin".into(), on_path: false }, "a Mac's PATH has no ~/.local/bin");
+        assert_eq!(link_dir("/opt/homebrew/bin:/usr/bin", home, false, &all).dir, PathBuf::from("/opt/homebrew/bin"));
+        assert!(!link_dir("/usr/local/bin", home, false, &none).on_path);
+        assert_eq!(link_dir("/sbin:/bin:/usr/sbin:/usr/bin", Path::new("/root"), true, &all), LinkPlan { dir: "/usr/local/bin".into(), on_path: true }, "sudo's secure_path on RHEL");
     }
 
     #[test]

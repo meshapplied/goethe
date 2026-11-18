@@ -326,8 +326,18 @@ fn fetch_pkg_file(base: &str, rel: &str, dest: &Path) -> Result<(), String> {
 }
 
 fn fetch_pkg_file_max(base: &str, rel: &str, dest: &Path, max: u64, idle: Duration) -> Result<(), String> {
-    // GET one CDN file into dest, streamed (never held in memory) and refused past `max` bytes; it fails when the host goes quiet for `idle`, never for being slow. GOETHE_PKG_TOKEN goes as a bearer token when set.
+    // GET one CDN file into dest, streamed (never held in memory) and refused past `max` bytes; it fails when the host goes quiet for `idle`, never for being slow. GOETHE_PKG_TOKEN goes as a bearer token when set; a file:// package is read from disk.
     let url = format!("{base}/{rel}");
+    if let Some(path) = url.strip_prefix("file://") {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let len = fs::metadata(path).map_err(|e| format!("fetch {rel}: {path}: {e}"))?.len();
+        if len > max {
+            return Err(format!("fetch {rel}: the file is longer than {max} bytes; refused"));
+        }
+        return fs::copy(path, dest).map(|_| ()).map_err(|e| format!("fetch {rel}: {path}: {e}"));
+    }
     let mut req = crate::net::agent_builder().timeout_read(idle).build().get(&url);
     if let Some(tok) = crate::paths::setting("GOETHE_PKG_TOKEN") {
         req = req.set("Authorization", &format!("Bearer {}", tok.trim()));
@@ -477,6 +487,7 @@ fn restart_goethed(home: &Path) -> Result<(), String> {
 
 pub(crate) fn start_upgraded(home: &Path, before: usize, kept: usize) -> Result<(), String> {
     // The new goethed after a keep-engines stop, by systemd when a unit starts it, then the engines it adopts.
+    crate::service::label_programs(home);
     match crate::service::systemctl_restart_args() {
         Some(args) => {
             let ok = Command::new("systemctl").args(&args).status().map_err(|e| e.to_string())?.success();
@@ -520,6 +531,17 @@ fn upgrade_summary(before: usize, kept: usize, running: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_package_is_read_from_disk() {
+        let t = tempfile::tempdir().unwrap();
+        fs::create_dir_all(t.path().join("cdn/bin")).unwrap();
+        fs::write(t.path().join("cdn/bin/x"), "hi").unwrap();
+        let base = format!("file://{}", t.path().join("cdn").display());
+        fetch_pkg_file(&base, "bin/x", &t.path().join("out/x")).unwrap();
+        assert_eq!(fs::read_to_string(t.path().join("out/x")).unwrap(), "hi");
+        assert!(fetch_pkg_file(&base, "missing", &t.path().join("out/y")).unwrap_err().contains("fetch missing"));
+    }
 
     #[test]
     fn a_response_past_the_cap_is_refused_and_not_kept() {

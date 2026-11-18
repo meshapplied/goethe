@@ -57,6 +57,11 @@ check "no system nginx was installed" bash -c '! command -v nginx >/dev/null && 
 check "no Python environment yet" sudo test ! -e /var/lib/goethe/py-env
 sudo /usr/local/bin/goethe up >/tmp/up.log 2>&1 || { fail "root goethe up"; sed 's/^/    | /' /tmp/up.log | tail -8; }
 check "systemd runs goethed" bash -c '[[ "$(systemctl is-active goethed 2>/dev/null)" == active ]]'
+[[ "$(systemctl is-active goethed 2>/dev/null)" == active ]] || {
+  systemctl status goethed --no-pager 2>&1 | tail -n 6 | sed 's/^/    | /'
+  command -v ausearch >/dev/null && sudo ausearch -m avc -ts recent 2>/dev/null | grep -o 'denied.*' | sort -u | head -n 4 | sed 's/^/    | avc /'
+  ls -Z /var/lib/goethe/bin/goethed 2>/dev/null | sed 's/^/    | /'
+}
 for _ in $(seq 1 30); do health && break; sleep 1; done
 check "root's gateway answers" health
 sudo /usr/local/bin/goethe uninstall --yes >/tmp/un.log 2>&1 || { fail "root uninstall"; sed 's/^/    | /' /tmp/un.log | tail -5; }

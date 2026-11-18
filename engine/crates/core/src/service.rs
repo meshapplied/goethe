@@ -587,7 +587,26 @@ pub fn unit_text(home: &Path, wanted_by: &str) -> String {
 }
 
 fn write_unit(path: &Path, home: &Path, wanted_by: &str) -> Result<(), String> {
-    fs::write(path, unit_text(home, wanted_by)).map_err(|e| format!("{}: {e}", path.display()))
+    fs::write(path, unit_text(home, wanted_by)).map_err(|e| format!("{}: {e}", path.display()))?;
+    if path == system_unit_path() {
+        label_programs(home);
+    }
+    Ok(())
+}
+
+pub fn label_programs(home: &Path) {
+    // With SELinux, systemd runs only files labelled as programs, and a home under /var/lib is data: root's goethe binaries get bin_t, kept across a relabel when semanage is there.
+    if unsafe { libc::geteuid() } != 0 || !Path::new("/sys/fs/selinux/enforce").exists() {
+        return;
+    }
+    let bin = home.join("bin");
+    let quiet = |c: &mut Command| c.stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    let spec = format!("{}(/.*)?", bin.display());
+    let recorded = quiet(Command::new("semanage").args(["fcontext", "-a", "-t", "bin_t", &spec]))
+        || quiet(Command::new("semanage").args(["fcontext", "-m", "-t", "bin_t", &spec]));
+    if !(recorded && quiet(Command::new("restorecon").arg("-R").arg(&bin))) {
+        quiet(Command::new("chcon").args(["-R", "-t", "bin_t"]).arg(&bin));
+    }
 }
 
 pub fn cron_line(home: &Path) -> String {
