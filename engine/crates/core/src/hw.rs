@@ -561,21 +561,30 @@ fn gb(mb: u64) -> String {
 }
 
 fn gpu_table(gpus: &[GpuState]) -> crate::term::Table {
-    // One row per GPU: name with SM, NUMA and unified memory below it, VRAM and PCIe; processes are in goethe gpu.
-    let mut table = crate::term::Table::new(&["GPU", "NAME", "VRAM TOTAL", "VRAM FREE", "PCIE"]);
+    // One row per GPU: name with its architecture, NUMA and unified memory below it, memory, and PCIe when the GPU has a link.
+    let word = crate::gpu_kind::host_memory_word(gpus).to_uppercase();
+    let pcie = gpus.iter().any(crate::gpu_kind::has_pcie);
+    let (total, free) = (format!("{word} TOTAL"), format!("{word} FREE"));
+    let mut head = vec!["GPU", "NAME", total.as_str(), free.as_str()];
+    if pcie {
+        head.push("PCIE");
+    }
+    let mut table = crate::term::Table::new(&head);
     for gpu in gpus {
-        let mut notes = vec![format!("SM {}", gpu.compute_capability)];
+        let mut notes: Vec<String> = crate::gpu_kind::arch_label(&gpu.compute_capability).into_iter().collect();
         notes.extend(gpu.numa_node.map(|n| format!("NUMA {n}")));
-        if gpu.unified_memory {
+        if crate::gpu_kind::is_unified(gpu) {
             notes.push("unified memory".to_string());
         }
-        table.row(vec![
-            format!("gpu{}", gpu.index),
-            format!("{}\n{}", gpu.name, notes.join(", ")),
-            gb(gpu.vram_total_mb),
-            gb(gpu.vram_free_mb),
-            format!("PCIe {} x{}", gpu.pcie_gen_max.max(gpu.pcie_gen), gpu.pcie_width_max.max(gpu.pcie_width)),
-        ]);
+        let mut row = vec![format!("gpu{}", gpu.index), format!("{}\n{}", gpu.name, notes.join(", ")), gb(gpu.vram_total_mb), gb(gpu.vram_free_mb)];
+        if pcie {
+            row.push(if crate::gpu_kind::has_pcie(gpu) {
+                format!("PCIe {} x{}", gpu.pcie_gen_max.max(gpu.pcie_gen), gpu.pcie_width_max.max(gpu.pcie_width))
+            } else {
+                "-".to_string()
+            });
+        }
+        table.row(row);
     }
     table
 }
@@ -583,7 +592,8 @@ fn gpu_table(gpus: &[GpuState]) -> crate::term::Table {
 fn print_summary(state: &HardwareState) {
     // GPUs, then host and environment lines; links and processes stay in the JSON.
     println!("Goethe hardware profile at {}", state.profiled_at);
-    println!("Driver: {}", state.driver);
+    let metal = state.gpus.iter().any(|g| crate::gpu_kind::Backend::of(&g.compute_capability) == crate::gpu_kind::Backend::Metal);
+    println!("{}: {}", if metal { "System" } else { "Driver" }, state.driver);
     gpu_table(&state.gpus).print();
     if let (Some(h), Some(e)) = (&state.host, &state.environment) {
         let home = crate::paths::goethe_home();

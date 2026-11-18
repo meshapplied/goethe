@@ -44,6 +44,18 @@ pub fn free_mb(limit_mb: u64, in_use_mb: u64, available_ram_mb: u64) -> u64 {
     limit_mb.saturating_sub(in_use_mb).min(available_ram_mb)
 }
 
+pub fn form_factor_of(battery_ioreg: &str) -> &'static str {
+    // `ioreg -r -c AppleSmartBattery` lists a battery on a MacBook and nothing on a Mac mini, iMac, Studio or Pro.
+    if battery_ioreg.contains("AppleSmartBattery") { "laptop" } else { "desktop" }
+}
+
+pub fn environment_label(form_factor: Option<&str>) -> String {
+    match form_factor {
+        Some(f @ ("laptop" | "desktop")) => format!("macOS {f}"),
+        _ => "macOS".to_string(),
+    }
+}
+
 pub fn parse_version(text: &str) -> Option<(u32, u32)> {
     let mut it = text.trim().split('.');
     Some((it.next()?.parse().ok()?, it.next().and_then(|m| m.parse().ok()).unwrap_or(0)))
@@ -67,6 +79,11 @@ mod imp {
 
     fn total_mb() -> u64 {
         sys::sysctl_u64("hw.memsize").unwrap_or(0) / (1024 * 1024)
+    }
+
+    pub fn form_factor() -> Option<&'static str> {
+        let out = std::process::Command::new("/usr/sbin/ioreg").args(["-r", "-d", "1", "-c", "AppleSmartBattery"]).output().ok()?;
+        out.status.success().then(|| form_factor_of(&String::from_utf8_lossy(&out.stdout)))
     }
 
     pub fn limit_mb() -> u64 {
@@ -204,6 +221,14 @@ mod tests {
         assert_eq!(free_mb(48_000, 8_000, 60_000), 40_000);
         assert_eq!(free_mb(48_000, 8_000, 12_000), 12_000, "other apps hold the rest of memory");
         assert_eq!(free_mb(10_000, 12_000, 30_000), 0);
+    }
+
+    #[test]
+    fn a_battery_makes_a_laptop() {
+        assert_eq!(form_factor_of("+-o AppleSmartBattery  <class AppleSmartBattery, id 0x100000585>"), "laptop");
+        assert_eq!(form_factor_of(""), "desktop");
+        assert_eq!(environment_label(Some("laptop")), "macOS laptop");
+        assert_eq!(environment_label(None), "macOS");
     }
 
     #[test]

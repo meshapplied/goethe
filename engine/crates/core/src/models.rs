@@ -46,7 +46,7 @@ impl Verdict {
         match self {
             Verdict::Unknown => "unknown (run goethe doctor --hardware)".to_string(),
             Verdict::Fits { per_gpu, .. } => format!("fits: {per_gpu:.1} GB per GPU"),
-            Verdict::TooLarge => "does not fit: not enough VRAM".to_string(),
+            Verdict::TooLarge => "does not fit: not enough GPU memory".to_string(),
             Verdict::Unsupported => "does not fit: unsupported architecture".to_string(),
         }
     }
@@ -332,6 +332,8 @@ pub struct PickData {
     pub disk_free_gb: Option<f64>,
     pub models_gb: f64,
     pub rows: Vec<PickRow>,
+    pub gpu_count: usize,
+    pub unified: bool,
 }
 
 fn disk_space_gb(path: &Path) -> Option<(f64, f64)> {
@@ -351,6 +353,7 @@ pub fn picker_data(home: &Path) -> Result<PickData, String> {
     let disk = disk_gb_by_model(&con);
     let hw = crate::placement::load_hw(home).ok_or("no hardware profile yet; run goethe doctor --hardware")?;
     let allowed = View::capacity(home, hw.clone());
+    let (gpu_count, unified) = (hw.gpus.len(), hw.gpus.iter().any(crate::gpu_kind::is_unified));
     let whole = View::whole(home, hw);
     let reg = fetch(&registry_url()).ok();
     let packs = crate::packs::catalog(home).map(|ix| crate::packs::offers_any(&ix, &crate::packs::local_archs(home))).unwrap_or_default();
@@ -398,6 +401,8 @@ pub fn picker_data(home: &Path) -> Result<PickData, String> {
         disk_total_gb: space.map(|s| s.0),
         disk_free_gb: space.map(|s| s.1),
         models_gb: disk.values().sum(),
+        gpu_count,
+        unified,
         rows,
     })
 }

@@ -124,6 +124,7 @@ pub struct Summary {
     pub environment: String,
     pub gpus: usize,
     pub vram_mb: u64,
+    pub memory_word: &'static str,
     pub disk_gb: Option<f64>,
     pub os: String,
 }
@@ -142,13 +143,23 @@ pub struct StatusView {
 }
 
 fn environment(home: &Path) -> String {
-    // Bare metal, a cloud VM (by provider) or a container, from the hardware profile.
+    // Bare metal, a cloud VM (by provider) or a container, from the hardware profile; a Mac says laptop or desktop.
+    if cfg!(target_os = "macos") {
+        return mac_environment();
+    }
     let env = crate::hw::load_hardware_state(home).ok().and_then(|h| h.environment);
     match env {
         Some(e) if e.container.is_some() => format!("container ({})", e.container.unwrap_or_default()),
         Some(e) if e.cloud != "none" && !e.cloud.is_empty() => format!("cloud VM ({})", e.cloud),
         _ => "bare metal".to_string(),
     }
+}
+
+fn mac_environment() -> String {
+    #[cfg(target_os = "macos")]
+    return crate::apple::environment_label(crate::apple::form_factor());
+    #[cfg(not(target_os = "macos"))]
+    String::new()
 }
 
 fn disk_gb(path: &Path) -> Option<f64> {
@@ -294,6 +305,7 @@ impl StatusView {
             environment: environment(&home),
             gpus: self.totals.len(),
             vram_mb: self.totals.values().sum(),
+            memory_word: hw.as_ref().map_or("VRAM", |h| crate::gpu_kind::host_memory_word(&h.gpus)),
             disk_gb: disk_gb(&home),
             os: hw.and_then(|h| h.host).map(|h| h.os.distro).unwrap_or_default(),
         };
@@ -324,14 +336,14 @@ pub fn width_for(terminal: usize) -> usize {
 }
 
 pub fn summary_line(s: &Summary, width: usize) -> String {
-    // Status, environment, GPUs, VRAM, disk and OS on one line; the last items give way when the terminal is narrow.
+    // Status, environment, GPUs, VRAM (GPU memory when unified), disk and OS on one line; the last items give way when the terminal is narrow.
     let state = if s.running { paint("running", Color::Green) } else { paint("stopped", Color::Red) };
     let label = |t: &str| paint(t, Color::Gray);
     let mut parts = vec![
         format!("{} {state}", blue("Status")),
         format!("{} {}", label("Environment"), s.environment),
         format!("{} {}", label("GPUs"), s.gpus),
-        format!("{} {}", label("VRAM"), gb(s.vram_mb)),
+        format!("{} {}", label(s.memory_word), gb(s.vram_mb)),
     ];
     if let Some(d) = s.disk_gb {
         parts.push(format!("{} {}", label("Disk"), size(d)));
@@ -385,7 +397,7 @@ pub fn gpu_lines(gpus: &[GpuLine], width: usize) -> Vec<String> {
         }
     }
     if gpus.is_empty() {
-        out.push(paint("no NVIDIA GPU found (goethe doctor says why)", Color::Gray));
+        out.push(paint("no GPU found (goethe doctor says why)", Color::Gray));
     }
     out
 }
@@ -481,7 +493,7 @@ mod tests {
 
     fn view() -> StatusView {
         StatusView {
-            summary: Summary { running: true, environment: "bare metal".into(), gpus: 2, vram_mb: 2 * 97_887, disk_gb: Some(6000.0), os: "Ubuntu 24.04.4 LTS".into() },
+            summary: Summary { running: true, environment: "bare metal".into(), gpus: 2, vram_mb: 2 * 97_887, memory_word: "VRAM", disk_gb: Some(6000.0), os: "Ubuntu 24.04.4 LTS".into() },
             gpus: vec![
                 GpuLine { index: 0, used_mb: 93_696, goethe_mb: 0, total_mb: 97_887, processes: vec![Proc::Foreign(3909)], denied: true, bandwidth: Some(7) },
                 GpuLine { index: 3, used_mb: 40_000, goethe_mb: 38_000, total_mb: 97_887, processes: vec![Proc::Model(3164098, "nvidia/Qwen3.8-27B-NVFP4".into()), Proc::Model(3164111, "nvidia/Qwen3.8-27B-NVFP4".into())], denied: false, bandwidth: Some(63) },
@@ -555,6 +567,12 @@ mod tests {
             let cpu = t.iter().find(|l| l.contains("\u{25a3} CPU")).unwrap();
             assert_eq!(cpu.chars().count(), 2 + width_for(w) - (width_for(w) - GAP.len()) % 2, "CPU and memory together span the same width");
         }
+    }
+
+    #[test]
+    fn a_unified_host_says_gpu_memory() {
+        let mac = Summary { memory_word: "GPU memory", environment: "macOS laptop".into(), gpus: 1, ..view().summary };
+        assert!(strip(&summary_line(&mac, 200)).contains("Environment macOS laptop   GPUs 1   GPU memory 191.2 GB"));
     }
 
     #[test]

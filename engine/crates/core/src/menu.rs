@@ -654,15 +654,20 @@ impl Picker {
     fn summary(&self) -> Vec<String> {
         // Two lines over the table: VRAM of the whole machine and of the allowed GPUs, then the storage and what the models take.
         let d = &self.data;
-        let label = |s: &str| paint(&format!("{s:<9}"), Color::Bold);
+        let label = |s: &str| paint(&format!("{s:<11}"), Color::Bold);
         let gpus = d.allowed_gpus.iter().map(|g| format!("gpu{g}")).collect::<Vec<_>>().join(" ");
-        let mut out = vec![format!(
-            "  {}{} total{GAP}{} allowed ({})",
-            label("VRAM"),
-            gb(d.total_vram_gb),
-            gb(d.allowed_vram_gb),
-            if gpus.is_empty() { "no GPU allowed".to_string() } else { gpus }
-        )];
+        let word = crate::gpu_kind::memory_word(d.unified);
+        let mut out = vec![if d.gpu_count <= 1 && !gpus.is_empty() {
+            format!("  {}{} total", label(word), gb(d.total_vram_gb))
+        } else {
+            format!(
+                "  {}{} total{GAP}{} allowed ({})",
+                label(word),
+                gb(d.total_vram_gb),
+                gb(d.allowed_vram_gb),
+                if gpus.is_empty() { "no GPU allowed".to_string() } else { gpus }
+            )
+        }];
         out.push(match (d.disk_total_gb, d.disk_free_gb) {
             (Some(t), Some(f)) => format!("  {}{} total{GAP}{} free{GAP}{} used by your models", label("Storage"), gb(t), gb(f), gb(d.models_gb)),
             _ => format!("  {}{} used by your models", label("Storage"), gb(d.models_gb)),
@@ -678,10 +683,14 @@ impl Picker {
             parts.iter().filter(|(on, _)| *on).map(|(_, t)| *t).collect::<Vec<_>>().join(" | ")
         };
         let longest = self.data.rows.iter().map(|r| r.id.chars().count()).max().unwrap_or(5).max(5);
-        let fixed = 4 + 2 + (NUM + GAP.len()) * 2 + 4 + GAP.len();
+        let multi = self.data.gpu_count > 1;
+        let gpus_w = if multi { 4 + GAP.len() } else { 0 };
+        let fixed = 4 + 2 + (NUM + GAP.len()) * 2 + gpus_w;
         let mw = longest.min(width.saturating_sub(fixed + GAP.len())).max(16);
         let nw = width.saturating_sub(fixed + mw + GAP.len());
-        let head = format!("    {:<mw$}  {GAP}{:>NUM$}{GAP}{:>NUM$}{GAP}{:>4}{GAP}{}", "MODEL", "SIZE", "VRAM", "GPUS", if nw >= 8 { "NOTE" } else { "" });
+        let mem = if self.data.unified { "MEMORY" } else { "VRAM" };
+        let gpus_head = if multi { format!("{:>4}{GAP}", "GPUS") } else { String::new() };
+        let head = format!("    {:<mw$}  {GAP}{:>NUM$}{GAP}{:>NUM$}{GAP}{gpus_head}{}", "MODEL", "SIZE", mem, if nw >= 8 { "NOTE" } else { "" });
         let mut out = vec![paint(head.trim_end(), Color::Bold)];
         let at = self.at.min(self.data.rows.len().saturating_sub(1));
         let start = window(self.data.rows.len(), at, rows);
@@ -698,7 +707,8 @@ impl Picker {
                 "" => name,
                 code => sgr(code, &name),
             };
-            let rest = format!("{GAP}{:>NUM$}{GAP}{:>NUM$}{GAP}{:>4}{GAP}", gb(r.size_gb), gb(r.vram_gb), r.gpus);
+            let gpus = if multi { format!("{:>4}{GAP}", r.gpus) } else { String::new() };
+            let rest = format!("{GAP}{:>NUM$}{GAP}{:>NUM$}{GAP}{gpus}", gb(r.size_gb), gb(r.vram_gb));
             let note = if nw >= 8 { fit(&note(r), nw).trim_end().to_string() } else { String::new() };
             out.push(format!("{cursor} {mark} {name}{rest}{}", gray(&note)).trim_end().to_string());
         }
@@ -881,6 +891,8 @@ mod tests {
             disk_free_gb: Some(1200.0),
             models_gb: 120.4,
             rows: vec![row("org/small", false), row("org/mine", true), row("org/large", false)],
+            gpu_count: 4,
+            unified: false,
         });
         p.account = None;
         p
@@ -939,6 +951,16 @@ mod tests {
             assert_eq!(c[end_of("VRAM") - 2..end_of("VRAM")].iter().collect::<String>(), "GB", "{l}");
             assert_eq!(c[end_of("GPUS") - 1], '1', "{l}");
         }
+    }
+
+    #[test]
+    fn a_mac_picker_says_gpu_memory_and_drops_the_gpus_column() {
+        let mut p = picker();
+        (p.data.gpu_count, p.data.unified, p.data.allowed_gpus) = (1, true, vec![0]);
+        let t = text(p.render(120, 30));
+        assert!(t.iter().any(|l| l.contains("GPU memory") && l.contains("382.4 GB total") && !l.contains("allowed")), "{t:?}");
+        let head = t.iter().find(|l| l.contains("MODEL")).unwrap();
+        assert!(head.contains("MEMORY") && !head.contains("VRAM") && !head.contains("GPUS"), "{head}");
     }
 
     #[test]

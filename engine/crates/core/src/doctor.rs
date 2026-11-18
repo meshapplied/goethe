@@ -114,7 +114,6 @@ const MAC_CHECKS: &[(&str, CheckFn)] = &[
     ("nginx", check_nginx),
     ("goethe_home", check_goethe_home),
     ("disk", check_disk),
-    ("ram", check_ram),
     ("state_db", check_state_db),
     ("environment", |_| check("environment", "OK", "macOS: goethe up adds a LaunchAgent, so goethed starts when you log in")),
     ("ports", check_ports),
@@ -145,12 +144,34 @@ pub fn mac_hardware_note(chip: &str, arm64: bool, version: &str, limit_mb: u64, 
     ("OK", text)
 }
 
+pub fn mac_memory_warning(free_mb: u64, smallest: Option<(f64, &str)>) -> Option<String> {
+    // RAM and GPU memory are one pool on a Mac, so the only memory warning is: even the smallest installed model does not fit now.
+    let (weights_gb, id) = smallest?;
+    let need = weights_gb + crate::calc::METAL_OVERHEAD_GB;
+    let free = free_mb as f64 / 1024.0;
+    (free < need).then(|| format!("{id} needs about {need:.1} GB and only {free:.1} GB is free; quit some apps before loading it"))
+}
+
 #[cfg(target_os = "macos")]
-fn check_mac_hardware(_home: &Path) -> Check {
+fn smallest_installed(home: &Path) -> Option<(f64, String)> {
+    let con = crate::db::open(home).ok()?;
+    crate::models::disk_gb_by_model(&con).into_iter().filter(|(_, gb)| *gb > 0.0).map(|(id, gb)| (gb, id)).min_by(|a, b| a.0.total_cmp(&b.0))
+}
+
+#[cfg(target_os = "macos")]
+fn check_mac_hardware(home: &Path) -> Check {
     let g = crate::apple::gpu(&[]);
     let total = crate::sys::memory().total_kb / 1024;
-    let (status, text) = mac_hardware_note(&g.name, crate::apple::apple_silicon(), &crate::apple::macos_version(), g.vram_total_mb, g.vram_free_mb, total);
-    check("hardware", status, text)
+    let (status, mut text) = mac_hardware_note(&g.name, crate::apple::apple_silicon(), &crate::apple::macos_version(), g.vram_total_mb, g.vram_free_mb, total);
+    let smallest = smallest_installed(home);
+    match mac_memory_warning(g.vram_free_mb, smallest.as_ref().map(|(gb, id)| (*gb, id.as_str()))) {
+        Some(w) if status == "OK" => {
+            text.push('\n');
+            text.push_str(&w);
+            check("hardware", "WARN", text)
+        }
+        _ => check("hardware", status, text),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -345,10 +366,10 @@ fn check_hardware(home: &Path) -> Check {
         let um = if g.unified_memory { ", unified memory" } else { "" };
         let sm_note = why.map_or_else(String::new, |w| format!("; {w}"));
         lines.push(format!(
-            "gpu{} {} (SM {}): {:.1} of {:.1} GB free{um}, {foreign} foreign process{plural}{sm_note}",
+            "gpu{} {} ({}): {:.1} of {:.1} GB free{um}, {foreign} foreign process{plural}{sm_note}",
             g.index,
             g.name,
-            g.compute_capability,
+            crate::gpu_kind::arch_label(&g.compute_capability).unwrap_or_else(|| g.compute_capability.clone()),
             g.vram_free_mb as f64 / 1024.0,
             g.vram_total_mb as f64 / 1024.0
         ));
@@ -824,6 +845,14 @@ mod tests {
         assert_eq!(mac_hardware_note("Intel Core i9", false, "14.0", 0, 0, 0).0, "FAIL");
         let (st, text) = mac_hardware_note("Apple M1", true, "13.6", 10_000, 8_000, 16_000);
         assert!(st == "FAIL" && text.contains("macOS 14 or newer"), "{text}");
+    }
+
+    #[test]
+    fn a_mac_warns_only_when_no_installed_model_fits_now() {
+        assert_eq!(mac_memory_warning(4_000, None), None, "nothing installed, nothing to warn about");
+        assert_eq!(mac_memory_warning(4_000, Some((0.3, "small"))), None);
+        let w = mac_memory_warning(4_000, Some((8.0, "big"))).unwrap();
+        assert!(w.contains("big needs about 8.5 GB") && w.contains("3.9 GB is free"), "{w}");
     }
 
     #[test]

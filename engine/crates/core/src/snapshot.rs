@@ -42,6 +42,7 @@ pub struct Environment {
     pub cloud: Option<String>,
     pub container: Option<String>,
     pub virt: Option<String>,
+    pub form_factor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -85,10 +86,14 @@ pub struct PublicGateway {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Gpu {
     pub index: u32,
-    pub uuid: String,
-    pub pci_bus_id: String,
+    pub uuid: Option<String>,
+    pub pci_bus_id: Option<String>,
     pub name: String,
     pub sm: String,
+    pub backend: String,
+    pub arch: Option<String>,
+    pub memory: String,
+    pub system_memory_mb: Option<u64>,
     pub vram_total_mb: u64,
     pub vram_used_mb: u64,
     pub vram_goethe_mb: u64,
@@ -316,7 +321,17 @@ pub fn environment(root: &Path) -> Environment {
         .unwrap_or_default()
         .lines()
         .any(|l| l.starts_with("flags") && l.split_whitespace().any(|f| f == "hypervisor"));
-    classify_environment(env.container.as_deref(), &env.cloud, &dmi("sys_vendor"), &dmi("product_name"), hypervisor)
+    let mut out = classify_environment(env.container.as_deref(), &env.cloud, &dmi("sys_vendor"), &dmi("product_name"), hypervisor);
+    out.form_factor = form_factor();
+    out
+}
+
+fn form_factor() -> Option<String> {
+    // laptop or desktop on a Mac (a battery means a MacBook); other hosts send none.
+    #[cfg(target_os = "macos")]
+    return crate::apple::form_factor().map(str::to_string);
+    #[cfg(not(target_os = "macos"))]
+    None
 }
 
 pub fn classify_environment(container: Option<&str>, cloud: &str, vendor: &str, product: &str, hypervisor: bool) -> Environment {
@@ -345,41 +360,53 @@ pub fn classify_environment(container: Option<&str>, cloud: &str, vendor: &str, 
         (None, None, Some(_)) => "vm",
         _ => "bare_metal",
     };
-    Environment { kind: kind.to_string(), cloud, container, virt: virt.map(str::to_string) }
+    Environment { kind: kind.to_string(), cloud, container, virt: virt.map(str::to_string), form_factor: None }
 }
 
 fn gpus(con: &rusqlite::Connection, home: &Path) -> Vec<Gpu> {
-    // gpu_policy::list_rows (live NVML) joined with the profile's UUIDs and NVML PCI bus ids; empty when the driver does not answer.
+    // gpu_policy::list_rows (live usage) joined with the profile (UUID, unified memory) and NVML PCI bus ids; empty when the GPU does not answer.
     let Ok(rows) = crate::gpu_policy::list_rows(con, home) else {
         return Vec::new();
     };
     let profile = crate::hw::load_hardware_state(home).ok();
-    let nvml = crate::nvidia_driver::nvml().ok();
+    let nvml = if cfg!(target_os = "macos") { None } else { crate::nvidia_driver::nvml().ok() };
+    let system_mb = crate::sys::memory().total_kb / 1024;
     rows.into_iter()
         .take(MAX_GPUS)
         .map(|r| {
-            let uuid = profile.as_ref().and_then(|p| p.gpus.iter().find(|g| g.index == r.index)).map(|g| g.uuid.clone()).unwrap_or_default();
             let pci = nvml
                 .as_ref()
                 .and_then(|n| n.device_by_index(r.index).ok())
                 .and_then(|d| d.pci_info().ok())
-                .map(|p| short_bus_id(&p.bus_id))
-                .unwrap_or_default();
-            Gpu {
-                index: r.index,
-                uuid: clean_text(&uuid, 64),
-                pci_bus_id: pci,
-                name: clean_text(&r.name, 128),
-                sm: platform_sm(&r.compute_capability),
-                vram_total_mb: r.vram_total_mb,
-                vram_used_mb: r.managed_mb + r.foreign_mb,
-                vram_goethe_mb: r.managed_mb,
-                vram_foreign_mb: r.foreign_mb,
-                mem_util_pct: r.memory_util_percent,
-                allowed: r.status == "ALLOWED",
-            }
+                .map(|p| short_bus_id(&p.bus_id));
+            gpu_entry(&r, profile.as_ref().and_then(|p| p.gpus.iter().find(|g| g.index == r.index)), pci, system_mb)
         })
         .collect()
+}
+
+pub fn gpu_entry(r: &crate::gpu_policy::GpuListRow, state: Option<&crate::hw::GpuState>, pci: Option<String>, system_mb: u64) -> Gpu {
+    // One GPU as the platform shows it: what kind it is, and only the identifiers and numbers that kind has.
+    use crate::gpu_kind::{Backend, arch_label, is_unified};
+    let backend = Backend::of(&r.compute_capability);
+    let unified = backend == Backend::Metal || state.is_some_and(is_unified);
+    let uuid = state.map(|g| clean_text(&g.uuid, 64)).filter(|u| backend != Backend::Metal && !u.is_empty());
+    Gpu {
+        index: r.index,
+        uuid,
+        pci_bus_id: pci.filter(|p| !p.is_empty()),
+        name: clean_text(&r.name, 128),
+        sm: platform_sm(&r.compute_capability),
+        backend: backend.id().to_string(),
+        arch: arch_label(&r.compute_capability).map(|a| clean_text(&a, 32)),
+        memory: if unified { "unified" } else { "dedicated" }.to_string(),
+        system_memory_mb: unified.then_some(system_mb).filter(|&mb| mb > 0),
+        vram_total_mb: r.vram_total_mb,
+        vram_used_mb: r.managed_mb + r.foreign_mb,
+        vram_goethe_mb: r.managed_mb,
+        vram_foreign_mb: r.foreign_mb,
+        mem_util_pct: r.memory_util_percent,
+        allowed: r.status == "ALLOWED",
+    }
 }
 
 fn os_name(read: &dyn Fn(&str) -> String) -> String {
@@ -618,7 +645,7 @@ mod tests {
         for key in ["hostname", "goethe_version", "os", "kernel", "uptime_s", "environment", "daemon"] {
             assert!(v["node"].get(key).is_some(), "node.{key}");
         }
-        for key in ["kind", "cloud", "container", "virt"] {
+        for key in ["kind", "cloud", "container", "virt", "form_factor"] {
             assert!(v["node"]["environment"].get(key).is_some(), "environment.{key}");
         }
         for key in ["url", "bind", "interface", "waiting", "port", "public"] {
@@ -693,6 +720,57 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&data).unwrap();
         assert_eq!(v["models"]["installed"], serde_json::json!([]));
         assert_eq!(v["models"]["loaded"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn each_gpu_kind_sends_what_it_has() {
+        let row = |cc: &str| crate::gpu_policy::GpuListRow {
+            index: 0,
+            name: "G".into(),
+            compute_capability: cc.into(),
+            vram_total_mb: 10_000,
+            managed_mb: 100,
+            foreign_mb: 200,
+            status: "ALLOWED".into(),
+            processes: Vec::new(),
+            memory_util_percent: Some(5),
+        };
+        let state = |cc: &str, uuid: &str, unified: bool| crate::hw::GpuState {
+            index: 0,
+            uuid: uuid.into(),
+            name: "G".into(),
+            compute_capability: cc.into(),
+            vram_total_mb: 10_000,
+            vram_used_mb: 300,
+            vram_free_mb: 9_700,
+            pcie_gen: 0,
+            pcie_width: 0,
+            pcie_gen_max: 0,
+            pcie_width_max: 0,
+            running_processes: Vec::new(),
+            unified_memory: unified,
+            numa_node: None,
+        };
+        let card = serde_json::to_value(gpu_entry(&row("12.0"), Some(&state("12.0", "GPU-1", false)), Some("0000:01:00.0".into()), 64_000)).unwrap();
+        assert_eq!(card["backend"], "cuda");
+        assert_eq!(card["arch"], "SM 12.0");
+        assert_eq!(card["sm"], "12.0");
+        assert_eq!(card["memory"], "dedicated");
+        assert_eq!(card["uuid"], "GPU-1");
+        assert!(card["system_memory_mb"].is_null());
+        let mac = serde_json::to_value(gpu_entry(&row("metal"), Some(&state("metal", crate::apple::GPU_UUID, false)), None, 16_384)).unwrap();
+        assert_eq!(mac["backend"], "metal");
+        assert_eq!(mac["arch"], "Metal");
+        assert_eq!(mac["sm"], "");
+        assert_eq!(mac["memory"], "unified");
+        assert_eq!(mac["system_memory_mb"], 16_384);
+        assert!(mac["uuid"].is_null() && mac["pci_bus_id"].is_null(), "no made-up identifiers");
+        let spark = serde_json::to_value(gpu_entry(&row("12.1"), Some(&state("12.1", "GPU-2", true)), Some(String::new()), 128_000)).unwrap();
+        assert_eq!((spark["backend"].as_str(), spark["memory"].as_str()), (Some("cuda"), Some("unified")));
+        assert!(spark["pci_bus_id"].is_null());
+        let odd = serde_json::to_value(gpu_entry(&row("?"), None, None, 0)).unwrap();
+        assert_eq!(odd["backend"], "unknown");
+        assert!(odd["arch"].is_null() && odd["system_memory_mb"].is_null());
     }
 
     #[test]

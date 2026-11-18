@@ -398,7 +398,7 @@ fn gpus() -> Result<(), String> {
             .iter()
             .map(|r| {
                 let used = (r.managed_mb + r.foreign_mb) as f64 / 1024.0;
-                format!("gpu{}  {}  SM {}  {:.1} GB used  {}", r.index, r.name, r.compute_capability, used, r.status)
+                format!("gpu{}  {}  {}  {:.1} GB used  {}", r.index, r.name, crate::gpu_kind::arch_label(&r.compute_capability).unwrap_or_default(), used, r.status)
             })
             .collect();
         options.extend([String::new(), "Back".to_string()]);

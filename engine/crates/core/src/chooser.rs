@@ -278,9 +278,13 @@ fn split_hint(input: &ChooserInput, gpus: &[GpuPlacementInput], hw: Option<&Hard
     })
 }
 
+fn arch(cc: &str) -> String {
+    crate::gpu_kind::arch_label(cc).unwrap_or_else(|| cc.to_string())
+}
+
 fn no_arch_message(input: &ChooserInput, gpus: &[GpuPlacementInput]) -> String {
     // Which architectures the model needs against what the visible GPUs are.
-    let mut have: Vec<String> = gpus.iter().map(|g| format!("GPU {} is SM {}", g.index, g.cc)).collect();
+    let mut have: Vec<String> = gpus.iter().map(|g| format!("GPU {} is {}", g.index, arch(&g.cc))).collect();
     have.dedup();
     let wants = match input.supported_sm.is_empty() {
         true => gpu_arch::supported_text(),
@@ -337,7 +341,7 @@ fn fixed_plan(
         match gpus.iter().find(|x| x.index == *g) {
             Some(x) if !gpu_arch::model_runs_on(&input.supported_sm, &x.cc) => {
                 let why = gpu_arch::unsupported_reason(&x.cc).unwrap_or_else(|| no_arch_message(input, gpus));
-                return fail(format!("GPU {g} (SM {}) cannot run this model; {why}", x.cc));
+                return fail(format!("GPU {g} ({}) cannot run this model; {why}", arch(&x.cc)));
             }
             Some(x) => picked.push(x),
             None => return fail(format!("GPU {g} is not available for placement")),
