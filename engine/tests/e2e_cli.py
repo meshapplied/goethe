@@ -54,7 +54,7 @@ class FreshUser(unittest.TestCase):
         r = c.run("install", *install, "--yes", "--load")
         clean(self, r)
         self.assertLessEqual(r.lines, INSTALL_LINES, r.out + r.err)
-        self.assertRegex(r.out, r"engine +\d+\.\d+\.\d+ ready", "the engine layer was created by this install")
+        self.assertRegex(r.out, r"engine +installing \d+\.\d+\.\d+", "the engine layer was created by this install")
         ps = c.run("ps")
         clean(self, ps)
         self.assertRegex(next(line for line in ps.out.splitlines() if model in line), r"\bgoethe-engine\b")
@@ -83,7 +83,7 @@ class FreshUser(unittest.TestCase):
             clean(self, c.run("login"))
             r = c.run("install", "e2e/packed", "--yes")
             clean(self, r)
-            self.assertRegex(r.out, r"engine +\d+\.\d+\.\d+ ready")
+            self.assertRegex(r.out, r"engine +installing \d+\.\d+\.\d+")
 
     def test_a_pack_only_model_on_a_card_with_no_pack_variant_is_refused_before_any_download(self) -> None:
         with self.pristine() as c:
@@ -209,14 +209,17 @@ class Matrix(unittest.TestCase):
             self.assertEqual(left, [], "no downloader is left running")
             r = c.run("install", "e2e/slow-gguf", "--yes")
             clean(self, r)
-            self.assertIn("weights  1 files", r.out)
+            self.assertIn("e2e/slow-gguf  llama.cpp", r.out, "the rerun finished the install")
 
-    def test_a_pack_that_runs_on_no_variant_refuses_without_fallback_and_serves_plain_with_it(self) -> None:
-        with self.cell(login=True, extra={"E2E_PACK_RUNS": "no"}) as c:
+    def test_a_pack_that_runs_on_no_variant_serves_plain_unless_fallback_is_turned_off(self) -> None:
+        with self.cell(login=True, extra={"E2E_PACK_RUNS": "no", "GOETHE_ALLOW_FALLBACK": "0"}) as c:
             r = c.run("install", "e2e/packed-gguf", "--yes")
             clean(self, r, ok=False)
             self.assertIn("--fallback", r.out + r.err)
-            clean(self, c.run("install", "e2e/packed-gguf", "--yes", "--fallback", "--load"))
+        with self.cell(login=True, extra={"E2E_PACK_RUNS": "no"}) as c:
+            r = c.run("install", "e2e/packed-gguf", "--yes", "--load")
+            clean(self, r)
+            self.assertIn("using its plain runtime", r.out + r.err)
             self.assertEqual(self.runtime_of(c, "e2e/packed-gguf"), "llama.cpp")
 
     def test_a_pack_index_with_a_bad_signature_is_refused_and_nothing_is_downloaded(self) -> None:
