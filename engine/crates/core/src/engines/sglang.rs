@@ -62,7 +62,7 @@ fn memory_args(spec: &EngineSpec, extras: &[String]) -> Vec<String> {
     args.chunks(2).filter(|p| !(user_chunk && p[0] == "--chunked-prefill-size")).flatten().cloned().collect()
 }
 
-const SGLANG_BOOT: &str = "import os,runpy,sys\nsys.argv=['sglang.launch_server',*sys.argv[1:],'--api-key',os.environ['GOETHE_ENGINE_API_KEY']]\nrunpy.run_module('sglang.launch_server',run_name='__main__')\n";
+const SGLANG_BOOT: &str = "import os, runpy, sys\n\nif __name__ == '__main__':\n    sys.argv = ['sglang.launch_server', *sys.argv[1:], '--api-key', os.environ['GOETHE_ENGINE_API_KEY']]\n    runpy.run_module('sglang.launch_server', run_name='__main__')\n";
 
 fn graph_args(max_conc: u64, extras: &[String]) -> Vec<String> {
     // Decode CUDA graphs captured only up to the batch the model runs (its concurrency), not SGLang's default range: a shorter load and less VRAM; graph flags the user set win.
@@ -74,11 +74,12 @@ fn graph_args(max_conc: u64, extras: &[String]) -> Vec<String> {
 }
 
 fn sglang_command(spec: &EngineSpec) -> Command {
+    // The boot script holds no secret (the key comes from the environment), so a plain write in any lib/ mode; rewritten when this goethe's differs.
     let lib = spec.home.join("lib");
     let boot = lib.join("goethe_sglang_boot.py");
-    if !boot.is_file() {
+    if std::fs::read(&boot).ok().as_deref() != Some(SGLANG_BOOT.as_bytes()) {
         let _ = std::fs::create_dir_all(&lib);
-        let _ = crate::platform::write_private(&boot, SGLANG_BOOT.as_bytes());
+        let _ = std::fs::write(&boot, SGLANG_BOOT);
     }
     let mut cmd = Command::new(resolve_python(spec.home));
     cmd.arg("-m")
@@ -217,6 +218,25 @@ mod tests {
             ]
         );
         assert!(!a.get_envs().any(|(k, _)| k.to_string_lossy().starts_with("TERNARY_")));
+    }
+
+    #[test]
+    fn the_boot_script_runs_sglang_only_as_the_main_module() {
+        assert!(super::SGLANG_BOOT.contains("if __name__ == '__main__':"), "spawned scheduler processes re-import the main module; unguarded, each starts a second server");
+        let guarded = super::SGLANG_BOOT.lines().skip_while(|l| !l.starts_with("if __name__")).skip(1);
+        assert!(guarded.clone().all(|l| l.starts_with("    ")) && guarded.count() == 2, "argv and run_module both inside the guard");
+    }
+
+    #[test]
+    fn a_changed_boot_script_is_written_again() {
+        let home = tempfile::tempdir().unwrap();
+        let plain: toml::Value = toml::from_str("runtime = \"sglang\"").unwrap();
+        let boot = home.path().join("lib/goethe_sglang_boot.py");
+        std::fs::create_dir_all(boot.parent().unwrap()).unwrap();
+        std::fs::write(&boot, "an older boot script").unwrap();
+        std::fs::set_permissions(boot.parent().unwrap(), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        super::super::command(&test_spec(home.path(), &plain, &[0])).unwrap();
+        assert_eq!(std::fs::read_to_string(&boot).unwrap(), super::SGLANG_BOOT, "a stale copy is replaced, not kept");
     }
 
     #[test]

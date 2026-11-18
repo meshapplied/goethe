@@ -285,8 +285,8 @@ pub fn run(o: Opts) -> Result<(), String> {
     // Verify the signed package, place goethe, goethed and nginx (handing a running goethed's engines over), then settings, links, certificate, fixes and login.
     let home = crate::paths::goethe_home();
     crate::paths::ensure_layout(&home).map_err(|e| format!("{}: {e}", home.display()))?;
-    let _ = migrate_retired_pkg_env(&home);
     fs::set_permissions(&home, std::os::unix::fs::PermissionsExt::from_mode(0o700)).map_err(|e| format!("{}: {e}", home.display()))?;
+    let _ = migrate_retired_pkg_env(&home);
     let macos = cfg!(target_os = "macos");
     let from = o.from.clone().unwrap_or_else(|| o.pkg.clone()).trim_end_matches('/').to_string();
     let tmp = home.join(".setup-staging");

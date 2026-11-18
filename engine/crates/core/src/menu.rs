@@ -950,6 +950,16 @@ impl SharePage {
             Err(e) => return self.say(e, true),
         };
         let allow: Vec<String> = self.allow.split([',', ' ']).map(str::trim).filter(|c| !c.is_empty()).map(str::to_string).collect();
+        let everyone = allow.len() == 1 && allow[0].eq_ignore_ascii_case("everyone");
+        if allow.is_empty() {
+            self.at = self.slots().iter().position(|s| *s == Slot::Allow).unwrap_or(0);
+            return self.say("Type who may connect: their public IPs or ranges, or everyone to open it to every address".to_string(), true);
+        }
+        if !everyone && allow.iter().any(|c| matches!(c.as_str(), "0.0.0.0/0" | "::/0" | "0.0.0.0" | "*")) {
+            self.at = self.slots().iter().position(|s| *s == Slot::Allow).unwrap_or(0);
+            return self.say("To open it to every address, type everyone instead".to_string(), true);
+        }
+        let allow = if everyone { Vec::new() } else { allow };
         let home = goethe_home();
         match share::open(
             &home,
@@ -958,7 +968,7 @@ impl SharePage {
                 keys: std::slice::from_ref(&name),
                 allow: &allow,
                 port: None,
-                dangerously_allow_all_inbound: false,
+                dangerously_allow_all_inbound: everyone,
             },
         ) {
             Ok(o) => {
@@ -1036,7 +1046,7 @@ impl Page for SharePage {
         let names = if self.names.is_empty() { "no keys yet: create one in API keys".to_string() } else { format!("keys: {}", self.names.join(", ")) };
         out.push(field(Slot::Key, "API key:", &self.key, &names));
         out.push(field(Slot::For, "For:", &self.duration, "e.g. 30m, 5h, 1d; at most 7d"));
-        out.push(field(Slot::Allow, "Allowed IPs:", &self.allow, "optional: any address, or e.g. 203.0.113.7, 198.51.100.0/24"));
+        out.push(field(Slot::Allow, "Allowed IPs:", &self.allow, "required: who may connect, e.g. 203.0.113.7, 198.51.100.0/24; everyone opens it to every address"));
         out.push(String::new());
         let action = |s: Slot, text: &str, color: Option<&str>| {
             let t = match (here == s, color) {
@@ -1655,6 +1665,22 @@ mod tests {
             status: String::new(),
             error: false,
         }
+    }
+
+    #[test]
+    fn a_share_needs_who_may_connect_and_everyone_is_said_on_purpose() {
+        let mut p = share_page(&[]);
+        p.key = "app".into();
+        p.share();
+        assert!(p.error && p.status.contains("Type who may connect"), "an empty list never opens it: {}", p.status);
+        assert_eq!(p.slot(), Slot::Allow, "the cursor goes to the addresses");
+        p.allow = "0.0.0.0/0".into();
+        p.share();
+        assert!(p.error && p.status.contains("type everyone instead"), "{}", p.status);
+        assert!(text(p.render(160, 40)).iter().any(|l| l.contains("Allowed IPs:")));
+        let mut q = share_page(&[]);
+        q.at = q.slots().iter().position(|s| *s == Slot::Allow).unwrap();
+        assert!(text(q.render(200, 40)).iter().any(|l| l.contains("required: who may connect") && l.contains("everyone")));
     }
 
     #[test]

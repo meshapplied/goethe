@@ -482,9 +482,9 @@ struct ShareArgs {
     duration: Option<String>,
     #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::key_names), long, value_name = "NAME_OR_ID", num_args = 1.., value_delimiter = ',', help = "API keys to share (not admin keys), each until DURATION; with stop, the keys to stop sharing.")]
     key: Vec<String>,
-    #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Only these client addresses or ranges may use the keys given, such as 203.0.113.7.")]
+    #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Who may connect (required to open a share): their addresses or ranges, such as --allow 203.0.113.7 198.51.100.0/24; reopening the same keys keeps their last ones.")]
     allow: Vec<String>,
-    #[arg(long, help = "Allow every address on the public gateway (0.0.0.0/0). Rate limits still apply. Not with --allow.")]
+    #[arg(long, help = "Open the public gateway to every address (0.0.0.0/0) on purpose, instead of --allow. Rate limits still apply.")]
     dangerously_allow_all_inbound: bool,
     #[arg(long, help = "The public port (default 8444, or the last one used).")]
     port: Option<u16>,
