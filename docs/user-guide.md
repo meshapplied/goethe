@@ -31,11 +31,21 @@ Goethe turns a Linux machine into your own API, compatible with OpenAI, Anthropi
 
 ## Quick install
 
+**Linux or macOS (Apple Silicon):**
+
 ```bash
 curl -fsSL https://goethe.sh/install.sh | bash
 goethe login
 goethe
 ```
+
+**Windows 10/11 (x64):** one elevated PowerShell command enables WSL2 if needed, installs Ubuntu, runs the Linux installer inside it, then opens a terminal on Goethe:
+
+```powershell
+irm https://goethe.sh/install.ps1 | iex
+```
+
+Run PowerShell as Administrator the first time (WSL features need it). After a reboot the installer continues on its own. GPU inference uses the **Windows** NVIDIA driver 580 or newer; never install a Linux NVIDIA driver inside WSL. From Windows, `localhost` reaches the API after `goethe up`.
 
 `goethe login` links the machine to the Goethe platform, which also unlocks optimised kernels; it is optional. `goethe` on its own starts Goethe and, while nothing is installed, walks you through three steps: install a model, serve it through the API, and configure who can reach it. You can stop after any step and continue later with `goethe`. If you prefer plain commands:
 
@@ -384,7 +394,7 @@ GeForce and TITAN cards need driver 580 or newer. Check the driver with `nvidia-
 
 ## Software requirements
 
-- Linux on x86_64 or ARM64 with glibc 2.30 or newer, for example Ubuntu 20.04+ or Debian 11+, or a Mac with Apple Silicon and macOS 14+.
+- Linux on x86_64 or ARM64 with glibc 2.30 or newer, for example Ubuntu 20.04+ or Debian 11+; a Mac with Apple Silicon and macOS 14+; or Windows 10/11 x64 via WSL2 (Ubuntu), using `install.ps1` above.
 - `curl` and `openssl` to install (as root, the installer adds `openssl` and CA certificates when they are missing). Goethe brings its own nginx; the Python environment comes with the first model you install.
 - Disk space for your models, plus about 2 GB for Goethe itself and about 8 GB more for SGLang, which installs once, with the first model that needs it.
 - No CUDA toolkit: Goethe brings its own CUDA runtime and compiler.
@@ -416,10 +426,11 @@ goethe uninstall           # remove Goethe and its models; add --keep-models to 
 | Environment | Examples |
 |---|---|
 | Your own hardware | Workstations and servers with one or more NVIDIA GPUs, including DGX Spark |
+| Windows PC (WSL2) | Windows 10/11 x64 with Ubuntu in WSL2; NVIDIA driver on Windows 580+ |
 | Cloud GPU virtual machines | AWS, Google Cloud, Azure, Oracle Cloud, Lambda, CoreWeave, Paperspace |
 | GPU containers | RunPod, Vast.ai, and Docker with the NVIDIA Container Toolkit |
 
-Goethe recognises the cloud provider or container it runs in, keeps its files on the persistent volume when there is one, and shows the address to use from outside. In a container, the GPU and its driver come from the host.
+Goethe recognises the cloud provider, container, or WSL environment it runs in, keeps its files on the persistent volume when there is one, and shows the address to use from outside. In a container or WSL, the GPU and its driver come from the host (Windows for WSL).
 
 ## Supported models
 

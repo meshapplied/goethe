@@ -562,6 +562,18 @@ fn check_state_db(home: &Path) -> Check {
 fn check_environment(home: &Path) -> Check {
     // How goethed should be kept running here: systemd units, or nohup/cron in containers.
     let env = crate::host::probe_environment(crate::nginx::public_port_u16(home));
+    if crate::host::is_wsl() {
+        let boot = if env.systemd_pid1 {
+            "systemd is PID 1: goethe up installs a unit"
+        } else {
+            "no systemd: goethe up uses crontab @reboot; set systemd=true under [boot] in /etc/wsl.conf and run wsl --shutdown"
+        };
+        return check(
+            "environment",
+            "INFO",
+            format!("WSL2: {boot}; the NVIDIA driver is on Windows (580 or newer), never inside WSL"),
+        );
+    }
     match (&env.container, env.systemd_pid1) {
         (Some(c), false) => {
             let volume = match &env.persistent_volume {

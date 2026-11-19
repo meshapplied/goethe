@@ -204,8 +204,17 @@ fn detect_container(root: &Path, env: &BTreeMap<String, String>) -> Option<Strin
     None
 }
 
+pub fn is_wsl_root(root: &Path) -> bool {
+    // WSL2: /dev/dxg or Windows driver libs under /usr/lib/wsl/lib (also used with a fake root in tests).
+    root.join("dev/dxg").exists() || root.join("usr/lib/wsl/lib").is_dir()
+}
+
+pub fn is_wsl() -> bool {
+    is_wsl_root(Path::new("/"))
+}
+
 fn detect_cloud(root: &Path, env: &BTreeMap<String, String>) -> (String, Option<String>) {
-    // Provider env markers win over DMI strings because GPU clouds run on other vendors' hardware.
+    // Provider env wins over DMI; WSL2's Microsoft Virtual Machine DMI is not Azure.
     let has_prefix = |p: &str| env.keys().any(|k| k.starts_with(p));
     if let Some(pod) = env.get("RUNPOD_POD_ID") {
         return ("runpod".into(), Some(pod.clone()));
@@ -238,6 +247,9 @@ fn detect_cloud(root: &Path, env: &BTreeMap<String, String>) -> (String, Option<
         return ("gcp".into(), None);
     }
     if vendor == "Microsoft Corporation" && product == "Virtual Machine" {
+        if is_wsl_root(root) {
+            return ("none".into(), None);
+        }
         return ("azure".into(), None);
     }
     if chassis_tag == "OracleCloud.com" {
@@ -584,6 +596,17 @@ mod tests {
             ("aws", vec![("sys/class/dmi/id/sys_vendor", "Amazon EC2\n"), ("sys/class/dmi/id/board_asset_tag", "i-0abc\n")], vec![], "aws", None),
             ("gcp", vec![("sys/class/dmi/id/product_name", "Google Compute Engine\n")], vec![], "gcp", None),
             ("azure", vec![("sys/class/dmi/id/sys_vendor", "Microsoft Corporation\n"), ("sys/class/dmi/id/product_name", "Virtual Machine\n")], vec![], "azure", None),
+            (
+                "wsl-not-azure",
+                vec![
+                    ("sys/class/dmi/id/sys_vendor", "Microsoft Corporation\n"),
+                    ("sys/class/dmi/id/product_name", "Virtual Machine\n"),
+                    ("usr/lib/wsl/lib/.keep", ""),
+                ],
+                vec![],
+                "none",
+                None,
+            ),
             ("oci", vec![("sys/class/dmi/id/chassis_asset_tag", "OracleCloud.com\n")], vec![], "oci", None),
             ("docker", vec![(".dockerenv", ""), ("proc/1/cgroup", "0::/\n")], vec![], "none", Some("docker")),
             ("k8s", vec![("proc/1/cgroup", "0::/kubepods/besteffort\n")], vec![("KUBERNETES_SERVICE_HOST", "10.0.0.1")], "none", Some("kubernetes")),
@@ -606,6 +629,9 @@ mod tests {
             }
             if name == "aws" {
                 assert_eq!(e.instance_id.as_deref(), Some("i-0abc"));
+            }
+            if name == "wsl-not-azure" {
+                assert!(is_wsl_root(root.path()), "{name}");
             }
             assert_eq!(e.systemd_pid1, name == "lambda" || name == "bare", "{name}");
         }

@@ -25,6 +25,14 @@ curl -fsSL https://goethe.sh/install.sh | bash
 goethe
 ```
 
+On Windows 10/11 (x64), from an elevated PowerShell:
+
+```powershell
+irm https://goethe.sh/install.ps1 | iex
+```
+
+That enables WSL2 if needed, installs Ubuntu, runs the Linux installer there, and opens a terminal on Goethe. GPU drivers stay on Windows (580+).
+
 `goethe` on its own starts Goethe and, the first time, walks you through three steps: install a model, serve it through the API, and configure who can reach it. If you prefer plain commands, these do the same:
 
 ```bash

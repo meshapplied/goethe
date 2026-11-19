@@ -90,7 +90,11 @@ jobs:
         run: python3 tests/lint_style.py
       - name: Shell syntax of installer and packaging scripts
         working-directory: goethe
-        run: for f in cdn/install.sh packaging/*.sh tests/gate.sh tests/*.sh; do bash -n "$f"; done
+        run: |
+          for f in cdn/install.sh packaging/*.sh tests/gate.sh tests/*.sh; do bash -n "$f"; done
+          test -f cdn/install.ps1
+          # Refuse an empty or non-UTF8 Windows installer stub.
+          python3 -c "p=open('cdn/install.ps1','rb').read(); assert p.startswith(b'#') and b'WSL' in p and len(p)>500"
 
   attribution:
     runs-on: ubuntu-24.04

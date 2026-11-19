@@ -1,6 +1,6 @@
 # Goethe
 
-Serves LLMs on NVIDIA GPUs (Ampere, Ada, Hopper and Blackwell, SM 8.0 to 12.1) behind one API that accepts the OpenAI, Anthropic (`/v1/messages`) and LiteLLM schemas at once. Rust control plane (`goethe` CLI and `goethed` daemon), SGLang engines, nginx gateway. Linux only (glibc 2.30 or newer, x86_64 and aarch64).
+Serves LLMs on NVIDIA GPUs (Ampere, Ada, Hopper and Blackwell, SM 8.0 to 12.1) behind one API that accepts the OpenAI, Anthropic (`/v1/messages`) and LiteLLM schemas at once. Rust control plane (`goethe` CLI and `goethed` daemon), SGLang engines, nginx gateway. Linux (glibc 2.30+, x86_64 and aarch64), macOS Apple Silicon, and Windows 10/11 x64 via WSL2.
 
 This README is for building and releasing Goethe. To install and use it, see the [user guide](../docs/user-guide.md).
 
@@ -8,7 +8,9 @@ This README is for building and releasing Goethe. To install and use it, see the
 
     curl -fsSL https://goethe.sh/install.sh | bash
 
-The installer verifies a signed manifest, creates a Python environment with SGLang, installs `goethe` and `goethed` and links `goethe` into `/usr/local/bin` (or `~/.local/bin`), then ends with `goethe`. It does not start goethed or turn on start at boot; `goethe` or `goethe up` does. Re-running it over a running goethed applies the new binaries to it and keeps engines serving. No root needed. State lives in `$GOETHE_HOME`, else in the home whose `bin/` holds the running binary (links are followed, so the linked `goethe` finds a custom home), else `/workspace/.goethe`, else `/var/lib/goethe`, else `~/.goethe`.
+On Windows (elevated PowerShell), `irm https://goethe.sh/install.ps1 | iex` enables WSL2 if needed and runs the Linux installer inside Ubuntu.
+
+The Linux installer verifies a signed manifest, creates a Python environment with SGLang, installs `goethe` and `goethed` and links `goethe` into `/usr/local/bin` (or `~/.local/bin`), then ends with `goethe`. It does not start goethed or turn on start at boot; `goethe` or `goethe up` does. Re-running it over a running goethed applies the new binaries to it and keeps engines serving. No root needed. State lives in `$GOETHE_HOME`, else in the home whose `bin/` holds the running binary (links are followed, so the linked `goethe` finds a custom home), else `/workspace/.goethe`, else `/var/lib/goethe`, else `~/.goethe`.
 
 To install from a local release tree (testing before publishing):
 

@@ -6,6 +6,7 @@ on:
     branches: [dev, main]
     paths:
       - "goethe/cdn/install.sh"
+      - "goethe/cdn/install.ps1"
       - "goethe/crates/core/src/setup.rs"
       - "goethe/crates/core/src/fix.rs"
       - "goethe/crates/core/src/fix_driver.sh"

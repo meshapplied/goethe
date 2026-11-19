@@ -327,11 +327,13 @@ pub fn environment(root: &Path) -> Environment {
 }
 
 fn form_factor() -> Option<String> {
-    // laptop or desktop on a Mac (a battery means a MacBook); other hosts send none.
+    // laptop or desktop on a Mac (a battery means a MacBook); WSL2 on Linux; other hosts send none.
     #[cfg(target_os = "macos")]
     return crate::apple::form_factor().map(str::to_string);
     #[cfg(not(target_os = "macos"))]
-    None
+    {
+        crate::host::is_wsl().then(|| "wsl".to_string())
+    }
 }
 
 pub fn classify_environment(container: Option<&str>, cloud: &str, vendor: &str, product: &str, hypervisor: bool) -> Environment {
