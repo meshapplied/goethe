@@ -1,6 +1,6 @@
 import unittest
 
-from goethe import hw
+from lab import hw
 
 LINE = "0, NVIDIA GeForce RTX 5090, 32607, 32100, 580.178.04, 12.0, 16, 16"
 

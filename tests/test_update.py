@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from goethe.engine import Install
-from goethe.update import check
+from lab.engine import Install
+from lab.update import check
 
 ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
@@ -98,7 +98,7 @@ class Check(unittest.TestCase):
                 seen.append(cmd)
                 return real(cmd, *args, **kwargs)
 
-            with unittest.mock.patch("goethe.update.subprocess.run", spy):
+            with unittest.mock.patch("lab.update.subprocess.run", spy):
                 rows = {c.name: c for c in check(inst, pin)}
         self.assertEqual(rows["digest"].status, "ok")
         self.assertEqual(rows["digest"].detail, "c9da62f164a33a1f, replay is not run here")

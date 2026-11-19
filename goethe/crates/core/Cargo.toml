@@ -1,0 +1,25 @@
+# goethe-core library crate.
+
+[package]
+name = "goethe-core"
+version = "0.3.4"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+libc = "0.2"
+nvml-wrapper = { version = "0.10", default-features = false }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+flate2 = "1"
+sha2 = "0.10"
+toml = "0.8"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
+[features]
+test-release-key = []
+
+[dev-dependencies]
+tempfile = "3"

@@ -4,7 +4,7 @@ import time
 import unittest
 from pathlib import Path
 
-from goethe import fit, registry, resolve
+from lab import fit, registry, resolve
 from tests.fixtures import RTX_5090
 
 MODEL = registry.load()["qwen3-8-27b"]

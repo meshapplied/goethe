@@ -1,0 +1,13 @@
+diff --git a/goethe/crates/core/src/packs.rs b/goethe/crates/core/src/packs.rs
+--- a/goethe/crates/core/src/packs.rs
++++ b/goethe/crates/core/src/packs.rs
+@@ -432,7 +432,8 @@
+ }
+ 
+ pub fn runnable(e: &Entry) -> bool {
+-    runnable_at(e, crate::pyenv::ENGINE_VERSION)
++    let _ = e;
++    true
+ }
+ 
+ pub fn runnable_at(e: &Entry, engine: &str) -> bool {

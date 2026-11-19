@@ -1,0 +1,16 @@
+diff --git a/goethe/crates/core/src/install.rs b/goethe/crates/core/src/install.rs
+--- a/goethe/crates/core/src/install.rs
++++ b/goethe/crates/core/src/install.rs
+@@ -312,8 +312,10 @@
+                 break 'packed false;
+             }
+             crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
+-            let plan = crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home))?
+-                .ok_or_else(|| format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch))?;
++            let plan = match crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home)) {
++                Ok(Some(p)) => p,
++                _ => break 'packed false,
++            };
+             if let Some(why) = refused_before_download(home, &plan, &crate::packs::python_runner(home)) {
+                 println!("{}", refuse(why));
+                 break 'packed false;

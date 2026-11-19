@@ -1,4 +1,4 @@
-"""engine/tests/accept.sh against a fake goethe: the table, the JSON, the pack-runtime rule."""
+"""goethe/tests/accept.sh against a fake goethe: the table, the JSON, the pack-runtime rule."""
 
 import json
 import os
@@ -9,7 +9,7 @@ from pathlib import Path
 
 from tests.fixtures import REPO
 
-SCRIPT = REPO / "engine" / "tests" / "accept.sh"
+SCRIPT = REPO / "goethe" / "tests" / "accept.sh"
 FAKE = r"""#!/usr/bin/env bash
 home="$GOETHE_HOME/models"
 case "$1" in

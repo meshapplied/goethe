@@ -12,7 +12,7 @@ from pathlib import Path
 
 from tests.fixtures import REPO
 
-INSTALL = REPO / "engine" / "cdn" / "install.sh"
+INSTALL = REPO / "goethe" / "cdn" / "install.sh"
 TOKEN = 'tok"en\\with-quotes'
 
 

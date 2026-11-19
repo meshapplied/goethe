@@ -1,0 +1,545 @@
+// goethe api expose: a guided choice between local, VPN and public access to the gateway.
+
+use crate::netif::{self, Iface, Net};
+use crate::nginx::{self, InterfaceAddr};
+use crate::paths::goethe_home;
+use crate::security;
+use std::io::{IsTerminal, Write};
+use std::net::{IpAddr, Ipv4Addr};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Local,
+    Vpn,
+    Public,
+}
+
+impl Mode {
+    pub fn parse(raw: &str) -> Result<Mode, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "local" => Ok(Mode::Local),
+            "vpn" => Ok(Mode::Vpn),
+            "public" => Ok(Mode::Public),
+            other => Err(format!("unknown mode {other:?}: use local, vpn or public")),
+        }
+    }
+}
+
+pub struct ApiOpts {
+    pub mode: Option<Mode>,
+    pub vpn_ip: Option<IpAddr>,
+    pub interface: Option<String>,
+    pub allow: Vec<String>,
+    pub yes: bool,
+    pub dangerously_allow_all_inbound: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Network {
+    pub iface: Iface,
+    pub ranges: Vec<Net>,
+}
+
+pub fn networks() -> Vec<Network> {
+    // Private networks this machine is on, tunnels first, each with the ranges it reaches.
+    let routes = netif::routes();
+    netif::candidates(&netif::interfaces(&routes))
+        .into_iter()
+        .map(|iface| {
+            let ranges = netif::reach(&iface, &routes);
+            Network { iface, ranges }
+        })
+        .collect()
+}
+
+fn network_label(n: &Network, width: usize) -> String {
+    // "wg0   10.8.0.2   reaches 10.8.0.0/24", padded so the menu lines up.
+    let reaches = if n.ranges.is_empty() {
+        "range unknown, you will be asked".to_string()
+    } else {
+        format!("reaches {}", n.ranges.iter().map(Net::to_string).collect::<Vec<_>>().join(", "))
+    };
+    format!("{:<width$}  {:<15}  {reaches}", n.iface.name, n.iface.addr.to_string())
+}
+
+const PUBLIC_WARNING: &str = "exposing the API on a public network is not recommended.
+  - Anyone who can reach this machine can attempt to connect; only the allowlist and API keys stop them.
+  - Allow only the client IPs you trust (goethe api allow add <ip>/32) and give every client its own key.
+  - Open the gateway port in your firewall or router yourself; Goethe does not change them.
+  - The certificate is self-signed, so clients must trust it or skip verification.";
+
+fn interactive() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+fn ask(question: &str, default: &str) -> Result<String, String> {
+    // One line from the terminal; an empty answer takes the default.
+    eprint!("{question} ");
+    std::io::stderr().flush().ok();
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf).map_err(|e| e.to_string())?;
+    let answer = buf.trim();
+    Ok(if answer.is_empty() { default.to_string() } else { answer.to_string() })
+}
+
+fn confirm(question: &str, default_yes: bool, yes: bool) -> Result<bool, String> {
+    // A y/n question; --yes answers yes, and without a terminal the default stands.
+    if yes {
+        return Ok(true);
+    }
+    if !interactive() {
+        return Ok(default_yes);
+    }
+    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    let a = ask(&format!("{question} {hint}"), if default_yes { "y" } else { "n" })?;
+    Ok(matches!(a.to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
+fn is_everyone(cidr: &str) -> bool {
+    cidr.ends_with("/0")
+}
+
+const RESTRICT_QUESTION: &str = "Restrict API access to specific IP addresses?";
+
+fn current_text() -> Result<String, String> {
+    // The bind, port and allowlist as they are before any change.
+    let home = goethe_home();
+    let list = security::allowlist_list()?;
+    let list = if list.is_empty() { "empty".to_string() } else { list.join(", ") };
+    let follows = nginx::bind_interface(&home).map(|n| format!(" (following {n})")).unwrap_or_default();
+    Ok(format!(
+        "Gateway now: listening on {}{follows} port {}; allowlist: {list}",
+        nginx::public_bind(&home),
+        nginx::public_port_u16(&home)
+    ))
+}
+
+fn choose_mode(nets: &[Network]) -> Result<Mode, String> {
+    // The three choices in an arrow-key menu, VPN preselected when a tunnel is up; a numbered prompt when raw mode fails.
+    let detected = if nets.is_empty() {
+        "none found, you can name one".to_string()
+    } else {
+        format!("found {}", nets.iter().map(|n| n.iface.name.as_str()).collect::<Vec<_>>().join(", "))
+    };
+    let options = vec![
+        "Local only: programs on this machine".to_string(),
+        format!("VPN or private network (recommended): {detected}"),
+        "Public network (not recommended): any address that can reach this machine".to_string(),
+    ];
+    let modes = [Mode::Local, Mode::Vpn, Mode::Public];
+    let default = if nets.iter().any(|n| n.iface.tunnel) { 1 } else { 0 };
+    match crate::term::select(&options, default) {
+        Ok(Some(i)) => {
+            eprintln!();
+            return Ok(modes[i]);
+        }
+        Ok(None) => return Err("cancelled; nothing changed".to_string()),
+        Err(_) => {}
+    }
+    for (i, o) in options.iter().enumerate() {
+        eprintln!("  {}) {o}", i + 1);
+    }
+    loop {
+        let a = ask(&format!("Choice [{}]:", default + 1), &(default + 1).to_string())?;
+        if let Some(m) = a.parse::<usize>().ok().and_then(|n| modes.get(n.wrapping_sub(1))) {
+            eprintln!();
+            return Ok(*m);
+        }
+        match Mode::parse(&a) {
+            Ok(m) => return Ok(m),
+            Err(_) => eprintln!("type 1, 2 or 3"),
+        }
+    }
+}
+
+fn allow(cidr: &str, note: &str, say: bool) -> Result<(), String> {
+    // Add one allowlist entry unless an equal one is already there; a stopped gateway still keeps the saved entry.
+    let canonical = security::canonical_cidr(cidr)?;
+    if security::allowlist_list()?.contains(&canonical) {
+        return Ok(());
+    }
+    let added = security::allowlist_add(&canonical, Some(note));
+    let saved = security::allowlist_list()?.contains(&canonical);
+    match added {
+        Ok(()) if say => println!("allowed {canonical} ({note})"),
+        Ok(()) => {}
+        Err(e) if saved && say => println!("allowed {canonical} ({note}); {e}"),
+        Err(_) if saved => {}
+        Err(e) => return Err(e),
+    }
+    Ok(())
+}
+
+fn bind(ip: &str) -> Result<(), String> {
+    println!("{}", nginx::set_public_bind(&goethe_home(), ip)?);
+    Ok(())
+}
+
+fn configure_local() -> Result<String, String> {
+    // Loopback bind and 127.0.0.1 allowed: only programs on this machine reach the API.
+    bind("127.0.0.1")?;
+    allow("127.0.0.1/32", "this machine", true)?;
+    Ok("127.0.0.1".to_string())
+}
+
+enum Target {
+    Interface(Network),
+    Address(Ipv4Addr, Vec<Net>),
+}
+
+impl Target {
+    fn addr(&self) -> Ipv4Addr {
+        match self {
+            Target::Interface(n) => n.iface.addr,
+            Target::Address(ip, _) => *ip,
+        }
+    }
+
+    fn ranges(&self) -> &[Net] {
+        match self {
+            Target::Interface(n) => &n.ranges,
+            Target::Address(_, r) => r,
+        }
+    }
+
+    fn who(&self) -> String {
+        match self {
+            Target::Interface(n) => format!("{} clients", n.iface.name),
+            Target::Address(..) => "VPN clients".to_string(),
+        }
+    }
+}
+
+fn by_interface(name: &str, nets: &[Network]) -> Result<Target, String> {
+    // A listed network, or any interface with an IPv4 address (a tunnel on a public address, a bridge the list leaves out).
+    if let Some(n) = nets.iter().find(|n| n.iface.name == name) {
+        return Ok(Target::Interface(n.clone()));
+    }
+    if !netif::valid_name(name) {
+        return Err(format!("{name:?} is not a network interface name"));
+    }
+    let routes = netif::routes();
+    let iface = netif::interfaces(&routes)
+        .into_iter()
+        .find(|i| i.name == name)
+        .ok_or_else(|| format!("{name} has no IPv4 address on this host; connect that network first (ip -4 addr show {name})"))?;
+    let ranges = netif::reach(&iface, &routes);
+    Ok(Target::Interface(Network { iface, ranges }))
+}
+
+fn by_address(ip: IpAddr, nets: &[Network]) -> Result<Target, String> {
+    // A fixed address of this machine; its ranges come from the interface that carries it.
+    let IpAddr::V4(v4) = ip else { return Err("the address must be IPv4".to_string()) };
+    if let Some(n) = nets.iter().find(|n| n.iface.addr == v4) {
+        return Ok(Target::Address(v4, n.ranges.clone()));
+    }
+    let routes = netif::routes();
+    let iface = netif::interfaces(&routes)
+        .into_iter()
+        .find(|i| i.addr == v4)
+        .ok_or_else(|| format!("{v4} is not an address of this host; a VPN without its own interface (userspace mode) needs local mode and the VPN's own port forwarding"))?;
+    Ok(Target::Address(v4, netif::reach(&iface, &routes)))
+}
+
+fn ask_other(nets: &[Network]) -> Result<Target, String> {
+    let a = ask("Interface name (e.g. wg0) or IP address of this machine:", "")?;
+    if a.is_empty() {
+        return Err("cancelled; nothing changed".to_string());
+    }
+    match a.parse::<IpAddr>() {
+        Ok(ip) => by_address(ip, nets),
+        Err(_) => by_interface(&a, nets),
+    }
+}
+
+fn pick_network(opts: &ApiOpts, nets: &[Network]) -> Result<Target, String> {
+    // --interface, --vpn-ip, the user's pick, or without a terminal the only network (or the only tunnel); never a guess among several.
+    if let Some(name) = &opts.interface {
+        return by_interface(name.trim(), nets);
+    }
+    if let Some(ip) = opts.vpn_ip {
+        return by_address(ip, nets);
+    }
+    let names = || nets.iter().map(|n| n.iface.name.as_str()).collect::<Vec<_>>().join(", ");
+    if !interactive() || opts.yes {
+        let tunnels: Vec<&Network> = nets.iter().filter(|n| n.iface.tunnel).collect();
+        return match (nets.len(), tunnels.len()) {
+            (0, _) => Err("no private network found on this machine; connect your VPN, or pass --interface <name>".to_string()),
+            (1, _) => Ok(Target::Interface(nets[0].clone())),
+            (_, 1) => Ok(Target::Interface(tunnels[0].clone())),
+            _ => Err(format!("several networks ({}); pass --interface <name>", names())),
+        };
+    }
+    if nets.is_empty() {
+        eprintln!("No private network found. Name the interface or address your VPN uses.");
+        return ask_other(nets);
+    }
+    let width = nets.iter().map(|n| n.iface.name.len()).max().unwrap_or(0);
+    let mut labels: Vec<String> = nets.iter().map(|n| network_label(n, width)).collect();
+    labels.push("Another interface or address...".to_string());
+    eprintln!("Which network?");
+    match crate::term::select(&labels, 0) {
+        Ok(Some(i)) if i < nets.len() => return Ok(Target::Interface(nets[i].clone())),
+        Ok(Some(_)) => return ask_other(nets),
+        Ok(None) => return Err("cancelled; nothing changed".to_string()),
+        Err(_) => {}
+    }
+    for (i, l) in labels.iter().enumerate() {
+        eprintln!("  {}) {l}", i + 1);
+    }
+    let a = ask("Choice [1]:", "1")?;
+    match a.parse::<usize>().ok().and_then(|n| n.checked_sub(1)) {
+        Some(i) if i < nets.len() => Ok(Target::Interface(nets[i].clone())),
+        Some(i) if i == nets.len() => ask_other(nets),
+        _ => Err(format!("no choice {a}")),
+    }
+}
+
+fn vpn_ranges(opts: &ApiOpts, target: &Target) -> Result<Vec<String>, String> {
+    // --allow, or the network's ranges with the usual offer to narrow them; asked outright when the ranges are unknown.
+    let raw = if !opts.allow.is_empty() {
+        opts.allow.join(",")
+    } else if target.ranges().is_empty() {
+        if !interactive() || opts.yes {
+            return Err(format!("which addresses reach {} is unknown; pass --allow <cidr>", target.addr()));
+        }
+        ask("Addresses or ranges to allow, comma separated (e.g. 10.8.0.0/24):", "")?
+    } else {
+        let default = target.ranges().iter().map(Net::to_string).collect::<Vec<_>>().join(",");
+        let specific = interactive() && !opts.yes && confirm(RESTRICT_QUESTION, false, false)?;
+        if specific {
+            ask(&format!("Addresses or ranges to allow, comma separated [{default}]:"), &default)?
+        } else {
+            default
+        }
+    };
+    let ranges: Vec<String> = raw.split(',').map(str::trim).filter(|r| !r.is_empty()).map(String::from).collect();
+    if ranges.is_empty() {
+        return Err("no addresses to allow; nothing changed".to_string());
+    }
+    for r in &ranges {
+        security::canonical_cidr(r)?;
+        if is_everyone(r) {
+            return Err(format!("{r} lets every address in; for that use --mode public"));
+        }
+    }
+    Ok(ranges)
+}
+
+fn configure_vpn(opts: &ApiOpts, nets: &[Network]) -> Result<String, String> {
+    // Listen on the chosen network only (following its interface) and on 127.0.0.1, and allow its range or the addresses named.
+    let target = pick_network(opts, nets)?;
+    let ranges = vpn_ranges(opts, &target)?;
+    let place = match &target {
+        Target::Interface(n) => n.iface.addr.to_string(),
+        Target::Address(ip, _) => format!("{ip} (fixed)"),
+    };
+    println!("The gateway will listen on {place} and on 127.0.0.1, and allow {}.", ranges.join(", "));
+    if !confirm("Apply?", true, opts.yes)? {
+        return Err("nothing changed".to_string());
+    }
+    match &target {
+        Target::Interface(n) => drop(nginx::set_public_bind_interface(&goethe_home(), &n.iface.name)?),
+        Target::Address(ip, _) => drop(nginx::set_public_bind(&goethe_home(), &ip.to_string())?),
+    }
+    allow("127.0.0.1/32", "this machine", false)?;
+    for r in &ranges {
+        allow(r, &target.who(), false)?;
+    }
+    println!("\n{} Gateway updated and live", crate::term::paint("\u{2713}", crate::term::Color::Green));
+    Ok(target.addr().to_string())
+}
+
+fn resolve_public_allows(opts: &ApiOpts) -> Result<Vec<String>, String> {
+    // Named clients required; --yes alone must not bind every interface on a leftover allowlist.
+    if opts.dangerously_allow_all_inbound {
+        if !opts.allow.is_empty() {
+            return Err("--dangerously-allow-all-inbound does not mix with --allow".to_string());
+        }
+        return Ok(vec!["0.0.0.0/0".to_string()]);
+    }
+    let mut ranges = opts.allow.clone();
+    if ranges.is_empty() {
+        if !interactive() || opts.yes {
+            return Err(
+                "public needs who may connect: goethe api expose public --allow <their-ip>/32 --yes\n\
+                 (to allow every address on purpose: --dangerously-allow-all-inbound --yes)"
+                    .to_string(),
+            );
+        }
+        if !confirm(RESTRICT_QUESTION, true, false)? {
+            return Err(
+                "public needs client addresses (--allow <their-ip>/32), or --dangerously-allow-all-inbound --yes"
+                    .to_string(),
+            );
+        }
+        let a = ask("Client IPs or ranges to allow, comma separated (e.g. 203.0.113.7/32):", "")?;
+        ranges = a.split(',').map(str::trim).filter(|r| !r.is_empty()).map(String::from).collect();
+    }
+    if ranges.is_empty() {
+        return Err(
+            "public needs who may connect: goethe api expose public --allow <their-ip>/32 --yes".to_string(),
+        );
+    }
+    for r in &ranges {
+        security::canonical_cidr(r)?;
+        if is_everyone(r) {
+            return Err(format!(
+                "{r} opens every address; use --dangerously-allow-all-inbound --yes"
+            ));
+        }
+    }
+    Ok(ranges)
+}
+
+fn configure_public(opts: &ApiOpts) -> Result<String, String> {
+    // Warn, require named clients (or an explicit world-open), confirm, bind every interface.
+    println!("{}: {PUBLIC_WARNING}", crate::term::paint("WARNING", crate::term::Color::Yellow));
+    let port = nginx::public_port_u16(&goethe_home());
+    let public = lookup_public_ip();
+    let public_host = public.as_ref().ok().map(|ip| ip.to_string());
+    for line in public_ip_lines(public, port, &nginx::interface_addrs().unwrap_or_default()) {
+        println!("{line}");
+    }
+    let ranges = resolve_public_allows(opts)?;
+    if !opts.yes && !interactive() {
+        return Err(
+            "public open needs a terminal to confirm (y), or pass --yes with --allow <their-ip>/32".to_string(),
+        );
+    }
+    let confirm_q = if opts.dangerously_allow_all_inbound {
+        "Bind every network interface and allow EVERY client address?"
+    } else {
+        "Expose the API on every network interface (0.0.0.0) for the allowlisted clients?"
+    };
+    if !confirm(confirm_q, false, opts.yes)? {
+        return Err("nothing changed (goethe api expose local or goethe api expose vpn to pick one)".to_string());
+    }
+    if opts.dangerously_allow_all_inbound {
+        println!("Every address that can reach this machine may connect; each request still needs an API key. Rate limits still apply.");
+    }
+    bind("0.0.0.0")?;
+    allow("127.0.0.1/32", "this machine", true)?;
+    for r in &ranges {
+        allow(r, "public client", true)?;
+    }
+    Ok(public_host.unwrap_or_else(|| "0.0.0.0".to_string()))
+}
+
+fn lookup_public_ip() -> Result<IpAddr, String> {
+    // This machine's address as the internet sees it, asked of the Goethe platform; GOETHE_PUBLIC_IP overrides, GOETHE_PUBLIC_IP_LOOKUP=0 disables.
+    crate::platform::lookup_public_ip(&goethe_home())
+}
+
+fn public_ip_lines(ip: Result<IpAddr, String>, port: u16, local: &[InterfaceAddr]) -> Vec<String> {
+    // What the public IP means for clients: the API URL on it, and whether a router must forward the port.
+    match ip {
+        Ok(ip) => {
+            let mut lines = vec![format!("Your public IP: {ip} -> API: https://{ip}:{port}/v1")];
+            if !local.iter().any(|a| a.ip == ip) {
+                lines.push(format!(
+                    "This machine is behind NAT ({ip} is not on its interfaces): forward TCP port {port} on your router or cloud firewall to it."
+                ));
+            }
+            lines
+        }
+        Err(e) => vec![format!("Your public IP: unknown, {e}")],
+    }
+}
+
+pub fn apply_access(opts: &ApiOpts) -> Result<String, String> {
+    // Show the current setup, pick a mode (asked on a terminal), apply bind and allowlist; returns the API base URL.
+    println!("{}", current_text()?);
+    let nets = networks();
+    let mode = match opts.mode {
+        Some(m) => m,
+        None if interactive() => choose_mode(&nets)?,
+        None => return Err("no terminal to ask on: pass --mode local, --mode vpn or --mode public".to_string()),
+    };
+    let bound = match mode {
+        Mode::Local => configure_local()?,
+        Mode::Vpn => configure_vpn(opts, &nets)?,
+        Mode::Public => configure_public(opts)?,
+    };
+    let port = nginx::public_port_u16(&goethe_home());
+    let host = match bound.as_str() {
+        "0.0.0.0" => lookup_public_ip().map_or_else(|_| "<this machine's address>".to_string(), |ip| ip.to_string()),
+        _ => bound,
+    };
+    Ok(format!("https://{host}:{port}/v1"))
+}
+
+pub fn run_api(opts: ApiOpts) -> Result<(), String> {
+    // goethe api expose: who can reach the API, then a key if none exists, then the URL.
+    let api = apply_access(&opts)?;
+    println!("\nAPI: {api}\n\n{}", crate::term::commands("For the models and keys run:", &["goethe api"]));
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(name: &str, ip: &str, prefix: u8) -> InterfaceAddr {
+        InterfaceAddr { name: name.to_string(), ip: ip.parse().unwrap(), prefix }
+    }
+
+    #[test]
+    fn public_ip_lines_show_the_api_and_spot_nat() {
+        let local = vec![addr("eno1", "192.168.1.20", 24)];
+        let nat = public_ip_lines(Ok("203.0.113.5".parse().unwrap()), 8080, &local);
+        assert_eq!(nat[0], "Your public IP: 203.0.113.5 -> API: https://203.0.113.5:8080/v1");
+        assert!(nat[1].contains("behind NAT") && nat[1].contains("8080"));
+        let direct = public_ip_lines(Ok("192.168.1.20".parse().unwrap()), 8080, &local);
+        assert_eq!(direct.len(), 1);
+        let down = public_ip_lines(Err("lookup disabled".to_string()), 8080, &local);
+        assert_eq!(down, vec!["Your public IP: unknown, lookup disabled".to_string()]);
+    }
+
+    #[test]
+    fn modes_parse_and_everyone_ranges_are_spotted() {
+        assert_eq!(Mode::parse("VPN"), Ok(Mode::Vpn));
+        assert!(Mode::parse("lan").is_err());
+        assert!(is_everyone("0.0.0.0/0") && is_everyone("::/0") && !is_everyone("203.0.113.7/32"));
+        assert_eq!(Net::new("10.1.2.3".parse().unwrap(), 16).to_string(), "10.1.0.0/16");
+    }
+
+    fn opts(allow: &[&str], yes: bool, dangerously: bool) -> ApiOpts {
+        ApiOpts {
+            mode: Some(Mode::Public),
+            vpn_ip: None,
+            interface: None,
+            allow: allow.iter().map(|s| (*s).to_string()).collect(),
+            yes,
+            dangerously_allow_all_inbound: dangerously,
+        }
+    }
+
+    #[test]
+    fn public_yes_without_allow_is_refused() {
+        let err = resolve_public_allows(&opts(&[], true, false)).unwrap_err();
+        assert!(err.contains("--allow"), "{err}");
+    }
+
+    #[test]
+    fn public_allow_is_accepted() {
+        let got = resolve_public_allows(&opts(&["203.0.113.7/32"], true, false)).unwrap();
+        assert_eq!(got, vec!["203.0.113.7/32".to_string()]);
+    }
+
+    #[test]
+    fn public_everyone_cidr_needs_dangerously_flag() {
+        let err = resolve_public_allows(&opts(&["0.0.0.0/0"], true, false)).unwrap_err();
+        assert!(err.contains("dangerously-allow-all-inbound"), "{err}");
+    }
+
+    #[test]
+    fn public_dangerously_opens_everyone_and_rejects_mixed_allow() {
+        assert_eq!(
+            resolve_public_allows(&opts(&[], true, true)).unwrap(),
+            vec!["0.0.0.0/0".to_string()]
+        );
+        let err = resolve_public_allows(&opts(&["203.0.113.7/32"], true, true)).unwrap_err();
+        assert!(err.contains("does not mix"), "{err}");
+    }
+}

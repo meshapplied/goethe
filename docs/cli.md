@@ -96,7 +96,7 @@ Downloads a model from Hugging Face, or registers a model folder on this machine
 | `--hf-token` | Ask for a Hugging Face token, for gated or private models; used for this download only, never stored |
 | `--yes` | Don't ask: download without confirming, and with `--load` load next to other programs on the GPU |
 | `--force` | Download again, or replace an existing install, and rebuild the model's saved settings from the defaults |
-| `--fallback` | If the model's kernel pack cannot run here, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also `GOETHE_ALLOW_FALLBACK=1` |
+| `--fallback` | Serve the model with its plain runtime (llama.cpp or SGLang) when its kernel pack cannot run here, even with `GOETHE_ALLOW_FALLBACK=0` (the plain runtime takes over by default) |
 | `--name <id>` | Id for a local folder |
 | `--copy` | Copy a local folder instead of linking to it |
 | `-- <options>` | Extra engine options, after `--`, saved with the model |
@@ -160,7 +160,7 @@ Loads a model and waits until it answers. Goethe picks the GPUs and sizes the me
 | `--dry-run` | Show where the model would be placed now and the memory it needs, and load nothing; with `--save` it only stores the defaults |
 | `--replica` | Start another copy, to serve more traffic |
 | `--yes` | Don't ask: load on busy GPUs, or next to other programs on the GPU |
-| `--fallback` | If the model's kernel pack fails to open, serve it with the plain runtime instead of failing |
+| `--fallback` | Serve the model with its plain runtime when its kernel pack fails to open, even with `GOETHE_ALLOW_FALLBACK=0` |
 | `--no-wait` | Return without waiting until it's ready |
 | `--json` | Print the instance as JSON |
 | `-- <options>` | Extra engine options, after `--` |
@@ -271,24 +271,24 @@ Who can reach the API. Without an argument it shows where the API listens and ho
 | `goethe api expose` | Show where the API listens and who may connect (`--json` for scripts) |
 | `goethe api expose local` | This machine only |
 | `goethe api expose vpn` | A VPN or other private network (recommended) |
-| `goethe api expose public` | A public address |
-| `goethe api expose <address or interface>` | Listen on `127.0.0.1` (this machine only), `0.0.0.0` (all addresses), one IP of this machine, or an interface such as `wg0`, whose address is followed |
+| `goethe api expose public` | A public address (needs `--allow <their-ip>/32` and `--yes`, or `y` on a terminal) |
+| `goethe api expose <address or interface>` | Listen on `127.0.0.1`, one IP of this machine, or an interface such as `wg0` (followed). Not `0.0.0.0`: use `expose public` |
 
 For a VPN it lists the networks this machine is on, with the ranges each one reaches, and works with any VPN that has a network interface. It then asks whether to restrict access to specific IP addresses. The gateway follows the chosen interface: when its address changes, it moves within a few seconds, and while the interface has no address only this machine can connect.
 
+`expose public` never binds every interface on a leftover allowlist. Name the clients with `--allow`, confirm with `--yes` (or `y`), and only then does it listen on `0.0.0.0`. Opening every client address needs the hidden `--dangerously-allow-all-inbound --yes`.
+
 | Option | Description |
 |---|---|
-| `--interface <name>` | With `vpn` or `public`: the network interface to serve, such as `wg0`; needed without a terminal when there are several |
-| `--ip <ip>` | With `vpn` or `public`: a fixed address of this machine instead of an interface |
-| `--allow <cidr>` | With `vpn` or `public`: a client address or range to allow; repeatable |
-| `--yes` | Apply without questions (`public` still refuses `0.0.0.0/0`) |
+| `--interface <name>` | With `vpn`: the network interface to serve, such as `wg0`; needed without a terminal when there are several |
+| `--allow <cidr>` | With `vpn` or `public`: a client address or range to allow; **required for public**; repeatable |
+| `--yes` | Apply without questions. Public still needs `--allow` (or `--dangerously-allow-all-inbound`) |
 | `--json` | With no argument: the status as JSON |
 
 ```bash
 goethe api expose local
 goethe api expose vpn --interface wg0
-goethe api expose public --allow 203.0.113.7/32
-goethe api expose 0.0.0.0
+goethe api expose public --allow 203.0.113.7/32 --yes
 ```
 
 ### `goethe api allow`
@@ -318,11 +318,12 @@ The DNS record that serves the API under your own domain name, with this machine
 Opens the API on a public address for a limited time, for API keys you choose, so you can give someone outside your network a URL and a key. The normal API address, local or VPN, stays as it is.
 
 ```
-goethe api share 5h --key my-app                   # share my-app for 5 hours
-goethe api share 1d --key ci --allow 203.0.113.7   # also share ci, for a day, from one address
-goethe api share                                   # status: URL, each key with its time left and addresses
-goethe api share stop --key ci                     # stop sharing one key
-goethe api share stop                              # close the public gateway
+goethe api share 5h --key my-app --allow 203.0.113.7/32              # prints the URL, the key and the certificate to send
+goethe api share 5h --key my-app --dangerously-allow-all-inbound     # every address (rate limits still apply)
+goethe api share 5h --key my-app                                     # reopen: keeps addresses from the last share of those keys
+goethe api share                                                     # status: URL, each key with its time left and addresses
+goethe api share stop --key ci                                       # stop sharing one key
+goethe api share stop                                                # close the public gateway
 ```
 
 Every shared key uses the same public gateway, each until its own time and from its own addresses. The gateway stays open until the last key's time ends. A key whose time has ended is refused while the others keep working, and the addresses only it allowed are dropped from the gateway. Sharing a key again starts its time over (`5h` means 5 hours from now) and replaces its addresses; the other keys are not touched. Without `--key`, the keys of the last opening are shared again. Opening prints the URL, each key with the models it may use, the certificate to send along, and a `curl` command to try it. The keys stay the same, so a recipient can keep using the key you sent. Connections in progress are not interrupted. The menu's Public address page does the same with a form: the key, how long, and optional addresses. `goethe status` shows the gateway while it is open, and a node linked to the platform shows the public URL and when it closes on its page.
@@ -331,7 +332,8 @@ Every shared key uses the same public gateway, each until its own time and from 
 |---|---|
 | `<duration>` | How long to share the keys: minutes, hours or days, such as `30m`, `5h` or `1d`, at most `7d`. `stop` stops sharing; nothing shows the status |
 | `--key <name or id>` | API keys to share, each until the duration; repeatable or comma-separated. With `stop`, the keys to stop sharing |
-| `--allow <cidr>` | Only these client addresses or ranges may use the keys given, such as `203.0.113.7`; repeatable. Without it any address may, with the key |
+| `--allow <cidr>` | Only these client addresses or ranges may use the keys given, such as `203.0.113.7`; repeatable. Without it, addresses from the last share of those keys are kept; with none, Goethe refuses to open |
+| `--dangerously-allow-all-inbound` | Allow every address (`0.0.0.0/0`). Rate limits still apply (10 requests/s per client, burst 20, 16 connections). Not with `--allow` |
 | `--port <port>` | The public port (default `8444`, or the last one used) |
 
 The recipient verifies the gateway with the certificate goethe prints, `GOETHE_HOME/nginx/certs/public.crt`. It holds no secret: `curl --cacert public.crt https://<address>:8444/v1/models -H "Authorization: Bearer <key>"`. Most OpenAI-compatible clients take it through `SSL_CERT_FILE` or their CA-bundle setting. If nobody can connect, forward the port to this machine on your router or allow it in your cloud firewall; goethe does not open ports on routers. The public listener uses IPv4.
@@ -347,7 +349,7 @@ The recipient verifies the gateway with the certificate goethe prints, `GOETHE_H
 - **API routes only:** health, readiness, admin and metrics endpoints are not served publicly.
 - **HTTPS only:** TLS 1.2 or 1.3, with its own certificate for the public listener. Plain HTTP connections are dropped.
 - **Stricter limits than the normal address:** 10 requests per second per client address (bursts of 20) and 16 connections per address, plus the same body size limit and header and body timeouts.
-- **Optional address limit per key:** a key shared with `--allow` works only from those addresses, checked on every request; nginx also admits only the addresses of the shared keys when every key has a limit.
+- **Client address required:** every shared key has an allowlist (`--allow`, or addresses kept from the last share of those keys). Nginx admits only that union and always ends with `deny all`. Every address (`0.0.0.0/0`) needs `--dangerously-allow-all-inbound`; this machine's own public IP is refused as `--allow`. Goethe also checks the client on every public request.
 - **Checks before opening:** nothing changes unless every check passes: the gateway and goethed are running, the keys are valid, and the port is free and is not the normal gateway's port. If nginx does not accept the new listener, the previous state is restored.
 
 ## Learning and traces
@@ -418,9 +420,11 @@ Installs the latest Goethe. Loaded models keep serving. It then checks the kerne
 
 | Command | Description |
 |---|---|
-| `goethe update` | Update Goethe and the kernel packs |
+| `goethe update` | Update Goethe, bundled nginx when its sha differs, already-installed engines, and kernel packs |
 | `goethe update engine` | Update only the installed engines (the ternary runtime too, when it is installed) |
 | `goethe update rollback` | Put the previous kernel pack of every model that has one back |
+
+CLI help text stays the source of truth for flags and examples. A later pass can regenerate the command tables from clap while keeping the prose paragraphs above hand-written.
 
 | Option | Description |
 |---|---|

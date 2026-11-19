@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""uv for the commands bootstrap.sh runs: a venv, lockfile installs (-r), and a wheel or editable with no -r."""
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+FAKE = Path(os.environ.get("E2E_FAKE_DIR", HERE))
+args = sys.argv[1:]
+
+
+def site(python):
+    env = Path(os.path.abspath(python)).parent.parent
+    return next((env / "lib").glob("python3*/site-packages"))
+
+
+def lay_dist(sp: Path, name: str, version: str) -> None:
+    name = name.replace("-", "_").lower()
+    (sp / f"{name}-{version}.dist-info").mkdir(exist_ok=True)
+    (sp / f"{name}-{version}.dist-info" / "METADATA").write_text(f"Name: {name}\nVersion: {version}\n")
+
+
+if args[:1] == ["venv"]:
+    target = next(a for a in args[1:] if not a.startswith("-") and a not in ("3.11",))
+    shutil.rmtree(target, ignore_errors=True)
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", target], check=True)
+elif args[:2] == ["pip", "install"]:
+    python = args[args.index("--python") + 1]
+    sp = site(python)
+    time.sleep(float(os.environ.get("FAKE_UV_SECONDS", "0")))
+    if "-r" in args:
+        req = Path(args[args.index("-r") + 1])
+        for line in req.read_text().splitlines():
+            m = re.match(r"^([A-Za-z0-9_.-]+)\s*(?:==\s*([^\s;\\]+))?", line.strip())
+            if not m or line.lstrip().startswith(("#", "-")):
+                continue
+            name, version = m.group(1).replace("-", "_").lower(), m.group(2) or "0"
+            if name == "goethe_engine":
+                version = re.search(r"goethe_engine-([0-9.]+)-", line).group(1)
+                shutil.copytree(FAKE / "goethe_engine", sp / "goethe_engine", dirs_exist_ok=True)
+            lay_dist(sp, name, version)
+            if name == "huggingface_hub":
+                hf = Path(python).parent / "hf"
+                hf.write_text(f"#!{os.path.abspath(python)}\n" + (FAKE / "hf").read_text().split("\n", 1)[1])
+                hf.chmod(0o755)
+    else:
+        # Wheel path or editable: bootstrap's GOETHE_SGLANG_WHEEL / -e fork install.
+        lay_dist(sp, "sglang", "0.0.0.dev1+e2e")
+else:
+    sys.exit(f"fake uv: unsupported {args}")

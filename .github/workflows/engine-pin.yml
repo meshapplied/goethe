@@ -1,4 +1,4 @@
-# Opens a PR to dev that moves engine/goethe-engine/PIN to the newest goethe-engine release (wheel URL and checked sha256).
+# Opens a PR to dev that moves goethe/goethe-engine/PIN to the newest goethe-engine release (wheel URL and checked sha256).
 name: engine-pin
 on:
   schedule:
@@ -24,7 +24,7 @@ jobs:
         run: |
           tag="$(gh release view -R meshapplied/goethe-engine --json tagName -q .tagName)"
           ver="${tag#v}"
-          have="$(sed -n 's/^GOETHE_ENGINE_VERSION=//p' engine/goethe-engine/PIN)"
+          have="$(sed -n 's/^GOETHE_ENGINE_VERSION=//p' goethe/goethe-engine/PIN)"
           newest="$(printf '%s\n%s\n' "$have" "$ver" | sort -V | tail -1)"
           if [[ "$ver" == "$have" || "$newest" != "$ver" ]]; then
             echo "pin $have is current (latest release $ver)"
@@ -47,7 +47,7 @@ jobs:
           want="$(curl -fsSL "$url.sha256" | cut -d' ' -f1)"
           got="$(sha256sum "$RUNNER_TEMP/$wheel" | cut -d' ' -f1)"
           [[ "$want" =~ ^[0-9a-f]{64}$ && "$want" == "$got" ]] || { echo "sha256 of $wheel does not match its .sha256"; exit 1; }
-          printf 'GOETHE_ENGINE_VERSION=%s\nGOETHE_ENGINE_WHEEL_URL=%s\nGOETHE_ENGINE_WHEEL_SHA256=%s\n' "$VER" "$url" "$got" >engine/goethe-engine/PIN
+          printf 'GOETHE_ENGINE_VERSION=%s\nGOETHE_ENGINE_WHEEL_URL=%s\nGOETHE_ENGINE_WHEEL_SHA256=%s\n' "$VER" "$url" "$got" >goethe/goethe-engine/PIN
       - name: Pull request
         if: steps.rel.outputs.ver
         env:

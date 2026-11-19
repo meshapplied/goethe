@@ -8,18 +8,18 @@ from pathlib import Path
 
 from tests.fixtures import REPO
 
-LINT = REPO / "engine" / "tests" / "lint_style.py"
+LINT = REPO / "goethe" / "tests" / "lint_style.py"
 
 
 def lint(tree: Path) -> str:
-    out = subprocess.run([sys.executable, str(LINT), str(tree / "engine")], capture_output=True, text=True)
+    out = subprocess.run([sys.executable, str(LINT), str(tree / "goethe")], capture_output=True, text=True)
     return out.stdout + out.stderr
 
 
 class ReleaseKeyGuard(unittest.TestCase):
     def tree(self, root: Path, toml: str = "[features]\ntest-release-key = []\n", release: str = "") -> None:
-        (root / "engine" / "packaging").mkdir(parents=True, exist_ok=True)
-        (root / "engine" / "Cargo.toml").write_text(toml)
+        (root / "goethe" / "packaging").mkdir(parents=True, exist_ok=True)
+        (root / "goethe" / "Cargo.toml").write_text(toml)
         (root / ".github" / "workflows").mkdir(parents=True, exist_ok=True)
         (root / ".github" / "workflows" / "release.yml").write_text(release)
         (root / ".github" / "workflows" / "ci.yml").write_text(

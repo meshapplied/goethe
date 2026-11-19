@@ -214,7 +214,7 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 | `goethe trace` | Record requests and replies as training traces (`on`, `off`, `--key`); see [traces.md](traces.md) |
 | `goethe learn` | Let a session keep what compaction would drop (`on`, `off`, `--model`); see [learn.md](learn.md) |
 | `goethe api domain` | DNS record for your own hostname (`check <name>`) |
-| `goethe api share 5h --key <name>` | Open the API on a public address for a while for chosen keys (`stop` closes it) |
+| `goethe api share 5h --key <name> --allow <their-ip>/32` | Open the API on a public address for a while for chosen keys from their IP (`stop` closes it) |
 
 ### GPUs and system
 
@@ -222,7 +222,7 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 |---|---|
 | `goethe gpu` | VRAM, processes and bandwidth per GPU, live until `q`; `allow` / `deny` GPUs |
 | `goethe doctor` | Setup check with a fix for each problem; `--hardware` prints GPUs, CPU, memory, disk and cloud provider |
-| `goethe update` | Install the latest Goethe (`--check` to only look; `engine`, `rollback`) |
+| `goethe update` | Install the latest Goethe (`--check` to only look; `engine` or `rollback` as a word) |
 | `goethe uninstall` | Remove Goethe and its models (`--keep-models` to keep them) |
 | `goethe completion install` | Tab completion for bash, zsh or fish: commands, models, keys, GPUs |
 | `goethe login` | Optional: link this node to the Goethe platform to see its health there (`--authkey` without a browser) |
@@ -240,7 +240,9 @@ The model id is the Hugging Face repo name. Any [supported model](#supported-mod
 
 **Optimised kernels:** some models have a kernel pack: the optimised kernels for every supported GPU microarchitecture, with the model's quantizations and configs (NVIDIA CUDA for now; other platforms such as AMD ROCm later). Packs are available to nodes logged in to the Goethe platform (`goethe login`), and `goethe install` uses them automatically. A node that is not logged in is asked to log in, or continues with SGLang. `goethe models` marks the models that have optimised kernels for your machine.
 
-**GGUF models:** a Hugging Face GGUF repo (`org/model-GGUF`, or `org/model-GGUF:Q8_0` for one quant) is served by llama.cpp on one GPU; a GGUF with a mean, cls or last pooling type is served as an embedding model (`goethe run <model> "text"`). If a model's kernel pack cannot open or does not run on your GPU, goethe stops with one line naming the reason; `--fallback` on `goethe install` or `goethe load` (or `GOETHE_ALLOW_FALLBACK=1`) serves the GGUF with llama.cpp instead. A model that has only a pack, and none for your GPU, is refused before anything is downloaded, with or without `--fallback`.
+**GGUF models:** a Hugging Face GGUF repo (`org/model-GGUF`, or `org/model-GGUF:Q8_0` for one quant) is served by llama.cpp on one GPU; a GGUF with a mean, cls or last pooling type is served as an embedding model (`goethe run <model> "text"`). If a model's kernel pack cannot open or does not run on your GPU, goethe says why in one line and serves the model with its plain runtime instead (`GOETHE_ALLOW_FALLBACK=0` makes that an error). A model that has only a pack, and none for your GPU, is refused before anything is downloaded.
+
+**Which engine serves a model:** goethe decides before downloading anything. On a node logged in to the platform, a goethe kernel pack for the model and your GPU is used automatically. Otherwise SGLang serves it when SGLang supports its architecture and quantization; else llama.cpp serves the repo's GGUF files, or the GGUF build Hugging Face lists for the model (the publisher's own `<model>-GGUF` repo first), and the name you typed becomes an alias of it. A model none of them serves is refused with each engine's reason. On a Mac llama.cpp serves every model. `goethe models` shows the engine of each model in its ENGINE column.
 
 **Gated or private models:** accept the license on the model's Hugging Face page, create a read token at huggingface.co/settings/tokens, then run `goethe install <org>/<model> --hf-token` and type the token when asked. It is used for that download only and never stored. In the guided `goethe` setup, choose "A private or gated model".
 
@@ -305,7 +307,7 @@ goethe api expose vpn      # or local, or public; asks who may connect
 - **VPN or private network (recommended):** connect your VPN first, then pick it from the list. Any VPN with a network interface works, and so does a cloud VM's private network. Goethe lists tunnels and interfaces on private addresses, leaves out container bridges and public network cards, and shows the range each one reaches, taken from the system's routes. When a VPN routes each device separately, the private block its address is in (such as `100.64.0.0/10` or `10.0.0.0/8`) is used, so devices added later can connect too; you can narrow it to specific addresses. Default routes are never allowed. The gateway follows the interface: a new address after a reconnect or a reboot is picked up within a few seconds, and while the interface is down only this machine can connect (`goethe status` says so). The allowlist itself only changes when you run `goethe api expose` again; `goethe doctor` warns if it no longer lets the network's clients in. A VPN without an interface (userspace mode) can't be listened on directly: use local mode and the VPN's own port forwarding.
 - **Public network:** any address that can reach this machine. You open the port in your firewall yourself.
 
-It then asks whether to restrict access to specific IP addresses, and offers to create the first key. In scripts: `goethe api expose vpn --yes`, or `goethe api expose public --allow 203.0.113.7 --yes`.
+It then asks whether to restrict access to specific IP addresses, and offers to create the first key. In scripts: `goethe api expose vpn --yes`, or `goethe api expose public --allow 203.0.113.7/32 --yes`. Public always needs `--allow` and a confirm (`--yes` or `y`); it will not open every interface on a leftover allowlist alone.
 
 ### Keys
 
@@ -337,13 +339,13 @@ goethe api allow remove 192.168.1.0/24
 To give someone outside your network access for a limited time, without changing how the API is normally reached:
 
 ```bash
-goethe api share 5h --key my-app      # prints the URL, the key and the certificate to send
-goethe api share 1d --key ci          # another key on the same address, for a day
-goethe api share stop --key ci        # stop sharing one key
-goethe api share stop                 # close early
+goethe api share 5h --key my-app --allow 203.0.113.7/32   # prints the URL, the key and the certificate to send
+goethe api share 1d --key ci --allow 203.0.113.7/32       # another key on the same address, for a day
+goethe api share stop --key ci                            # stop sharing one key
+goethe api share stop                                     # close early
 ```
 
-The public address exists only while some key is shared, accepts only the keys you chose (never admin keys), each until its own time, and closes by itself when the last one ends. Keys stay the same every time. The menu's Public address page does the same with a form. Details and the full list of security precautions: [`goethe api share`](cli.md#goethe-api-share-duration).
+The public address exists only while some key is shared, accepts only the keys you chose (never admin keys), each until its own time and from the client addresses you named with `--allow` (or kept from the last share of those keys), and closes by itself when the last one ends. Keys stay the same every time. The menu's Public address page does the same with a form. Details and the full list of security precautions: [`goethe api share`](cli.md#goethe-api-share-duration).
 
 ### Address, aliases and your own domain
 
@@ -462,6 +464,8 @@ Optional. Set them in your shell, or in `goethe.env` inside Goethe's folder so t
 | `GOETHE_MAX_BODY_MB` | Largest request size in MB (default 10) |
 | `GOETHE_GATEWAY_RATE_PER_IP` | Requests per second one client address may send (default 100, bursts up to twice that) |
 | `GOETHE_GATEWAY_CONN_PER_IP` | Open API connections one client address may hold (default 512) |
+| `GOETHE_SHARE_RATE_PER_IP` | Same for `goethe api share` (default 10, bursts up to twice that) |
+| `GOETHE_SHARE_CONN_PER_IP` | Open share connections one client address may hold (default 16) |
 | `GOETHE_PLATFORM_URL` | Platform `goethe login` links to (default `https://goethe.sh`) |
 | `GOETHE_PUBLIC_IP_URL` | Where `goethe api expose`, `goethe api domain` and `goethe doctor` look up the public IP (default: the platform's `/api/ip`; a plain-text or `{"ip": ...}` answer both work) |
 | `GOETHE_PUBLIC_IP_LOOKUP=0` | Never look up the public IP (set `GOETHE_PUBLIC_IP` to name it) |

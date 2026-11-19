@@ -1,4 +1,4 @@
-# macOS (Apple Silicon): unit tests, clippy, the macOS package build (goethe, goethed, nginx) and the end-to-end test.
+# macOS (Apple Silicon): path-scoped unit/clippy vs package+e2e. Same shape as ci.yml changes/gate.
 name: macos
 
 on:
@@ -7,11 +7,14 @@ on:
   pull_request:
     branches: [dev, main]
     paths:
-      - "engine/crates/**"
-      - "engine/cdn/install.sh"
-      - "engine/packaging/build_macos.sh"
-      - "engine/tests/macos_e2e.sh"
-      - "engine/llama-cpp/PIN"
+      - "goethe/crates/**"
+      - "goethe/Cargo.toml"
+      - "goethe/Cargo.lock"
+      - "goethe/rust-toolchain*"
+      - "goethe/cdn/install.sh"
+      - "goethe/packaging/**"
+      - "goethe/tests/macos_e2e.sh"
+      - "goethe/llama-cpp/PIN"
       - ".github/workflows/macos.yml"
   workflow_dispatch:
 
@@ -20,38 +23,124 @@ permissions:
 
 concurrency:
   group: macos-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  macos:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      unit: ${{ steps.flags.outputs.unit }}
+      e2e: ${{ steps.flags.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: What the pull request touches (push/dispatch runs everything)
+        id: flags
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # unit: crates/toolchain. e2e: packaging, installer, mac e2e script, llama PIN.
+          unit=true e2e=true
+          if [[ -n "${BASE}" ]]; then
+            unit=false e2e=false
+            while IFS= read -r f; do
+              [[ -z "$f" ]] && continue
+              case "$f" in
+                .github/workflows/macos.yml)
+                  unit=true; e2e=true ;;
+                goethe/crates/*|goethe/Cargo.toml|goethe/Cargo.lock|goethe/rust-toolchain*)
+                  unit=true ;;
+                goethe/packaging/*|goethe/tests/macos_e2e.sh|goethe/cdn/install.sh|goethe/llama-cpp/PIN)
+                  e2e=true ;;
+              esac
+            done <<<"$(git diff --name-only "${BASE}" HEAD)"
+          fi
+          {
+            echo "unit=${unit}"
+            echo "e2e=${e2e}"
+          } >>"${GITHUB_OUTPUT}"
+          echo "unit=${unit} e2e=${e2e}"
+
+  unit:
+    needs: changes
+    if: ${{ needs.changes.outputs.unit == 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        working-directory: goethe
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: goethe
+          shared-key: macos-unit
+      - name: Unit tests
+        working-directory: goethe
+        run: cargo test --workspace --locked
+      - name: Clippy
+        working-directory: goethe
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
+
+  e2e:
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
-        working-directory: engine
+        working-directory: goethe
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustc --version
-      - name: Unit tests
-        working-directory: engine
-        run: cargo test --workspace --locked
-      - name: Clippy
-        working-directory: engine
-        run: cargo clippy --workspace --locked --all-targets -- -D warnings
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: goethe
+          shared-key: macos-e2e
       - name: Build the macOS package
-        run: bash engine/packaging/build_macos.sh
+        run: bash goethe/packaging/build_macos.sh
       - name: End to end
-        run: bash engine/tests/macos_e2e.sh
+        run: bash goethe/tests/macos_e2e.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: darwin-aarch64
-          path: engine/dist/cdn/bin/darwin-aarch64
+          path: goethe/dist/cdn/bin/darwin-aarch64
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: snapshot-mac
-          path: engine/dist/snapshot-mac.json
+          path: goethe/dist/snapshot-mac.json
           if-no-files-found: ignore
           retention-days: 7
+
+  # One check to watch: required jobs passed, or skipped because their path flag was false.
+  gate:
+    if: ${{ always() }}
+    needs: [changes, unit, e2e]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every job passed (or was skipped for a false flag) and every job is listed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          listed=$(jq -r 'keys[]' <<<"$NEEDS" | sort)
+          defined=$(awk '/^jobs:/{f=1;next} f&&/^  [a-z0-9-]+:/{gsub(/[ :]/,"");print}' .github/workflows/macos.yml | grep -vxE 'gate' | sort)
+          [ "$listed" = "$defined" ] || { echo "gate.needs and the jobs of macos.yml differ:"; diff <(echo "$listed") <(echo "$defined"); exit 1; }
+          bad=$(jq -r '
+            .changes.outputs as $f
+            | to_entries[]
+            | select(.value.result != "success")
+            | select((.value.result == "skipped" and (
+                (.key == "unit" and $f.unit != "true")
+                or (.key == "e2e" and $f.e2e != "true")
+              )) | not)
+            | "\(.key): \(.value.result)"' <<<"$NEEDS")
+          [ -z "$bad" ] || { echo "$bad"; exit 1; }
