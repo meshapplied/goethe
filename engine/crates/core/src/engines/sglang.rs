@@ -65,7 +65,7 @@ fn memory_args(spec: &EngineSpec, extras: &[String]) -> Vec<String> {
 const SGLANG_BOOT: &str = "import os, runpy, sys\n\nif __name__ == '__main__':\n    sys.argv = ['sglang.launch_server', *sys.argv[1:], '--api-key', os.environ['GOETHE_ENGINE_API_KEY']]\n    runpy.run_module('sglang.launch_server', run_name='__main__')\n";
 
 fn graph_args(max_conc: u64, extras: &[String]) -> Vec<String> {
-    // Decode graphs up to concurrency. Prefill capture lives outside the static pool — skip it (ponytail: else OOM on tight cards).
+    // Decode graphs up to concurrency. Prefill capture lives outside the static pool; skip it (ponytail: else OOM on tight cards).
     let theirs = extras.iter().any(|a| a.starts_with("--cuda-graph") || a == "--disable-cuda-graph");
     if theirs {
         return Vec::new();
