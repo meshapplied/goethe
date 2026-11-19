@@ -36,14 +36,18 @@ pub fn parse_shortfall_gb(log_text: &str) -> Option<f64> {
     None
 }
 
+fn size_gb_after(line: &str, key: &str) -> Option<f64> {
+    // "2.00 GiB" / "272.00 MiB" / "3.00 GB" → GB. Unknown unit kept as today (GiB).
+    let mut words = line.split(key).nth(1)?.split_whitespace();
+    let n: f64 = words.next()?.trim_end_matches(['.', ',']).parse().ok()?;
+    let unit = words.next().unwrap_or("GiB").to_ascii_lowercase();
+    Some(if unit.starts_with("mi") { n / 1024.0 } else { n })
+}
+
 fn torch_oom_gap_gb(line: &str) -> Option<f64> {
-    // "Tried to allocate 2.00 GiB. GPU 0 has a total capacity of 178.34 GiB of which 1.15 GiB is free": what was missing.
-    let number_after = |key: &str| -> Option<f64> {
-        let rest = line.split(key).nth(1)?;
-        rest.split_whitespace().next()?.trim_end_matches(['.', ',']).parse().ok()
-    };
-    let wanted = number_after("Tried to allocate ")?;
-    let free = number_after("of which ").unwrap_or(0.0);
+    // "Tried to allocate 2.00 GiB ... of which 1.15 GiB is free": what was missing.
+    let wanted = size_gb_after(line, "Tried to allocate ")?;
+    let free = size_gb_after(line, "of which ").unwrap_or(0.0);
     Some(wanted - free)
 }
 
@@ -237,6 +241,8 @@ mod tests {
     fn a_torch_oom_names_what_was_missing() {
         let line = "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 12.00 GiB. GPU 0 has a total capacity of 178.34 GiB of which 1.15 GiB is free.";
         assert!((parse_shortfall_gb(line).unwrap() - (12.0 - 1.15 + 1.0)).abs() < 1e-9);
+        let mib = "Tried to allocate 272.00 MiB. GPU 0 has a total capacity of 31.36 GiB of which 53.56 MiB is free.";
+        assert!((parse_shortfall_gb(mib).unwrap() - 2.0).abs() < 1e-6);
         assert_eq!(parse_shortfall_gb("CUDA out of memory"), Some(4.0));
     }
 
