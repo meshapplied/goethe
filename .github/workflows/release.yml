@@ -1,7 +1,7 @@
 name: release
 
 # Build, sign, verify and publish a Goethe release from main.
-# Start it by pushing a tag vX.Y.Z on a commit of main (the version must match engine/crates/goethe/Cargo.toml),
+# Start it by pushing a tag vX.Y.Z on a commit of main (the version must match goethe/crates/goethe/Cargo.toml),
 # or run it by hand from the Actions tab on main.
 #
 # Repository settings it needs:
@@ -68,9 +68,9 @@ jobs:
       - id: version
         name: Version from Cargo.toml (and the tag, when there is one)
         run: |
-          v="$(sed -n 's/^version = "\(.*\)"/\1/p' engine/crates/goethe/Cargo.toml | head -n1)"
+          v="$(sed -n 's/^version = "\(.*\)"/\1/p' goethe/crates/goethe/Cargo.toml | head -n1)"
           if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$v" ]]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match engine/crates/goethe/Cargo.toml version $v"
+            echo "::error::tag $GITHUB_REF_NAME does not match goethe/crates/goethe/Cargo.toml version $v"
             exit 1
           fi
           echo "version=$v" >>"$GITHUB_OUTPUT"
@@ -89,7 +89,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Patched SGLang source at the pinned commit
         run: |
-          . engine/sglang/PIN
+          . goethe/sglang/PIN
           git clone --quiet --filter=blob:none --no-checkout "$SGLANG_REPO" sglang-fork
           git -C sglang-fork checkout --quiet "$SGLANG_REV"
       - uses: astral-sh/setup-uv@v6
@@ -105,10 +105,10 @@ jobs:
           umask 077
           printf '%s\n' "$SIGN_KEY_PEM" >"$key"
           trap 'shred -u "$key" 2>/dev/null || rm -f "$key"' EXIT
-          GOETHE_SIGN_KEY="$key" engine/packaging/build_cdn.sh --release --arch x86_64
+          GOETHE_SIGN_KEY="$key" goethe/packaging/build_cdn.sh --release --arch x86_64
       - name: Verify what will ship (x86_64)
         run: |
-          cd engine/dist/cdn
+          cd goethe/dist/cdn
           grep -q "release=1" BUILDINFO
           grep -q "fork_dirty=0" BUILDINFO
           sha256sum -c SHA256SUMS
@@ -123,7 +123,7 @@ jobs:
           file bin/linux-x86_64/goethe | grep -q "x86-64"
       # Artifacts do not keep file modes, so the executables travel inside a tar.
       - name: Pack for the merge job
-        run: tar -C engine/dist -cf cdn-x86_64.tar cdn
+        run: tar -C goethe/dist -cf cdn-x86_64.tar cdn
       - uses: actions/upload-artifact@v4
         with:
           name: cdn-x86_64
@@ -139,23 +139,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Portable aarch64 binaries and uv
         run: |
-          mkdir -p engine/dist/cdn/bin/linux-aarch64
+          mkdir -p goethe/dist/cdn/bin/linux-aarch64
           curl -fsSL -o /tmp/uv.tar.gz \
             "https://github.com/astral-sh/uv/releases/download/0.13.1/uv-aarch64-unknown-linux-gnu.tar.gz"
           echo "9041c73c99fdc5892cf128140beb354eca9231d502068cc36e6cb53a8e59ad14  /tmp/uv.tar.gz" | sha256sum -c --quiet
-          tar -xzf /tmp/uv.tar.gz -C engine/dist/cdn/bin/linux-aarch64 --strip-components=1 "uv-aarch64-unknown-linux-gnu/uv"
-          chmod +x engine/dist/cdn/bin/linux-aarch64/uv
-          GOETHE_ARCH=aarch64 engine/packaging/build_bin.sh
-          cp engine/target-portable/aarch64-unknown-linux-gnu/release/goethe \
-            engine/target-portable/aarch64-unknown-linux-gnu/release/goethed engine/dist/cdn/bin/linux-aarch64/
+          tar -xzf /tmp/uv.tar.gz -C goethe/dist/cdn/bin/linux-aarch64 --strip-components=1 "uv-aarch64-unknown-linux-gnu/uv"
+          chmod +x goethe/dist/cdn/bin/linux-aarch64/uv
+          GOETHE_ARCH=aarch64 goethe/packaging/build_bin.sh
+          cp goethe/target-portable/aarch64-unknown-linux-gnu/release/goethe \
+            goethe/target-portable/aarch64-unknown-linux-gnu/release/goethed goethe/dist/cdn/bin/linux-aarch64/
       - name: Verify the aarch64 binaries
         run: |
-          cd engine/dist/cdn/bin/linux-aarch64
+          cd goethe/dist/cdn/bin/linux-aarch64
           file goethe | grep -q "ARM aarch64"
           file goethed | grep -q "ARM aarch64"
           file uv | grep -q "ARM aarch64"
       - name: Pack for the merge job
-        run: tar -C engine/dist/cdn/bin -cf bin-aarch64.tar linux-aarch64
+        run: tar -C goethe/dist/cdn/bin -cf bin-aarch64.tar linux-aarch64
       - uses: actions/upload-artifact@v4
         with:
           name: bin-aarch64
@@ -170,9 +170,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: goethe's own nginx for aarch64 Linux
-        run: bash engine/packaging/build_nginx_linux.sh
+        run: bash goethe/packaging/build_nginx_linux.sh
       - name: Pack for the merge job
-        run: tar -C engine/dist/cdn/bin -cf nginx-aarch64.tar linux-aarch64/nginx
+        run: tar -C goethe/dist/cdn/bin -cf nginx-aarch64.tar linux-aarch64/nginx
       - uses: actions/upload-artifact@v4
         with:
           name: nginx-aarch64
@@ -187,11 +187,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: goethe, goethed and nginx for Apple Silicon
-        run: bash engine/packaging/build_macos.sh
+        run: bash goethe/packaging/build_macos.sh
       - name: End to end on macOS
-        run: bash engine/tests/macos_e2e.sh
+        run: bash goethe/tests/macos_e2e.sh
       - name: Pack for the merge job
-        run: tar -C engine/dist/cdn/bin -cf bin-darwin.tar darwin-aarch64
+        run: tar -C goethe/dist/cdn/bin -cf bin-darwin.tar darwin-aarch64
       - uses: actions/upload-artifact@v4
         with:
           name: bin-darwin
@@ -338,11 +338,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: src
-          sparse-checkout: engine/packaging
+          sparse-checkout: goethe/packaging
       - name: The package tree served at pkg.goethe.sh, with the newest releases under v/
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash src/engine/packaging/pages_site.sh goethe-cdn-*.tar.zst site
+        run: bash src/goethe/packaging/pages_site.sh goethe-cdn-*.tar.zst site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

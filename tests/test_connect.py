@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest import mock
 
-from goethe import cli, connect
+from lab import cli, connect
 
 PORT = 8080
 URL = f"http://127.0.0.1:{PORT}/v1"
@@ -68,22 +68,22 @@ class Print(unittest.TestCase):
         self.assertIn("aider --model openai/qwen3.8-27b --message hi", out.getvalue())
 
     def test_refuses_without_a_server(self):
-        with mock.patch("goethe.engine.healthy", return_value=False), mock.patch("os.execve") as ex:
+        with mock.patch("lab.engine.healthy", return_value=False), mock.patch("os.execve") as ex:
             code = cli.main(["connect", "claude"])
         self.assertEqual(code, 1)
         ex.assert_not_called()
 
     def test_missing_harness_is_an_error(self):
-        with mock.patch("goethe.engine.healthy", return_value=True), \
-                mock.patch("goethe.connect.conforms", return_value=[]), \
+        with mock.patch("lab.engine.healthy", return_value=True), \
+                mock.patch("lab.connect.conforms", return_value=[]), \
                 mock.patch("shutil.which", return_value=None), mock.patch("os.execve") as ex:
             code = cli.main(["connect", "claude"])
         self.assertEqual(code, 1)
         ex.assert_not_called()
 
     def test_execs_with_the_harness_environment(self):
-        with mock.patch("goethe.engine.healthy", return_value=True), \
-                mock.patch("goethe.connect.conforms", return_value=[]), \
+        with mock.patch("lab.engine.healthy", return_value=True), \
+                mock.patch("lab.connect.conforms", return_value=[]), \
                 mock.patch("shutil.which", return_value="/usr/bin/claude"), \
                 mock.patch.dict(os.environ, {"HOME": "/h"}, clear=True), mock.patch("os.execve") as ex:
             cli.main(["connect", "claude"])

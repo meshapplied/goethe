@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from goethe import doctor, registry
-from goethe.engine import Install
+from lab import doctor, registry
+from lab.engine import Install
 from tests.fixtures import PRO_6000, RTX_3090, RTX_5090, gpu
 
 MODEL = registry.load()["qwen3-8-27b"]

@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from goethe import registry
+from lab import registry
 from tests.fixtures import REPO
 
 GOOD = """

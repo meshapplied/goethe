@@ -115,7 +115,8 @@ Supported [model families and quantization formats](docs/user-guide.md#supported
 
 | Path | What it is |
 |------|------------|
-| [`engine/`](engine/) | Goethe: the `goethe` command, the background service, the gateway and the installer |
+| [`goethe/`](goethe/) | Goethe: the `goethe` command, the background service, the gateway and the installer |
+| [`lab/`](lab/) | `goethe-lab`: fit/registry helpers used in development and tests |
 | [`nvfp4-kernels/`](nvfp4-kernels/), [`ternary-kernels/`](ternary-kernels/) | GPU kernels behind our models |
 | [`docs/`](docs/) | User guide, command reference and model notes |
 

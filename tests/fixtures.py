@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from goethe.hw import Gpu
+from lab.hw import Gpu
 
 REPO = Path(__file__).resolve().parent.parent
 

@@ -40,13 +40,15 @@ jobs:
               case "$f" in
                 .github/*)
                   rust=true; e2e=true; python=true; patches=true ;;
-                engine/tests/*|engine/pyenv/*|engine/cdn/*|engine/packaging/*)
+                goethe/tests/*|goethe/pyenv/*|goethe/cdn/*|goethe/packaging/*)
                   rust=true; e2e=true ;;
-                engine/crates/*|engine/Cargo.toml|engine/Cargo.lock|engine/rust-toolchain*)
+                goethe/crates/*|goethe/Cargo.toml|goethe/Cargo.lock|goethe/rust-toolchain*)
                   rust=true ;;
                 nvfp4-kernels/*)
                   patches=true ;;
-                goethe/*|tests/*|pyproject*|requirements*)
+                goethe/*)
+                  rust=true ;;
+                lab/*|tests/*|pyproject*|requirements*)
                   python=true ;;
               esac
             done <<<"$(git diff --name-only "${BASE}" HEAD)"
@@ -81,13 +83,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uvx ruff@0.17.0 check goethe tests
-      - run: shellcheck -S warning install.sh engine/tests/accept.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
+      - run: uvx ruff@0.17.0 check lab tests
+      - run: shellcheck -S warning install.sh goethe/tests/accept.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
       - name: Style lint (headers, function comments, no dashes or emojis, leak guard, pinned ruff with the repo rules)
-        working-directory: engine
+        working-directory: goethe
         run: python3 tests/lint_style.py
       - name: Shell syntax of installer and packaging scripts
-        working-directory: engine
+        working-directory: goethe
         run: for f in cdn/install.sh packaging/*.sh tests/gate.sh tests/*.sh; do bash -n "$f"; done
 
   attribution:
@@ -143,15 +145,15 @@ jobs:
     timeout-minutes: 15
     defaults:
       run:
-        working-directory: engine
+        working-directory: goethe
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: engine
-          shared-key: engine-dev
+          workspaces: goethe
+          shared-key: goethe-dev
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo build --locked --features goethe/test-release-key
@@ -172,15 +174,15 @@ jobs:
     timeout-minutes: 25
     defaults:
       run:
-        working-directory: engine
+        working-directory: goethe
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: engine
-          shared-key: engine-dev
+          workspaces: goethe
+          shared-key: goethe-dev
       - name: nginx, which goethe up starts
         run: sudo apt-get install -y -qq nginx >/dev/null
       - run: cargo build --locked --features goethe/test-release-key
@@ -189,22 +191,22 @@ jobs:
       - name: The other user paths with no GPU (cards, offline, gated, Ctrl-C, fallback, bad index, update)
         run: python3 tests/e2e_cli.py Matrix
 
-  # Does the end-to-end suite notice the bugs we shipped? Each patch in engine/tests/mutants brings one back; the suite must go red.
+  # Does the end-to-end suite notice the bugs we shipped? Each patch in goethe/tests/mutants brings one back; the suite must go red.
   mutants:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     defaults:
       run:
-        working-directory: engine
+        working-directory: goethe
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: engine
-          shared-key: engine-dev
+          workspaces: goethe
+          shared-key: goethe-dev
       - name: nginx, which goethe up starts
         run: sudo apt-get install -y -qq nginx >/dev/null
       - run: bash tests/mutants/run.sh
@@ -247,7 +249,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Patched SGLang source at the pinned commit
         run: |
-          . engine/sglang/PIN
+          . goethe/sglang/PIN
           git clone --quiet --filter=blob:none --no-checkout "$SGLANG_REPO" sglang-fork
           git -C sglang-fork checkout --quiet "$SGLANG_REV"
       - uses: astral-sh/setup-uv@v6
@@ -257,11 +259,11 @@ jobs:
         env:
           SGLANG_FORK_SRC: ${{ github.workspace }}/sglang-fork
           GOETHE_ALLOW_UNSIGNED: "1"
-        run: engine/packaging/build_cdn.sh --arch x86_64
+        run: goethe/packaging/build_cdn.sh --arch x86_64
       - name: The portable binaries run on a stock runner
         run: |
-          engine/dist/cdn/bin/linux-x86_64/goethe --version
-          engine/dist/cdn/bin/linux-x86_64/goethe --help >/dev/null
+          goethe/dist/cdn/bin/linux-x86_64/goethe --version
+          goethe/dist/cdn/bin/linux-x86_64/goethe --help >/dev/null
       - name: The portable binary refuses a foreign release key planted in the environment (a build trusting the test key would accept it)
         run: |
           d="$(mktemp -d)"
@@ -275,7 +277,7 @@ jobs:
           server=$!
           sleep 1
           out="$(GOETHE_HOME="${d}/home" GOETHE_RELEASE_PUB="${d}/foreign_pub.pem" GOETHE_PKG_URL=http://127.0.0.1:18765 \
-            engine/dist/cdn/bin/linux-x86_64/goethe update --check 2>&1)" && rc=0 || rc=$?
+            goethe/dist/cdn/bin/linux-x86_64/goethe update --check 2>&1)" && rc=0 || rc=$?
           kill "${server}"
           echo "${out}"
           [[ "${rc}" -ne 0 && "${out}" == *"never takes its release key from the environment"* ]]

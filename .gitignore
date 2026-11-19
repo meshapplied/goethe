@@ -21,7 +21,7 @@ build/
 .eggs/
 *.local.toml
 docs/gpu-checks.md
-!engine/packaging/release_pub.pem
+!goethe/packaging/release_pub.pem
 
 # Developer docs (local only, never committed)
 docs/dev/
@@ -30,6 +30,6 @@ docs/dev/
 modal/
 
 # In-context learning prototype and eval, kept local
-engine/tests/icl/
-engine/tests/learn/.work/
-engine/tests/vm/.work/
+goethe/tests/icl/
+goethe/tests/learn/.work/
+goethe/tests/vm/.work/

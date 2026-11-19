@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from goethe import cli, engine, fit, hw
+from lab import cli, engine, fit, hw
 from tests.fixtures import PRO_6000, RTX_3090, RTX_5090
 
 
@@ -22,7 +22,7 @@ def run(*argv, gpus=(RTX_5090,), env=None, config=None, busy=False, fitted=None)
         probe = (list(gpus), None) if gpus else ([], "nvidia-smi not found")
 
         def default_fitted(plan, argv, model_file):
-            from goethe import fit
+            from lab import fit
             return fit.Fit(int(plan.value("context")), int(plan.value("lanes")), int(plan.value("context")), 1)
 
         with mock.patch.dict(os.environ, environ, clear=True), mock.patch.object(hw, "probe", lambda *a: probe), \

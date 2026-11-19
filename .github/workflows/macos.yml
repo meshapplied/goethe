@@ -7,14 +7,14 @@ on:
   pull_request:
     branches: [dev, main]
     paths:
-      - "engine/crates/**"
-      - "engine/Cargo.toml"
-      - "engine/Cargo.lock"
-      - "engine/rust-toolchain*"
-      - "engine/cdn/install.sh"
-      - "engine/packaging/**"
-      - "engine/tests/macos_e2e.sh"
-      - "engine/llama-cpp/PIN"
+      - "goethe/crates/**"
+      - "goethe/Cargo.toml"
+      - "goethe/Cargo.lock"
+      - "goethe/rust-toolchain*"
+      - "goethe/cdn/install.sh"
+      - "goethe/packaging/**"
+      - "goethe/tests/macos_e2e.sh"
+      - "goethe/llama-cpp/PIN"
       - ".github/workflows/macos.yml"
   workflow_dispatch:
 
@@ -50,9 +50,9 @@ jobs:
               case "$f" in
                 .github/workflows/macos.yml)
                   unit=true; e2e=true ;;
-                engine/crates/*|engine/Cargo.toml|engine/Cargo.lock|engine/rust-toolchain*)
+                goethe/crates/*|goethe/Cargo.toml|goethe/Cargo.lock|goethe/rust-toolchain*)
                   unit=true ;;
-                engine/packaging/*|engine/tests/macos_e2e.sh|engine/cdn/install.sh|engine/llama-cpp/PIN)
+                goethe/packaging/*|goethe/tests/macos_e2e.sh|goethe/cdn/install.sh|goethe/llama-cpp/PIN)
                   e2e=true ;;
               esac
             done <<<"$(git diff --name-only "${BASE}" HEAD)"
@@ -71,19 +71,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
-        working-directory: engine
+        working-directory: goethe
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustc --version
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: engine
+          workspaces: goethe
           shared-key: macos-unit
       - name: Unit tests
-        working-directory: engine
+        working-directory: goethe
         run: cargo test --workspace --locked
       - name: Clippy
-        working-directory: engine
+        working-directory: goethe
         run: cargo clippy --workspace --locked --all-targets -- -D warnings
 
   e2e:
@@ -94,28 +94,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
-        working-directory: engine
+        working-directory: goethe
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustc --version
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: engine
+          workspaces: goethe
           shared-key: macos-e2e
       - name: Build the macOS package
-        run: bash engine/packaging/build_macos.sh
+        run: bash goethe/packaging/build_macos.sh
       - name: End to end
-        run: bash engine/tests/macos_e2e.sh
+        run: bash goethe/tests/macos_e2e.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: darwin-aarch64
-          path: engine/dist/cdn/bin/darwin-aarch64
+          path: goethe/dist/cdn/bin/darwin-aarch64
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: snapshot-mac
-          path: engine/dist/snapshot-mac.json
+          path: goethe/dist/snapshot-mac.json
           if-no-files-found: ignore
           retention-days: 7
 

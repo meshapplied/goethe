@@ -1,0 +1,19 @@
+diff --git a/goethe/crates/core/src/hf.rs b/goethe/crates/core/src/hf.rs
+--- a/goethe/crates/core/src/hf.rs
++++ b/goethe/crates/core/src/hf.rs
+@@ -582,7 +582,6 @@
+     let group = DOWNLOAD_PGID.load(Ordering::SeqCst);
+     unsafe {
+         if group > 0 {
+-            libc::kill(-group, libc::SIGTERM);
+             libc::write(2, INTERRUPTED.as_ptr().cast(), INTERRUPTED.len());
+             libc::_exit(128 + sig);
+         }
+@@ -609,7 +608,6 @@
+     #[cfg(target_os = "linux")]
+     unsafe {
+         cmd.pre_exec(|| {
+-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+             Ok(())
+         });
+     }
