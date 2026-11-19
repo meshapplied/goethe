@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.4 (2026-11-19)
 
 - Bundled nginx pin is 1.30.7 (was 1.30.6) for the HTTP/2 fixes (CVE-2026-123007 and related). `goethe doctor` warns when the on-disk nginx is older. Rebuild/republish the package so `goethe update` can refresh the binary.
 - `goethe update` refreshes bundled nginx when its signed sha differs, refreshes already-installed engines by default (same as `update engine`), and re-execs `update engine` after a binary swap with the positional form. Kernel-pack fit uses the installed goethe-engine wheel when present (not only the compile-time pin), so a new binary with an old py-env no longer accepts packs it cannot run.
