@@ -369,8 +369,16 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
             plan.ctx
         ));
     }
-    let starting = start_engine(req, con, &plan, need, learned, min_free, gpu_name, card)?;
+    let starting = start_engine(req, con, &plan, FitSpawn { need, learned, min_free, gpu_name, card })?;
     Ok(Step::Started(Box::new(starting), notices))
+}
+
+struct FitSpawn {
+    need: Need,
+    learned: Learned,
+    min_free: f64,
+    gpu_name: String,
+    card: toml::Value,
 }
 
 fn copies_of(con: &Connection, model_id: &str) -> Vec<(String, String, String, i64)> {
@@ -392,17 +400,9 @@ fn missing_error(message: String, holders: &[Foreign]) -> LoadErr {
     (1, lines.join("\n"), Value::Null)
 }
 
-fn start_engine(
-    req: &LoadReq,
-    con: &Connection,
-    plan: &LoadPlan,
-    need: Need,
-    learned: Learned,
-    min_free: f64,
-    gpu_name: String,
-    card: toml::Value,
-) -> Result<Starting, LoadErr> {
+fn start_engine(req: &LoadReq, con: &Connection, plan: &LoadPlan, fit: FitSpawn) -> Result<Starting, LoadErr> {
     // Port and slot, spawn, then the STARTING row and ledger entry; any failure after spawn stops the engine.
+    let FitSpawn { need, learned, min_free, gpu_name, card } = fit;
     let (lo, hi) = crate::ports::engine_port_range().map_err(err1)?;
     let port = next_port(con, lo, hi).map_err(err1)?;
     let model_id = &req.params.model_id;
