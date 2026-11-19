@@ -64,17 +64,18 @@ fn memory_args(spec: &EngineSpec, extras: &[String]) -> Vec<String> {
 
 const SGLANG_BOOT: &str = "import os, runpy, sys\n\nif __name__ == '__main__':\n    sys.argv = ['sglang.launch_server', *sys.argv[1:], '--api-key', os.environ['GOETHE_ENGINE_API_KEY']]\n    runpy.run_module('sglang.launch_server', run_name='__main__')\n";
 
-fn graph_args(max_conc: u64, mem_frac: f64, extras: &[String]) -> Vec<String> {
-    // Decode graphs only up to concurrency; on a tight card skip prefill capture (it OOMs after KV is sized).
+fn graph_args(max_conc: u64, extras: &[String]) -> Vec<String> {
+    // Decode graphs up to concurrency. Prefill capture lives outside the static pool — skip it (ponytail: else OOM on tight cards).
     let theirs = extras.iter().any(|a| a.starts_with("--cuda-graph") || a == "--disable-cuda-graph");
     if theirs {
         return Vec::new();
     }
-    let mut out = vec!["--cuda-graph-max-bs-decode".to_string(), max_conc.max(1).to_string()];
-    if mem_frac >= 0.85 {
-        out.extend(["--cuda-graph-backend-prefill".to_string(), "disabled".to_string()]);
-    }
-    out
+    vec![
+        "--cuda-graph-max-bs-decode".into(),
+        max_conc.max(1).to_string(),
+        "--cuda-graph-backend-prefill".into(),
+        "disabled".into(),
+    ]
 }
 
 fn sglang_command(spec: &EngineSpec) -> Command {
@@ -115,7 +116,7 @@ fn sglang_command(spec: &EngineSpec) -> Command {
     };
     let extras: Vec<String> = card_extras.into_iter().chain(spec.load_extra.iter().cloned()).collect();
     cmd.args(memory_args(spec, &extras));
-    cmd.args(graph_args(spec.max_conc, spec.mem_frac, &extras));
+    cmd.args(graph_args(spec.max_conc, &extras));
     if let Some(dtype) = spec
         .card
         .get("kv_cache_dtype")
@@ -175,14 +176,16 @@ mod tests {
 
     #[test]
     fn graphs_are_captured_up_to_the_concurrency_unless_the_user_says_otherwise() {
-        assert_eq!(graph_args(4, 0.5, &[]), ["--cuda-graph-max-bs-decode", "4"]);
-        assert_eq!(graph_args(0, 0.5, &[]), ["--cuda-graph-max-bs-decode", "1"]);
         assert_eq!(
-            graph_args(2, 0.9, &[]),
-            ["--cuda-graph-max-bs-decode", "2", "--cuda-graph-backend-prefill", "disabled"]
+            graph_args(4, &[]),
+            ["--cuda-graph-max-bs-decode", "4", "--cuda-graph-backend-prefill", "disabled"]
+        );
+        assert_eq!(
+            graph_args(0, &[]),
+            ["--cuda-graph-max-bs-decode", "1", "--cuda-graph-backend-prefill", "disabled"]
         );
         for theirs in ["--cuda-graph-max-bs-decode=16", "--cuda-graph-bs-prefill", "--cuda-graph-config", "--disable-cuda-graph"] {
-            assert!(graph_args(4, 0.9, &[theirs.to_string()]).is_empty(), "{theirs}");
+            assert!(graph_args(4, &[theirs.to_string()]).is_empty(), "{theirs}");
         }
     }
 

@@ -212,14 +212,17 @@ pub fn plan_with(
     pinned_gpus: Option<&[u32]>,
     learned: LearnedAt,
 ) -> Result<LoadPlan, PlanError> {
-    let marlin = plan_once(input, gpus, hw, pinned_tp, pinned_gpus, learned);
+    let with_extra = plan_once(input, gpus, hw, pinned_tp, pinned_gpus, learned);
     if input.marlin_extra_gb <= 0.0 {
-        return marlin;
+        return with_extra;
     }
-    let mut stock = input.clone();
-    stock.marlin_extra_gb = 0.0;
-    let stock = plan_once(&stock, gpus, hw, pinned_tp, pinned_gpus, learned);
-    prefer_capacity(marlin, stock)
+    let want = (input.ctx.min(input.max_ctx), input.max_conc.max(1));
+    if matches!(&with_extra, Ok(p) if (p.ctx, p.max_conc) == want) {
+        return with_extra;
+    }
+    let mut bare = input.clone();
+    bare.marlin_extra_gb = 0.0;
+    prefer_capacity(with_extra, plan_once(&bare, gpus, hw, pinned_tp, pinned_gpus, learned))
 }
 
 fn plan_once(
