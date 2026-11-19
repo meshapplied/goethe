@@ -71,6 +71,12 @@ function Persist-Self {
     return $Script:PersistedPath
 }
 
+function ConvertTo-BashBase64([string]$Text) {
+    # Git on Windows checkouts this file as CRLF; bash then rejects `set -euo pipefail\r`.
+    $lf = $Text -replace "`r`n", "`n" -replace "`r", "`n"
+    return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($lf))
+}
+
 function Invoke-Wsl {
     # Native wsl.exe stderr must not abort under $ErrorActionPreference Stop (PS 5.1 / 7).
     # Exit code is in $Script:LastWslExit. -Capture returns output; otherwise it streams to the host.
@@ -281,7 +287,7 @@ printf '\n[boot]\nsystemd=true\n' >>"$tmp"
 cp "$tmp" "$conf"
 rm -f "$tmp"
 '@
-    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
+    $b64 = ConvertTo-BashBase64 $script
     [void](Invoke-Wsl -WslArgs @('-d', $Script:Distro, '-u', 'root', '--', 'bash', '-lc', "echo $b64 | base64 -d | bash") -IgnoreExit)
     if ($Script:LastWslExit -ne 0) {
         Die "could not enable systemd in /etc/wsl.conf as root; run: wsl -d $Script:Distro -u root -- bash -lc `"printf '\\n[boot]\\nsystemd=true\\n' >> /etc/wsl.conf`" then wsl --terminate $Script:Distro"
@@ -366,7 +372,7 @@ curl -fsSL "$pkg/install.sh" | bash -s -- $argStr
 command -v goethe >/dev/null
 goethe --version
 "@
-    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bash))
+    $b64 = ConvertTo-BashBase64 $bash
     [void](Invoke-Wsl -WslArgs @('-d', $Script:Distro, '--', 'bash', '-lc', "echo $b64 | base64 -d | bash") -IgnoreExit)
     if ($Script:LastWslExit -ne 0) {
         Die "install.sh failed inside WSL (exit $($Script:LastWslExit)); see messages above, then run this installer again"
@@ -389,7 +395,7 @@ echo "GPU driver stays on Windows (580+). Never install a Linux NVIDIA driver in
 echo
 exec goethe
 '@
-    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($inner))
+    $b64 = ConvertTo-BashBase64 $inner
     $wslArgs = @('-d', $Script:Distro, '--', 'bash', '-lc', "echo $b64 | base64 -d | bash")
 
     $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
