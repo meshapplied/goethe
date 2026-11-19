@@ -29,11 +29,10 @@ impl Need {
 }
 
 pub fn missing_gb(need: &Need, free_gb: f64) -> f64 {
-    // Weights+peak must fit in free; pool may use the whole free card; else keep the safety margin.
-    let by_weights = need.weights + need.load_peak - free_gb;
-    let by_pool = need.pool() - MAX_MEM_FRACTION * free_gb;
-    let by_margin = need.total() - (free_gb - SAFETY_MARGIN_GB);
-    by_weights.max(by_pool).max(by_margin).max(0.0)
+    // Weights+peak in free; total leaves SAFETY_MARGIN_GB. (ponytail: pool-cap == free is dead under the margin.)
+    (need.weights + need.load_peak - free_gb)
+        .max(need.total() - (free_gb - SAFETY_MARGIN_GB))
+        .max(0.0)
 }
 
 fn tenth(x: f64) -> f64 {
@@ -66,17 +65,6 @@ pub fn shortfall(need: &Need, gpu: u32, free_gb: f64) -> Option<String> {
         ));
     }
     let by_margin = n - (f - SAFETY_MARGIN_GB);
-    let cap = tenth(MAX_MEM_FRACTION * f);
-    let by_cap = w + k + s - cap;
-    if by_cap > by_margin {
-        return Some(format!(
-            "{head}, and its static pool ({}, {:.1} GB) may use at most {:.0}% of free VRAM ({cap:.1} GB): missing {:.1} GB",
-            if s > 0.0 { "weights, KV and state" } else { "weights + KV" },
-            w + k + s,
-            MAX_MEM_FRACTION * 100.0,
-            by_cap.max(0.1)
-        ));
-    }
     Some(format!("{head}, minus a {SAFETY_MARGIN_GB} GB safety margin: missing {:.1} GB", by_margin.max(0.1)))
 }
 
@@ -135,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn mem_fraction_rejects_over_095_with_missing() {
+    fn mem_fraction_rejects_when_budget_misses() {
         let err = mem_fraction_from_free(&need(45.0, 3.2, 1.8), 50.0, 0.0).unwrap_err();
         assert!(err.contains("missing"), "{err}");
     }
@@ -167,12 +155,8 @@ mod tests {
             "needs 19.8 GB per GPU (weights 12.0 + KV 6.0 + overhead 1.8); GPU 2 has 20.0 GB free, \
              minus a 1.5 GB safety margin: missing 1.3 GB"
         );
-        // Margin (oh+1.5) beats the 100% pool-cap branch whenever overhead >= 0.
         let capped = shortfall(&need(70.0, 9.5, 1.8), 2, 75.6).unwrap();
-        assert!(
-            capped.ends_with("minus a 1.5 GB safety margin: missing 7.2 GB"),
-            "{capped}"
-        );
+        assert!(capped.ends_with("minus a 1.5 GB safety margin: missing 7.2 GB"), "{capped}");
         assert_eq!(shortfall(&need(10.0, 1.0, 1.8), 2, 75.6), None);
     }
 

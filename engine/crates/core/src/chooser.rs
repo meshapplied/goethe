@@ -610,51 +610,34 @@ mod tests {
 
     #[test]
     fn auto_fit_across_gpu_states_and_model_shapes() {
-        // CPU stand-in for "any GPU state / any model shape": free VRAM, foreign, arch, weight_extra.
-        struct Case {
-            name: &'static str,
-            static_gb: f64,
-            extra: f64,
-            kv: u64,
-            free: f64,
-            cc: &'static str,
-            foreign: bool,
-            want_ok: bool,
-            want_drop: bool,
-            want_full: bool,
-        }
-        let cases = [
-            Case { name: "roomy-dense", static_gb: 10.0, extra: 0.0, kv: 4096, free: 40.0, cc: "9.0", foreign: false, want_ok: true, want_drop: false, want_full: true },
-            Case { name: "roomy-keeps-marlin", static_gb: 20.0, extra: 4.0, kv: 4096, free: 40.0, cc: "12.0", foreign: false, want_ok: true, want_drop: false, want_full: true },
-            Case { name: "tight-drops-marlin", static_gb: 23.0, extra: 7.85, kv: 32768, free: 31.3, cc: "12.0", foreign: false, want_ok: true, want_drop: true, want_full: false },
-            Case { name: "tight-shrink-no-extra", static_gb: 20.0, extra: 0.0, kv: 65536, free: 31.3, cc: "9.0", foreign: false, want_ok: true, want_drop: false, want_full: false },
-            Case { name: "extra-ignored-off-arch", static_gb: 23.0, extra: 7.85, kv: 4096, free: 40.0, cc: "9.0", foreign: false, want_ok: true, want_drop: false, want_full: true },
-            Case { name: "empty-card-refuses", static_gb: 20.0, extra: 0.0, kv: 4096, free: 0.0, cc: "9.0", foreign: false, want_ok: false, want_drop: false, want_full: false },
-            Case { name: "foreign-still-plans", static_gb: 10.0, extra: 0.0, kv: 4096, free: 40.0, cc: "9.0", foreign: true, want_ok: true, want_drop: false, want_full: true },
-            Case { name: "partial-free-shrinks", static_gb: 18.0, extra: 0.0, kv: 32768, free: 22.0, cc: "8.6", foreign: false, want_ok: true, want_drop: false, want_full: false },
-        ];
-        for c in cases {
+        // free / foreign / arch / marlin_extra → place, drop, shrink, or refuse.
+        for (name, static_gb, extra, kv, free, cc, foreign, want_ok, want_drop, want_full) in [
+            ("roomy", 10.0, 0.0, 4096, 40.0, "9.0", false, true, false, true),
+            ("keeps-marlin", 20.0, 4.0, 4096, 40.0, "12.0", false, true, false, true),
+            ("drops-marlin", 23.0, 7.85, 32768, 31.3, "12.0", false, true, true, false),
+            ("shrink", 20.0, 0.0, 65536, 31.3, "9.0", false, true, false, false),
+            ("extra-off-arch", 23.0, 7.85, 4096, 40.0, "9.0", false, true, false, true),
+            ("empty", 20.0, 0.0, 4096, 0.0, "9.0", false, false, false, false),
+            ("foreign", 10.0, 0.0, 4096, 40.0, "9.0", true, true, false, true),
+            ("partial", 18.0, 0.0, 32768, 22.0, "8.6", false, true, false, false),
+        ] {
             let mut m = inp();
-            m.static_vram_gb = c.static_gb;
-            m.marlin_extra_gb = c.extra;
-            m.kv_bytes_per_token = c.kv;
+            m.static_vram_gb = static_gb;
+            m.marlin_extra_gb = extra;
+            m.kv_bytes_per_token = kv;
             m.ctx = 131072;
             m.max_ctx = 131072;
             m.max_conc = 8;
-            m.supported_sm = vec![c.cc.into()];
-            let gpus = [GpuPlacementInput { foreign_process: c.foreign, ..gpu_on(0, c.cc, c.free) }];
+            m.supported_sm = vec![cc.into()];
+            let gpus = [GpuPlacementInput { foreign_process: foreign, ..gpu_on(0, cc, free) }];
             let got = pick_load_plan(&m, &gpus, None, None, None);
-            if !c.want_ok {
-                assert!(got.is_err(), "{} expected refuse", c.name);
+            if !want_ok {
+                assert!(got.is_err(), "{name}");
                 continue;
             }
-            let plan = got.unwrap_or_else(|e| panic!("{}: {}", c.name, e.message));
-            assert_eq!(plan.disable_marlin, c.want_drop, "{}", c.name);
-            if c.want_full {
-                assert_eq!((plan.ctx, plan.max_conc), (m.ctx, m.max_conc), "{}", c.name);
-            } else {
-                assert!((plan.ctx, plan.max_conc) < (m.ctx, m.max_conc), "{} kept full {:?}", c.name, (plan.ctx, plan.max_conc));
-            }
+            let plan = got.unwrap_or_else(|e| panic!("{name}: {}", e.message));
+            assert_eq!(plan.disable_marlin, want_drop, "{name}");
+            assert_eq!((plan.ctx, plan.max_conc) == (m.ctx, m.max_conc), want_full, "{name}");
         }
     }
 
