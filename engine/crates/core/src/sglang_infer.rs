@@ -424,5 +424,23 @@ mod tests {
         assert!(note.unwrap().contains("modelopt_fp4"));
         let bare = s(&["--reasoning-parser", "qwen3"]);
         assert_eq!(drop_quantization_when_config_declares(&bare, &ct).0, bare);
+        // Synthetic configs: any quant_method triggers the drop; plain BF16 keeps --quantization.
+        for method in ["compressed-tensors", "awq", "gptq", "bitsandbytes", "fp8", "modelopt"] {
+            let cfg = serde_json::json!({"quantization_config": {"quant_method": method}});
+            let (out, note) = drop_quantization_when_config_declares(&s(&["--quantization", "fp8", "--trust-remote-code"]), &cfg);
+            assert_eq!(out, s(&["--trust-remote-code"]), "{method}");
+            assert!(note.unwrap().contains("fp8"), "{method}");
+        }
+        let bf16 = serde_json::json!({"model_type": "llama"});
+        assert_eq!(
+            drop_quantization_when_config_declares(&s(&["--quantization", "fp8"]), &bf16).0,
+            s(&["--quantization", "fp8"])
+        );
+        let empty_qc = serde_json::json!({"quantization_config": {}});
+        assert_eq!(
+            drop_quantization_when_config_declares(&s(&["--quantization", "awq"]), &empty_qc).0,
+            s(&["--quantization", "awq"]),
+            "no quant_method → keep registry flag"
+        );
     }
 }

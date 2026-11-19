@@ -167,8 +167,12 @@ mod tests {
             "needs 19.8 GB per GPU (weights 12.0 + KV 6.0 + overhead 1.8); GPU 2 has 20.0 GB free, \
              minus a 1.5 GB safety margin: missing 1.3 GB"
         );
+        // Margin (oh+1.5) beats the 100% pool-cap branch whenever overhead >= 0.
         let capped = shortfall(&need(70.0, 9.5, 1.8), 2, 75.6).unwrap();
-        assert!(capped.contains("missing") && (capped.contains("100%") || capped.contains("safety margin")), "{capped}");
+        assert!(
+            capped.ends_with("minus a 1.5 GB safety margin: missing 7.2 GB"),
+            "{capped}"
+        );
         assert_eq!(shortfall(&need(10.0, 1.0, 1.8), 2, 75.6), None);
     }
 
@@ -176,8 +180,14 @@ mod tests {
     fn missing_uses_margin_and_static_cap() {
         assert_eq!(missing_gb(&need(8.0, 0.2, 1.8), 20.0), 0.0);
         assert!((missing_gb(&need(15.0, 2.2, 1.8), 20.0) - 0.5).abs() < 1e-9);
-        let over = missing_gb(&need(88.0, 5.0, 1.8), 96.0);
-        assert!(over > 0.0, "{over}");
+        assert!((missing_gb(&need(88.0, 5.0, 1.8), 96.0) - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mem_fraction_may_use_the_full_free_card() {
+        let n = need(26.0, 0.0, 1.5);
+        assert!((mem_fraction_from_free(&n, 30.0, 4.0).unwrap() - 1.0).abs() < 1e-9);
+        assert!(mem_fraction_from_free(&n, 27.0, 0.0).is_err());
     }
 
     #[test]

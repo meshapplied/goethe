@@ -241,7 +241,11 @@ mod tests {
         let line = "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 12.00 GiB. GPU 0 has a total capacity of 178.34 GiB of which 1.15 GiB is free.";
         assert!((parse_shortfall_gb(line).unwrap() - (12.0 - 1.15 + 1.0)).abs() < 1e-9);
         let mib = "Tried to allocate 272.00 MiB. GPU 0 has a total capacity of 31.36 GiB of which 53.56 MiB is free.";
-        assert!((parse_shortfall_gb(mib).unwrap() - 2.0).abs() < 1e-6, "MiB gap floors to 1 GB + 1, got {:?}", parse_shortfall_gb(mib));
+        assert!((parse_shortfall_gb(mib).unwrap() - 2.0).abs() < 1e-6, "gap.max(1)+1 after MiB→GB, got {:?}", parse_shortfall_gb(mib));
+        let gib = "Tried to allocate 1.50 GiB. GPU 0 has a total capacity of 80.00 GiB of which 0.25 GiB is free.";
+        assert!((parse_shortfall_gb(gib).unwrap() - ((1.50_f64 - 0.25).max(1.0) + 1.0)).abs() < 1e-9);
+        let gb = "Tried to allocate 3.00 GB. GPU 0 has a total capacity of 24.00 GB of which 0.50 GB is free.";
+        assert!((parse_shortfall_gb(gb).unwrap() - ((3.0_f64 - 0.5).max(1.0) + 1.0)).abs() < 1e-9);
         assert_eq!(parse_shortfall_gb("CUDA out of memory"), Some(4.0));
     }
 
