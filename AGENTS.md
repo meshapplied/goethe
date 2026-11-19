@@ -21,7 +21,7 @@ Index for coding agents in this repo. Read what you need; do not invent architec
 - Fail closed (allowlist, packs, release key, share). Silent success is a bug.
 - Smallest change that fixes the real bug. No speculative frameworks.
 - Never force-push `main`/`master`. Commit only when asked. No AI co-author trailers.
-- No internal jargon (“ponytail”, agent traces) in commits/PR/user-facing text.
+- No internal jargon ("ponytail", agent traces) in commits/PR/user-facing text.
 - Never track `PROJECT.md` or `.local/` / agent skill dirs. Lint refuses if they appear in `git ls-files`.
 - Match `goethe/tests/lint_style.py` (and CI lint).
 
@@ -32,6 +32,6 @@ Index for coding agents in this repo. Read what you need; do not invent architec
 - Full Linux PR bar: CI `gate`. Mac package e2e only when packaging paths change.
 
 ## Out of scope unless asked
-- GPU acceptance / greengoblin loads
+- GPU acceptance loads
 - Rewriting learn/OOM DB pipeline
 - Further folder renames (see `PROJECT.md` when present)
