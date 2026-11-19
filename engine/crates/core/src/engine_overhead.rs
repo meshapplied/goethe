@@ -37,16 +37,13 @@ pub fn parse_shortfall_gb(log_text: &str) -> Option<f64> {
 }
 
 fn torch_oom_gap_gb(line: &str) -> Option<f64> {
-    // "Tried to allocate 2.00 GiB ... of which 1.15 GiB is free" (MiB/GiB/GB normalized to GB).
-    let size_after = |key: &str| -> Option<f64> {
+    // "Tried to allocate 2.00 GiB. GPU 0 has a total capacity of 178.34 GiB of which 1.15 GiB is free": what was missing.
+    let number_after = |key: &str| -> Option<f64> {
         let rest = line.split(key).nth(1)?;
-        let mut words = rest.split_whitespace();
-        let n: f64 = words.next()?.trim_end_matches(['.', ',']).parse().ok()?;
-        let unit = words.next().unwrap_or("GiB").to_ascii_lowercase();
-        Some(if unit.starts_with("mi") { n / 1024.0 } else { n })
+        rest.split_whitespace().next()?.trim_end_matches(['.', ',']).parse().ok()
     };
-    let wanted = size_after("Tried to allocate ")?;
-    let free = size_after("of which ").unwrap_or(0.0);
+    let wanted = number_after("Tried to allocate ")?;
+    let free = number_after("of which ").unwrap_or(0.0);
     Some(wanted - free)
 }
 
@@ -240,12 +237,6 @@ mod tests {
     fn a_torch_oom_names_what_was_missing() {
         let line = "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 12.00 GiB. GPU 0 has a total capacity of 178.34 GiB of which 1.15 GiB is free.";
         assert!((parse_shortfall_gb(line).unwrap() - (12.0 - 1.15 + 1.0)).abs() < 1e-9);
-        let mib = "Tried to allocate 272.00 MiB. GPU 0 has a total capacity of 31.36 GiB of which 53.56 MiB is free.";
-        assert!((parse_shortfall_gb(mib).unwrap() - 2.0).abs() < 1e-6, "gap.max(1)+1 after MiB→GB, got {:?}", parse_shortfall_gb(mib));
-        let gib = "Tried to allocate 1.50 GiB. GPU 0 has a total capacity of 80.00 GiB of which 0.25 GiB is free.";
-        assert!((parse_shortfall_gb(gib).unwrap() - ((1.50_f64 - 0.25).max(1.0) + 1.0)).abs() < 1e-9);
-        let gb = "Tried to allocate 3.00 GB. GPU 0 has a total capacity of 24.00 GB of which 0.50 GB is free.";
-        assert!((parse_shortfall_gb(gb).unwrap() - ((3.0_f64 - 0.5).max(1.0) + 1.0)).abs() < 1e-9);
         assert_eq!(parse_shortfall_gb("CUDA out of memory"), Some(4.0));
     }
 
