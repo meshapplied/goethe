@@ -10,7 +10,7 @@ REPO="${GITHUB_REPOSITORY:-meshapplied/goethe}"
 
 mkdir -p "${SITE}"
 zstd -dc "${TARBALL}" | tar -C "${SITE}" --strip-components=1 -xf -
-test -f "${SITE}/install.sh" && test -f "${SITE}/SHA256SUMS.sig" && test -f "${SITE}/v1/registry.json"
+test -f "${SITE}/install.sh" && test -f "${SITE}/install.ps1" && test -f "${SITE}/SHA256SUMS.sig" && test -f "${SITE}/v1/registry.json"
 current="$(cat "${SITE}/VERSION")"
 mkdir -p "${SITE}/v/${current}"
 (cd "${SITE}" && find . -mindepth 1 -maxdepth 1 ! -name v -exec cp -R {} "v/${current}/" \;)
