@@ -120,7 +120,6 @@ pub struct Api {
     pub id: String,
     pub name: String,
     pub prefix: String,
-    pub secret: Option<String>,
     pub models: Option<Vec<String>>,
     pub expires: Option<String>,
     pub admin: bool,
@@ -484,21 +483,20 @@ fn loaded(con: &rusqlite::Connection) -> Vec<Loaded> {
 }
 
 fn apis(con: &rusqlite::Connection) -> Vec<Api> {
-    // The node's API keys for the platform's API table: the full key goes only in `secret` (the platform stores it encrypted).
-    con.prepare("SELECT key_id, name, raw_prefix, token, model_scope, expires_at, is_admin FROM api_keys ORDER BY created_at")
+    // Inventory only: id, name, prefix, scope, expiry. The raw token never leaves the node.
+    con.prepare("SELECT key_id, name, raw_prefix, model_scope, expires_at, is_admin FROM api_keys ORDER BY created_at")
         .and_then(|mut s| {
             s.query_map([], |r| {
-                let scope: Option<String> = r.get(4)?;
+                let scope: Option<String> = r.get(3)?;
                 Ok(Api {
                     id: clean_text(&r.get::<_, String>(0)?, 64),
                     name: clean_text(&r.get::<_, String>(1)?, 64),
                     prefix: clean_text(&r.get::<_, Option<String>>(2)?.unwrap_or_default(), 32),
-                    secret: r.get::<_, Option<String>>(3)?.filter(|t| t.len() <= 128 && t.chars().all(|c| c.is_ascii_graphic())),
                     models: scope
                         .map(|m| m.split(',').map(str::trim).filter(|x| !x.is_empty()).map(|x| clean_text(x, 200)).collect::<Vec<_>>())
                         .filter(|m| !m.is_empty()),
-                    expires: r.get::<_, Option<String>>(5)?.map(|e| clean_text(&e, 40)).filter(|e| !e.is_empty()),
-                    admin: r.get::<_, i64>(6)? != 0,
+                    expires: r.get::<_, Option<String>>(4)?.map(|e| clean_text(&e, 40)).filter(|e| !e.is_empty()),
+                    admin: r.get::<_, i64>(5)? != 0,
                 })
             })?
             .collect()
@@ -627,17 +625,32 @@ mod tests {
         let mut c = Collector::new("2026-11-11T10:00:00Z".into());
         let s = c.build(&home, "start", None);
         let full = String::from_utf8(encode(&s).unwrap()).unwrap();
-        let mut v: serde_json::Value = serde_json::from_str(&full).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&full).unwrap();
         assert_eq!(
             v["apis"],
-            serde_json::json!([{"id": "k1", "name": "app", "prefix": "gk_pre", "secret": "gk_live_TOKEN-SECRET", "models": ["org/m", "org/n"], "expires": "2027-01-31", "admin": false}]),
-            "the API key goes only in apis[].secret"
+            serde_json::json!([{"id": "k1", "name": "app", "prefix": "gk_pre", "models": ["org/m", "org/n"], "expires": "2027-01-31", "admin": false}]),
+            "apis list inventory only; no secret field"
         );
-        v["apis"][0]["secret"] = serde_json::Value::Null;
-        let text = v.to_string();
-        for secret in ["SECRET", "sk-engine", "ek-ENGINE", "gk_live", "HASH", "secret-home-path", "4242", "mesh_node_", "--api-key", "safetensors", "goethe_card"] {
+        assert!(v["apis"][0].get("secret").is_none(), "apis[].secret must not be serialized");
+        let text = full;
+        for secret in [
+            "SECRET",
+            "sk-engine",
+            "ek-ENGINE",
+            "gk_live",
+            "gk_live_TOKEN-SECRET",
+            "HASH-SECRET-abc",
+            "HASH",
+            "secret-home-path",
+            "4242",
+            "mesh_node_",
+            "--api-key",
+            "safetensors",
+            "goethe_card",
+        ] {
             assert!(!text.contains(secret), "{secret} leaked into {text}");
         }
+        assert!(!text.contains("\"secret\""), "secret key must not appear in the heartbeat JSON: {text}");
         let home_str = home.to_string_lossy().to_string();
         assert!(!text.contains(&home_str));
         assert_eq!(v["schema"], 1);
