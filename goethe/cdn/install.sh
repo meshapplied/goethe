@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Goethe installer for Linux, macOS, and WSL (Ubuntu). Same script everywhere once a Unix shell exists.
-# Linux/macOS:  curl -fsSL https://pkg.goethe.sh/install.sh | bash
-# Windows:      irm https://pkg.goethe.sh/install.ps1 | iex   # enables WSL2, then runs this file inside Ubuntu
+# Goethe installer for Linux, macOS, and WSL (Windows uses install.ps1, which runs this script inside Ubuntu).
 
 set -euo pipefail
 
