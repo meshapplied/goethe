@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-# Equivalence gates for in-place module splits (move-only bites).
-# Usage:
-#   equiv_split_gate.sh baseline
-#   equiv_split_gate.sh check [NEW_RS ...]
-#   equiv_split_gate.sh focused PARENT [NEW...]
+# Equivalence gates for move-only module splits: baseline | check [NEW_RS...] | focused PARENT [NEW...]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
