@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from goethe import registry, resolve
+from lab import registry, resolve
 from tests.fixtures import PRO_4000, PRO_6000, REPO, RTX_3090, RTX_5090, gpu
 
 MODEL = registry.load()["qwen3-8-27b"]

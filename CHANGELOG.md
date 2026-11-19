@@ -47,7 +47,7 @@
 - A pack no allowed GPU can run (its manifest's architecture, SM count or shared memory) is refused before the engine layer or any weight is downloaded, with one line and exit 3.
 - Install and load use one memory plan, so the fit line before a download matches the load that follows; a download-only install (`--no-load`) checks the card's total memory, and a busy GPU is named as busy.
 - A failed step prints one error line and the path of its log; underlying output goes to `<home>/logs` and shows with `-v`. Long steps print a heartbeat (verifying, starting the engine, loading, warming up) and a pack download that fails transiently is retried.
-- CI runs on pull requests into dev and finishes in about three minutes; the full package build runs on main and nightly. `engine/tests/accept.sh` installs, runs and removes each release model and fails any that is not served by its kernel pack.
+- CI runs on pull requests into dev and finishes in about three minutes; the full package build runs on main and nightly. `goethe/tests/accept.sh` installs, runs and removes each release model and fails any that is not served by its kernel pack.
 
 ## 0.3.2 (2026-11-16)
 
@@ -96,7 +96,7 @@
 - `goethe trace on|off [--key ... | --all-keys]` records every chat, Anthropic Messages, completions and Responses request with its reply, for all models and instances, into `~/.goethe/traces` (or `--dir`), as a corpus for training later. Turns are grouped into sessions: follow-ups store only their new messages, and regenerations are kept as alternative replies. Each turn names the exact model version that produced it, and streamed replies are stored in their non-streaming shape. A manifest, a session index and a recording history describe the folder. `off` keeps the chosen keys for the next `on`. `goethe trace` shows the size. Recording turns itself off at a size limit (`--max-gb`, default 20 GB), pauses while the disk is low, and never slows a reply. The format is in `docs/traces.md`; `goethe uninstall` keeps the corpus, and `goethe remove --model` asks whether to delete that model's traces (`--delete-traces`, `--keep-traces`).
 - Traces work with any model and client: Responses requests link into sessions and store only new items, including `previous_response_id`; streams keep every field the engine sends, and a cut Responses stream keeps its partial reply. Model fingerprints cover the Goethe version, the runtime, more tokenizer files and single-file checkpoints such as NInfer's. Drop counters survive a restart, goethed writes queued turns before stopping, and a partial write can no longer hide later turns.
 - The gateway certificate now has subject alternative names (`localhost`, `127.0.0.1`, `::1`, the hostname and `GOETHE_TLS_NAMES`), so the `curl --cacert` command from `goethe api` verifies. It is regenerated only when those names change.
-- `engine/packaging/Dockerfile` builds a container image with the signed installer.
+- `goethe/packaging/Dockerfile` builds a container image with the signed installer.
 
 ## 0.1.7 (2026-10-30)
 
@@ -110,7 +110,7 @@
 - `goethe unload` waits up to 30 s for the GPU memory to be released, so an immediate `goethe load` no longer sees the old engine as a foreign process.
 - A warm-up request runs before a model is reported RUNNING, so the first client request does not wait for first-use kernel builds.
 - The gateway allows 100 requests per second (burst 200) and 512 open connections per client address, configurable with `GOETHE_GATEWAY_RATE_PER_IP` and `GOETHE_GATEWAY_CONN_PER_IP`; before, more than 32 concurrent streams from one machine got 429.
-- `docs/registry.md`: what a registry entry must pass; `engine/tests/load/mixed_load.py`: mixed prompt-length load test.
+- `docs/registry.md`: what a registry entry must pass; `goethe/tests/load/mixed_load.py`: mixed prompt-length load test.
 
 ## 0.1.6 (2026-10-27)
 
@@ -140,7 +140,7 @@
 - GPUs are named as `goethe gpu` lists them: `goethe load --model <id> --gpu gpu3`, or `--gpu gpu2 gpu3` to split a model across both (the number of GPUs is the tensor-parallel size), also on `install` and `config`. A count the model cannot be split over is refused with the counts that work, and when the named GPUs are too few the error names a `--gpu` list that fits. The older `--gpus 2,3` still works.
 - Memory budgets are accurate for long contexts and hybrid models. The KV cache holds one request at the full context, or every parallel request at a quarter of it, instead of four full contexts. Hybrid models (Qwen3.5, Qwen3-Next and other linear-attention or Mamba models) budget their linear-attention state and pass the slot count to SGLang (`--max-mamba-cache-size`); before, SGLang gave about half of the KV budget to that state on its own.
 
-- Third-party notices: `THIRD_PARTY_NOTICES.md` lists the main components (SGLang, shipped in a modified build, PyTorch, FlashInfer, Triton, Transformers, the NVIDIA CUDA libraries, uv, CPython, nginx, SQLite) and every Python package and Rust crate with its version and license, with notes on the NVIDIA, LGPL and MPL components. `THIRD_PARTY_LICENSES.txt` carries the license texts of the Rust crates compiled into goethe and goethed. Both ship in the signed package with Goethe's `LICENSE`, and the installer places them in `$GOETHE_HOME`. `engine/packaging/third_party.py` regenerates them, and CI checks that they match `Cargo.lock` and `requirements.lock`.
+- Third-party notices: `THIRD_PARTY_NOTICES.md` lists the main components (SGLang, shipped in a modified build, PyTorch, FlashInfer, Triton, Transformers, the NVIDIA CUDA libraries, uv, CPython, nginx, SQLite) and every Python package and Rust crate with its version and license, with notes on the NVIDIA, LGPL and MPL components. `THIRD_PARTY_LICENSES.txt` carries the license texts of the Rust crates compiled into goethe and goethed. Both ship in the signed package with Goethe's `LICENSE`, and the installer places them in `$GOETHE_HOME`. `goethe/packaging/third_party.py` regenerates them, and CI checks that they match `Cargo.lock` and `requirements.lock`.
 - `goethe uninstall` now deletes the models Goethe installed, with the same rules as `goethe remove`: downloads and managed copies are deleted, models registered from a folder elsewhere or the Hugging Face cache lose only Goethe's links, and a folder of your own files inside the models directory is kept and named. The plan lists the models and the space they free, also with `--yes`. `--keep-models` keeps them; the old `--purge-models` still works.
 
 ## 0.1.4 (2026-10-25)

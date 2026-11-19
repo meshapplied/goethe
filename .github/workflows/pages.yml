@@ -41,13 +41,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: src
-          sparse-checkout: engine/packaging
+          sparse-checkout: goethe/packaging
       - name: The package tree served at pkg.goethe.sh, with the newest releases under v/
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         run: |
-          bash src/engine/packaging/pages_site.sh "goethe-cdn-${TAG#v}.tar.zst" site
+          bash src/goethe/packaging/pages_site.sh "goethe-cdn-${TAG#v}.tar.zst" site
           test "$(cat site/VERSION)" = "${TAG#v}" || { echo "::error::the package is $(cat site/VERSION), not ${TAG#v}"; exit 1; }
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

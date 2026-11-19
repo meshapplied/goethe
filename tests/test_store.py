@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from goethe import store
+from lab import store
 
 
 class Paths(unittest.TestCase):

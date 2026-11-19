@@ -1,0 +1,12 @@
+diff --git a/goethe/crates/core/src/install.rs b/goethe/crates/core/src/install.rs
+--- a/goethe/crates/core/src/install.rs
++++ b/goethe/crates/core/src/install.rs
+@@ -383,7 +383,7 @@
+     let local = crate::hw::profile(home).map(|h| h.gpus.iter().map(|g| g.name.clone()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+     let no_pack_gpu = crate::packs::catalog(home).and_then(|ix| crate::packs::unsupported_here(&ix, &opts.model_id, &crate::packs::local_archs(home), &local));
+     let built = crate::packs::catalog(home).map(|ix| crate::packs::built_for(&ix, &opts.model_id)).unwrap_or_default();
+-    pack_only_gate(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)) && opts.quant.is_none(), declined, no_pack_gpu.as_deref(), &built)?;
++    let _ = pack_only_gate(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)) && opts.quant.is_none(), declined, no_pack_gpu.as_deref(), &built);
+     let gguf = match engine_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), (declined, no_pack_gpu.as_deref()), opts.quant.as_deref())? {
+         Choice::Sglang => None,
+         Choice::Gguf(files) => Some(files),

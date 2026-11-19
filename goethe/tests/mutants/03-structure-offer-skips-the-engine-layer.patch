@@ -1,0 +1,14 @@
+diff --git a/goethe/crates/core/src/install.rs b/goethe/crates/core/src/install.rs
+--- a/goethe/crates/core/src/install.rs
++++ b/goethe/crates/core/src/install.rs
+@@ -531,9 +531,7 @@
+         println!("no optimised kernel pack has the structure of these weights; using the plain runtime");
+         return Ok(None);
+     }
+-    if let Err(e) = (deps.ensure_engine)() {
+-        return miss(format!("optimised kernels exist for this GPU but goethe-engine could not be installed to look for them: {e}"));
+-    }
++    let _ = &deps.ensure_engine;
+     let plan = match (deps.by_structure)(&creds) {
+         Ok(Some((_, plan))) => plan,
+         Ok(None) => {

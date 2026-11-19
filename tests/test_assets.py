@@ -2,7 +2,7 @@
 import json
 import unittest
 
-from goethe import registry
+from lab import registry
 from tests.fixtures import REPO
 
 KERNELS = REPO / "nvfp4-kernels"

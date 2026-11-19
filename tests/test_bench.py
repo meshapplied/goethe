@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from goethe.bench import parse_done, score, tool_ok
+from lab.bench import parse_done, score, tool_ok
 
 
 class Score(unittest.TestCase):
