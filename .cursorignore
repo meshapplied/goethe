@@ -1,0 +1,7 @@
+# Keep local doctrine and skills out of Cursor index / cloud context
+PROJECT.md
+.local/
+.agents/skills/
+.cursor/skills/
+.claude/skills/
+docs/dev/
