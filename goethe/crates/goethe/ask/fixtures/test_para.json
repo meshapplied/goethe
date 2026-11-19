@@ -1,0 +1,15 @@
+[
+  {"utterance": "is goethe running", "intent": "status", "argv": ["goethe", "status"]},
+  {"utterance": "are you up", "intent": "status", "argv": ["goethe", "status"]},
+  {"utterance": "bring goethe up", "intent": "up", "argv": ["goethe", "up"]},
+  {"utterance": "shut down goethe", "intent": "down", "argv": ["goethe", "down"]},
+  {"utterance": "check the machine", "intent": "doctor", "argv": ["goethe", "doctor"]},
+  {"utterance": "health check", "intent": "doctor", "argv": ["goethe", "doctor"]},
+  {"utterance": "what models are loaded", "intent": "ps", "argv": ["goethe", "ps"]},
+  {"utterance": "what models do i have", "intent": "models", "argv": ["goethe", "models"]},
+  {"utterance": "how do i connect", "intent": "api", "argv": ["goethe", "api"]},
+  {"utterance": "gpu memory", "intent": "gpu", "argv": ["goethe", "gpu"]},
+  {"utterance": "upgrade goethe", "intent": "update", "argv": ["goethe", "update"]},
+  {"utterance": "download model org/name-7b", "intent": "install", "argv": ["goethe", "install", "org/name-7b"]},
+  {"utterance": "serve this model org/name-7b", "intent": "load", "argv": ["goethe", "load", "org/name-7b"]}
+]

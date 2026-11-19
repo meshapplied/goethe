@@ -166,6 +166,8 @@ jobs:
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo build --locked --features goethe/test-release-key
+      - name: ask NL gate (OOD abstain, above random, para bar; Rust only)
+        run: cargo test -p goethe --locked ask::tests::gate_core_para_ood_slots -- --nocapture
       - name: CPU gates (harness self-test, package signing and verification) on the dev build
         env:
           GOETHE_TEST_GPUS: ""

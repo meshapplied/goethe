@@ -1,0 +1,15 @@
+[
+  {"utterance": "show status", "intent": "status", "argv": ["goethe", "status"]},
+  {"utterance": "start goethe", "intent": "up", "argv": ["goethe", "up"]},
+  {"utterance": "stop goethe", "intent": "down", "argv": ["goethe", "down"]},
+  {"utterance": "run doctor", "intent": "doctor", "argv": ["goethe", "doctor"]},
+  {"utterance": "list running models", "intent": "ps", "argv": ["goethe", "ps"]},
+  {"utterance": "list models", "intent": "models", "argv": ["goethe", "models"]},
+  {"utterance": "show the api address", "intent": "api", "argv": ["goethe", "api"]},
+  {"utterance": "show gpus", "intent": "gpu", "argv": ["goethe", "gpu"]},
+  {"utterance": "update goethe", "intent": "update", "argv": ["goethe", "update"]},
+  {"utterance": "install meta-llama/Llama-3.2-3B", "intent": "install", "argv": ["goethe", "install", "meta-llama/Llama-3.2-3B"]},
+  {"utterance": "load meta-llama/Llama-3.2-3B", "intent": "load", "argv": ["goethe", "load", "meta-llama/Llama-3.2-3B"]},
+  {"utterance": "unload meta-llama/Llama-3.2-3B", "intent": "unload", "argv": ["goethe", "unload", "meta-llama/Llama-3.2-3B"]},
+  {"utterance": "remove meta-llama/Llama-3.2-3B", "intent": "remove", "argv": ["goethe", "remove", "meta-llama/Llama-3.2-3B"]}
+]

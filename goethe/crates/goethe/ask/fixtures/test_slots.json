@@ -1,0 +1,6 @@
+[
+  {"utterance": "install org/good-model", "intent": "install", "argv": ["goethe", "install", "org/good-model"]},
+  {"utterance": "install please", "abstain": true},
+  {"utterance": "load org/x", "intent": "load", "argv": ["goethe", "load", "org/x"]},
+  {"utterance": "expose on port 99999", "abstain": true}
+]

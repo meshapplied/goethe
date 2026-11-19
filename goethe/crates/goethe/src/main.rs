@@ -1,5 +1,6 @@
 // goethe CLI entrypoint for hardware, install, config, and load commands.
 
+mod ask;
 mod complete;
 use clap::{CommandFactory, Parser, Subcommand};
 use goethe_core::alias;
@@ -697,6 +698,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("goethe login", "link this node to the Goethe platform (optional)"),
         ("goethe logout", "unlink it and remove its local credentials"),
         ("goethe completion install", "tab completion for your shell"),
+        ("goethe ask UTTERANCE", "map a phrase to a Goethe command (confirm before run; never free shell)"),
     ]),
 ];
 
@@ -751,6 +753,17 @@ fn main() {
     }
     if args.len() == 1 || (args.len() == 2 && matches!(args[1].as_str(), "-h" | "--help" | "help")) {
         print!("{}", top_help(&goethe_core::onboard::suggested(true)));
+        return;
+    }
+    if args.len() >= 2 && matches!(args[1].as_str(), "ask" | "?") {
+        let root = Cli::command();
+        let validate = |argv: &[String]| -> Result<(), String> {
+            Cli::try_parse_from(argv).map(|_| ()).map_err(|e| e.to_string())
+        };
+        if let Err(e) = ask::run(&args, root, &validate) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
         return;
     }
     let cli = Cli::command().try_get_matches_from(&args).and_then(|m| <Cli as clap::FromArgMatches>::from_arg_matches(&m)).unwrap_or_else(|e| e.exit());
@@ -2105,6 +2118,9 @@ mod tests {
         }
         for (_, rows) in HELP_SECTIONS {
             for (cmd, _) in *rows {
+                if cmd.split_whitespace().nth(1) == Some("ask") {
+                    continue;
+                }
                 let words: Vec<&str> = cmd.split_whitespace().skip(1).map(|w| match w { "MODEL" => "org/m", "FOLDER" => "f", "KEY_ID" => "a1", "DOMAIN" => "a.example.com", w => w }).collect();
                 if !words.is_empty() {
                     assert!(parse(&words).is_ok(), "{cmd} does not parse");

@@ -352,7 +352,17 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 }
                 (Err(e), _) | (_, Err(e)) => eprintln!("note: the per-GPU fit was not checked before the download: {e}"),
             }
-            confirm(opts, &format!("{} ({}, {:.1} GB) with optimised kernels for {}{spec}", opts.model_id, choice.offer.format, bytes(&files) as f64 / GIB, choice.offer.arch))?;
+            confirm(
+                opts,
+                &format!(
+                    "{} ({}, {:.1} GB) with optimised kernels for {}{spec} → {}",
+                    opts.model_id,
+                    choice.offer.format,
+                    bytes(&files) as f64 / GIB,
+                    choice.offer.arch,
+                    card_dir.display()
+                ),
+            )?;
             let pack_dl = DownloadOpts { revision: Some(rev), force: opts.force, no_verify: opts.no_verify, only: Some(files.clone()) };
             fetch_weights(home, &choice.offer.hf_repo, &card_dir, &pack_dl)?;
             if let Some((repo, revision, only)) = crate::packs::aux(&plan.entry) {
@@ -405,9 +415,19 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             };
             let (fmt, engine) = if gguf.is_some() { ("gguf", "llama.cpp") } else { ("safetensors", "SGLang") };
             let line = if cfg!(target_os = "macos") {
-                format!("{} ({fmt}, {:.1} GB) with llama.cpp on Metal", opts.model_id, bytes as f64 / GIB)
+                format!(
+                    "{} ({fmt}, {:.1} GB) with llama.cpp on Metal → {}",
+                    opts.model_id,
+                    bytes as f64 / GIB,
+                    card_dir.display()
+                )
             } else {
-                format!("{} ({fmt}, {:.1} GB) with {engine}", opts.model_id, bytes as f64 / GIB)
+                format!(
+                    "{} ({fmt}, {:.1} GB) with {engine} → {}",
+                    opts.model_id,
+                    bytes as f64 / GIB,
+                    card_dir.display()
+                )
             };
             confirm(opts, &line)?;
         }

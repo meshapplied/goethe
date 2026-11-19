@@ -1,0 +1,86 @@
+[
+  {
+    "id": "status",
+    "template": ["goethe", "status"],
+    "blurb": "show status",
+    "paraphrases": ["is goethe running", "show status", "api status", "are you up"]
+  },
+  {
+    "id": "up",
+    "template": ["goethe", "up"],
+    "blurb": "start Goethe",
+    "paraphrases": ["start goethe", "start the daemon", "bring goethe up", "start at boot"]
+  },
+  {
+    "id": "down",
+    "template": ["goethe", "down"],
+    "blurb": "stop Goethe",
+    "paraphrases": ["stop goethe", "shut down goethe", "bring goethe down", "stop the daemon"]
+  },
+  {
+    "id": "doctor",
+    "template": ["goethe", "doctor"],
+    "blurb": "check machine",
+    "paraphrases": ["check the machine", "run doctor", "health check", "diagnose setup"]
+  },
+  {
+    "id": "ps",
+    "template": ["goethe", "ps"],
+    "blurb": "list loaded models",
+    "paraphrases": ["list running models", "what models are loaded", "show loaded models"]
+  },
+  {
+    "id": "models",
+    "template": ["goethe", "models"],
+    "blurb": "list models",
+    "paraphrases": ["list models", "show installed models", "what models do i have"]
+  },
+  {
+    "id": "models.installed",
+    "template": ["goethe", "models", "--installed"],
+    "blurb": "list installed only",
+    "paraphrases": ["list installed models only", "show installed only"]
+  },
+  {
+    "id": "api",
+    "template": ["goethe", "api"],
+    "blurb": "show API address",
+    "paraphrases": ["show the api address", "how do i connect", "api endpoint"]
+  },
+  {
+    "id": "gpu",
+    "template": ["goethe", "gpu"],
+    "blurb": "show GPUs",
+    "paraphrases": ["show gpus", "list gpus", "gpu memory"]
+  },
+  {
+    "id": "update",
+    "template": ["goethe", "update"],
+    "blurb": "update Goethe",
+    "paraphrases": ["update goethe", "upgrade goethe", "check for updates"]
+  },
+  {
+    "id": "install",
+    "template": ["goethe", "install", "{model}"],
+    "blurb": "install model",
+    "paraphrases": ["install a model", "download model", "get this model"]
+  },
+  {
+    "id": "load",
+    "template": ["goethe", "load", "{model}"],
+    "blurb": "serve model",
+    "paraphrases": ["load a model", "serve this model", "start serving"]
+  },
+  {
+    "id": "unload",
+    "template": ["goethe", "unload", "{model}"],
+    "blurb": "unload model",
+    "paraphrases": ["unload a model", "stop serving this model"]
+  },
+  {
+    "id": "remove",
+    "template": ["goethe", "remove", "{model}"],
+    "blurb": "remove model",
+    "paraphrases": ["remove a model", "delete this model", "uninstall model"]
+  }
+]
