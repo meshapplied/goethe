@@ -1617,6 +1617,8 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
     if let Some(msg) = sgl::reserved_flag_error(&registry_args) {
         return Err(format!("registry entry for {}: {msg}", t.model_id));
     }
+    let (registry_args, quant_note) = sgl::drop_quantization_when_config_declares(&registry_args, &cfg);
+    notes.extend(quant_note);
     let (mut base_args, dir_notes) = sgl::resolve_model_dir_args(&registry_args, dir)?;
     notes.extend(dir_notes);
     if opts.trust_remote_code {
@@ -1629,6 +1631,10 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
+    let (old_args, old_quant_note) = sgl::drop_quantization_when_config_declares(&old_args, &cfg);
+    if old_quant_note.is_some() && !sgl::has_flag(&cli_args, "--quantization") {
+        notes.extend(old_quant_note);
+    }
     let mut inferred = Vec::new();
     for (flag, value, why) in sgl::infer_parsers(&cfg, dir) {
         if [&base_args, &old_args, &cli_args].iter().all(|a| !sgl::has_flag(a, &flag)) {

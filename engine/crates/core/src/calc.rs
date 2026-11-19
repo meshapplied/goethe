@@ -1,8 +1,7 @@
 // VRAM budget calculator from the product spec, with the one fit rule every load path uses.
 
 const SAFETY_MARGIN_GB: f64 = 1.5;
-const MAX_MEM_FRACTION: f64 = 0.95;
-const CUDA_CONTEXT_GB: f64 = crate::engine_overhead::DEFAULT_CONTEXT_GB;
+const MAX_MEM_FRACTION: f64 = 1.0;
 pub const BASE_OVERHEAD_GB: f64 = 1.8;
 pub const METAL_OVERHEAD_GB: f64 = 0.5;
 
@@ -30,10 +29,9 @@ impl Need {
 }
 
 pub fn missing_gb(need: &Need, free_gb: f64) -> f64 {
-    // GB a budget lacks: the whole budget leaves the safety margin, the static pool stays within 95% of free minus context.
-    (need.total() - (free_gb - SAFETY_MARGIN_GB))
-        .max(need.pool() - MAX_MEM_FRACTION * (free_gb - CUDA_CONTEXT_GB))
-        .max(need.weights + need.load_peak + need.overhead - (free_gb - SAFETY_MARGIN_GB))
+    // Weights+peak in free; total leaves SAFETY_MARGIN_GB. (ponytail: pool-cap == free is dead under the margin.)
+    (need.weights + need.load_peak - free_gb)
+        .max(need.total() - (free_gb - SAFETY_MARGIN_GB))
         .max(0.0)
 }
 
@@ -58,7 +56,7 @@ pub fn shortfall(need: &Need, gpu: u32, free_gb: f64) -> Option<String> {
     let (w, k, s, o, f) = (tenth(need.weights), tenth(need.kv) + tenth(need.window), tenth(need.state), tenth(need.overhead), tenth(free_gb));
     let n = w + k + s + o;
     let head = format!("needs {}; GPU {gpu} has {f:.1} GB free", describe(need));
-    let by_load = tenth(need.weights + need.load_peak + need.overhead) - (f - SAFETY_MARGIN_GB);
+    let by_load = tenth(need.weights + need.load_peak) - f;
     if need.load_peak > 0.0 && by_load >= n - (f - SAFETY_MARGIN_GB) && by_load > 0.0 {
         return Some(format!(
             "{head}; while loading, SGLang also holds {:.1} GB of reordered expert copies: missing {:.1} GB (split it across more GPUs with --gpu)",
@@ -67,16 +65,6 @@ pub fn shortfall(need: &Need, gpu: u32, free_gb: f64) -> Option<String> {
         ));
     }
     let by_margin = n - (f - SAFETY_MARGIN_GB);
-    let cap = tenth(MAX_MEM_FRACTION * (f - CUDA_CONTEXT_GB));
-    let by_cap = w + k + s - cap;
-    if by_cap > by_margin {
-        return Some(format!(
-            "{head}, and its static pool ({}, {:.1} GB) may use at most 95% of it after the CUDA context ({cap:.1} GB): missing {:.1} GB",
-            if s > 0.0 { "weights, KV and state" } else { "weights + KV" },
-            w + k + s,
-            by_cap.max(0.1)
-        ));
-    }
     Some(format!("{head}, minus a {SAFETY_MARGIN_GB} GB safety margin: missing {:.1} GB", by_margin.max(0.1)))
 }
 
@@ -135,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn mem_fraction_rejects_over_095_with_missing() {
+    fn mem_fraction_rejects_when_budget_misses() {
         let err = mem_fraction_from_free(&need(45.0, 3.2, 1.8), 50.0, 0.0).unwrap_err();
         assert!(err.contains("missing"), "{err}");
     }
@@ -168,10 +156,7 @@ mod tests {
              minus a 1.5 GB safety margin: missing 1.3 GB"
         );
         let capped = shortfall(&need(70.0, 9.5, 1.8), 2, 75.6).unwrap();
-        assert!(
-            capped.ends_with("its static pool (weights + KV, 79.5 GB) may use at most 95% of it after the CUDA context (70.5 GB): missing 9.0 GB"),
-            "{capped}"
-        );
+        assert!(capped.ends_with("minus a 1.5 GB safety margin: missing 7.2 GB"), "{capped}");
         assert_eq!(shortfall(&need(10.0, 1.0, 1.8), 2, 75.6), None);
     }
 
@@ -179,6 +164,19 @@ mod tests {
     fn missing_uses_margin_and_static_cap() {
         assert_eq!(missing_gb(&need(8.0, 0.2, 1.8), 20.0), 0.0);
         assert!((missing_gb(&need(15.0, 2.2, 1.8), 20.0) - 0.5).abs() < 1e-9);
-        assert!((missing_gb(&need(88.0, 5.0, 1.8), 96.0) - (93.0 - 0.95 * (96.0 - CUDA_CONTEXT_GB))).abs() < 1e-9);
+        assert!((missing_gb(&need(88.0, 5.0, 1.8), 96.0) - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mem_fraction_may_use_the_full_free_card() {
+        let n = need(26.0, 0.0, 1.5);
+        assert!((mem_fraction_from_free(&n, 30.0, 4.0).unwrap() - 1.0).abs() < 1e-9);
+        assert!(mem_fraction_from_free(&n, 27.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn exact_fill_with_overhead_still_refuses() {
+        assert!(missing_gb(&need(20.0, 0.1, 1.8), 20.0) > 0.0);
+        assert!(missing_gb(&need(20.0, 1.0, 0.5), 21.0) > 0.0);
     }
 }

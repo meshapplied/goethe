@@ -63,6 +63,7 @@ pub struct LoadPlan {
     pub cc: String,
     pub ctx: u64,
     pub max_conc: u64,
+    pub disable_marlin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,10 +164,10 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
 pub const KV_SHARE_OF_FREE: f64 = 0.4;
 
 pub fn cap_default_ctx(input: &ChooserInput, tp: usize, cc: &str, free_gb: f64) -> u64 {
-    // A context nobody asked for is halved (down to 8192) until its KV cache is at most 40% of the free VRAM.
+    // A context nobody asked for is halved (down to SHRINK_CTX_FLOOR) until its KV cache is at most 40% of the free VRAM.
     let mut trial = input.clone();
-    while trial.ctx > 8192 && need(&trial, tp, cc).kv > KV_SHARE_OF_FREE * free_gb {
-        trial.ctx = (trial.ctx / 2).max(8192);
+    while trial.ctx > SHRINK_CTX_FLOOR && need(&trial, tp, cc).kv > KV_SHARE_OF_FREE * free_gb {
+        trial.ctx = (trial.ctx / 2).max(SHRINK_CTX_FLOOR);
     }
     trial.ctx
 }
@@ -211,7 +212,27 @@ pub fn plan_with(
     pinned_gpus: Option<&[u32]>,
     learned: LearnedAt,
 ) -> Result<LoadPlan, PlanError> {
-    // Pinned GPUs as given, else a pinned or the smallest fitting tp over GPUs whose architecture runs the model.
+    let with_extra = plan_once(input, gpus, hw, pinned_tp, pinned_gpus, learned);
+    if input.marlin_extra_gb <= 0.0 {
+        return with_extra;
+    }
+    let want = (input.ctx.min(input.max_ctx), input.max_conc.max(1));
+    if matches!(&with_extra, Ok(p) if (p.ctx, p.max_conc) == want) {
+        return with_extra;
+    }
+    let mut bare = input.clone();
+    bare.marlin_extra_gb = 0.0;
+    prefer_capacity(with_extra, plan_once(&bare, gpus, hw, pinned_tp, pinned_gpus, learned))
+}
+
+fn plan_once(
+    input: &ChooserInput,
+    gpus: &[GpuPlacementInput],
+    hw: Option<&HardwareState>,
+    pinned_tp: Option<usize>,
+    pinned_gpus: Option<&[u32]>,
+    learned: LearnedAt,
+) -> Result<LoadPlan, PlanError> {
     if let Some(pg) = pinned_gpus.filter(|p| !p.is_empty()) {
         let tp = pinned_tp.unwrap_or(pg.len());
         if tp != pg.len() {
@@ -256,6 +277,21 @@ pub fn plan_with(
         return fits(input).or_else(|| shrink_until(input, fits)).ok_or_else(|| closest_miss(input, &eligible, hw, tp, learned));
     }
     auto_plan(input, &eligible, hw, learned)
+}
+
+fn prefer_capacity(with_extra: Result<LoadPlan, PlanError>, without: Result<LoadPlan, PlanError>) -> Result<LoadPlan, PlanError> {
+    match (with_extra, without) {
+        (Ok(a), Ok(mut b)) if (b.ctx, b.max_conc) > (a.ctx, a.max_conc) => {
+            b.disable_marlin = true;
+            Ok(b)
+        }
+        (Ok(a), _) => Ok(a),
+        (Err(_), Ok(mut b)) => {
+            b.disable_marlin = true;
+            Ok(b)
+        }
+        (Err(e), Err(_)) => Err(e),
+    }
 }
 
 const MAX_TP: usize = 64;
@@ -305,17 +341,20 @@ fn plan(input: &ChooserInput, tp: usize, set: SetRank) -> LoadPlan {
         cc: set.cc,
         ctx: input.ctx,
         max_conc: input.max_conc,
+        disable_marlin: false,
     }
 }
 
+pub const SHRINK_CTX_FLOOR: u64 = 2048;
+
 fn shrink_until(input: &ChooserInput, mut fits: impl FnMut(&ChooserInput) -> Option<LoadPlan>) -> Option<LoadPlan> {
-    // Context halved down to 8192, then one request fewer at full context, until a memory shortfall goes away.
+    // Context halved down to SHRINK_CTX_FLOOR, then concurrency, until a shortfall clears.
     let mut trial = input.clone();
     trial.ctx = input.ctx.min(input.max_ctx);
     trial.max_conc = input.max_conc.max(1);
     loop {
-        if trial.ctx > 8192 {
-            trial.ctx /= 2;
+        if trial.ctx > SHRINK_CTX_FLOOR {
+            trial.ctx = (trial.ctx / 2).max(SHRINK_CTX_FLOOR);
         } else if trial.max_conc > 1 {
             trial.max_conc -= 1;
             trial.ctx = input.ctx.min(input.max_ctx);
@@ -432,8 +471,8 @@ fn auto_plan(
                 return Ok(plan(&trial, tp, set));
             }
         }
-        if trial.ctx > 8192 {
-            trial.ctx /= 2;
+        if trial.ctx > SHRINK_CTX_FLOOR {
+            trial.ctx = (trial.ctx / 2).max(SHRINK_CTX_FLOOR);
         } else if trial.max_conc > 1 {
             trial.max_conc -= 1;
             trial.ctx = input.ctx.min(input.max_ctx);
@@ -501,7 +540,7 @@ mod tests {
         assert!(capped < 131072 && kv(capped) <= KV_SHARE_OF_FREE * 10.0, "{capped}");
         assert!(kv(capped * 2) > KV_SHARE_OF_FREE * 10.0, "the largest halving that fits");
         assert_eq!(cap_default_ctx(&m, 1, "12.0", 4000.0), 131072, "plenty of room keeps the default");
-        assert_eq!(cap_default_ctx(&m, 1, "12.0", 0.1), 8192, "never below 8192");
+        assert_eq!(cap_default_ctx(&m, 1, "12.0", 0.1), SHRINK_CTX_FLOOR, "never below the shrink floor");
     }
 
     #[test]
@@ -545,6 +584,61 @@ mod tests {
         assert_eq!(need(&m, 2, "12.0").weights, 12.0);
         assert_eq!(need(&m, 2, "10.0").weights, 10.0);
         assert_eq!(need(&m, 2, "9.0").weights, 10.0);
+    }
+
+    #[test]
+    fn weight_extra_that_wont_fit_is_dropped_so_the_card_still_places() {
+        let mut m = inp();
+        m.static_vram_gb = 23.0;
+        m.ctx = 262_144;
+        m.max_ctx = 262_144;
+        m.max_conc = 8;
+        m.marlin_extra_gb = 7.85;
+        m.kv_bytes_per_token = 32768;
+        m.num_attention_heads = 24;
+        m.num_kv_heads = 4;
+        m.attention = "hybrid".into();
+        m.supported_sm = vec!["12.0".into()];
+        let plan = pick_load_plan(&m, &[gpu(0, 31.3, false)], None, None, None)
+            .expect("dropping the weight-extra copy must still place on one 32 GB GPU");
+        assert_eq!(plan.tp, 1);
+        assert!(plan.disable_marlin, "planned without the dual-copy weight overhead");
+        assert!(plan.ctx < m.ctx, "ctx reduced: {}", plan.ctx);
+        assert!(plan.ctx >= SHRINK_CTX_FLOOR, "{}", plan.ctx);
+        assert!(plan.max_conc <= m.max_conc);
+    }
+
+    #[test]
+    fn auto_fit_across_gpu_states_and_model_shapes() {
+        // free / foreign / arch / marlin_extra → place, drop, shrink, or refuse.
+        for (name, static_gb, extra, kv, free, cc, foreign, want_ok, want_drop, want_full) in [
+            ("roomy", 10.0, 0.0, 4096, 40.0, "9.0", false, true, false, true),
+            ("keeps-marlin", 20.0, 4.0, 4096, 40.0, "12.0", false, true, false, true),
+            ("drops-marlin", 23.0, 7.85, 32768, 31.3, "12.0", false, true, true, false),
+            ("shrink", 20.0, 0.0, 65536, 31.3, "9.0", false, true, false, false),
+            ("extra-off-arch", 23.0, 7.85, 4096, 40.0, "9.0", false, true, false, true),
+            ("empty", 20.0, 0.0, 4096, 0.0, "9.0", false, false, false, false),
+            ("foreign", 10.0, 0.0, 4096, 40.0, "9.0", true, true, false, true),
+            ("partial", 18.0, 0.0, 32768, 22.0, "8.6", false, true, false, false),
+        ] {
+            let mut m = inp();
+            m.static_vram_gb = static_gb;
+            m.marlin_extra_gb = extra;
+            m.kv_bytes_per_token = kv;
+            m.ctx = 131072;
+            m.max_ctx = 131072;
+            m.max_conc = 8;
+            m.supported_sm = vec![cc.into()];
+            let gpus = [GpuPlacementInput { foreign_process: foreign, ..gpu_on(0, cc, free) }];
+            let got = pick_load_plan(&m, &gpus, None, None, None);
+            if !want_ok {
+                assert!(got.is_err(), "{name}");
+                continue;
+            }
+            let plan = got.unwrap_or_else(|e| panic!("{name}: {}", e.message));
+            assert_eq!(plan.disable_marlin, want_drop, "{name}");
+            assert_eq!((plan.ctx, plan.max_conc) == (m.ctx, m.max_conc), want_full, "{name}");
+        }
     }
 
     #[test]

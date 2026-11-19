@@ -65,12 +65,17 @@ fn memory_args(spec: &EngineSpec, extras: &[String]) -> Vec<String> {
 const SGLANG_BOOT: &str = "import os, runpy, sys\n\nif __name__ == '__main__':\n    sys.argv = ['sglang.launch_server', *sys.argv[1:], '--api-key', os.environ['GOETHE_ENGINE_API_KEY']]\n    runpy.run_module('sglang.launch_server', run_name='__main__')\n";
 
 fn graph_args(max_conc: u64, extras: &[String]) -> Vec<String> {
-    // Decode CUDA graphs captured only up to the batch the model runs (its concurrency), not SGLang's default range: a shorter load and less VRAM; graph flags the user set win.
+    // Decode graphs up to concurrency. Prefill capture lives outside the static pool; skip it (ponytail: else OOM on tight cards).
     let theirs = extras.iter().any(|a| a.starts_with("--cuda-graph") || a == "--disable-cuda-graph");
     if theirs {
         return Vec::new();
     }
-    vec!["--cuda-graph-max-bs-decode".to_string(), max_conc.max(1).to_string()]
+    vec![
+        "--cuda-graph-max-bs-decode".into(),
+        max_conc.max(1).to_string(),
+        "--cuda-graph-backend-prefill".into(),
+        "disabled".into(),
+    ]
 }
 
 fn sglang_command(spec: &EngineSpec) -> Command {
@@ -102,7 +107,14 @@ fn sglang_command(spec: &EngineSpec) -> Command {
         .arg(spec.served_name)
         .arg("--uvicorn-access-log-exclude-prefixes")
         .args(QUIET_PATHS);
-    let extras: Vec<String> = card_extra_args(spec.card).into_iter().chain(spec.load_extra.iter().cloned()).collect();
+    let card_extras = {
+        let raw = card_extra_args(spec.card);
+        match crate::model_facts::read_config(spec.model_path) {
+            Ok(cfg) => crate::sglang_infer::drop_quantization_when_config_declares(&raw, &cfg).0,
+            Err(_) => raw,
+        }
+    };
+    let extras: Vec<String> = card_extras.into_iter().chain(spec.load_extra.iter().cloned()).collect();
     cmd.args(memory_args(spec, &extras));
     cmd.args(graph_args(spec.max_conc, &extras));
     if let Some(dtype) = spec
@@ -164,8 +176,14 @@ mod tests {
 
     #[test]
     fn graphs_are_captured_up_to_the_concurrency_unless_the_user_says_otherwise() {
-        assert_eq!(graph_args(4, &[]), ["--cuda-graph-max-bs-decode", "4"], "the pinned SGLang splits the flag into -decode and -prefill");
-        assert_eq!(graph_args(0, &[]), ["--cuda-graph-max-bs-decode", "1"]);
+        assert_eq!(
+            graph_args(4, &[]),
+            ["--cuda-graph-max-bs-decode", "4", "--cuda-graph-backend-prefill", "disabled"]
+        );
+        assert_eq!(
+            graph_args(0, &[]),
+            ["--cuda-graph-max-bs-decode", "1", "--cuda-graph-backend-prefill", "disabled"]
+        );
         for theirs in ["--cuda-graph-max-bs-decode=16", "--cuda-graph-bs-prefill", "--cuda-graph-config", "--disable-cuda-graph"] {
             assert!(graph_args(4, &[theirs.to_string()]).is_empty(), "{theirs}");
         }
