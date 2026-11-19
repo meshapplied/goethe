@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Goethe installer: check this machine, verify the signed package, then the verified goethe sets itself up (goethe setup) the same way on Linux and macOS.
+# Goethe installer for Linux, macOS, and WSL (Ubuntu). Same script everywhere once a Unix shell exists.
+# Linux/macOS:  curl -fsSL https://pkg.goethe.sh/install.sh | bash
+# Windows:      irm https://pkg.goethe.sh/install.ps1 | iex   # enables WSL2, then runs this file inside Ubuntu
 
 set -euo pipefail
 
