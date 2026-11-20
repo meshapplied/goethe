@@ -110,6 +110,19 @@ pub fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, Str
     }
 }
 
+pub const RUN_CTX: u64 = 100_000;
+
+fn run_ctx(home: &std::path::Path, model: &str) -> Option<u64> {
+    // The context run loads a model with: RUN_CTX, or the model's maximum when that is smaller; None (the load default) when unknown.
+    let con = crate::db::open(home).ok()?;
+    let max: i64 = con.query_row("SELECT COALESCE(max_ctx, default_ctx) FROM installed_models WHERE model_id = ?1", [model], |r| r.get(0)).ok()?;
+    run_ctx_for(max)
+}
+
+fn run_ctx_for(max: i64) -> Option<u64> {
+    (max > 0).then(|| RUN_CTX.min(max as u64))
+}
+
 pub(crate) struct Target {
     pub(crate) model: String,
     pub(crate) kind: String,
@@ -156,7 +169,8 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
     let mut loaded = Loaded::new(opts.keep);
     if load_need(snap.routes(&model).iter().any(|r| !r.draining), installed.contains(&model), &model)? {
         loaded.add(&model);
-        if let Err(e) = crate::install::run_load(json!({"model_id": model, "gpus": null, "ctx": null, "max_conc": null, "tp": null, "force": false, "yes": false, "extra_sglang_args": [], "async_finish": true}), false, false) {
+        let ctx = run_ctx(&home, &model);
+        if let Err(e) = crate::install::run_load(json!({"model_id": model, "gpus": null, "ctx": ctx, "max_conc": null, "tp": null, "force": false, "yes": false, "extra_sglang_args": [], "async_finish": true}), false, false) {
             loaded.forget(&model);
             return Err(e);
         }
@@ -504,6 +518,13 @@ mod tests {
         assert_eq!(load_need(true, true, "org/m"), Ok(false), "serving: left alone");
         assert_eq!(load_need(false, true, "org/m"), Ok(true), "installed, not loaded: run loads it");
         assert_eq!(load_need(false, false, "org/m").unwrap_err(), "org/m is not installed: goethe install org/m");
+    }
+
+    #[test]
+    fn run_loads_with_a_100k_context_or_the_model_maximum_when_smaller() {
+        assert_eq!(run_ctx_for(262_144), Some(100_000));
+        assert_eq!(run_ctx_for(32_768), Some(32_768));
+        assert_eq!(run_ctx_for(0), None);
     }
 
     #[test]

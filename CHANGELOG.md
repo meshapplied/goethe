@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `goethe run` loads a model that is not loaded yet with a 100,000-token context, or the model's maximum when that is smaller (it is still reduced when the GPU cannot fit it).
+
 ## 0.3.5 (2026-11-20)
 
 - `goethe update --check` names nginx by version (from the package's BUILDINFO, which now records it), marks a rebuild of the same wheel or version as "another build", and ends with a summary of what would change.
