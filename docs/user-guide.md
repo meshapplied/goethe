@@ -2,7 +2,7 @@
 
 Run and share your models on your own infrastructure in three steps, and run them fast.
 
-Goethe turns a Linux machine into your own API, compatible with OpenAI, Anthropic and LiteLLM clients. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
+Goethe turns a machine into your own API, compatible with OpenAI, Anthropic and LiteLLM clients. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
 
 ## Contents
 
@@ -43,7 +43,12 @@ goethe
 irm https://pkg.goethe.sh/install.ps1 | iex
 ```
 
-Then in WSL: `goethe up` and `goethe api expose local`. From Windows use HTTPS: `curl.exe -k https://127.0.0.1:8443/`.
+WSL limits to know:
+
+- The GPU comes from the **Windows** NVIDIA driver **580 or newer**. Never install a Linux NVIDIA driver inside WSL.
+- After a driver change on Windows, run `wsl --shutdown` (or terminate the distro), then reopen WSL.
+- In WSL: `goethe up` and `goethe api expose local`. From Windows use HTTPS: `curl.exe -k https://127.0.0.1:8443/`.
+- Some WSL GPUs lack full NVML topology. If doctor or GPU placement looks thin, that is a WSL limit, not a broken install.
 
 `goethe login` links the machine to the Goethe console, which also unlocks optimised kernels; it is optional. `goethe` on its own starts Goethe and, while nothing is installed, walks you through three steps: install a model, serve it through the API, and configure who can reach it. You can stop after any step and continue later with `goethe`. If you prefer plain commands:
 

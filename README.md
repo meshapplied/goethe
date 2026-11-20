@@ -6,7 +6,7 @@
   <img alt="NVIDIA CUDA 12.8 or newer" src="https://img.shields.io/badge/NVIDIA%20CUDA-%E2%89%A5%2012.8-76B900?logo=nvidia&logoColor=white">
   <img alt="GPU architectures sm_86 to sm_120" src="https://img.shields.io/badge/arch-sm__86%20%E2%80%93%20sm__120-76B900">
   <img alt="Written in Rust" src="https://img.shields.io/badge/language-Rust-B7410E?logo=rust&logoColor=white">
-  <img alt="Linux x86_64 and aarch64" src="https://img.shields.io/badge/OS-Linux%20x86__64%20%2F%20aarch64-FCC624?logo=linux&logoColor=black">
+  <img alt="Linux, macOS, and Windows via WSL" src="https://img.shields.io/badge/OS-Linux%20%7C%20macOS%20%7C%20Windows%20(WSL)-FCC624?logo=linux&logoColor=black">
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
   <a href="https://github.com/meshapplied/goethe/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/meshapplied/goethe/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <br>
@@ -18,7 +18,7 @@
 
 <p align="center">If Goethe is useful to you, a ⭐ on <a href="https://github.com/meshapplied/goethe">GitHub</a> helps others find it.</p>
 
-Goethe turns a Linux machine into your own API, compatible with OpenAI, Anthropic and LiteLLM clients. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
+Goethe turns a machine into your own API, compatible with OpenAI, Anthropic and LiteLLM clients. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
 
 ```bash
 curl -fsSL https://pkg.goethe.sh/install.sh | bash
@@ -30,6 +30,8 @@ On Windows 10/11 (x64), elevated PowerShell (enables WSL2, then runs the same `i
 ```powershell
 irm https://pkg.goethe.sh/install.ps1 | iex
 ```
+
+GPU inference uses the Windows NVIDIA driver (580 or newer), never a Linux driver inside WSL. After a driver change, run `wsl --shutdown` and reopen WSL. Then in WSL: `goethe up` and `goethe api expose local`. From Windows: `curl.exe -k https://127.0.0.1:8443/`.
 
 `goethe` on its own starts Goethe and, the first time, walks you through three steps: install a model, serve it through the API, and configure who can reach it. If you prefer plain commands, these do the same:
 
@@ -76,7 +78,7 @@ print(reply.choices[0].message.content)
 | Cloud GPU virtual machines | AWS, Google Cloud, Azure, Oracle Cloud, Lambda, CoreWeave, Paperspace |
 | GPU containers | RunPod, Vast.ai, and Docker with the NVIDIA Container Toolkit |
 
-Linux on x86_64 or ARM64 (glibc 2.30 or newer, for example Ubuntu 20.04+ or Debian 11+). Goethe recognises the cloud provider or container it runs in and shows the address to use from outside.
+Linux on x86_64 or ARM64 (glibc 2.30 or newer, for example Ubuntu 20.04+ or Debian 11+), macOS on Apple Silicon (macOS 14+), or Windows 10/11 via WSL2. Goethe recognises the cloud provider or container it runs in and shows the address to use from outside.
 
 ## GPU and CUDA compatibility
 
