@@ -410,6 +410,7 @@ The installer changes nothing outside Goethe's folder except the links to `goeth
 | A GPU the driver did not start | A full power cycle, power cables, Above 4G decoding in the BIOS |
 | A driver but no `/dev/nvidia*` | Pass the devices into the container, or `sudo nvidia-modprobe -u -c=0` on the host |
 | No C++ compiler | `sudo apt install build-essential` or `sudo dnf install gcc-c++` |
+| No FFmpeg | `sudo apt install ffmpeg` or `sudo dnf install ffmpeg-free` |
 
 After installing, open a new terminal if `goethe` is not found yet. Goethe keeps its files in `/workspace/.goethe` on cloud machines with a persistent volume, `/var/lib/goethe` as root, or `~/.goethe` otherwise.
 
