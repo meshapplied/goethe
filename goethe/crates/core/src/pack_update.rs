@@ -40,12 +40,16 @@ pub(crate) fn read_prefix(pack: &Path) -> Result<Vec<u8>, String> {
     let mut f = std::fs::File::open(pack).map_err(|e| format!("{}: {e}", pack.display()))?;
     let mut head = [0u8; 16];
     f.read_exact(&mut head).map_err(|e| format!("{}: {e}", pack.display()))?;
+    let size = f.metadata().map_err(|e| format!("{}: {e}", pack.display()))?.len();
+    let within = |end: Option<u64>| end.filter(|e| *e <= size).ok_or_else(|| format!("{}: the container header points past the end of the file", pack.display()));
     let n = u64::from_le_bytes(head[8..16].try_into().map_err(|_| "pack header")?);
+    within(n.checked_add(16))?;
     let mut header = vec![0u8; n as usize];
     f.read_exact(&mut header).map_err(|e| format!("{}: {e}", pack.display()))?;
     let h: Value = serde_json::from_slice(&header).map_err(|e| format!("{}: container header: {e}", pack.display()))?;
     let (off, len) = (h["manifest"][0].as_u64().ok_or("container header: manifest")?, h["manifest"][1].as_u64().ok_or("container header: manifest")?);
-    let mut rest = vec![0u8; (off + len) as usize];
+    let rest_len = within(off.checked_add(len).and_then(|r| r.checked_add(16 + n)))? - 16 - n;
+    let mut rest = vec![0u8; rest_len as usize];
     f.read_exact(&mut rest).map_err(|e| format!("{}: {e}", pack.display()))?;
     let mut out = head.to_vec();
     out.extend(header);
@@ -139,7 +143,7 @@ pub fn refresh(home: &Path, model_id: &str, dir: &Path, arch: &str, broker: &imp
         )));
     }
     if entry.manifest_sha256 == installed {
-        let fetched = overlay_only(home, dir, &entry, &installed, broker, run)?;
+        let fetched = overlay_only(dir, &entry, &installed, broker, run)?;
         crate::packs::store_serial(home, serial)?;
         return Ok(Outcome::Overlaid(fetched));
     }
@@ -167,7 +171,7 @@ pub fn installed_overlays(dir: &Path) -> Vec<String> {
     v["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(String::from)).collect()
 }
 
-fn overlay_only(_home: &Path, dir: &Path, entry: &Entry, installed: &str, broker: &impl Broker, run: Runner) -> Result<u64, String> {
+fn overlay_only(dir: &Path, entry: &Entry, installed: &str, broker: &impl Broker, run: Runner) -> Result<u64, String> {
     // The entry lists overlays for the installed base: fetch only those (small), check each against its hash and the engine, then stack them.
     use sha2::{Digest, Sha256};
     let have = installed_overlays(dir);
@@ -615,5 +619,20 @@ mod tests {
         assert_eq!(installed_manifest(dir.path()).as_deref(), Some(v1.manifest_sha.as_str()));
         rollback(dir.path()).unwrap();
         assert_eq!(std::fs::read(dir.path().join(PACK_FILE)).unwrap(), v2.bytes);
+    }
+
+    #[test]
+    fn a_damaged_pack_header_is_an_error_not_a_huge_allocation() {
+        let v1 = pack_v("1", &[blob(1)]);
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join(PACK_FILE);
+        std::fs::write(&pack, &v1.bytes).unwrap();
+        assert_eq!(read_prefix(&pack).unwrap(), v1.bytes[..v1.ranges[0].0 as usize]);
+        let mut bad = v1.bytes.clone();
+        bad[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        std::fs::write(&pack, &bad).unwrap();
+        assert!(read_prefix(&pack).unwrap_err().contains("past the end of the file"));
+        std::fs::write(&pack, &v1.bytes[..20]).unwrap();
+        assert!(read_prefix(&pack).is_err());
     }
 }

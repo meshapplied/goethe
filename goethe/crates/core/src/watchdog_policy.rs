@@ -11,11 +11,6 @@ pub fn restart_backoff_secs(instance_restart_count: i64) -> u64 {
     }
 }
 
-pub struct WindowState {
-    pub window_start: i64,
-    pub count: i64,
-}
-
 pub fn effective_window_count(now: i64, window_start: i64, count: i64) -> i64 {
     if now.saturating_sub(window_start) > RESTART_WINDOW_SECS {
         0

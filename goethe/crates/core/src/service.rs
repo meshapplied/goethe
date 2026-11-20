@@ -204,7 +204,6 @@ pub fn run_up(boot: bool) -> Result<(), String> {
         None => spawn_goethed(&home)?,
     }
     wait_goethed(std::time::Duration::from_secs(60))
-
 }
 
 pub fn wait_goethed(timeout: std::time::Duration) -> Result<(), String> {
@@ -502,7 +501,7 @@ pub fn unit_text_home(text: &str) -> Option<PathBuf> {
     text.lines()
         .filter_map(|l| l.trim().strip_prefix("Environment="))
         .flat_map(env_assignments)
-        .find_map(|a| a.strip_prefix("GOETHE_HOME=").map(PathBuf::from))
+        .find_map(|a| a.strip_prefix("GOETHE_HOME=").map(|h| PathBuf::from(h.replace("%%", "%"))))
 }
 
 fn env_assignments(value: &str) -> Vec<String> {
@@ -577,8 +576,8 @@ fn systemd_quote(s: &str) -> String {
 }
 
 pub fn unit_text(home: &Path, wanted_by: &str) -> String {
-    // Unit with quoted paths and the installer's goethe.env; goethed stops its own engines, so KillMode=process.
-    let h = home.display().to_string();
+    // Unit with quoted paths, % doubled so systemd expands no specifier, and the installer's goethe.env (the whole EnvironmentFile value is the path, systemd takes no quotes there); goethed stops its own engines, so KillMode=process.
+    let h = home.display().to_string().replace('%', "%%");
     format!(
         "[Unit]\nDescription=Goethe control plane daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nEnvironment={}\nEnvironmentFile=-{h}/goethe.env\nExecStart={}\nKillMode=process\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy={wanted_by}\n",
         systemd_quote(&format!("GOETHE_HOME={h}")),
@@ -762,6 +761,9 @@ mod tests {
         assert!(unit.contains("ExecStart=\"/srv/my home/.goethe/bin/goethed\""));
         assert!(unit.contains("EnvironmentFile=-/srv/my home/.goethe/goethe.env"));
         assert!(unit.contains("\nKillMode=process\n"), "engines must survive a goethed restart under systemd");
+        let pct = unit_text(Path::new("/srv/50%/.goethe"), "default.target");
+        assert!(pct.contains("Environment=\"GOETHE_HOME=/srv/50%%/.goethe\"") && pct.contains("EnvironmentFile=-/srv/50%%/.goethe/goethe.env"));
+        assert_eq!(unit_text_home(&pct).as_deref(), Some(Path::new("/srv/50%/.goethe")), "a doubled % reads back as the home");
         let cron = cron_line(Path::new("/srv/50%/.goethe"));
         assert_eq!(
             cron,

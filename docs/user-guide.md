@@ -37,7 +37,7 @@ goethe login
 goethe
 ```
 
-`goethe login` links the machine to the Goethe platform, which also unlocks optimised kernels; it is optional. `goethe` on its own starts Goethe and, while nothing is installed, walks you through three steps: install a model, serve it through the API, and configure who can reach it. You can stop after any step and continue later with `goethe`. If you prefer plain commands:
+`goethe login` links the machine to the Goethe console, which also unlocks optimised kernels; it is optional. `goethe` on its own starts Goethe and, while nothing is installed, walks you through three steps: install a model, serve it through the API, and configure who can reach it. You can stop after any step and continue later with `goethe`. If you prefer plain commands:
 
 ```bash
 # 1. Start Goethe and load a model
@@ -225,7 +225,7 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 | `goethe update` | Install the latest Goethe (`--check` to only look; `engine` or `rollback` as a word) |
 | `goethe uninstall` | Remove Goethe and its models (`--keep-models` to keep them) |
 | `goethe completion install` | Tab completion for bash, zsh or fish: commands, models, keys, GPUs |
-| `goethe login` | Optional: link this node to the Goethe platform to see its health there (`--authkey` without a browser) |
+| `goethe login` | Optional: link this node to the Goethe console to see its health there (`--authkey` without a browser) |
 | `goethe logout` | Unlink it again |
 
 ## Add models
@@ -238,11 +238,11 @@ goethe install zai-org/GLM-5.3-Flash --load     # download and load in one step
 
 The model id is the Hugging Face repo name. Any [supported model](#supported-models) on Hugging Face works, not only the catalog. Useful flags: `--load`, `--ctx`, `--max-conc`, `--trust-remote-code` (only for models you trust) and `--hf-token`.
 
-**Optimised kernels:** some models have a kernel pack: the optimised kernels for every supported GPU microarchitecture, with the model's quantizations and configs (NVIDIA CUDA for now; other platforms such as AMD ROCm later). Packs are available to nodes logged in to the Goethe platform (`goethe login`), and `goethe install` uses them automatically. A node that is not logged in is asked to log in, or continues with SGLang. `goethe models` marks the models that have optimised kernels for your machine.
+**Optimised kernels:** some models have a kernel pack: the optimised kernels for every supported GPU microarchitecture, with the model's quantizations and configs (NVIDIA CUDA for now; other platforms such as AMD ROCm later). Packs are available to nodes logged in to the Goethe console (`goethe login`), and `goethe install` uses them automatically. A node that is not logged in is asked to log in, or continues with SGLang. `goethe models` marks the models that have optimised kernels for your machine.
 
 **GGUF models:** a Hugging Face GGUF repo (`org/model-GGUF`, or `org/model-GGUF:Q8_0` for one quant) is served by llama.cpp on one GPU; a GGUF with a mean, cls or last pooling type is served as an embedding model (`goethe run <model> "text"`). If a model's kernel pack cannot open or does not run on your GPU, goethe says why in one line and serves the model with its plain runtime instead (`GOETHE_ALLOW_FALLBACK=0` makes that an error). A model that has only a pack, and none for your GPU, is refused before anything is downloaded.
 
-**Which engine serves a model:** goethe decides before downloading anything. On a node logged in to the platform, a goethe kernel pack for the model and your GPU is used automatically. Otherwise SGLang serves it when SGLang supports its architecture and quantization; else llama.cpp serves the repo's GGUF files, or the GGUF build Hugging Face lists for the model (the publisher's own `<model>-GGUF` repo first), and the name you typed becomes an alias of it. A model none of them serves is refused with each engine's reason. On a Mac llama.cpp serves every model. `goethe models` shows the engine of each model in its ENGINE column.
+**Which engine serves a model:** goethe decides before downloading anything. On a node logged in to the console, a goethe kernel pack for the model and your GPU is used automatically. Otherwise SGLang serves it when SGLang supports its architecture and quantization; else llama.cpp serves the repo's GGUF files, or the GGUF build Hugging Face lists for the model (the publisher's own `<model>-GGUF` repo first), and the name you typed becomes an alias of it. A model none of them serves is refused with each engine's reason. On a Mac llama.cpp serves every model. `goethe models` shows the engine of each model in its ENGINE column.
 
 **Gated or private models:** accept the license on the model's Hugging Face page, create a read token at huggingface.co/settings/tokens, then run `goethe install <org>/<model> --hf-token` and type the token when asked. It is used for that download only and never stored. In the guided `goethe` setup, choose "A private or gated model".
 
@@ -466,8 +466,8 @@ Optional. Set them in your shell, or in `goethe.env` inside Goethe's folder so t
 | `GOETHE_GATEWAY_CONN_PER_IP` | Open API connections one client address may hold (default 512) |
 | `GOETHE_SHARE_RATE_PER_IP` | Same for `goethe api share` (default 10, bursts up to twice that) |
 | `GOETHE_SHARE_CONN_PER_IP` | Open share connections one client address may hold (default 16) |
-| `GOETHE_PLATFORM_URL` | Platform `goethe login` links to (default `https://goethe.sh`) |
-| `GOETHE_PUBLIC_IP_URL` | Where `goethe api expose`, `goethe api domain` and `goethe doctor` look up the public IP (default: the platform's `/api/ip`; a plain-text or `{"ip": ...}` answer both work) |
+| `GOETHE_PLATFORM_URL` | Console URL `goethe login` links to (default `https://goethe.sh`) |
+| `GOETHE_PUBLIC_IP_URL` | Where `goethe api expose`, `goethe api domain` and `goethe doctor` look up the public IP (default: the console's `/api/ip`; a plain-text or `{"ip": ...}` answer both work) |
 | `GOETHE_PUBLIC_IP_LOOKUP=0` | Never look up the public IP (set `GOETHE_PUBLIC_IP` to name it) |
 | `NO_COLOR=1` | Turn off colored output |
 

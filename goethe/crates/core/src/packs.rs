@@ -43,11 +43,11 @@ impl<'a> HttpBroker<'a> {
         match Self::agent().get(&format!("{}{path}", self.store)).set("Authorization", &format!("Bearer {token}")).call() {
             Ok(r) => Ok(r),
             Err(ureq::Error::Status(401, _)) => {
-                Err("the platform did not accept this node's login (logged out, removed, or its login expired); run goethe login".into())
+                Err("the console did not accept this node's login (logged out, removed, or its login expired); run goethe login".into())
             }
-            Err(ureq::Error::Status(403, _)) => Err("the platform refused the kernel pack for this workspace".into()),
+            Err(ureq::Error::Status(403, _)) => Err("the console refused the kernel pack for this workspace".into()),
             Err(ureq::Error::Status(404, _)) => Err(format!("{path}: not in the pack store")),
-            Err(ureq::Error::Status(429, _)) => Err("the platform is rate limiting pack downloads; try again in a minute".into()),
+            Err(ureq::Error::Status(429, _)) => Err("the console is rate limiting pack downloads; try again in a minute".into()),
             Err(ureq::Error::Status(c, _)) => Err(format!("{path}: HTTP {c}")),
             Err(e) => Err(format!("{path}: {e}")),
         }
@@ -160,7 +160,7 @@ fn read_capped(r: impl Read, max: u64) -> Result<Vec<u8>, String> {
     let mut v = Vec::new();
     r.take(max + 1).read_to_end(&mut v).map_err(|e| e.to_string())?;
     if v.len() as u64 > max {
-        return Err(format!("the platform's response is longer than {max} bytes; refused"));
+        return Err(format!("the console's response is longer than {max} bytes; refused"));
     }
     Ok(v)
 }
@@ -1001,7 +1001,7 @@ mod tests {
         }
         fn range(&self, _: &str, off: u64, len: u64) -> Result<Vec<u8>, String> {
             if self.refuse {
-                return Err("the platform did not accept this node's login".into());
+                return Err("the console did not accept this node's login".into());
             }
             self.ranges.borrow_mut().push((off, len));
             let mut b = self.pack.bytes[off as usize..(off + len) as usize].to_vec();

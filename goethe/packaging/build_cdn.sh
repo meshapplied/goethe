@@ -181,7 +181,6 @@ for a in "${ARCH_LIST[@]}"; do
   fi
 done
 
-cp "${ROOT}/cdn/goethed.service" "${DIST}/goethed.service"
 cp "${ROOT}/../LICENSE" "${ROOT}/../NOTICE" "${DIST}/"
 cp "${ROOT}/cdn/v1/registry.json" "${DIST}/v1/registry.json"
 (cd "${ROOT}" && cargo test --locked -q -p goethe-core --lib -- --exact pyenv::tests::layer_locks_are_subsets_of_the_main_lock)

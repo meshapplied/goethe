@@ -30,12 +30,23 @@ pub fn run(opts: UpdateOpts) -> Result<(), String> {
     ensure_layout(&home).map_err(|e| e.to_string())?;
     let _ = crate::setup::migrate_retired_pkg_env(&home);
     let pkg = pkg_base_url();
-    let tmp = home.join(".update-staging");
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    let tmp = staging_dir(&home, ".update-staging")?;
     let result = update_in(&home, &pkg, &tmp, &opts);
     let _ = fs::remove_dir_all(&tmp);
     result
+}
+
+pub(crate) fn staging_dir(home: &Path, prefix: &str) -> Result<PathBuf, String> {
+    // A private folder for this run alone, so concurrent runs never touch each other's verified files; folders of runs whose process is gone (and the old shared one) are swept first.
+    for e in fs::read_dir(home).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix(prefix) else { continue };
+        let pid = rest.strip_prefix('-').and_then(|r| r.split('-').next()).and_then(|p| p.parse::<i32>().ok());
+        if rest.is_empty() || pid.is_some_and(|p| !crate::sys::exists(p)) {
+            let _ = fs::remove_dir_all(e.path());
+        }
+    }
+    crate::paths::private_dir_in(home, prefix)
 }
 
 fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<(), String> {
@@ -105,6 +116,11 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
             }
         }
     }
+    if let Some(t) = ternary {
+        unpack_ternary(home, &t)?;
+        let sha = lookup_sum(&sums, TERNARY_REL)?;
+        fs::write(home.join(TERNARY_RECORD), format!("{sha}\n")).map_err(|e| e.to_string())?;
+    }
     let mut engine_ok = !(bins && pyenv::engine_installed(home).is_some() && differs("goethe-engine"));
     if bins && pyenv::engine_installed(home).is_some() && differs("goethe-engine") {
         engine_ok = Command::new(home.join("bin/goethe"))
@@ -116,13 +132,8 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
             eprintln!("note: goethe-engine was not brought to the new pin; run goethe update engine");
         }
     }
-    if let Some(t) = ternary {
-        unpack_ternary(home, &t)?;
-        let sha = lookup_sum(&sums, TERNARY_REL)?;
-        fs::write(home.join(TERNARY_RECORD), format!("{sha}\n")).map_err(|e| e.to_string())?;
-    }
     if bins && engine_ok {
-        fs::copy(&version_file, home.join("VERSION")).map_err(|e| e.to_string())?;
+        fs::write(home.join("VERSION"), format!("{remote_ver}\n")).map_err(|e| e.to_string())?;
     }
     if was_running && bins {
         restart_goethed(home)?;
@@ -280,9 +291,26 @@ pub fn pkg_base_url() -> String {
         .to_string()
 }
 
+pub(crate) fn plain_http_refusal(url: &str) -> Option<String> {
+    // Why a plain http package, registry or token URL is refused: only a loopback host, or a test host GOETHE_ALLOW_HTTP=1 names, may skip TLS.
+    let rest = url.strip_prefix("http://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let name = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.split(':').next().unwrap_or(""),
+    };
+    let loopback = name.eq_ignore_ascii_case("localhost") || name.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    (!loopback && std::env::var("GOETHE_ALLOW_HTTP").as_deref() != Ok("1"))
+        .then(|| format!("{url}: plain http is refused for packages, the registry and the package token; use https, file:// or a loopback address (GOETHE_ALLOW_HTTP=1 allows a test host)"))
+}
+
 pub fn newer_published() -> Option<String> {
-    // The published version when it is newer than this goethe; None when equal, older or unreachable within 2 s.
+    // The published version when it is newer than this goethe; None when equal, older, over plain http or unreachable within 2 s.
     let url = format!("{}/VERSION", pkg_base_url());
+    if plain_http_refusal(&url).is_some() {
+        return None;
+    }
     let mut req = crate::net::agent().get(&url).timeout(std::time::Duration::from_secs(2));
     if let Some(tok) = crate::paths::setting("GOETHE_PKG_TOKEN") {
         req = req.set("Authorization", &format!("Bearer {}", tok.trim()));
@@ -355,6 +383,9 @@ fn fetch_pkg_file_max(base: &str, rel: &str, dest: &Path, max: u64, idle: Durati
         }
         return fs::copy(path, dest).map(|_| ()).map_err(|e| format!("fetch {rel}: {path}: {e}"));
     }
+    if let Some(why) = plain_http_refusal(&url) {
+        return Err(format!("fetch {rel}: {why}"));
+    }
     let mut req = crate::net::agent_builder().timeout_read(idle).build().get(&url);
     if let Some(tok) = crate::paths::setting("GOETHE_PKG_TOKEN") {
         req = req.set("Authorization", &format!("Bearer {}", tok.trim()));
@@ -417,29 +448,38 @@ pub(crate) fn stage(base: &str, sums: &Path, rel: &str, tmp: &Path, dest: &Path)
 }
 
 pub(crate) fn swap_all(staged: &[Staged]) -> Result<(), String> {
-    // Move every verified file into place, keeping .prev copies; roll back on the first failure.
-    let mut done: Vec<&Staged> = Vec::new();
+    // Move every verified file into place, keeping .prev copies; on the first failure every file this call moved is put back, and one that had no previous file is removed.
+    let restore = |s: &Staged, moved: bool| {
+        let _ = if moved { fs::rename(s.dest.with_extension("prev"), &s.dest) } else { fs::remove_file(&s.dest) };
+    };
+    let mut done: Vec<(&Staged, bool)> = Vec::new();
     for s in staged {
+        let staged_dest = s.dest.with_extension("new");
+        let mut moved = false;
         let r = (|| {
             if let Some(parent) = s.dest.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            let staged_dest = s.dest.with_extension("new");
             fs::copy(&s.part, &staged_dest).map_err(|e| format!("{}: {e}", staged_dest.display()))?;
             fs::set_permissions(&staged_dest, std::os::unix::fs::PermissionsExt::from_mode(0o755))
                 .map_err(|e| e.to_string())?;
             if s.dest.exists() {
                 fs::rename(&s.dest, s.dest.with_extension("prev")).map_err(|e| e.to_string())?;
+                moved = true;
             }
             fs::rename(&staged_dest, &s.dest).map_err(|e| e.to_string())
         })();
         if let Err(e) = r {
-            for d in done.iter().rev() {
-                let _ = fs::rename(d.dest.with_extension("prev"), &d.dest);
+            let _ = fs::remove_file(&staged_dest);
+            if moved {
+                restore(s, true);
+            }
+            for (d, m) in done.iter().rev() {
+                restore(d, *m);
             }
             return Err(format!("installing {} failed ({e}); previous files restored", s.rel));
         }
-        done.push(s);
+        done.push((s, moved));
     }
     Ok(())
 }
@@ -623,6 +663,58 @@ mod tests {
         assert_eq!(note, "goethe 0.3.3 is newer than the published 0.3.2; keeping it");
         assert_eq!(binaries_due(Ordering::Equal, &opts(true, false, false), "0.3.3", "0.3.3", || Ok(true)), Ok((true, None)), "another build at the same version");
         assert_eq!(binaries_due(Ordering::Equal, &opts(false, false, false), "0.3.3", "0.3.3", || Ok(false)), Ok((false, None)));
+    }
+
+    #[test]
+    fn a_failed_swap_puts_back_what_it_moved_and_never_a_stale_prev() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path();
+        let staged = |rel: &str, dest: PathBuf| {
+            fs::write(p.join(format!("{rel}.part")), format!("new {rel}")).unwrap();
+            Staged { rel: rel.to_string(), part: p.join(format!("{rel}.part")), dest }
+        };
+        fs::write(p.join("goethe"), "old goethe").unwrap();
+        fs::write(p.join("nginx.prev"), "stale nginx").unwrap();
+        fs::write(p.join("blocker"), "a file where a folder must be").unwrap();
+        let all = [staged("goethe", p.join("goethe")), staged("nginx", p.join("nginx")), staged("goethed", p.join("blocker/goethed"))];
+        assert!(swap_all(&all).unwrap_err().contains("installing goethed failed"));
+        assert_eq!(fs::read_to_string(p.join("goethe")).unwrap(), "old goethe");
+        assert!(!p.join("nginx").exists(), "a file that was not there before is removed, not replaced by an older .prev");
+        assert_eq!(fs::read_to_string(p.join("nginx.prev")).unwrap(), "stale nginx");
+        assert!(!p.join("goethe.new").exists() && !p.join("nginx.new").exists());
+        swap_all(&all[..2]).unwrap();
+        assert_eq!(fs::read_to_string(p.join("goethe")).unwrap(), "new goethe");
+        assert_eq!(fs::read_to_string(p.join("goethe.prev")).unwrap(), "old goethe");
+    }
+
+    #[test]
+    fn each_run_stages_in_its_own_folder_and_dead_runs_are_swept() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path();
+        let dead = home.join(".update-staging-999999999-1-0");
+        let live = home.join(format!(".update-staging-{}-1-0", std::process::id()));
+        for d in [&home.join(".update-staging"), &dead, &live, &home.join(".setup-staging")] {
+            fs::create_dir_all(d.join("bin")).unwrap();
+        }
+        let (a, b) = (staging_dir(home, ".update-staging").unwrap(), staging_dir(home, ".update-staging").unwrap());
+        assert!(a != b && a.is_dir() && b.is_dir(), "two runs never share a folder");
+        assert!(!home.join(".update-staging").exists() && !dead.exists(), "the old shared folder and a dead run's folder go");
+        assert!(live.exists() && home.join(".setup-staging").exists(), "a running run's folder and other prefixes stay");
+        assert_eq!(fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn plain_http_is_refused_unless_the_host_is_this_machine() {
+        let refused = |u: &str| plain_http_refusal(u).is_some();
+        for ok in ["https://pkg.goethe.sh", "file:///srv/cdn", "http://127.0.0.1:8999/a", "http://localhost/x", "http://[::1]:80/", "http://127.0.0.2"] {
+            assert!(!refused(ok), "{ok}");
+        }
+        for bad in ["http://pkg.goethe.sh", "http://10.0.2.2:8999/a", "http://127.0.0.1.evil.example/", "http://127.0.0.1@evil.example/", "http://[fe80::1]/"] {
+            assert!(refused(bad), "{bad}");
+        }
+        let err = fetch_pkg_file("http://pkg.example", "SHA256SUMS", Path::new("/nonexistent/x")).unwrap_err();
+        assert!(err.contains("plain http is refused"), "{err}");
     }
 
     #[test]

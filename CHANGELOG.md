@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `goethe run` without a model opens a list of the installed models to pick from (loaded ones first); a model that is not loaded is loaded for the chat and unloaded after unless `--keep`.
+- goethed keeps a local usage log, linked or not: per-model requests by outcome, prompt and generated token counts, latency and time-to-first-token histograms and decode speed, plus 5 s GPU and host samples (utilisation, VRAM, power, temperature, throttling, CPU, RAM, disk), as clock-minute rows for 48 hours and hourly rows for 90 days in `state.db`. Counts and timings only. A linked node sends the new minute rows with its heartbeat (per model, GPU and host; no API keys). See Usage log in `docs/cli.md`.
+- The gateway streams every chat, completions, Anthropic messages and Responses request from the engine and rebuilds the reply for a client that did not stream, so time to first token, decode speed and token counts are measured for every request with any engine.
+- The menu has a Metrics page below Status (an empty line now separates API keys and gateway from Status): per model and per API key and model the requests, errors, input and output tokens, average time to first token and tok/s and the 95th-percentile latency, then GPU and host use, over 1 h, 24 h, 7 d, this month, 30 d or 90 d. `goethe metrics` opens the same page from the shell (printed once when piped). Every API key is listed, with zeros when it made no request. The API schema example is drawn below the menu, so a copied curl command no longer picks up menu text.
+
 ## 0.3.4 (2026-11-19)
 
 - Bundled nginx pin is 1.30.7 (was 1.30.6) for the HTTP/2 fixes (CVE-2026-123007 and related). `goethe doctor` warns when the on-disk nginx is older. Rebuild/republish the package so `goethe update` can refresh the binary.

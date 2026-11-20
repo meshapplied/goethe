@@ -208,8 +208,7 @@ fn write_instances(out: &mut String) {
 }
 
 fn nvml() -> Option<&'static Nvml> {
-    static NVML: OnceLock<Option<Nvml>> = OnceLock::new();
-    NVML.get_or_init(|| crate::nvidia_driver::init_nvml().ok()).as_ref()
+    crate::nvidia_driver::shared_nvml()
 }
 
 fn write_gpu_memory(out: &mut String) {

@@ -100,12 +100,12 @@ pub fn kv_shard(t: usize, num_kv_heads: u64, attention: &str) -> f64 {
 
 pub fn kv_tokens(ctx: u64, max_conc: u64) -> u64 {
     // The KV pool holds one request at the full context, or every parallel request at a quarter of it.
-    ctx.max((max_conc.max(1) * ctx).div_ceil(4))
+    ctx.max(max_conc.max(1).saturating_mul(ctx).div_ceil(4))
 }
 
 pub fn state_slots(m: &MemorySpec, max_conc: u64) -> u64 {
     // State slots SGLang needs for max_conc requests with prefix caching (5 per request on extra-buffer models, else 3).
-    m.state_slots_per_request * max_conc.max(1)
+    m.state_slots_per_request.saturating_mul(max_conc.max(1))
 }
 
 pub fn swa_ratio(m: &MemorySpec, ctx: u64, max_conc: u64) -> f64 {
@@ -133,7 +133,7 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
     let marlin = if gpu_arch::nvfp4_dual_copy(cc) { input.marlin_extra_gb } else { 0.0 };
     let tokens = kv_tokens(input.ctx, input.max_conc) as f64;
     let conc = input.max_conc.max(1);
-    let request_table = ((conc + 1) * (input.ctx + 4) * 4) as f64 / GIB;
+    let request_table = (conc as f64 + 1.0) * (input.ctx as f64 + 4.0) * 4.0 / GIB;
     let oh = if gpu_arch::is_apple(cc) { METAL_OVERHEAD_GB } else { input.overhead_gb } + request_table;
     let Some(m) = &input.memory else {
         let shard = kv_shard(tp, input.num_kv_heads, &input.attention);
@@ -147,14 +147,15 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
     };
     let split = |heads: u64| if heads == 0 { 1.0 } else { (tp as f64).min(heads as f64) };
     let swa_tokens = (m.swa_tokens(conc) as f64).min(tokens);
-    let slots = if m.state_bytes_per_slot > 0 { state_slots(m, conc) + 1 } else { 0 };
+    let slots = if m.state_bytes_per_slot > 0 { state_slots(m, conc).saturating_add(1) } else { 0 };
     Need {
         weights: ((input.static_vram_gb - m.static_state_bytes as f64 / GIB).max(0.0) + marlin) / tp as f64,
         kv: tokens * (m.kv_bytes_for(cc) as f64 / split(m.kv_heads) + m.kv_replicated_bytes_per_token as f64) / GIB,
         window: swa_tokens * m.swa_bytes_per_token as f64 / split(m.swa_heads) / GIB,
-        state: ((slots as f64 * m.state_bytes_per_slot as f64 + ((conc + 1) * m.spec_state_bytes_per_request) as f64)
+        state: ((slots as f64 * m.state_bytes_per_slot as f64 + (conc as f64 + 1.0) * m.spec_state_bytes_per_request as f64)
             / tp as f64
-            + ((conc + 1) * m.request_bytes + m.fixed_bytes) as f64)
+            + (conc as f64 + 1.0) * m.request_bytes as f64
+            + m.fixed_bytes as f64)
             / GIB,
         overhead: oh,
         load_peak: m.load_peak_bytes as f64 / tp as f64 / GIB,
@@ -504,6 +505,12 @@ mod tests {
             memory: None,
             overhead_gb: crate::calc::BASE_OVERHEAD_GB,
         }
+    }
+
+    #[test]
+    fn huge_contexts_and_concurrency_saturate_instead_of_wrapping() {
+        assert_eq!(kv_tokens(u64::MAX, u64::MAX), u64::MAX);
+        assert_eq!(kv_tokens(1 << 40, 1 << 40), (u64::MAX).div_ceil(4));
     }
 
     #[test]

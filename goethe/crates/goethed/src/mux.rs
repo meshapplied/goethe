@@ -48,6 +48,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const READY_TTL: Duration = Duration::from_secs(1);
 const JSON_USAGE_CAP: usize = 8 << 20;
 const SSE_LINE_CAP: usize = 1 << 20;
+const REBUILD_CAP: usize = 64 << 20;
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 const X_SESSION_ID: HeaderName = HeaderName::from_static("x-session-id");
 
@@ -69,7 +70,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub fn spawn_mux() -> Result<tokio::task::JoinHandle<()>, String> {
-    // Bind the daemon's persisted mux port now so startup fails fast, then serve it on the runtime.
+    // Bind the daemon's persisted mux port now so startup fails fast, then serve it and the public listener in one task, so aborting it (upgrade drain) stops both.
     let home = goethe_home();
     let port = nginx::persisted_mux_port(&home)?;
     raise_nofile_limit();
@@ -98,10 +99,14 @@ pub fn spawn_mux() -> Result<tokio::task::JoinHandle<()>, String> {
     });
     let _ = mux.cache.exact();
     curator::spawn_ticker(mux);
-    if let Some(public) = public {
-        tokio::spawn(serve(mux, public, true));
-    }
-    Ok(tokio::spawn(serve(mux, listener, false)))
+    Ok(tokio::spawn(async move {
+        match public {
+            Some(public) => {
+                tokio::join!(serve(mux, listener, false), serve(mux, public, true));
+            }
+            None => serve(mux, listener, false).await,
+        }
+    }))
 }
 
 fn raise_nofile_limit() {
@@ -260,6 +265,7 @@ async fn api(m: MuxRef, req: Request<Incoming>, path: &str, rid: &str, public: b
     }
     if let Some(retry) = gcra_check(&mut lock(&m.rpm), &key.key_id, key.rpm_limit, Instant::now()) {
         metrics::inc_rate_limited(&key.key_id);
+        goethe_core::usage_log::record_request(&key.key_id, goethe_core::usage_log::RATE_LIMITED, 429, false, 0.0, None, 0, 0);
         return rate_limited(retry);
     }
     match route {
@@ -401,13 +407,15 @@ struct Finish {
 
 impl Finish {
     fn now(self, resp: Response<MuxBody>) -> Response<MuxBody> {
-        self.record(resp.status().as_u16(), 0, 0, None);
+        self.record(resp.status().as_u16(), false, 0, 0, None);
         resp
     }
 
-    fn record(&self, code: u16, prompt: i64, completion: i64, ttft: Option<f64>) {
-        // Metrics use the full duration to the last byte; key usage goes to the batched writer.
-        metrics::record_request(&self.label, code, self.started.elapsed().as_secs_f64(), prompt, completion);
+    fn record(&self, code: u16, cancelled: bool, prompt: i64, completion: i64, ttft: Option<f64>) {
+        // Metrics and the usage log use the full duration to the last byte; key usage goes to the batched writer.
+        let secs = self.started.elapsed().as_secs_f64();
+        metrics::record_request(&self.label, code, secs, prompt, completion);
+        goethe_core::usage_log::record_request(&self.key_id, &self.label, code, cancelled, secs, ttft, prompt, completion);
         if let Some(t) = ttft {
             metrics::record_ttft(&self.label, t);
         }
@@ -499,7 +507,8 @@ async fn route_post(
     }
     let stream = matches!(head.stream, Some(Value::Bool(true)));
     let body = prepare_body(path, body);
-    let (sent, retry, learn_note) = apply_note(m, &snap, path, &model, key, hint.as_deref(), &body);
+    let (upstream_body, mode) = streamed(path, stream, &body);
+    let (sent, retry, learn_note) = apply_note(m, &snap, path, &model, key, hint.as_deref(), &upstream_body);
     let tap = snap.trace().records(&key.key_id).then(|| api_tail(path)).filter(|t| TraceApi::from_path(t).is_some()).map(|t| {
         let cfg = snap.trace();
         Box::new(Capture {
@@ -524,17 +533,33 @@ async fn route_post(
         })
     });
     let ctype = if audio { content_type.as_str() } else { "application/json" };
-    proxy(m, path, &route, sent, retry, rid, stream, guard, finish, tap, ctype).await
+    proxy(m, path, &route, sent, retry, rid, mode, guard, finish, tap, ctype).await
 }
 
 fn form_field(content_type: &str, body: &[u8], name: &str) -> Option<String> {
-    // The text value of one multipart/form-data field (RFC 7578), found in the body's bytes by its name.
+    // The text value of one multipart/form-data field (RFC 7578): the one part whose Content-Disposition name matches exactly; a repeated field is refused, since parsers disagree on which copy wins.
     content_type.to_ascii_lowercase().starts_with("multipart/form-data").then_some(())?;
     let boundary = content_type.split(';').find_map(|p| p.trim().strip_prefix("boundary="))?.trim_matches('"');
+    let delim = format!("\r\n--{boundary}");
     let find = |needle: &[u8], from: usize| body.get(from..)?.windows(needle.len()).position(|w| w == needle).map(|i| i + from);
-    let start = find(b"\r\n\r\n", find(format!("name=\"{name}\"").as_bytes(), 0)?)? + 4;
-    let end = find(format!("\r\n--{boundary}").as_bytes(), start)?;
-    std::str::from_utf8(&body[start..end]).ok().map(|v| v.trim().to_string())
+    let mut head_start = find(&delim.as_bytes()[2..], 0)? + delim.len() - 2;
+    let mut found = None;
+    while body.get(head_start..head_start + 2) == Some(b"\r\n") {
+        let head_end = find(b"\r\n\r\n", head_start)?;
+        let next = find(delim.as_bytes(), head_end + 4)?;
+        let named = std::str::from_utf8(&body[head_start..head_end]).ok().and_then(disposition_name) == Some(name);
+        if named && found.replace(std::str::from_utf8(&body[head_end + 4..next]).ok()?.trim().to_string()).is_some() {
+            return None;
+        }
+        head_start = next + delim.len();
+    }
+    found
+}
+
+fn disposition_name(head: &str) -> Option<&str> {
+    // The name parameter of a part's Content-Disposition header (not filename).
+    let (_, value) = head.split("\r\n").filter_map(|l| l.split_once(':')).find(|(k, _)| k.trim().eq_ignore_ascii_case("content-disposition"))?;
+    value.split(';').find_map(|p| p.trim().strip_prefix("name=")).map(|n| n.trim_matches('"'))
 }
 
 struct NoteRetry {
@@ -616,7 +641,7 @@ async fn proxy(
     body: Bytes,
     retry: Option<NoteRetry>,
     rid: &str,
-    stream: bool,
+    mode: Mode,
     guard: inflight::InflightGuard,
     finish: Finish,
     mut tap: Option<Box<Capture>>,
@@ -671,10 +696,15 @@ async fn proxy(
     }
     let sse = match parts.headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()) {
         Some(ct) => ct.starts_with("text/event-stream"),
-        None => stream,
+        None => mode != Mode::Pass(false),
     };
+    let rebuild = (mode == Mode::Rebuild && sse).then(|| TraceApi::from_path(api_tail(path))).flatten();
+    let hide = (mode == Mode::HideUsage && sse).then(UsageFilter::default);
+    if rebuild.is_some() || hide.is_some() {
+        parts.headers.remove(CONTENT_LENGTH);
+    }
     let code = parts.status.as_u16();
-    let body = MeteredBody {
+    let mut body = MeteredBody {
         inner: upstream,
         meter: UsageMeter::new(sse, finish.started),
         done: Some((finish, guard, code)),
@@ -683,8 +713,122 @@ async fn proxy(
         ended: false,
         tap,
         cut_event: if is_anthropic(path) { ANTHROPIC_CUT_EVENT } else { STREAM_CUT_EVENT },
+        hide,
+        defer: rebuild.is_some(),
     };
-    Response::from_parts(parts, body.boxed())
+    match rebuild {
+        Some(api) => rebuild_reply(parts, &mut body, api, is_anthropic(path)).await,
+        None => Response::from_parts(parts, body.boxed()),
+    }
+}
+
+async fn rebuild_reply(mut parts: hyper::http::response::Parts, body: &mut MeteredBody, api: TraceApi, anthropic: bool) -> Response<MuxBody> {
+    // Read the whole engine stream (capped), assemble the body a non-streaming call returns off the async workers, then pick the status: an engine error inside the stream is an error reply, not a 200.
+    let mut raw = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let Some(data) = frame.ok().and_then(|f| f.into_data().ok()) else {
+            continue;
+        };
+        raw.extend_from_slice(&data);
+        if raw.len() > REBUILD_CAP {
+            body.cut = true;
+            body.settle(StatusCode::BAD_GATEWAY.as_u16());
+            return error(StatusCode::BAD_GATEWAY, "the reply is too large to return as one body; send the request with stream: true", "server_error", "reply_too_large");
+        }
+    }
+    let assembled = tokio::task::spawn_blocking(move || goethe_core::trace_assemble::assemble(api, true, &raw)).await.unwrap_or(Value::Null);
+    let (status, reply) = rebuilt_reply(parts.status, assembled, anthropic);
+    body.settle(status.as_u16());
+    parts.status = status;
+    parts.headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    Response::from_parts(parts, full(serde_json::to_vec(&reply).unwrap_or_default()))
+}
+
+fn rebuilt_reply(engine: StatusCode, assembled: Value, anthropic: bool) -> (StatusCode, Value) {
+    // An error the engine put in the stream (or a failed Responses run) becomes the error reply in the API's shape, with the engine's code when it gave one, else 502.
+    let failed = assembled.get("status").and_then(Value::as_str) == Some("failed");
+    let err = assembled.get("error").filter(|e| !e.is_null()).cloned().or_else(|| failed.then(|| json!({"message": "the engine failed this response"})));
+    let Some(err) = err.filter(|_| engine.is_success()) else {
+        return (engine, assembled);
+    };
+    let status = err
+        .get("code")
+        .and_then(Value::as_u64)
+        .and_then(|c| u16::try_from(c).ok())
+        .and_then(|c| StatusCode::from_u16(c).ok())
+        .filter(|c| c.is_client_error() || c.is_server_error())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let reply = if anthropic { json!({"type": "error", "error": err}) } else { json!({"error": err}) };
+    (status, reply)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Mode {
+    Pass(bool),
+    HideUsage,
+    Rebuild,
+}
+
+fn streamed(path: &str, stream: bool, body: &Bytes) -> (Bytes, Mode) {
+    // Every generation request streams from the engine, so time to first token and decode speed are measured one way: Rebuild returns a request the client did not stream as one body, HideUsage hides the usage chunk an OpenAI stream now asks for, Pass(stream) leaves the body as sent.
+    let Some(api) = TraceApi::from_path(api_tail(path)) else {
+        return (body.clone(), Mode::Pass(stream));
+    };
+    let Ok(Value::Object(mut v)) = serde_json::from_slice::<Value>(body) else {
+        return (body.clone(), Mode::Pass(stream));
+    };
+    let openai = matches!(api, TraceApi::Chat | TraceApi::Completions);
+    let asked = v.get("stream_options").and_then(|o| o.get("include_usage")) == Some(&Value::Bool(true));
+    let mode = match (stream, openai && !asked) {
+        (false, _) => Mode::Rebuild,
+        (true, true) => Mode::HideUsage,
+        (true, false) => return (body.clone(), Mode::Pass(true)),
+    };
+    v.insert("stream".into(), Value::Bool(true));
+    if openai {
+        match v.entry("stream_options").or_insert_with(|| json!({})).as_object_mut() {
+            Some(o) => o.insert("include_usage".into(), Value::Bool(true)),
+            None => return (body.clone(), Mode::Pass(stream)),
+        };
+    }
+    match serde_json::to_vec(&v) {
+        Ok(b) => (Bytes::from(b), mode),
+        Err(_) => (body.clone(), Mode::Pass(stream)),
+    }
+}
+
+#[derive(Default)]
+struct UsageFilter {
+    held: Vec<u8>,
+    skip_blank: bool,
+}
+
+impl UsageFilter {
+    fn pass(&mut self, data: &[u8], last: bool) -> Bytes {
+        // Whole SSE lines go through except the usage-only chunk (no choices) and the blank line after it; a partial line waits for the next frame.
+        self.held.extend_from_slice(data);
+        let end = if last { self.held.len() } else { self.held.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1) };
+        let mut out = Vec::with_capacity(end);
+        for line in self.held[..end].split_inclusive(|&b| b == b'\n') {
+            let text = line.trim_ascii();
+            if self.skip_blank && text.is_empty() {
+                self.skip_blank = false;
+                continue;
+            }
+            self.skip_blank = false;
+            if text.strip_prefix(b"data:").is_some_and(usage_only) {
+                self.skip_blank = true;
+                continue;
+            }
+            out.extend_from_slice(line);
+        }
+        self.held.drain(..end);
+        Bytes::from(out)
+    }
+}
+
+fn usage_only(data: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(data.trim_ascii()).is_ok_and(|c| c.get("choices").and_then(Value::as_array).is_some_and(|a| a.is_empty()) && c.get("usage").is_some_and(|u| !u.is_null()))
 }
 
 struct MeteredBody {
@@ -696,17 +840,46 @@ struct MeteredBody {
     ended: bool,
     tap: Option<Box<Capture>>,
     cut_event: &'static [u8],
+    hide: Option<UsageFilter>,
+    defer: bool,
 }
 
 const STREAM_CUT_EVENT: &[u8] = b"data: {\"error\":{\"message\":\"the engine stopped during this stream (model unloaded or engine crashed)\",\"type\":\"unavailable_error\",\"code\":\"engine_stopped\"}}\n\ndata: [DONE]\n\n";
 const ANTHROPIC_CUT_EVENT: &[u8] = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"the engine stopped during this stream (model unloaded or engine crashed)\"}}\n\n";
 
 impl MeteredBody {
+    fn take_in(&mut self, data: &[u8]) {
+        // Every byte from the engine is metered and, when traced, kept as the engine sent it.
+        self.meter.feed(data);
+        if let Some(c) = self.tap.as_mut() {
+            if c.response.len() + data.len() > trace::RESPONSE_CAP {
+                c.truncated = true;
+            } else {
+                c.response.extend_from_slice(data);
+            }
+        }
+    }
+
+    fn finish_unless_deferred(&mut self) {
+        if !self.defer {
+            self.finish();
+        }
+    }
+
+    fn settle(&mut self, code: u16) {
+        // A deferred body (rebuilt reply) records with the status the client finally gets.
+        if let Some(d) = self.done.as_mut() {
+            d.2 = code;
+        }
+        self.finish();
+    }
+
     fn finish(&mut self) {
-        // Record once, at end of stream or when the client goes away; this also releases the in-flight slot.
+        // Record once, at end of stream or when the client goes away (neither end nor engine error: cancelled); this also releases the in-flight slot.
         if let Some((finish, guard, code)) = self.done.take() {
             let (prompt, completion) = self.meter.totals();
-            finish.record(code, prompt, completion, self.meter.ttft());
+            let cancelled = !self.ended && !self.cut;
+            finish.record(code, cancelled, prompt, completion, self.meter.ttft());
             drop(guard);
             if let Some(mut c) = self.tap.take() {
                 c.duration_s = finish.started.elapsed().as_secs_f64();
@@ -727,38 +900,37 @@ impl Body for MeteredBody {
     fn poll_frame(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
         // Frames pass through while data is metered; a cut SSE stream ends with an error event in its API's shape, not a reset.
         let this = self.get_mut();
-        if this.cut {
+        if this.cut || (this.ended && (this.done.is_none() || this.defer)) {
             return Poll::Ready(None);
         }
         let polled = Pin::new(&mut this.inner).poll_frame(cx);
         match &polled {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
-                    this.meter.feed(data);
-                    if let Some(c) = this.tap.as_mut() {
-                        if c.response.len() + data.len() > trace::RESPONSE_CAP {
-                            c.truncated = true;
-                        } else {
-                            c.response.extend_from_slice(data);
-                        }
-                    }
+                    this.take_in(data);
                 }
                 if this.inner.is_end_stream() {
                     this.ended = true;
                 }
+                if let (Some(f), Some(data)) = (this.hide.as_mut(), frame.data_ref()) {
+                    return Poll::Ready(Some(Ok(Frame::data(f.pass(data, this.ended)))));
+                }
             }
             Poll::Ready(Some(Err(_))) if this.sse => {
                 this.cut = true;
-                this.finish();
+                this.finish_unless_deferred();
                 return Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(this.cut_event)))));
             }
             Poll::Ready(None) => {
                 this.ended = true;
-                this.finish();
+                this.finish_unless_deferred();
+                if let Some(rest) = this.hide.as_mut().map(|f| f.pass(&[], true)).filter(|b| !b.is_empty()) {
+                    return Poll::Ready(Some(Ok(Frame::data(rest))));
+                }
             }
             Poll::Ready(Some(Err(_))) => {
                 this.cut = true;
-                this.finish();
+                this.finish_unless_deferred();
             }
             Poll::Pending => {}
         }
@@ -770,6 +942,10 @@ impl Body for MeteredBody {
     }
 
     fn size_hint(&self) -> SizeHint {
+        // A rebuilt or filtered body is not the engine's length; claiming it would make hyper send a wrong Content-Length.
+        if self.defer || self.hide.is_some() {
+            return SizeHint::default();
+        }
         self.inner.size_hint()
     }
 }
@@ -1266,12 +1442,52 @@ mod tests {
         assert_eq!(form_field("application/json", br#"{"model": "org/asr"}"#, "model"), None);
     }
 
+    #[test]
+    fn a_form_field_is_found_by_its_part_header_only_and_never_twice() {
+        let ct = "multipart/form-data; boundary=B";
+        let decoy = b"--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"model\"\r\n\r\nx name=\"model\"\r\n\r\nfake\r\n--B\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nreal\r\n--B--\r\n";
+        assert_eq!(form_field(ct, decoy, "model").as_deref(), Some("real"), "bytes inside a file or a filename are not the field");
+        let twice = b"--B\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\na\r\n--B\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nb\r\n--B--\r\n";
+        assert_eq!(form_field(ct, twice, "model"), None, "which copy an engine reads is not ours to guess");
+        assert_eq!(form_field(ct, b"--B\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nunterminated", "model"), None);
+    }
+
     fn meter_feed(sse: bool, parts: &[&[u8]]) -> UsageMeter {
         let mut m = UsageMeter::new(sse, Instant::now());
         for p in parts {
             m.feed(p);
         }
         m
+    }
+
+    #[test]
+    fn every_generation_request_streams_from_the_engine_and_others_pass() {
+        let mode = |path: &str, stream: bool, b: &[u8]| {
+            let (sent, mode) = streamed(path, stream, &Bytes::copy_from_slice(b));
+            (serde_json::from_slice::<Value>(&sent).unwrap_or(Value::Null), mode)
+        };
+        let (v, m) = mode("/v1/chat/completions", true, br#"{"stream":true,"stream_options":{"include_usage":false,"x":1}}"#);
+        assert_eq!((m, v["stream_options"].clone()), (Mode::HideUsage, json!({"include_usage": true, "x": 1})), "other stream options are kept");
+        let own = br#"{"stream":true,"stream_options":{"include_usage":true}}"#;
+        assert_eq!(streamed("/v1/chat/completions", true, &Bytes::from_static(own)), (Bytes::from_static(own), Mode::Pass(true)), "a client that asked keeps its usage chunk");
+        let (v, m) = mode("/v1/messages", false, br#"{"model":"m"}"#);
+        assert_eq!((m, v["stream"].clone(), v.get("stream_options").is_none()), (Mode::Rebuild, json!(true), true), "Anthropic streams carry usage already");
+        assert_eq!(mode("/v1/messages", true, br#"{"stream":true}"#).1, Mode::Pass(true));
+        assert_eq!(mode("/v1/responses", false, br#"{"input":"x"}"#).1, Mode::Rebuild);
+        let emb = br#"{"input":"x"}"#;
+        assert_eq!(streamed("/v1/embeddings", false, &Bytes::from_static(emb)), (Bytes::from_static(emb), Mode::Pass(false)), "not a generation route");
+    }
+
+    #[test]
+    fn only_the_usage_chunk_is_hidden_even_when_split_across_frames() {
+        let mut f = UsageFilter::default();
+        let a = f.pass(b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: {\"choices\":[],\"usa", false);
+        let b = f.pass(b"ge\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n", true);
+        let out = [a, b].concat();
+        assert_eq!(String::from_utf8(out).unwrap(), "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: [DONE]\n\n");
+        let mut f = UsageFilter::default();
+        let keep = b"data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"completion_tokens\":2}}\n\n";
+        assert_eq!(f.pass(keep, true).as_ref(), &keep[..], "a chunk with choices is the client's, usage or not");
     }
 
     #[test]
@@ -1449,32 +1665,34 @@ mod tests {
         assert_eq!(prepare_body("/v1/chat/completions", Bytes::from_static(openai)).as_ref(), &openai[..]);
     }
 
-    #[tokio::test]
-    async fn proxied_openai_body_keeps_tools() {
-        let dir = std::env::temp_dir().join(format!("goethe-mux-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+    async fn fake_engine(reply: &'static [u8], content_type: &'static str) -> (u16, Arc<Mutex<Vec<u8>>>) {
+        // One connection that records the request body and answers with `reply`.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::<u8>::new()));
         let seen_task = seen.clone();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let io = TokioIo::new(stream);
             let svc = service_fn(move |req: Request<Incoming>| {
                 let seen_task = seen_task.clone();
                 async move {
                     let bytes = req.into_body().collect().await.unwrap().to_bytes();
-                    let mut slot = seen_task.lock().unwrap();
-                    slot.clear();
-                    slot.extend_from_slice(&bytes);
-                    let reply = b"{\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}";
-                    Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(reply))))
+                    seen_task.lock().unwrap().clone_from(&bytes.to_vec());
+                    let mut resp = Response::new(Full::new(Bytes::from_static(reply)));
+                    resp.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+                    Ok::<_, Infallible>(resp)
                 }
             });
-            let _ = http1::Builder::new().serve_connection(io, svc).await;
+            let _ = http1::Builder::new().serve_connection(TokioIo::new(stream), svc).await;
         });
         tokio::task::yield_now().await;
-        let mux = Box::leak(Box::new(Mux {
+        (port, seen)
+    }
+
+    fn test_mux(name: &str) -> MuxRef {
+        let dir = std::env::temp_dir().join(format!("goethe-mux-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Box::leak(Box::new(Mux {
             cache: GatewayCache::open(&dir),
             client: upstream_client(),
             max_body: 8 << 20,
@@ -1483,17 +1701,82 @@ mod tests {
             trace: Recorder::start(&dir),
             learn: Store::start(&dir),
             learn_gates: Gates::default(),
-        }));
+        }))
+    }
+
+    async fn proxied(mux: MuxRef, port: u16, body: &[u8], mode: Mode) -> Response<MuxBody> {
         let route = Route { instance_id: "i".into(), port, engine_key: None, draining: false };
-        let raw = br#"{"model":"m","tools":[{"type":"function","function":{"name":"ping"}}]}"#;
-        let body = prepare_body("/v1/chat/completions", Bytes::from_static(raw));
-        assert_eq!(body.as_ref(), &raw[..]);
-        let guard = inflight::track("m");
         let finish = Finish { m: mux, label: "m".into(), key_id: "k".into(), started: Instant::now() };
-        let resp = proxy(mux, "/v1/chat/completions", &route, body, None, "req-1", false, guard, finish, None, "application/json").await;
-        let _ = resp.into_body().collect().await.unwrap();
-        let recorded = seen.lock().unwrap().clone();
-        let v: Value = serde_json::from_slice(&recorded).unwrap();
+        proxy(mux, "/v1/chat/completions", &route, Bytes::copy_from_slice(body), None, "req-1", mode, inflight::track("m"), finish, None, "application/json").await
+    }
+
+    async fn send(mux: MuxRef, port: u16, body: &[u8], mode: Mode) -> (Option<String>, Vec<u8>) {
+        let resp = proxied(mux, port, body, mode).await;
+        let ct = resp.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_string);
+        (ct, resp.into_body().collect().await.unwrap().to_bytes().to_vec())
+    }
+
+    #[tokio::test]
+    async fn a_filtered_stream_does_not_claim_the_engines_length() {
+        let sse = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"completion_tokens\":1}}\n\ndata: [DONE]\n\n";
+        let (port, _) = fake_engine(sse, "text/event-stream").await;
+        let resp = proxied(test_mux("hide-len"), port, br#"{"model":"m","stream":true}"#, Mode::HideUsage).await;
+        assert!(resp.headers().get(CONTENT_LENGTH).is_none() && resp.body().size_hint().exact().is_none());
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(!body.windows(5).any(|w| w == b"usage") && body.ends_with(b"data: [DONE]\n\n"), "{body:?}");
+    }
+
+    #[tokio::test]
+    async fn proxied_openai_body_keeps_tools() {
+        let (port, seen) = fake_engine(b"{\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}", "application/json").await;
+        let raw = br#"{"model":"m","tools":[{"type":"function","function":{"name":"ping"}}]}"#;
+        assert_eq!(prepare_body("/v1/chat/completions", Bytes::from_static(raw)).as_ref(), &raw[..]);
+        send(test_mux("tools"), port, raw, Mode::Pass(false)).await;
+        let v: Value = serde_json::from_slice(&seen.lock().unwrap()).unwrap();
         assert_eq!(v["tools"][0]["function"]["name"], "ping");
+    }
+
+    #[tokio::test]
+    async fn a_request_the_client_did_not_stream_comes_back_as_one_body() {
+        let sse = b"data: {\"id\":\"c1\",\"created\":7,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"}}]}\n\n\
+data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n\n\
+data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\ndata: [DONE]\n\n";
+        let (port, seen) = fake_engine(sse, "text/event-stream").await;
+        let (upstream, mode) = streamed("/v1/chat/completions", false, &Bytes::from_static(br#"{"model":"m","messages":[]}"#));
+        assert_eq!(mode, Mode::Rebuild);
+        let (ct, body) = send(test_mux("rebuild"), port, &upstream, mode).await;
+        let sent: Value = serde_json::from_slice(&seen.lock().unwrap()).unwrap();
+        assert_eq!((sent["stream"].clone(), sent["stream_options"]["include_usage"].clone()), (json!(true), json!(true)), "the engine is asked for a stream with usage");
+        assert_eq!(ct.as_deref(), Some("application/json"));
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["object"], "chat.completion");
+        assert_eq!((v["choices"][0]["message"]["content"].clone(), v["choices"][0]["finish_reason"].clone()), (json!("Hello"), json!("stop")));
+        assert_eq!(v["usage"]["completion_tokens"], 2);
+    }
+
+    #[tokio::test]
+    async fn a_rebuilt_reply_past_the_cap_ends_in_an_error_instead_of_growing() {
+        let line = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n";
+        let huge: &'static [u8] = Box::leak(line.repeat(REBUILD_CAP / line.len() + 2).into_boxed_slice());
+        let (port, _) = fake_engine(huge, "text/event-stream").await;
+        let resp = proxied(test_mux("rebuild-cap"), port, br#"{"model":"m","stream":true}"#, Mode::Rebuild).await;
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"], "reply_too_large");
+    }
+
+    #[tokio::test]
+    async fn an_engine_error_inside_a_rebuilt_stream_is_an_error_reply_not_a_200() {
+        let sse = b"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n\
+data: {\"error\":{\"message\":\"context too long\",\"type\":\"BadRequestError\",\"code\":400}}\n\ndata: [DONE]\n\n";
+        let (port, _) = fake_engine(sse, "text/event-stream").await;
+        let resp = proxied(test_mux("rebuild-err"), port, br#"{"model":"m","stream":true}"#, Mode::Rebuild).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(v, json!({"error": {"message": "context too long", "type": "BadRequestError", "code": 400}}));
+        let (code, reply) = rebuilt_reply(StatusCode::OK, json!({"type": "message", "error": {"type": "api_error", "message": "stopped"}}), true);
+        assert_eq!((code, reply["type"].clone()), (StatusCode::BAD_GATEWAY, json!("error")), "no numeric code: 502, Anthropic shape");
+        let fine = json!({"object": "chat.completion"});
+        assert_eq!(rebuilt_reply(StatusCode::OK, fine.clone(), false), (StatusCode::OK, fine));
     }
 }

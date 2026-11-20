@@ -1,6 +1,6 @@
 // What SGLang allocates for a model, from its config.json: token pools per GPU generation, window pool, state slots.
 
-use crate::model_facts::{self, read_u64};
+use crate::model_facts::{self, mul, read_u64};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -90,7 +90,7 @@ impl MemorySpec {
         }
         let page = 128;
         let w = self.swa_window;
-        max_conc.max(1) * (w + SWA_EVICTION_INTERVAL + 2 * page + 4 * (w + page)) + 2 * CHUNKED_PREFILL + page
+        mul(&[max_conc.max(1), mul(&[5, w]).saturating_add(SWA_EVICTION_INTERVAL + 6 * page)]).saturating_add(2 * CHUNKED_PREFILL + page)
     }
 }
 
@@ -105,7 +105,7 @@ pub fn installed_from_config(cfg: &Value, card: &toml::Value, load_extra: &[Stri
     let mut spec = from_config(cfg, kv_dtype).ok()?;
     let facts = model_facts::facts_from_config(cfg, 0.0, None, "installed").ok()?;
     let elem = crate::install::kv_element_bytes(kv_dtype.unwrap_or("auto"), cfg);
-    spec.static_state_bytes = (facts.swa_kv_elems_per_request * elem + facts.linear_state_bytes_per_request) * 4;
+    spec.static_state_bytes = mul(&[mul(&[facts.swa_kv_elems_per_request, elem]).saturating_add(facts.linear_state_bytes_per_request), 4]);
     let mut args = crate::engines::sglang::card_extra_args(card);
     args.extend_from_slice(load_extra);
     apply_engine_args(&mut spec, Some(cfg), &args);
@@ -147,7 +147,7 @@ pub fn apply_engine_args(spec: &mut MemorySpec, cfg: Option<&Value>, args: &[Str
         .and_then(|v| v.parse::<u64>().ok())
         .or_else(|| flag_value(args, "--speculative-num-steps").and_then(|v| v.parse::<u64>().ok()).map(|s| s + 1))
         .unwrap_or(4);
-    spec.spec_state_bytes_per_request = draft_tokens * spec.state_bytes_per_slot;
+    spec.spec_state_bytes_per_request = mul(&[draft_tokens, spec.state_bytes_per_slot]);
 }
 
 pub fn from_config(cfg: &Value, kv_dtype: Option<&str>) -> Result<MemorySpec, String> {
@@ -191,7 +191,7 @@ fn fp4_expert_load_peak(cfg: &Value, lm: &Value, model_type: &str) -> u64 {
         return 0;
     }
     let get = |k: &str| lm.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-    let per_layer = (get("n_routed_experts") * 3 * get("hidden_size") * get("moe_intermediate_size")) as f64 * (0.5 + 1.0 / 32.0);
+    let per_layer = mul(&[get("n_routed_experts"), 3, get("hidden_size"), get("moe_intermediate_size")]) as f64 * (0.5 + 1.0 / 32.0);
     (LOAD_PEAK_LAYERS * per_layer) as u64
 }
 
@@ -202,7 +202,7 @@ fn deepseek_v4(lm: &Value, layers: u64) -> Result<MemorySpec, String> {
     let rope = get("qk_rope_head_dim").unwrap_or(64);
     let index = get("index_head_dim").unwrap_or(128);
     let window = get("sliding_window").unwrap_or(128);
-    let kv = (head - rope) + 2 * rope + 8;
+    let kv = head.saturating_sub(rope) + 2 * rope + 8;
     let ratios: Vec<u64> = lm
         .get("compress_ratios")
         .and_then(|v| v.as_array())
@@ -216,12 +216,12 @@ fn deepseek_v4(lm: &Value, layers: u64) -> Result<MemorySpec, String> {
             .filter(|r| *r == 1 || *r == 2)
             .map(|r| (kv + low_index) as f64 / r as f64)
             .sum();
-        let swa = kv * layers;
-        let per_request_window = window + SWA_EVICTION_INTERVAL + 2 * DSV4_PAGE + 4 * (window + DSV4_PAGE);
+        let swa = mul(&[kv, layers]);
+        let per_request_window = mul(&[5, window]).saturating_add(SWA_EVICTION_INTERVAL + 6 * DSV4_PAGE);
         return Ok(MemorySpec {
             kv_bytes_per_token: low.ceil() as u64,
-            request_bytes: per_request_window * swa + 3 * 8 * 4096,
-            fixed_bytes: (2 * CHUNKED_PREFILL + DSV4_PAGE) * swa,
+            request_bytes: mul(&[per_request_window, swa]).saturating_add(3 * 8 * 4096),
+            fixed_bytes: mul(&[2 * CHUNKED_PREFILL + DSV4_PAGE, swa]),
             chunked_prefill: CHUNKED_PREFILL,
             ..MemorySpec::default()
         });
@@ -229,7 +229,7 @@ fn deepseek_v4(lm: &Value, layers: u64) -> Result<MemorySpec, String> {
     let n4 = ratios.iter().filter(|r| **r == 4).count() as u64;
     let n128 = ratios.iter().filter(|r| **r == 128).count() as u64;
     let indexer = index + index / 128 * 4;
-    let swa_token = (kv * layers) as f64 + 8.0 / window as f64 * (2.0 * 2.0 * 512.0 * 4.0 + 2.0 * 2.0 * 128.0 * 4.0) * n4 as f64;
+    let swa_token = mul(&[kv, layers]) as f64 + 8.0 / window as f64 * (2.0 * 2.0 * 512.0 * 4.0 + 2.0 * 2.0 * 128.0 * 4.0) * n4 as f64;
     let full = 0.1 * swa_token + (kv * n4) as f64 / 4.0 + (kv * n128) as f64 / 128.0 + (indexer * n4) as f64 / 4.0;
     let page_padding = 43.75;
     Ok(MemorySpec {
@@ -244,7 +244,7 @@ fn mla(lm: &Value, cfg: &Value, arch: &str, mla_layers: u64) -> MemorySpec {
     let rank = read_u64(lm, cfg, &["kv_lora_rank"]).unwrap_or(0);
     let rope = read_u64(lm, cfg, &["qk_rope_head_dim"]).unwrap_or(64);
     let dsa = lm.get("index_topk").is_some() && lm.get("index_head_dim").is_some();
-    let mut spec = MemorySpec { kv_bytes_per_token: (rank + rope) * BF16 * mla_layers, ..MemorySpec::default() };
+    let mut spec = MemorySpec { kv_bytes_per_token: mul(&[rank + rope, BF16, mla_layers]), ..MemorySpec::default() };
     if !dsa {
         return spec;
     }
@@ -281,7 +281,7 @@ fn minimax_sparse(lm: &Value, cfg: &Value, layers: u64) -> MemorySpec {
     let head = read_u64(lm, cfg, &["head_dim"]).unwrap_or(128);
     let index_dim = sparse.get("sparse_index_dim").and_then(|v| v.as_u64()).unwrap_or(128);
     MemorySpec {
-        kv_bytes_per_token: layers * 2 * kv_heads * head * BF16,
+        kv_bytes_per_token: mul(&[layers, 2, kv_heads, head, BF16]),
         kv_heads,
         kv_replicated_bytes_per_token: (2 * index_kv + k_only) * index_dim * BF16,
         ..MemorySpec::default()
@@ -301,7 +301,7 @@ fn mha(lm: &Value, cfg: &Value, plan: model_facts::LayerPlan) -> MemorySpec {
     let full_head = read_u64(lm, cfg, &["global_head_dim"]).unwrap_or(head);
     let full_v = if lm.get("global_head_dim").is_some() { full_head } else { v_head };
     let mut spec = MemorySpec {
-        kv_bytes_per_token: full_heads * (full_head + full_v) * BF16 * plan.full,
+        kv_bytes_per_token: mul(&[full_heads, full_head + full_v, BF16, plan.full]),
         kv_heads: full_heads,
         ..MemorySpec::default()
     };
@@ -309,7 +309,7 @@ fn mha(lm: &Value, cfg: &Value, plan: model_facts::LayerPlan) -> MemorySpec {
         let swa_heads = read_u64(lm, cfg, &["swa_num_key_value_heads"]).unwrap_or(heads);
         let swa_head = read_u64(lm, cfg, &["swa_head_dim"]).unwrap_or(head);
         let swa_v = read_u64(lm, cfg, &["swa_v_head_dim"]).unwrap_or(if lm.get("swa_head_dim").is_some() { v_head } else { head });
-        spec.swa_bytes_per_token = swa_heads * (swa_head + swa_v) * BF16 * plan.swa;
+        spec.swa_bytes_per_token = mul(&[swa_heads, swa_head + swa_v, BF16, plan.swa]);
         spec.swa_heads = swa_heads;
         spec.swa_window = read_u64(lm, cfg, &["sliding_window", "sliding_window_size"]).unwrap_or(4096);
         spec.chunked_prefill = CHUNKED_PREFILL;

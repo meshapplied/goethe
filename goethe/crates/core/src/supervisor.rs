@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 static SLOT_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 static WATCHDOG_TICK_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_ATTEMPT: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+static STUCK_STOPS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 const LIVE: &str = "('STARTING', 'RUNNING', 'RESTARTING', 'DRAINING', 'STOPPING')";
 const GPU_RELEASE_WAIT: Duration = Duration::from_secs(30);
@@ -227,7 +228,7 @@ pub fn handle_load(params: LoadParams) -> Result<(Value, String), LoadErr> {
         }
         let step = {
             let _plan = coordinator::plan_lock();
-            if ticket.cancelled() {
+            if ticket.cancelled() || shutdown_requested() {
                 return Err(err1("load cancelled"));
             }
             plan_and_start(&req, &con)?
@@ -261,10 +262,18 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
     }
     let copies = copies_of(con, model_id);
     if let (None, false, Some(first)) = (&req.params.slot_key, req.params.replica, copies.first()) {
-        let message = format!(
-            "already loaded: {} on GPU {} (port {}); use --replica to start another copy",
-            first.0, first.2, first.3
-        );
+        let differs = copy_mismatch(&req.params, &req.pinned, &first.2, first.4);
+        let message = if differs.is_empty() {
+            format!("already loaded: {} on GPU {} (port {}); use --replica to start another copy", first.0, first.2, first.3)
+        } else {
+            format!(
+                "already loaded: {} on GPU {} (port {}), but {}; nothing changed. Unload it first to load with the new settings, or use --replica for another copy",
+                first.0,
+                first.2,
+                first.3,
+                differs.join(" and ")
+            )
+        };
         let result = json!({"instance_id": first.0, "status": first.1, "already_loaded": true});
         return Ok(Step::Loaded(result, message));
     }
@@ -381,17 +390,33 @@ struct FitSpawn {
     card: toml::Value,
 }
 
-fn copies_of(con: &Connection, model_id: &str) -> Vec<(String, String, String, i64)> {
-    // STARTING or RUNNING instances of a model (RUNNING first): id, status, GPUs, port.
+fn copies_of(con: &Connection, model_id: &str) -> Vec<(String, String, String, i64, i64)> {
+    // STARTING, RUNNING or RESTARTING (watchdog backoff) instances of a model, RUNNING first: id, status, GPUs, port, context.
     let Ok(mut stmt) = con.prepare(
-        "SELECT instance_id, status, gpu_indices, internal_port FROM loaded_instances
-         WHERE model_id = ?1 AND status IN ('STARTING', 'RUNNING') ORDER BY status = 'RUNNING' DESC, rowid",
+        "SELECT instance_id, status, gpu_indices, internal_port, ctx_len FROM loaded_instances
+         WHERE model_id = ?1 AND status IN ('STARTING', 'RUNNING', 'RESTARTING') ORDER BY status = 'RUNNING' DESC, rowid",
     ) else {
         return Vec::new();
     };
-    stmt.query_map([model_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+    stmt.query_map([model_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
+}
+
+fn copy_mismatch(params: &LoadParams, pinned: &[u32], gpus: &str, ctx_len: i64) -> Vec<String> {
+    // What a load asked for explicitly that the running copy does not have (GPUs, context).
+    let mut out = Vec::new();
+    let mut have = parse_gpu_csv(gpus);
+    let mut want = pinned.to_vec();
+    have.sort_unstable();
+    want.sort_unstable();
+    if params.gpus.is_some() && !want.is_empty() && want != have {
+        out.push(format!("you asked for GPU {}", gpu_csv(&want)));
+    }
+    if let Some(ctx) = params.ctx.filter(|c| i64::try_from(*c).ok() != Some(ctx_len)) {
+        out.push(format!("you asked for context {ctx} and it runs with {ctx_len}"));
+    }
+    out
 }
 
 fn missing_error(message: String, holders: &[Foreign]) -> LoadErr {
@@ -553,14 +578,14 @@ fn launch_finish(starting: Starting, notices: String) -> (Value, String) {
         "slot_key": starting.params.slot_key,
     });
     let sk = starting.params.slot_key.clone().unwrap_or_default();
-    load_slot::slot_in_flight_inc(&sk);
+    let in_flight = load_slot::slot_in_flight(&sk);
     thread::spawn(move || {
         let slot = slot_lock(&sk);
         let _guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let _in_flight = in_flight;
         let mut starting = starting;
         startup(&mut starting);
         drop(starting);
-        load_slot::slot_in_flight_dec(&sk);
     });
     (result, notices)
 }
@@ -572,8 +597,14 @@ fn startup(s: &mut Starting) {
         match wait_engine_ready(s) {
             Startup::Ready => {
                 warm_up(s);
-                if mark_running(s) {
-                    learn_overhead(s);
+                match mark_running(s) {
+                    Ok(true) => learn_overhead(s),
+                    Ok(false) => {}
+                    Err(e) => {
+                        append_goethed_log(&s.home, &format!("{}: could not record RUNNING ({e}); stopping the engine\n", s.instance_id));
+                        load_slot::push_instance_notice(&s.instance_id, &format!("could not record RUNNING: {e}"));
+                        fail_engine(s);
+                    }
                 }
                 return;
             }
@@ -732,26 +763,22 @@ fn learn_weights(s: &Starting) {
     );
 }
 
-fn mark_running(s: &Starting) -> bool {
-    // STARTING to RUNNING and the desired slot in one transaction, so a concurrent unload can never resurrect it.
-    let Ok(mut con) = db::open(&s.home) else {
-        return false;
-    };
-    let Ok(tx) = con.transaction_with_behavior(TransactionBehavior::Immediate) else {
-        return false;
-    };
+fn mark_running(s: &Starting) -> Result<bool, String> {
+    // STARTING to RUNNING and the desired slot in one transaction, so a concurrent unload can never resurrect it; Ok(false) when the row left STARTING (an unload won).
+    let mut con = db::open(&s.home).map_err(|e| e.to_string())?;
+    let tx = con.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
     let changed = tx
         .execute(
             "UPDATE loaded_instances SET status = 'RUNNING' WHERE instance_id = ?1 AND status = 'STARTING'",
             [&s.instance_id],
         )
-        .unwrap_or(0);
+        .map_err(|e| e.to_string())?;
     if changed == 1 {
-        let _ = autostart::mark_desired(&tx, &s.params);
+        autostart::mark_desired(&tx, &s.params).map_err(|e| format!("desired load: {e}"))?;
     }
-    let ok = tx.commit().is_ok() && changed == 1;
+    tx.commit().map_err(|e| e.to_string())?;
     crate::platform::state_changed();
-    ok
+    Ok(changed == 1)
 }
 
 fn cancel_engine(s: &Starting) {
@@ -1524,9 +1551,14 @@ pub fn watchdog_tick() {
     let Ok(con) = db::open(&home) else {
         return;
     };
+    retry_stuck_stops(&con, &home);
     let now = now_epoch_secs();
     for i in insts(&con, "status = 'RUNNING'", &[]).unwrap_or_default() {
         let alive = i.identity.as_ref().is_some_and(proc_ident::leader_alive);
+        if !alive && i.identity.as_ref().is_some_and(proc_ident::leader_unreadable) {
+            append_goethed_log(&home, &format!("watchdog instance={} process table unreadable; liveness unknown, tick skipped\n", i.instance_id));
+            continue;
+        }
         let owned = alive && owns_port(i.identity.as_ref(), i.port);
         let mut state = load_probe_state(&con, &i.instance_id, now);
         let cheap = owned && serves(i.port, &i.engine_key, &i.model_id);
@@ -1576,6 +1608,34 @@ pub fn watchdog_tick() {
     }
 }
 
+fn retry_stuck_stops(con: &Connection, home: &Path) {
+    // Engines that survived a watchdog stop stay STOPPING with a pid: stop them again each tick until gone, then finish as planned (restart or FAILED).
+    let stuck: Vec<(String, String)> = STUCK_STOPS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for (id, to) in stuck {
+        let row = insts(con, "instance_id = ?1 AND status = 'STOPPING' AND pid > 0", &[&id]).ok().and_then(|v| v.into_iter().next());
+        let Some(i) = row else {
+            STUCK_STOPS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(s, _)| *s != id);
+            continue;
+        };
+        if !retire(con, home, &i, "STOPPING", &to) {
+            continue;
+        }
+        append_goethed_log(home, &format!("watchdog instance={id} stopped on retry; now {to}\n"));
+        if to == "RESTARTING" {
+            match load_params_for_slot(con, &i.slot_key, &i.model_id) {
+                Some(params) => {
+                    let backoff = crate::watchdog_policy::restart_backoff_secs(i.restarts);
+                    next_attempts().insert(i.slot_key.clone(), now_epoch_secs() + backoff as i64);
+                    schedule_restart(params, i.restarts, backoff);
+                }
+                None => {
+                    let _ = con.execute("UPDATE loaded_instances SET status = 'FAILED' WHERE instance_id = ?1 AND status = 'RESTARTING'", [&id]);
+                }
+            }
+        }
+    }
+}
+
 fn retire(con: &Connection, home: &Path, i: &Inst, from: &str, to: &str) -> bool {
     // Stop a claimed instance (verified) and keep its row as `to` with pid 0 for ps; STOPPING if processes survived.
     if !stop_processes(home, std::slice::from_ref(i)).is_empty() {
@@ -1583,8 +1643,14 @@ fn retire(con: &Connection, home: &Path, i: &Inst, from: &str, to: &str) -> bool
             "UPDATE loaded_instances SET status = 'STOPPING' WHERE instance_id = ?1 AND status = ?2",
             [&i.instance_id, from],
         );
+        let mut stuck = STUCK_STOPS.lock().unwrap_or_else(|e| e.into_inner());
+        if !stuck.iter().any(|(id, _)| *id == i.instance_id) {
+            append_goethed_log(home, &format!("watchdog instance={} survived the stop; retrying every watchdog tick\n", i.instance_id));
+            stuck.push((i.instance_id.clone(), to.to_string()));
+        }
         return false;
     }
+    STUCK_STOPS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(id, _)| *id != i.instance_id);
     let _ = con.execute(
         "UPDATE loaded_instances SET status = ?3, pid = 0, pgid = 0 WHERE instance_id = ?1 AND status = ?2",
         [i.instance_id.as_str(), from, to],
@@ -1996,6 +2062,22 @@ mod tests {
             assert_eq!(message, "already loaded: i-first on GPU 0 (port 30007); use --replica to start another copy");
             assert_eq!(result, json!({"instance_id": "i-first", "status": "RUNNING", "already_loaded": true}));
         });
+    }
+
+    #[test]
+    fn a_copy_in_restart_backoff_counts_and_different_settings_are_named() {
+        with_temp_home(|home, con| {
+            install_m(home, con);
+            insert_running(con, "i-back", i32::MAX, 1, 30008);
+            con.execute("UPDATE loaded_instances SET status = 'RESTARTING', pid = 0 WHERE instance_id = 'i-back'", []).unwrap();
+            let (result, message) = handle_load(LoadParams { ctx: Some(8192), ..user_load(false) }).expect("already loaded");
+            assert_eq!(result["instance_id"], "i-back", "no second engine during the watchdog backoff");
+            assert!(message.contains("you asked for context 8192 and it runs with 4096") && message.contains("nothing changed"), "{message}");
+        });
+        let p = LoadParams { gpus: Some("1".into()), ..user_load(false) };
+        assert_eq!(copy_mismatch(&p, &[1], "0", 4096), vec!["you asked for GPU 1".to_string()]);
+        assert!(copy_mismatch(&p, &[0], "0", 4096).is_empty());
+        assert!(copy_mismatch(&LoadParams { gpus: None, ..user_load(false) }, &[], "0,1", 4096).is_empty());
     }
 
     #[test]

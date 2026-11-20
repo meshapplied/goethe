@@ -38,8 +38,10 @@ fn env_port(name: &str) -> Result<Option<u16>, String> {
         Ok(v) => v
             .trim()
             .parse::<u16>()
+            .ok()
+            .filter(|p| *p != 0)
             .map(Some)
-            .map_err(|_| format!("invalid {name}")),
+            .ok_or_else(|| format!("invalid {name}: expected a port from 1 to 65535")),
         Err(_) => Ok(None),
     }
 }
@@ -48,10 +50,12 @@ fn read_port_file(home: &Path, rel: &str) -> Option<u16> {
     fs::read_to_string(home.join(rel))
         .ok()
         .and_then(|v| v.trim().parse().ok())
+        .filter(|p| *p != 0)
 }
 
 fn write_port_file(home: &Path, rel: &str, port: u16) -> Result<(), String> {
-    fs::write(home.join(rel), format!("{port}\n")).map_err(|e| e.to_string())
+    // Temp file and rename: a reader never sees a half-written port, and a symlink at the path is replaced, not followed.
+    crate::nginx::write_private(&home.join(rel), format!("{port}\n").as_bytes())
 }
 
 const ENGINE_PORTS_DEFAULT: (u16, u16) = (30001, 30099);
@@ -147,6 +151,25 @@ pub fn resolve_public_port(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn port_zero_is_refused_and_port_files_replace_a_symlink() {
+        std::env::set_var("GOETHE_TEST_PORT_ZERO", "0");
+        assert!(env_port("GOETHE_TEST_PORT_ZERO").is_err());
+        std::env::remove_var("GOETHE_TEST_PORT_ZERO");
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        fs::create_dir_all(home.join("nginx")).unwrap();
+        fs::write(home.join("nginx/mux_port"), "0\n").unwrap();
+        assert_eq!(read_port_file(home, "nginx/mux_port"), None);
+        let victim = home.join("victim");
+        fs::write(&victim, "keep").unwrap();
+        fs::remove_file(home.join("nginx/mux_port")).unwrap();
+        std::os::unix::fs::symlink(&victim, home.join("nginx/mux_port")).unwrap();
+        write_port_file(home, "nginx/mux_port", 30005).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep", "the link target is untouched");
+        assert_eq!(read_port_file(home, "nginx/mux_port"), Some(30005));
+    }
 
     #[test]
     fn engine_ports_parse_and_reject_bad_ranges() {

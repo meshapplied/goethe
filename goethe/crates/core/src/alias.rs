@@ -4,11 +4,17 @@ use crate::db;
 use crate::paths::goethe_home;
 use rusqlite::Connection;
 
-pub fn set(alias: &str, model_id: &str) -> Result<(), String> {
-    // Refuse an empty alias and one that would shadow an installed model id, then store it.
-    if alias.trim().is_empty() {
-        return Err("alias must not be empty".to_string());
+pub fn name_check(alias: &str) -> Result<(), String> {
+    // An alias clients can type in a request: 1 to 64 characters, no spaces or control characters; matched exactly, case included.
+    if alias.is_empty() || alias.chars().count() > 64 || alias.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!("{alias:?} is not an alias: use 1 to 64 letters, digits or punctuation, no spaces"));
     }
+    Ok(())
+}
+
+pub fn set(alias: &str, model_id: &str) -> Result<(), String> {
+    // Refuse a malformed alias and one that would shadow an installed model id, then store it.
+    name_check(alias)?;
     let home = goethe_home();
     let con = db::open(&home).map_err(|e| e.to_string())?;
     let shadows: i64 = con
@@ -71,4 +77,17 @@ pub fn resolve(con: &Connection, name: &str) -> Option<String> {
         |r| r.get(0),
     )
     .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aliases_are_one_word_without_control_characters() {
+        assert!(name_check("fast").is_ok() && name_check("org/small-v2").is_ok() && name_check("Fast.1").is_ok());
+        for bad in ["", "two words", "tab\there", "esc\x1b[2J", " lead", &"x".repeat(65)] {
+            assert!(name_check(bad).is_err(), "{bad:?}");
+        }
+    }
 }
