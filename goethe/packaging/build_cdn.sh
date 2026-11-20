@@ -193,6 +193,5 @@ cp "${ROOT}"/pyenv/requirements*.lock "${ROOT}/pyenv/bootstrap.sh" "${DIST}/pyen
 "${ROOT}/packaging/subst_install_pubkey.sh" "${ROOT}/cdn/install.sh" "${RELEASE_PUB}" \
   "${DIST}/install.sh"
 cp "${ROOT}/cdn/install.ps1" "${DIST}/install.ps1"
-# Always write VERSION + SHA256SUMS; sign only when GOETHE_SIGN_KEY is set (release merge job).
 "${ROOT}/packaging/sign_cdn.sh" "${DIST}" "${GOETHE_SIGN_KEY:-}"
 echo "CDN assembled at ${DIST}"

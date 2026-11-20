@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Write VERSION and SHA256SUMS for a dist/cdn tree. With a signing key, also write .sig files and verify
-# them against the public key embedded in install.sh. Without a key, leave the tree unsigned (CI / pre-merge).
+# Write VERSION and SHA256SUMS for a dist/cdn tree; with a signing key also sign them and verify with install.sh's key.
 
 set -euo pipefail
 
