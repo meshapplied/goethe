@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.5 (2026-11-20)
 
 - `goethe update --check` names nginx by version (from the package's BUILDINFO, which now records it), marks a rebuild of the same wheel or version as "another build", and ends with a summary of what would change.
 - `goethe run` without a model opens a list of the installed models to pick from (loaded ones first); a model that is not loaded is loaded for the chat and unloaded after unless `--keep`.
