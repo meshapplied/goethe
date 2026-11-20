@@ -5,9 +5,9 @@ name: release
 # or run it by hand from the Actions tab on main.
 #
 # Repository settings it needs:
-#   secret   GOETHE_SIGN_KEY          contents of release.key (P-256 PEM private key)
-#   variable GOETHE_RELEASE_PUB_FPR   sha256 of the DER public key (printed by packaging/keygen.sh)
-#   environment "release"             add required reviewers so publishing waits for an approval
+#   environment "release"             required reviewers; GOETHE_SIGN_KEY lives here (not as a repo secret)
+#   env secret GOETHE_SIGN_KEY        contents of release.key (P-256 PEM private key); merge job only
+#   variable   GOETHE_RELEASE_PUB_FPR sha256 of the DER public key (printed by packaging/keygen.sh)
 # The package is served by GitHub Pages at https://pkg.goethe.sh:
 #   Settings > Pages > Source: GitHub Actions, Custom domain: pkg.goethe.sh, Enforce HTTPS
 #   DNS: CNAME pkg.goethe.sh -> meshapplied.github.io
@@ -37,7 +37,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       ci_green: ${{ steps.ci.outputs.green }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: Release only from main
@@ -86,35 +86,31 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Patched SGLang source at the pinned commit
         run: |
           . goethe/sglang/PIN
           git clone --quiet --filter=blob:none --no-checkout "$SGLANG_REPO" sglang-fork
           git -C sglang-fork checkout --quiet "$SGLANG_REV"
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           version: "0.13.1"
-      - name: "Signed release build (x86_64: wheel, pyenv, binaries)"
+      - name: "Release build unsigned (x86_64: wheel, pyenv, binaries); merge signs"
         env:
           SGLANG_FORK_SRC: ${{ github.workspace }}/sglang-fork
           GOETHE_RELEASE_PUB_FPR: ${{ vars.GOETHE_RELEASE_PUB_FPR }}
-          SIGN_KEY_PEM: ${{ secrets.GOETHE_SIGN_KEY }}
-        run: |
-          key="$RUNNER_TEMP/release.key"
-          umask 077
-          printf '%s\n' "$SIGN_KEY_PEM" >"$key"
-          trap 'shred -u "$key" 2>/dev/null || rm -f "$key"' EXIT
-          GOETHE_SIGN_KEY="$key" goethe/packaging/build_cdn.sh --release --arch x86_64
-      - name: Verify what will ship (x86_64)
+          GOETHE_ALLOW_UNSIGNED: "1"
+        run: goethe/packaging/build_cdn.sh --release --arch x86_64
+      - name: Verify what will ship (x86_64; signature comes from merge)
         run: |
           cd goethe/dist/cdn
           grep -q "release=1" BUILDINFO
           grep -q "fork_dirty=0" BUILDINFO
+          test -f SHA256SUMS
+          test ! -e SHA256SUMS.sig
           sha256sum -c SHA256SUMS
           awk "/-----BEGIN PUBLIC KEY-----/,/-----END PUBLIC KEY-----/" install.sh \
             | sed "s/^GOETHE_RELEASE_PUB_PEM='//; s/'\$//" >"$RUNNER_TEMP/embedded.pem"
-          openssl dgst -sha256 -verify "$RUNNER_TEMP/embedded.pem" -signature SHA256SUMS.sig SHA256SUMS
           fpr="$(openssl pkey -pubin -in "$RUNNER_TEMP/embedded.pem" -outform DER | sha256sum | cut -d' ' -f1)"
           [[ "$fpr" == "${{ vars.GOETHE_RELEASE_PUB_FPR }}" ]]
           bash -n install.sh
@@ -125,7 +121,7 @@ jobs:
       # Artifacts do not keep file modes, so the executables travel inside a tar.
       - name: Pack for the merge job
         run: tar -C goethe/dist -cf cdn-x86_64.tar cdn
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cdn-x86_64
           path: cdn-x86_64.tar
@@ -137,7 +133,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Portable aarch64 binaries and uv
         run: |
           mkdir -p goethe/dist/cdn/bin/linux-aarch64
@@ -157,7 +153,7 @@ jobs:
           file uv | grep -q "ARM aarch64"
       - name: Pack for the merge job
         run: tar -C goethe/dist/cdn/bin -cf bin-aarch64.tar linux-aarch64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bin-aarch64
           path: bin-aarch64.tar
@@ -169,12 +165,12 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: goethe's own nginx for aarch64 Linux
         run: bash goethe/packaging/build_nginx_linux.sh
       - name: Pack for the merge job
         run: tar -C goethe/dist/cdn/bin -cf nginx-aarch64.tar linux-aarch64/nginx
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nginx-aarch64
           path: nginx-aarch64.tar
@@ -186,14 +182,14 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: goethe, goethed and nginx for Apple Silicon
         run: bash goethe/packaging/build_macos.sh
       - name: End to end on macOS
         run: bash goethe/tests/macos_e2e.sh
       - name: Pack for the merge job
         run: tar -C goethe/dist/cdn/bin -cf bin-darwin.tar darwin-aarch64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bin-darwin
           path: bin-darwin.tar
@@ -204,17 +200,19 @@ jobs:
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    # Signing key is an environment secret: this job waits for required reviewers, then alone can sign.
+    environment: release
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: cdn-x86_64
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: bin-aarch64
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: bin-darwin
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: nginx-aarch64
       - name: Unpack every platform
@@ -264,7 +262,7 @@ jobs:
           (cd cdn && sha256sum -c --quiet SHA256SUMS)
       - name: Archive
         run: tar -C "$GITHUB_WORKSPACE" -cf - cdn | zstd -19 -T0 -o "goethe-cdn-${{ needs.guard.outputs.version }}.tar.zst"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: goethe-cdn
           path: |
@@ -281,7 +279,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: goethe-cdn
       - name: Installer accepts the signed package in a clean Ubuntu 22.04 container
@@ -304,9 +302,9 @@ jobs:
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    environment: release
+    # Approval already happened on merge (signing). Publish only uploads the signed artifact.
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: goethe-cdn
       - name: GitHub release
@@ -334,10 +332,10 @@ jobs:
       pages: write
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: goethe-cdn
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: src
           sparse-checkout: goethe/packaging
@@ -345,13 +343,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash src/goethe/packaging/pages_site.sh goethe-cdn-*.tar.zst site
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           path: site
           name: github-pages-${{ github.run_attempt }}
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
         with:
           artifact_name: github-pages-${{ github.run_attempt }}
           timeout: 1800000

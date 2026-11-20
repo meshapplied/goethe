@@ -33,7 +33,7 @@ jobs:
       unit: ${{ steps.flags.outputs.unit }}
       e2e: ${{ steps.flags.outputs.e2e }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: What the pull request touches (push/dispatch runs everything)
@@ -69,13 +69,13 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Toolchain
         working-directory: goethe
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustc --version
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: goethe
           shared-key: macos-unit
@@ -92,13 +92,13 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Toolchain
         working-directory: goethe
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustc --version
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: goethe
           shared-key: macos-e2e
@@ -106,12 +106,12 @@ jobs:
         run: bash goethe/packaging/build_macos.sh
       - name: End to end
         run: bash goethe/tests/macos_e2e.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: darwin-aarch64
           path: goethe/dist/cdn/bin/darwin-aarch64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: snapshot-mac
@@ -126,7 +126,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Every job passed (or was skipped for a false flag) and every job is listed
         env:
           NEEDS: ${{ toJSON(needs) }}

@@ -64,7 +64,7 @@ pub_fingerprint() {
 }
 
 check_signing() {
-  # Fail fast: release builds need a signing key and the expected public-key fingerprint of release_pub.pem.
+  # Fail fast: release builds need the expected public-key fingerprint; the private key may wait for the gated sign job.
   local pub="${RELEASE_PUB}" fpr
   if [[ ! -f "${pub}" ]]; then
     echo "missing ${pub}" >&2
@@ -75,8 +75,12 @@ check_signing() {
     echo "--release always embeds packaging/release_pub.pem; unset GOETHE_RELEASE_PUB" >&2
     exit 1
   fi
-  if [[ "${RELEASE}" -eq 1 && ( -z "${GOETHE_SIGN_KEY:-}" || -z "${GOETHE_RELEASE_PUB_FPR:-}" ) ]]; then
-    echo "--release needs GOETHE_SIGN_KEY and GOETHE_RELEASE_PUB_FPR (expected sha256 of the DER public key)" >&2
+  if [[ "${RELEASE}" -eq 1 && -z "${GOETHE_RELEASE_PUB_FPR:-}" ]]; then
+    echo "--release needs GOETHE_RELEASE_PUB_FPR (expected sha256 of the DER public key)" >&2
+    exit 1
+  fi
+  if [[ "${RELEASE}" -eq 1 && -z "${GOETHE_SIGN_KEY:-}" && "${GOETHE_ALLOW_UNSIGNED:-}" != "1" ]]; then
+    echo "--release needs GOETHE_SIGN_KEY or GOETHE_ALLOW_UNSIGNED=1 (CI builds unsigned; the release merge job signs)" >&2
     exit 1
   fi
   if [[ -n "${GOETHE_RELEASE_PUB_FPR:-}" && "${GOETHE_RELEASE_PUB_FPR}" != "${fpr}" ]]; then
@@ -189,7 +193,6 @@ cp "${ROOT}"/pyenv/requirements*.lock "${ROOT}/pyenv/bootstrap.sh" "${DIST}/pyen
 "${ROOT}/packaging/subst_install_pubkey.sh" "${ROOT}/cdn/install.sh" "${RELEASE_PUB}" \
   "${DIST}/install.sh"
 cp "${ROOT}/cdn/install.ps1" "${DIST}/install.ps1"
-if [[ -n "${GOETHE_SIGN_KEY:-}" ]]; then
-  "${ROOT}/packaging/sign_cdn.sh" "${DIST}" "${GOETHE_SIGN_KEY}"
-fi
+# Always write VERSION + SHA256SUMS; sign only when GOETHE_SIGN_KEY is set (release merge job).
+"${ROOT}/packaging/sign_cdn.sh" "${DIST}" "${GOETHE_SIGN_KEY:-}"
 echo "CDN assembled at ${DIST}"
