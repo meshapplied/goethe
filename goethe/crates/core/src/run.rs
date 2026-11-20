@@ -195,7 +195,7 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
             let _ = wav.parent().map(std::fs::remove_dir);
             done.map(|text| println!("{}", for_stdout(&text)))
         }
-        (_, Some(text)) => api.chat(&model, &[json!({"role": "user", "content": text})], &mut |_| true).map(|reply| println!("{}", shown(&reply, opts.thinking))),
+        (_, Some(text)) => api.chat(&model, &[json!({"role": "user", "content": text})], &mut |_| true).map(|(reply, _)| println!("{}", shown(&reply, opts.thinking))),
         (_, None) => {
             let mut msgs = Vec::new();
             loop {
@@ -207,7 +207,7 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
                 }
                 msgs.push(json!({"role": "user", "content": line.trim_end()}));
                 match api.chat(&model, &msgs, &mut |_| true) {
-                    Ok(reply) => {
+                    Ok((reply, _)) => {
                         println!("{}", shown(&reply, opts.thinking));
                         msgs.push(json!({"role": "assistant", "content": reply}));
                     }
@@ -325,21 +325,24 @@ impl Api {
         Ok(reply(req.send_bytes(&body))?["text"].as_str().unwrap_or_default().to_string())
     }
 
-    pub(crate) fn chat(&self, model: &str, msgs: &[Value], sink: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
-        // Streams the reply piece by piece into the sink (which says false to stop) and returns it whole.
-        let body = json!({"model": model, "messages": msgs, "stream": true}).to_string();
+    pub(crate) fn chat(&self, model: &str, msgs: &[Value], sink: &mut dyn FnMut(&str) -> bool) -> Result<(String, u64), String> {
+        // Streams the reply piece by piece into the sink (which says false to stop); returns it whole with its completion tokens (the usage chunk, else the content chunks).
+        let body = json!({"model": model, "messages": msgs, "stream": true, "stream_options": {"include_usage": true}}).to_string();
         let r = self.req("POST", "/chat/completions").set("Content-Type", "application/json").send_string(&body).map_err(fail)?;
-        let mut out = String::new();
+        let (mut out, mut chunks, mut usage) = (String::new(), 0, None);
         for line in BufReader::new(r.into_reader()).lines() {
             let line = line.map_err(|e| e.to_string())?;
             let Some(data) = line.strip_prefix("data:").map(str::trim).filter(|d| *d != "[DONE]") else { continue };
-            let piece = serde_json::from_str::<Value>(data).ok().and_then(|v| v["choices"][0]["delta"]["content"].as_str().map(String::from)).unwrap_or_default();
-            out.push_str(&piece);
-            if !sink(&piece) {
+            let v = serde_json::from_str::<Value>(data).unwrap_or_default();
+            usage = v["usage"]["completion_tokens"].as_u64().or(usage);
+            let piece = v["choices"][0]["delta"]["content"].as_str().unwrap_or_default();
+            chunks += u64::from(!piece.is_empty());
+            out.push_str(piece);
+            if !sink(piece) {
                 break;
             }
         }
-        Ok(out)
+        Ok((out, usage.unwrap_or(chunks)))
     }
 }
 

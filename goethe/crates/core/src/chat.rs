@@ -129,11 +129,13 @@ pub(crate) struct Ui {
     scroll: usize,
     follow: bool,
     size: (usize, usize),
+    session: (u64, f64),
+    last_reply: Option<(u64, f64)>,
 }
 
 impl Ui {
     pub(crate) fn new(header: String, thinking: bool) -> Ui {
-        Ui { mode: Mode::Typing, back: Mode::Typing, input: Vec::new(), at: 0, entries: Vec::new(), header, picks: Vec::new(), pick: 0, streaming: false, thinking, waiting: None, scroll: 0, follow: true, size: (80, 24) }
+        Ui { mode: Mode::Typing, back: Mode::Typing, input: Vec::new(), at: 0, entries: Vec::new(), header, picks: Vec::new(), pick: 0, streaming: false, thinking, waiting: None, scroll: 0, follow: true, size: (80, 24), session: (0, 0.0), last_reply: None }
     }
 
     pub(crate) fn key(&mut self, key: Input) -> Act {
@@ -270,7 +272,12 @@ impl Ui {
         let wrap = |text: &str, style: Style, out: &mut Vec<(String, Style)>| out.extend(wrap(&clean(text), width).into_iter().map(|l| (l, style)));
         for (i, e) in self.entries.iter().enumerate() {
             match e {
-                Entry::User(t) => wrap(&format!("> {t}"), Style::Bold, &mut out),
+                Entry::User(_) => out.push(("\u{27a4} User".to_string(), Style::Secondary)),
+                Entry::Reply(_) | Entry::Vector(_) => out.push(("\u{27a4} Model".to_string(), Style::Third)),
+                _ => {}
+            }
+            match e {
+                Entry::User(t) => wrap(t, Style::Bold, &mut out),
                 Entry::Vector(t) => wrap(t, Style::Plain, &mut out),
                 Entry::Note(t) => wrap(t, Style::Dim, &mut out),
                 Entry::Divider(t) => wrap(&format!("-- {t} --"), Style::Dim, &mut out),
@@ -293,6 +300,23 @@ impl Ui {
             }
         }
         out
+    }
+
+    pub(crate) fn count(&mut self, tokens: u64, seconds: f64) {
+        // One finished reply (its completion tokens, first to last token in seconds) into the session totals.
+        self.session = (self.session.0 + tokens, self.session.1 + seconds);
+        self.last_reply = Some((tokens, seconds));
+    }
+
+    fn stats(&self, room: usize) -> String {
+        // Tokens generated this session and the decode speed, with the last reply's when there is room.
+        if self.session.0 == 0 {
+            return String::new();
+        }
+        let speed = |(n, s): (u64, f64)| if s > 0.0 { format!(" \u{b7} {:.1} tok/s", n as f64 / s) } else { String::new() };
+        let total = format!("{} tokens{}", self.session.0, speed(self.session));
+        let last = self.last_reply.map(|l| format!("{total}  (last {}{})", l.0, speed(l))).unwrap_or_default();
+        [last, total].into_iter().find(|t| t.chars().count() <= room).unwrap_or_default()
     }
 
     pub(crate) fn render(&self, width: usize, height: usize) -> Vec<String> {
@@ -344,7 +368,9 @@ impl Ui {
             Mode::Confirm => SURE,
             Mode::Pick => PICKING,
         };
-        out.push(paint(&fit(keys, width), Style::Dim));
+        let stats = self.stats(width.saturating_sub(keys.chars().count() + 4));
+        let gap = width.saturating_sub(keys.chars().count() + stats.chars().count());
+        out.push(paint(&fit(&format!("{keys}{}{stats}", " ".repeat(gap)), width), Style::Dim));
         out
     }
 }
@@ -478,10 +504,14 @@ impl State {
         let (started, clock) = (SystemTime::now(), Instant::now());
         self.ui.waiting = Some(clock);
         draw(&mut self.ui, &mut self.last);
-        let mut ttft = None;
+        let (mut ttft, mut first, mut end) = (None, None, clock);
         let State { t, ui, msgs, last, .. } = self;
         let result = t.api.chat(&t.model, msgs, &mut |piece| {
             ttft.get_or_insert_with(|| clock.elapsed().as_secs_f64());
+            if !piece.is_empty() {
+                end = Instant::now();
+                first.get_or_insert(end);
+            }
             if let Some(Entry::Reply(raw)) = ui.entries.last_mut() {
                 raw.push_str(piece);
             }
@@ -491,7 +521,8 @@ impl State {
         self.ui.streaming = false;
         self.ui.waiting = None;
         match result {
-            Ok(reply) => {
+            Ok((reply, tokens)) => {
+                self.ui.count(tokens, first.map_or(0.0, |f| (end - f).as_secs_f64()));
                 self.turns.push(Turn { started, seconds: clock.elapsed().as_secs_f64(), ttft, messages: self.msgs.clone(), reply: reply.clone() });
                 self.msgs.push(json!({"role": "assistant", "content": reply}));
             }
@@ -734,7 +765,7 @@ mod tests {
         assert_eq!(typing.len(), 8);
         assert!(typing[0].contains("org/m  (llama.cpp, text)") && typing[7].contains("[Esc] commands  [Enter] send"));
         let all = typing.join("\n");
-        assert!(all.contains("> hi") && all.contains("Hello!") && all.contains("thinking (3 words)") && !all.contains("thought it over"), "{all}");
+        assert!(all.contains("\u{27a4} User ") && all.contains("hi") && all.contains("\u{27a4} Model") && all.contains("Hello!") && all.contains("thinking (3 words)") && !all.contains("thought it over"), "{all}");
         assert!(typing[6].starts_with("> ab"), "{:?}", typing[6]);
         ui.key(Input::Esc);
         assert!(ui.render(70, 8)[7].contains("[m] model  [e] export  [r] record  [q] quit  [i] type"));
@@ -745,6 +776,34 @@ mod tests {
         let text = shown.render(40, 8).join("\n");
         assert!(text.contains("thinking") && text.contains("a long thought") && text.contains("done"), "{text}");
         assert_eq!(ui.render(10, 3).len(), 3, "a tiny terminal gets a one-line message");
+    }
+
+    #[test]
+    fn each_turn_is_labelled_with_who_said_it_in_the_theme_colors() {
+        let mut ui = Ui::new("m".into(), false);
+        ui.entries = vec![Entry::User("hi".into()), Entry::Reply("Hello!".into()), Entry::Note("a note".into())];
+        let lines = ui.lines(40);
+        let user = ("\u{27a4} User".to_string(), Style::Secondary);
+        let model = ("\u{27a4} Model".to_string(), Style::Third);
+        assert_eq!(lines, [user, ("hi".into(), Style::Bold), model, ("Hello!".into(), Style::Plain), ("a note".into(), Style::Dim)]);
+        ui.entries = vec![Entry::User("x".repeat(50))];
+        assert_eq!(ui.lines(40).iter().map(|l| visible_width(&l.0)).collect::<Vec<_>>(), [6, 40, 10], "text wraps by itself, the label apart");
+    }
+
+    #[test]
+    fn the_keys_line_shows_the_session_tokens_and_decode_speed_once_a_reply_is_in() {
+        let mut ui = Ui::new("m".into(), false);
+        assert!(!ui.render(80, 8)[7].contains("tokens"), "nothing before the first reply");
+        ui.count(100, 4.0);
+        ui.count(300, 6.0);
+        let keys = ui.render(80, 8)[7].clone();
+        assert!(keys.contains("[Esc] commands  [Enter] send") && keys.contains("400 tokens \u{b7} 40.0 tok/s  (last 300 \u{b7} 50.0 tok/s)"), "{keys}");
+        assert_eq!(visible_width(&keys), 80);
+        let narrow = ui.render(60, 8)[7].clone();
+        assert!(narrow.contains("400 tokens \u{b7} 40.0 tok/s") && !narrow.contains("last"), "{narrow}");
+        assert!(!ui.render(40, 8)[7].contains("tokens"), "no room, no stats");
+        ui.count(1, 0.0);
+        assert!(ui.render(80, 8)[7].contains("401 tokens \u{b7} 40.1 tok/s  (last 1)"));
     }
 
     #[test]
@@ -784,23 +843,23 @@ mod tests {
         ui.resize(40, 13);
         ui.entries = vec![Entry::User("first".into()), Entry::Reply("short".into())];
         let screen = ui.render(40, 13);
-        assert!(screen[1].contains("> first") && screen[2].contains("short"), "the first line is on the first body row: {screen:?}");
+        assert!(screen[1].contains("\u{27a4} User") && screen[2].contains("first") && screen[4].contains("short"), "the first line is on the first body row: {screen:?}");
         long_chat(&mut ui);
         let body = |ui: &Ui| ui.render(40, 13)[1..=10].join("|");
-        assert!(body(&ui).contains("line 40") && !body(&ui).contains("> first"), "following: the end is shown, the start scrolled off");
+        assert!(body(&ui).contains("line 40") && !body(&ui).contains("first"), "following: the end is shown, the start scrolled off");
         ui.key(Input::Esc);
         assert_eq!(ui.key(Input::Char('g')), Act::None);
-        assert!(body(&ui).contains("> first") && ui.render(40, 13)[0].contains("scrolled: G follows"), "g goes to the top and leaves the stream");
+        assert!(body(&ui).contains("first") && ui.render(40, 13)[0].contains("scrolled: G follows"), "g goes to the top and leaves the stream");
         ui.key(Input::Down);
         ui.key(Input::Char('j'));
-        assert!(!body(&ui).contains("> first") && body(&ui).contains("line 1"), "j and Down scroll one line");
+        assert!(!body(&ui).contains("first") && body(&ui).contains("line 1"), "j and Down scroll one line");
         ui.key(Input::PageDown);
-        assert!(body(&ui).contains("line 11") && !body(&ui).contains("line 10"), "a page is the window minus one line: {}", body(&ui));
+        assert!(body(&ui).starts_with("line 9 ") && !body(&ui).contains("line 8"), "a page is the window minus one line: {}", body(&ui));
         ui.key(Input::Char('k'));
         ui.key(Input::PageUp);
-        assert!(body(&ui).starts_with("line 1 "), "{}", body(&ui));
+        assert!(body(&ui).contains("first") && !body(&ui).contains("User"), "{}", body(&ui));
         ui.key(Input::PageUp);
-        assert!(body(&ui).contains("> first"), "{}", body(&ui));
+        assert!(body(&ui).contains("\u{27a4} User"), "{}", body(&ui));
         ui.key(Input::Char('G'));
         assert!(body(&ui).contains("line 40") && ui.follow && !ui.render(40, 13)[0].contains("scrolled"), "G jumps to the end and follows again");
         ui.key(Input::Char('g'));

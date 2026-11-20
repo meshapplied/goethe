@@ -153,6 +153,22 @@ pub fn credentials_path(home: &Path) -> PathBuf {
     platform_dir(home).join("credentials")
 }
 
+pub fn install_key_path(home: &Path) -> PathBuf {
+    platform_dir(home).join("install_key")
+}
+
+pub fn install_key(home: &Path) -> Result<Secret, String> {
+    // This install's own secret, made on the first login and kept through logout and updates, so the console links it again as the same node.
+    let path = install_key_path(home);
+    if let Some(key) = read_private(&path, 256, true)?.map(|t| t.trim().to_string()).filter(|k| valid_token(k)) {
+        return Ok(Secret::new(key));
+    }
+    ensure_platform_dir(home)?;
+    let key = format!("gik_{}", crate::security::random_hex(32));
+    write_private(&path, key.as_bytes())?;
+    Ok(Secret::new(key))
+}
+
 pub fn state_path(home: &Path) -> PathBuf {
     platform_dir(home).join("platform_state.json")
 }
@@ -589,6 +605,20 @@ mod tests {
         ] {
             assert!(check_url(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_install_key_is_made_once_private_and_outlives_a_logout() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let first = install_key(&home).unwrap();
+        assert!(first.expose().starts_with("gik_") && first.expose().len() == 68);
+        assert_eq!(fs::metadata(install_key_path(&home)).unwrap().mode() & 0o777, 0o600);
+        save_credentials(&home, &creds()).unwrap();
+        remove_credentials(&home).unwrap();
+        assert_eq!(install_key(&home).unwrap().expose(), first.expose(), "logout keeps it");
+        let other = dir.path().join("other");
+        assert_ne!(install_key(&other).unwrap().expose(), first.expose(), "each home is its own node");
     }
 
     #[test]

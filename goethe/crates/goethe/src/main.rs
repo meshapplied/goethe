@@ -306,7 +306,7 @@ enum Commands {
         #[arg(long = "allow-downgrade", help = "Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries).")]
         allow_downgrade: bool,
     },
-    #[command(display_order = 18, about = "Remove Goethe and the models it installed (folders of your own stay).")]
+    #[command(display_order = 18, about = "Remove Goethe with its models, engines and kernel packs (folders of your own stay).")]
     Uninstall {
         #[arg(long, help = "Keep the installed models in GOETHE_HOME/models.")]
         keep_models: bool,

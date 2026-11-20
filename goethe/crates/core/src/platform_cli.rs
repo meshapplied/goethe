@@ -163,9 +163,9 @@ fn relink_intro(workspace: &str, revoked: bool) -> String {
     }
 }
 
-fn replace_old_link(home: &Path, old: Option<Credentials>) -> Result<(), String> {
-    // A new login replaces the old link: log a live old node out (best effort; a revoked one is already gone), then drop its credentials.
-    let Some(old) = old.filter(|o| !is_revoked(home, o)) else {
+fn replace_old_link(home: &Path, old: Option<Credentials>, same_node: Option<&str>) -> Result<(), String> {
+    // A new login replaces the old link: log a live old node out (best effort; a revoked one is already gone, and the same node linked again needs none), then drop its credentials.
+    let Some(old) = old.filter(|o| !is_revoked(home, o) && Some(o.node_id.as_str()) != same_node) else {
         return platform::remove_credentials(home).map(|_| ());
     };
     let ws = platform::clean_text(&old.workspace.name, 64);
@@ -231,18 +231,18 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
         }
     }
     let client = Client::new(&url, REQUEST_TIMEOUT)?;
-    let (hostname, fingerprint) = (platform::hostname(), platform::fingerprint());
+    let (hostname, fingerprint, install_key) = (platform::hostname(), platform::fingerprint(), platform::install_key(&home)?);
     let _ctrl_c = CtrlC::catch();
     if let Some(key) = key {
-        let approved = with_retries(|| client.enroll(&key, &hostname, &fingerprint)).map_err(|e| match e {
+        let approved = with_retries(|| client.enroll(&key, &hostname, &fingerprint, &install_key)).map_err(|e| match e {
             ApiError::Unauthorized => "the console did not accept the auth key (wrong, used or expired); nothing was changed".to_string(),
             e => format!("{e}; nothing was changed"),
         })?;
-        replace_old_link(&home, old)?;
+        replace_old_link(&home, old, Some(&approved.node_id))?;
         return finish(&home, approved, &client.base());
     }
-    let started = with_retries(|| client.auth_start(&hostname, &fingerprint)).map_err(|e| format!("{e}; nothing was changed"))?;
-    replace_old_link(&home, old)?;
+    let started = with_retries(|| client.auth_start(&hostname, &fingerprint, &install_key)).map_err(|e| format!("{e}; nothing was changed"))?;
+    replace_old_link(&home, old, None)?;
     println!(
         "\nTo link this node ({hostname}), open:\n\n{}\n\nand enter the code {} (it is valid for {})\n",
         command(&started.verification_uri_complete),
@@ -295,7 +295,7 @@ pub fn logout() -> Result<(), String> {
     platform::poke_daemon();
     let ws = creds.as_ref().map(|c| platform::clean_text(&c.workspace.name, 64)).unwrap_or_default();
     match remote {
-        Ok(()) => println!("Logged out: this node was removed from workspace {ws}."),
+        Ok(()) => println!("Logged out of workspace {ws}. The console keeps this node offline; goethe login links it again as the same node."),
         Err(e) => println!(
             "Removed the local link, but could not tell the console ({e}).\nThe node will show offline there until you remove it on the console."
         ),
@@ -526,7 +526,7 @@ mod tests {
             (200, r#"{"status":"approved","node_id":"n7","node_token":"mesh_node_dddddddddddddddd","workspace":{"id":"w7","name":"Prod"}}"#.into()),
         ]);
         let c = Client::new(&m.url, Duration::from_secs(5)).unwrap();
-        let s = c.auth_start("h", "f").unwrap();
+        let s = c.auth_start("h", "f", &Secret::new("gik_install")).unwrap();
         let mut blips = 0;
         let a = wait_for_approval(&s, &mut || c.auth_poll(&s.device_code), &mut |_| true, &mut |_| blips += 1).unwrap();
         assert_eq!((a.node_id.as_str(), a.workspace.name.as_str(), blips), ("n7", "Prod", 1));
@@ -571,12 +571,18 @@ mod tests {
         platform::save_state(home, &st).unwrap();
         assert!(is_revoked(home, &c));
         assert_eq!(relink_intro("Personal", true), "The previous link (workspace Personal) was revoked or expired on the console; linking again.");
-        replace_old_link(home, Some(c.clone())).unwrap();
+        replace_old_link(home, Some(c.clone()), None).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(*m.connections.lock().unwrap(), 0, "no logout call for a revoked link");
         assert_eq!(platform::load_credentials(home).unwrap(), None);
+        platform::save_state(home, &PlatformState { link: platform::link_key(&c), ..Default::default() }).unwrap();
         platform::save_credentials(home, &c).unwrap();
-        replace_old_link(home, Some(c)).unwrap();
+        replace_old_link(home, Some(c.clone()), Some(&c.node_id)).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(*m.connections.lock().unwrap(), 0, "the same node linked again is not logged out");
+        assert_eq!(platform::load_credentials(home).unwrap(), None);
+        platform::save_credentials(home, &c).unwrap();
+        replace_old_link(home, Some(c), Some("another-node")).unwrap();
         assert_eq!(m.seen.lock().unwrap()[0].path, "/api/device/logout", "a live link is logged out");
     }
 

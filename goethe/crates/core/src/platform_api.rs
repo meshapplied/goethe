@@ -102,8 +102,8 @@ impl Client {
         }
     }
 
-    pub fn auth_start(&self, hostname: &str, fingerprint: &str) -> Result<Started, ApiError> {
-        let body = json!({"action": "start", "hostname": hostname, "version": env!("CARGO_PKG_VERSION"), "fingerprint": fingerprint});
+    pub fn auth_start(&self, hostname: &str, fingerprint: &str, install_key: &Secret) -> Result<Started, ApiError> {
+        let body = json!({"action": "start", "hostname": hostname, "version": env!("CARGO_PKG_VERSION"), "fingerprint": fingerprint, "install_key": install_key.expose()});
         parse_started(&self.post("/api/device/auth", body.to_string().as_bytes(), None)?, &self.base())
     }
 
@@ -112,8 +112,8 @@ impl Client {
         parse_poll(&self.post("/api/device/auth", body.to_string().as_bytes(), None)?)
     }
 
-    pub fn enroll(&self, authkey: &Secret, hostname: &str, fingerprint: &str) -> Result<Approved, ApiError> {
-        let body = json!({"authkey": authkey.expose(), "hostname": hostname, "version": env!("CARGO_PKG_VERSION"), "fingerprint": fingerprint});
+    pub fn enroll(&self, authkey: &Secret, hostname: &str, fingerprint: &str, install_key: &Secret) -> Result<Approved, ApiError> {
+        let body = json!({"authkey": authkey.expose(), "hostname": hostname, "version": env!("CARGO_PKG_VERSION"), "fingerprint": fingerprint, "install_key": install_key.expose()});
         parse_approved(&self.post("/api/device/enroll", body.to_string().as_bytes(), None)?)
     }
 
@@ -462,7 +462,7 @@ mod tests {
             (200, approved_json()),
         ]);
         let c = Client::new(&m.url, Duration::from_secs(5)).unwrap();
-        let s = c.auth_start("host", "fp").unwrap();
+        let s = c.auth_start("host", "fp", &Secret::new("gik_install")).unwrap();
         assert_eq!((s.user_code.as_str(), s.interval, s.expires_in), ("ABCD-1234", 3, 900));
         assert_eq!(s.verification_uri_complete, "http://127.0.0.1:9/device?code=ABCD-1234");
         assert_eq!(c.auth_poll(&s.device_code).unwrap(), Poll::Pending);
@@ -496,10 +496,10 @@ mod tests {
         assert!(matches!(c.auth_poll(&Secret::new("d")), Err(ApiError::Malformed(e)) if e.contains("larger")));
         let m = mock::serve(vec![(200, r#"{"device_code":"d","user_code":"AB\u001b[2J","verification_uri_complete":"http://evil.example.com/x","expires_in":900,"interval":3}"#.into())]);
         let c = Client::new(&m.url, Duration::from_secs(5)).unwrap();
-        assert!(c.auth_start("h", "f").is_err());
+        assert!(c.auth_start("h", "f", &Secret::new("gik_install")).is_err());
         let m = mock::serve(vec![(200, r#"{"device_code":"d","user_code":"ABCD-1234","verification_uri_complete":"https://evil.example.com/x","expires_in":900,"interval":3}"#.into())]);
         let c = Client::new(&m.url, Duration::from_secs(5)).unwrap();
-        assert!(c.auth_start("h", "f").is_err(), "https on another origin is refused");
+        assert!(c.auth_start("h", "f", &Secret::new("gik_install")).is_err(), "https on another origin is refused");
     }
 
     #[test]

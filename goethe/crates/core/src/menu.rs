@@ -8,7 +8,7 @@ use std::io::{IsTerminal, Write};
 
 #[path = "menu_draw.rs"]
 mod menu_draw;
-use menu_draw::{brand, columns, example_below, fine_bar, gb, gray, hl, mark, name_style, screen, sgr, themes_line, GAP};
+use menu_draw::{brand, columns, drop_mark, example_below, fine_bar, gb, gray, hl, mark, name_style, screen, sgr, themes_line, GAP};
 #[cfg(test)]
 use menu_draw::{plain, LOGO, SITE};
 
@@ -1174,9 +1174,10 @@ impl Picker {
             let (here, picked) = (i == self.at, self.chosen[i]);
             let cursor = if here { sgr(&hl(), "\u{27a4}") } else { " ".to_string() };
             let mark = match (picked, r.installed) {
-                (true, _) => sgr(&mark(), "\u{25cf}"),
+                (true, false) => sgr(&mark(), "\u{25cf}"),
+                (true, true) => sgr(&drop_mark(), "\u{25cf}"),
                 (false, true) => sgr(&crate::theme::secondary(), "\u{25cf}"),
-                _ => "\u{25cb}".to_string(),
+                (false, false) => "\u{25cb}".to_string(),
             };
             let name = fit(&format!("{}{}", if picked { "  " } else { "" }, r.id), mw + 2);
             let name = match name_style(r, here) {
@@ -1211,23 +1212,39 @@ impl Picker {
         vec![format!("{}   Custom model:  {custom}", cursor(Spot::Custom)), format!("{}   {token}", cursor(Spot::Token))]
     }
 
+    fn chosen_ids(&self, installed: bool) -> Vec<String> {
+        // The chosen models that are (or are not) installed: what Enter uninstalls (or installs).
+        self.data.rows.iter().zip(&self.chosen).filter(|(r, c)| **c && r.installed == installed).map(|(r, _)| r.id.clone()).collect()
+    }
+
     fn installs(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.data.rows.iter().zip(&self.chosen).filter(|(_, c)| **c).map(|(r, _)| r.id.clone()).collect();
-        if !self.custom.trim().is_empty() {
-            ids.push(self.custom.trim().to_string());
+        let mut ids = self.chosen_ids(false);
+        let custom = self.custom.trim();
+        if !custom.is_empty() && !ids.iter().any(|i| i == custom) && !self.data.rows.iter().any(|r| r.installed && r.id == custom) {
+            ids.push(custom.to_string());
         }
         ids
     }
 
+    fn removals(&self) -> Vec<String> {
+        self.chosen_ids(true)
+    }
+
+    fn plan(&self, width: usize) -> Vec<String> {
+        // What Enter would do, one line each: install in the secondary color, uninstall in the third.
+        let line = |word: &str, ids: Vec<String>, code: String| {
+            (!ids.is_empty()).then(|| sgr(&code, fit(&format!("{word}: {}", ids.join(" ")), width.saturating_sub(2)).trim_end()))
+        };
+        [line("install", self.installs(), crate::theme::secondary()), line("uninstall", self.removals(), drop_mark())].into_iter().flatten().collect()
+    }
+
     fn hint(&self) -> String {
-        let n = self.installs().len();
-        let lead = if n > 0 { format!("{n} selected   ") } else { String::new() };
         let keys = match self.spot() {
-            Spot::Model(_) => "\u{2191}\u{2193} move   Space select   Enter install   \u{2190} back",
-            Spot::Custom => "type a Hugging Face id such as org/model   Enter install   \u{2191}\u{2193} move   \u{2190} back",
+            Spot::Model(_) => "\u{2191}\u{2193} move   Space select   Enter apply   \u{2190} back",
+            Spot::Custom => "type a Hugging Face id such as org/model   Enter apply   \u{2191}\u{2193} move   \u{2190} back",
             Spot::Token => "paste a Hugging Face token   Enter use it for these installs   \u{2191}\u{2193} move   \u{2190} back",
         };
-        format!("{lead}{keys}")
+        keys.to_string()
     }
 
     fn enter(&mut self) -> Flow {
@@ -1254,7 +1271,7 @@ impl Picker {
                 return Flow::Stay;
             }
         }
-        if self.installs().is_empty() {
+        if self.installs().is_empty() && self.removals().is_empty() {
             self.status = "Select models with Space, or type a custom model".to_string();
             return Flow::Stay;
         }
@@ -1267,10 +1284,15 @@ impl Page for Picker {
         let mut out = vec![String::new(), format!("  {}", paint("Install models", Color::Bold)), String::new()];
         out.extend(self.summary());
         out.push(String::new());
-        let rows = height.saturating_sub(out.len() + 1 + 3 + 3).max(1);
+        let plan = self.plan(width);
+        let rows = height.saturating_sub(out.len() + 1 + 3 + 3 + plan.len() + usize::from(!plan.is_empty())).max(1);
         out.extend(self.table(width, rows));
         out.push(String::new());
         out.extend(self.fields());
+        if !plan.is_empty() {
+            out.push(String::new());
+            out.extend(plan.into_iter().map(|l| format!("  {l}")));
+        }
         let footer = if self.status.is_empty() { gray(&self.hint()) } else { paint(&self.status, Color::Yellow) };
         screen(out, width, height, footer)
     }
@@ -1290,11 +1312,11 @@ impl Page for Picker {
             Input::Esc | Input::Left => return Flow::Leave,
             Input::Interrupt => return Flow::Quit,
             Input::Char('q') if !typing => return Flow::Quit,
-            Input::Space => match self.spot() {
-                Spot::Model(i) if self.data.rows[i].installed => self.status = format!("{} is already installed", self.data.rows[i].id),
-                Spot::Model(i) => self.chosen[i] = !self.chosen[i],
-                _ => {}
-            },
+            Input::Space => {
+                if let Spot::Model(i) = self.spot() {
+                    self.chosen[i] = !self.chosen[i];
+                }
+            }
             Input::Backspace => match self.spot() {
                 Spot::Custom => drop(self.custom.pop()),
                 Spot::Token => drop(self.token.pop()),
@@ -1312,43 +1334,66 @@ impl Page for Picker {
 }
 
 fn install_page(tty: &mut Tty) -> Result<(), String> {
-    // The table of models that fit; the chosen ones are installed one after the other on the normal screen.
+    // The table of models that fit; Enter uninstalls the chosen installed ones, then installs the others, on the normal screen, and the table comes back.
     let home = goethe_home();
-    tty.draw(&Notice("Reading the catalog and the GPUs...".to_string()));
-    let data = crate::placement::ensure_hw_profile(&home).and_then(|_| crate::models::picker_data(&home));
-    let mut picker = match data {
-        Ok(d) => Picker::new(d),
-        Err(e) => return tty.inside(|| Err(e)),
-    };
-    if tty.run(&mut picker)?.is_none() {
-        return Ok(());
-    }
-    let ids = picker.installs();
-    tty.inside(|| {
-        for id in ids {
-            println!("{}", paint(&format!("Installing {id}"), Color::Bold));
-            report(crate::install::run(crate::install::InstallOpts {
-                model_id: id,
-                ctx: None,
-                max_conc: None,
-                tp: None,
-                gpus: None,
-                load: false,
-                force: false,
-                no_verify: false,
-                name: None,
-                copy_local: false,
-                sglang_args: Vec::new(),
-                no_wait: false,
-                trust_remote_code: false,
-                yes: true,
-                reset: false,
-                quant: None,
-                fallback: false,
-            }));
+    loop {
+        tty.draw(&Notice("Reading the catalog and the GPUs...".to_string()));
+        let data = crate::placement::ensure_hw_profile(&home).and_then(|_| crate::models::picker_data(&home));
+        let mut picker = match data {
+            Ok(d) => Picker::new(d),
+            Err(e) => return tty.inside(|| Err(e)),
+        };
+        if tty.run(&mut picker)?.is_none() || tty.quit {
+            return Ok(());
         }
-        Ok(())
-    })
+        let (removals, installs) = (picker.removals(), picker.installs());
+        tty.inside(|| apply_picks(&removals, &installs))?;
+        if tty.quit {
+            return Ok(());
+        }
+    }
+}
+
+fn apply_picks(removals: &[String], installs: &[String]) -> Result<(), String> {
+    // Every chosen change in turn, uninstalls first so their disk space is free for the installs; one failure never stops the others.
+    let mut failed = Vec::new();
+    for id in removals {
+        println!("{}", paint(&format!("Uninstalling {id}"), Color::Bold));
+        if let Err(e) = crate::models::run_remove(id, true, false, Some(false)) {
+            report(Err(e));
+            failed.push(id.clone());
+        }
+    }
+    for id in installs {
+        println!("{}", paint(&format!("Installing {id}"), Color::Bold));
+        let opts = crate::install::InstallOpts {
+            model_id: id.clone(),
+            ctx: None,
+            max_conc: None,
+            tp: None,
+            gpus: None,
+            load: false,
+            force: false,
+            no_verify: false,
+            name: None,
+            copy_local: false,
+            sglang_args: Vec::new(),
+            no_wait: false,
+            trust_remote_code: false,
+            yes: true,
+            reset: false,
+            quant: None,
+            fallback: false,
+        };
+        if let Err(e) = crate::install::run(opts) {
+            report(Err(e));
+            failed.push(id.clone());
+        }
+    }
+    match failed.len() {
+        0 => Ok(()),
+        _ => Err(format!("not done: {}", failed.join(", "))),
+    }
 }
 
 #[cfg(test)]
@@ -1600,19 +1645,40 @@ mod tests {
     }
 
     #[test]
-    fn space_selects_and_indents_installed_models_cannot_be_picked() {
+    fn space_selects_models_to_install_and_installed_ones_to_uninstall() {
         let mut p = picker();
-        p.key(Input::Space);
         let line = |p: &Picker, id: &str| text(p.render(120, 30)).into_iter().find(|l| l.contains(id)).unwrap();
+        assert!(line(&p, "org/mine").contains("\u{25cf} org/mine"), "installed models have a filled dot, not indented");
+        assert!(!text(p.render(120, 30)).iter().any(|l| l.contains("install:")), "nothing chosen, no plan");
+        p.key(Input::Space);
         assert!(line(&p, "org/small").contains("\u{25cf}   org/small"), "{}", line(&p, "org/small"));
         assert!(line(&p, "org/large").contains("\u{25cb} org/large"));
         p.key(Input::Down);
         p.key(Input::Space);
-        assert!(p.status.contains("already installed") && !p.chosen[1]);
+        assert!(p.chosen[1] && p.status.is_empty());
+        assert!(line(&p, "org/mine").contains("\u{25cf}   org/mine"), "chosen for uninstall: indented");
         assert_eq!(name_style(&p.data.rows[1], false), "1", "installed names are bold");
-        assert!(line(&p, "org/mine").contains("\u{25cf} org/mine"), "installed models have a filled dot, not indented");
         assert_eq!(name_style(&p.data.rows[0], false), "");
+        let t = text(p.render(120, 30));
+        let at = t.iter().position(|l| l.trim() == "install: org/small").unwrap_or_else(|| panic!("{t:?}"));
+        assert_eq!(t[at + 1].trim(), "uninstall: org/mine");
+        assert!(t[at + 3].contains("Enter apply"), "the keys stay under the plan: {t:?}");
         assert!(matches!(p.key(Input::Enter), Flow::Pick(0)));
+        assert_eq!((p.installs(), p.removals()), (vec!["org/small".to_string()], vec!["org/mine".to_string()]));
+        p.key(Input::Space);
+        p.key(Input::Up);
+        p.key(Input::Space);
+        assert!(p.installs().is_empty() && p.removals().is_empty(), "Space again drops the choice");
+        assert!(matches!(p.key(Input::Enter), Flow::Stay) && p.status.starts_with("Select models"));
+    }
+
+    #[test]
+    fn a_custom_model_that_is_already_chosen_or_installed_is_not_installed_twice() {
+        let mut p = picker();
+        p.key(Input::Space);
+        p.custom = "org/small".into();
+        assert_eq!(p.installs(), ["org/small"]);
+        p.custom = "org/mine".into();
         assert_eq!(p.installs(), ["org/small"]);
     }
 

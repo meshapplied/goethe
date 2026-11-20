@@ -64,12 +64,10 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     let want_ternary = opts.ternary || (want_engines && ternary_installed(home));
     let (sglang, engine) = if want_engines { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
     let ternary = if want_ternary { ternary_delta(home, &sums) } else { None };
-    let local_commit = option_env!("GOETHE_GIT_COMMIT").unwrap_or("unknown");
     let buildinfo = fetch_verified(pkg, &sums, "BUILDINFO", tmp).ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
-    let remote_commit = buildinfo_commit(&buildinfo, local_commit.trim_end_matches("-dirty").len());
     let nginx = nginx_delta(home, &sums, &arch, buildinfo_value(&buildinfo, "nginx_version"));
-    let published = published_label(&remote_ver, remote_commit.as_deref(), local_commit, bins && order == Ordering::Equal);
-    let installed = if bins { build_label(&local_ver, Some(local_commit)) } else { published.clone() };
+    let published = published_label(&remote_ver, bins && order == Ordering::Equal);
+    let installed = if bins { local_ver.clone() } else { published.clone() };
     let parts = [
         ("goethe", kept.is_none().then(|| Delta::of(&installed, &published, bins))),
         ("nginx", nginx),
@@ -194,12 +192,6 @@ fn buildinfo_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     text.lines().find_map(|l| l.trim().strip_prefix(key)?.strip_prefix('=').map(str::trim)).filter(|v| !v.is_empty())
 }
 
-fn buildinfo_commit(text: &str, len: usize) -> Option<String> {
-    // engine_commit from BUILDINFO, shortened like the local commit, with -dirty for a dirty tree.
-    let commit: String = buildinfo_value(text, "engine_commit")?.chars().take(len.max(7)).collect();
-    Some(if buildinfo_value(text, "engine_dirty") == Some("1") { format!("{commit}-dirty") } else { commit })
-}
-
 fn check_summary(pending: &[(&str, Delta)]) -> String {
     // The last line of goethe update --check: what would change, or that nothing would.
     let due: Vec<&str> = pending.iter().filter(|(_, d)| d.differs).map(|(w, _)| *w).collect();
@@ -210,21 +202,9 @@ fn check_summary(pending: &[(&str, Delta)]) -> String {
     }
 }
 
-fn build_label(version: &str, commit: Option<&str>) -> String {
-    match commit.filter(|c| !c.is_empty() && *c != "unknown") {
-        Some(c) => format!("{version} (commit {c})"),
-        None => version.to_string(),
-    }
-}
-
-fn published_label(version: &str, commit: Option<&str>, local_commit: &str, rebuilt: bool) -> String {
-    // The published build's label; another build of the installed version says so, even at the same commit.
-    match commit {
-        Some(c) if rebuilt && c == local_commit => format!("{version} (commit {c}, another build)"),
-        Some(c) => build_label(version, Some(c)),
-        None if rebuilt => format!("{version} (another build)"),
-        None => version.to_string(),
-    }
+fn published_label(version: &str, rebuilt: bool) -> String {
+    // The published build's label; another build of the installed version says so.
+    if rebuilt { format!("{version} (another build)") } else { version.to_string() }
 }
 
 const TERNARY_REL: &str = "goethe/ternary-kernels.tar.zst";
@@ -795,18 +775,10 @@ mod tests {
         fs::write(home.join("bin/goethed"), b"older daemon").unwrap();
         assert!(binaries_differ(home, &sums, "x86_64").unwrap());
         assert!(binaries_differ(home, &sums, "aarch64").is_err(), "no signed entry for that arch");
-        let info = "built_at=x\nengine_commit=0123456789abcdef0123\nengine_dirty=0\n";
-        assert_eq!(buildinfo_commit(info, 7).as_deref(), Some("0123456"));
-        assert_eq!(buildinfo_commit(&info.replace("dirty=0", "dirty=1"), 9).as_deref(), Some("012345678-dirty"));
-        assert_eq!(buildinfo_commit("release=1\n", 7), None);
-        assert_eq!(build_label("0.1.0", Some("abc1234")), "0.1.0 (commit abc1234)");
-        assert_eq!(build_label("0.1.0", Some("unknown")), "0.1.0");
-        assert_eq!(published_label("0.1.0", Some("abc1234"), "abc1234", true), "0.1.0 (commit abc1234, another build)");
-        assert_eq!(published_label("0.1.0", Some("def5678"), "abc1234", true), "0.1.0 (commit def5678)");
-        assert_eq!(published_label("0.1.0", None, "abc1234", true), "0.1.0 (another build)");
-        assert_eq!(published_label("0.2.0", None, "abc1234", false), "0.2.0");
-        let d = Delta::of("0.1.0 (commit abc1234)", "0.1.0 (commit def5678)", true);
-        assert_eq!(d.line("goethe"), "update available: goethe 0.1.0 (commit abc1234) -> 0.1.0 (commit def5678)");
+        assert_eq!(published_label("0.1.0", true), "0.1.0 (another build)");
+        assert_eq!(published_label("0.2.0", false), "0.2.0");
+        let d = Delta::of("0.1.0", &published_label("0.1.0", true), true);
+        assert_eq!(d.line("goethe"), "update available: goethe 0.1.0 -> 0.1.0 (another build)");
     }
 
     #[test]
