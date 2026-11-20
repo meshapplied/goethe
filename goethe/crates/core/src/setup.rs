@@ -145,7 +145,6 @@ pub fn ask(question: &str, setting: &str) -> bool {
     a.is_empty() || a.starts_with(['y', 'Y'])
 }
 
-
 pub struct Opts {
     pub pkg: String,
     pub from: Option<String>,
@@ -225,11 +224,11 @@ fn heartbeat_check(home: &Path) {
     while std::time::Instant::now() < deadline {
         let state: crate::platform::PlatformState = fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         if state.last_ok_at.is_some() && state.last_error.is_none() {
-            say("the platform accepted this node's heartbeat");
+            say("the console accepted this node's heartbeat");
             return;
         }
         if let (Some(e), true) = (&state.last_error, state.failures > 0) {
-            eprintln!("note: the platform refused this node's heartbeat: {e}; goethe status shows when it recovers");
+            eprintln!("note: the console refused this node's heartbeat: {e}; goethe status shows when it recovers");
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -241,8 +240,8 @@ pub fn login_question(link: &crate::platform_cli::Link) -> Option<&'static str> 
     use crate::platform_cli::Link;
     match link {
         Link::Linked { revoked: false, .. } | Link::Unreadable(_) => None,
-        Link::Linked { revoked: true, .. } => Some("\nThis node's platform login was revoked or has expired. Log in again now?"),
-        Link::NotLinked => Some("\nLog in to the Goethe platform now? Logged-in nodes get optimised kernels for supported models."),
+        Link::Linked { revoked: true, .. } => Some("\nThis node's console login was revoked or has expired. Log in again now?"),
+        Link::NotLinked => Some("\nLog in to the Goethe console now? Logged-in nodes get optimised kernels for supported models."),
     }
 }
 
@@ -263,14 +262,14 @@ fn login_step(home: &Path, platform_url: Option<&str>) {
             c.wait()
         });
         if !ok.is_ok_and(|s| s.success()) {
-            eprintln!("WARNING: goethe is installed, but linking to the platform failed; retry with: goethe login --authkey <key>");
+            eprintln!("WARNING: goethe is installed, but linking to the console failed; retry with: goethe login --authkey <key>");
         }
         return;
     }
     let Some(question) = login_question(&crate::platform_cli::link_state(home, false)) else {
         return;
     };
-    let later = "run goethe login any time to link this node to the Goethe platform (logged-in nodes get optimised kernels for supported models)";
+    let later = "run goethe login any time to link this node to the Goethe console (logged-in nodes get optimised kernels for supported models)";
     if !ask(question, "GOETHE_LOGIN") {
         println!("Not logged in: {later}");
         return;
@@ -289,9 +288,7 @@ pub fn run(o: Opts) -> Result<(), String> {
     let _ = migrate_retired_pkg_env(&home);
     let macos = cfg!(target_os = "macos");
     let from = o.from.clone().unwrap_or_else(|| o.pkg.clone()).trim_end_matches('/').to_string();
-    let tmp = home.join(".setup-staging");
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let tmp = crate::update::staging_dir(&home, ".setup-staging")?;
     let result = run_in(&home, &o, &from, &tmp, macos);
     let _ = fs::remove_dir_all(&tmp);
     result
@@ -300,6 +297,9 @@ pub fn run(o: Opts) -> Result<(), String> {
 fn run_in(home: &Path, o: &Opts, from: &str, tmp: &Path, macos: bool) -> Result<(), String> {
     let total = 3;
     heading(1, total, "Installing goethe, goethed and the gateway");
+    if let Some(why) = crate::update::plain_http_refusal(&o.pkg) {
+        return Err(why);
+    }
     let sums = crate::update::fetch_signed_sums(from, tmp)?;
     let version = fs::read_to_string(crate::update::fetch_verified(from, &sums, "VERSION", tmp)?).map_err(|e| e.to_string())?.trim().to_string();
     let plat = crate::update::platform_dir(&crate::update::normalize_arch());
@@ -318,16 +318,16 @@ fn run_in(home: &Path, o: &Opts, from: &str, tmp: &Path, macos: bool) -> Result<
     }
     let upgrading = home.join("bin/goethe").is_file() && staged.iter().any(|s| !s.rel.ends_with("/nginx"));
     let running = upgrading && crate::service::goethed_running();
-    let before = if running { crate::service::live_engine_pids().len() } else { 0 };
+    let engines = if running { crate::service::live_engine_pids() } else { Vec::new() };
     let note = if running { Some(stop_old(home)?) } else { None };
     let old_version = upgrading.then(|| fs::read_to_string(home.join("VERSION")).unwrap_or_default().trim().to_string()).filter(|v| !v.is_empty());
-    crate::update::swap_all(&staged)?;
+    crate::update::swap_all(&staged).map_err(|e| if running { format!("{e}; goethed was stopped for the upgrade: start it again with goethe up") } else { e })?;
     crate::service::label_programs(home);
     fs::copy(tmp.join("VERSION"), home.join("VERSION")).map_err(|e| e.to_string())?;
     if running {
         crate::service::refresh_unit(home);
-        let kept = crate::service::live_engine_pids().len();
-        crate::update::start_upgraded(home, before, kept)?;
+        let kept = engines.iter().filter(|p| crate::service::pid_alive(**p)).count();
+        crate::update::start_upgraded(home, engines.len(), kept)?;
     }
     if let Some(n) = note {
         say(&n);
@@ -426,7 +426,7 @@ mod tests {
     fn login_is_offered_unless_the_link_works() {
         use crate::platform_cli::Link;
         let linked = |revoked| Link::Linked { workspace: "w".into(), revoked, heartbeat: String::new(), ok: true };
-        assert!(login_question(&Link::NotLinked).unwrap().contains("Log in to the Goethe platform now?"));
+        assert!(login_question(&Link::NotLinked).unwrap().contains("Log in to the Goethe console now?"));
         assert!(login_question(&linked(true)).unwrap().contains("revoked or has expired"), "a token uninstall revoked");
         assert_eq!(login_question(&linked(false)), None);
     }

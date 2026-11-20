@@ -47,7 +47,7 @@ pub(super) fn offer_for(opts: &InstallOpts, deps: OfferDeps) -> Result<Option<Pa
         Ok(Some(c)) => c,
         Ok(None) => return Ok(None),
         Err(e) => {
-            eprintln!("note: the platform login cannot be read ({e}), so these weights are not checked for optimised kernels");
+            eprintln!("note: the console login cannot be read ({e}), so these weights are not checked for optimised kernels");
             return Ok(None);
         }
     };
@@ -131,9 +131,9 @@ pub(super) fn ask_login(offer: &crate::packs::Offer, opts: &InstallOpts) -> Resu
     // Asked only on a terminal; elsewhere one note, and the install continues with SGLang.
     let what = format!("Optimised kernels for {} are available for this GPU ({})", opts.model_id, offer.arch);
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
-        eprintln!("note: {what} to nodes logged in to the Goethe platform (goethe login); continuing without them");
+        eprintln!("note: {what} to nodes logged in to the Goethe console (goethe login); continuing without them");
         return Ok(false);
     }
-    let a = crate::term::ask(&format!("{what}.\nLog in to the Goethe platform to install them? Otherwise goethe uses SGLang. [Y/n]"), "y")?;
+    let a = crate::term::ask(&format!("{what}.\nLog in to the Goethe console to install them? Otherwise goethe uses SGLang. [Y/n]"), "y")?;
     Ok(a.to_ascii_lowercase().starts_with('y'))
 }

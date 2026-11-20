@@ -60,7 +60,7 @@ impl Worker {
             }
             Err(e) => {
                 self.forget();
-                self.note(&format!("platform: credentials not used: {e}"));
+                self.note(&format!("console: credentials not used: {e}"));
                 return (Outcome::Unreadable(e), MAX_BACKOFF);
             }
         };
@@ -77,7 +77,7 @@ impl Worker {
         }
         let snap = self.collector.build(&self.home, &self.reason_word(reason), state.public_ip.as_deref());
         let loaded = snap.models.loaded.len();
-        let data = match snapshot::encode(&snap) {
+        let (data, usage_to) = match snapshot::encode_sent(&snap) {
             Ok(d) => d,
             Err(e) => return (self.failed(&mut state, e), self.backoff()),
         };
@@ -88,8 +88,11 @@ impl Worker {
             Ok(reply) => {
                 self.last_loaded = Some(loaded);
                 self.server_interval = reply.interval;
+                if let Some(to) = usage_to {
+                    crate::usage_log::mark_sent(&self.home, to);
+                }
                 if self.failures > 0 || state.last_ok_at.is_none() {
-                    self.note(&format!("platform: heartbeat OK, linked to workspace {}", platform::clean_text(&creds.workspace.name, 64)));
+                    self.note(&format!("console: heartbeat OK, linked to workspace {}", platform::clean_text(&creds.workspace.name, 64)));
                 }
                 self.failures = 0;
                 state.last_ok_at = Some(snapshot::now_rfc3339());
@@ -108,7 +111,7 @@ impl Worker {
                 state.last_error = Some(ApiError::Unauthorized.to_string());
                 state.last_error_at = Some(now);
                 let _ = platform::save_state(&self.home, &state);
-                self.note("platform: the token was revoked or expired; heartbeats stop until goethe login");
+                self.note("console: the token was revoked or expired; heartbeats stop until goethe login");
                 self.client = None;
                 (Outcome::Revoked, INTERVAL)
             }
@@ -142,7 +145,7 @@ impl Worker {
         state.last_error_at = Some(snapshot::now_rfc3339());
         let _ = platform::save_state(&self.home, state);
         if self.failures == 1 {
-            self.note(&format!("platform: heartbeat failing: {e}"));
+            self.note(&format!("console: heartbeat failing: {e}"));
         }
         Outcome::Failed(e)
     }
@@ -267,6 +270,29 @@ mod tests {
         assert_eq!((v["schema"].as_u64(), v["reason"].as_str()), (Some(1), Some("start")));
         let st = platform::load_state(dir.path(), &key());
         assert!(st.last_ok_at.is_some() && st.last_error.is_none() && st.revoked_at.is_none());
+    }
+
+    #[test]
+    fn usage_rows_go_with_the_heartbeat_and_only_an_accepted_send_moves_past_them() {
+        let m = mock::serve(vec![(503, "{}".into()), (200, r#"{"ok":true}"#.into()), (200, r#"{"ok":true}"#.into())]);
+        let dir = home();
+        link(dir.path(), &m.url);
+        let now = chrono::Utc::now().timestamp();
+        let t = now - now.rem_euclid(60) - 600;
+        crate::usage_log::put_minute_for_test(&crate::db::open(dir.path()).unwrap(), t, "org/model", 14844);
+        let mut w = worker(dir.path());
+        assert!(matches!(w.step(Reason::Interval).0, Outcome::Failed(_)));
+        assert_eq!(w.step(Reason::Interval).0, Outcome::Sent);
+        assert_eq!(w.step(Reason::Interval).0, Outcome::Sent);
+        let seen = m.seen.lock().unwrap();
+        let body = |i: usize| serde_json::from_str::<serde_json::Value>(&seen[i].body).unwrap();
+        for i in [0, 1] {
+            let u = &body(i)["usage"];
+            assert_eq!((u["models"][0]["t"].as_i64(), u["models"][0]["completion_tokens"].as_i64()), (Some(t), Some(14844)), "sent until accepted");
+            assert!(u["models"][0].get("prompt_tokens").is_some() && body(i)["apis"].is_array());
+        }
+        let after = &body(2)["usage"];
+        assert!(after.is_null() || after["models"].as_array().unwrap().is_empty(), "an accepted minute is not sent again: {after}");
     }
 
     #[test]

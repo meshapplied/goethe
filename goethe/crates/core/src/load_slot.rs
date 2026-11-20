@@ -46,21 +46,24 @@ pub fn begin_slot_load(slot_key: &str) -> Arc<AtomicBool> {
     flag
 }
 
-pub fn slot_in_flight_inc(slot_key: &str) {
+pub struct SlotInFlight(String);
+
+pub fn slot_in_flight(slot_key: &str) -> SlotInFlight {
+    // Count a startup thread against its slot until the guard drops, even when the thread panics.
     let g = slots().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(s) = g.get(slot_key) {
         s.in_flight.fetch_add(1, Ordering::SeqCst);
     }
+    SlotInFlight(slot_key.to_string())
 }
 
-pub fn slot_in_flight_dec(slot_key: &str) {
-    let g = slots().lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(s) = g.get(slot_key) {
-        let prev = s.in_flight.fetch_sub(1, Ordering::SeqCst);
-        if prev == 1 {
-            let (lock, cv) = &*s.done;
-            if let Ok(mut guard) = lock.lock() {
-                guard.clone_from(&true);
+impl Drop for SlotInFlight {
+    fn drop(&mut self) {
+        let g = slots().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = g.get(&self.0) {
+            if s.in_flight.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)) == Ok(1) {
+                let (lock, cv) = &*s.done;
+                lock.lock().unwrap_or_else(|e| e.into_inner()).clone_from(&true);
                 cv.notify_all();
             }
         }
@@ -133,4 +136,24 @@ pub fn instance_notices(instance_id: &str) -> Vec<String> {
 pub fn clear_instance_notices(instance_id: &str) {
     let mut g = notices_map().lock().unwrap_or_else(|e| e.into_inner());
     g.remove(instance_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panicking_startup_thread_still_leaves_its_slot_quiet() {
+        let _ = begin_slot_load("panic-slot");
+        let guard = slot_in_flight("panic-slot");
+        assert!(!wait_slot_quiet("panic-slot", Duration::from_millis(10)));
+        let _ = std::thread::spawn(move || {
+            let _held = guard;
+            panic!("startup failed");
+        })
+        .join();
+        assert!(wait_slot_quiet("panic-slot", Duration::from_millis(10)));
+        drop(SlotInFlight("panic-slot".into()));
+        assert!(wait_slot_quiet("panic-slot", Duration::from_millis(10)), "an extra drop never wraps the count");
+    }
 }

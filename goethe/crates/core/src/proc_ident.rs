@@ -176,6 +176,17 @@ pub fn leader_alive(id: &Identity) -> bool {
     running(id.pid, id.start_ticks) && leader_matches(id)
 }
 
+pub fn leader_unreadable(id: &Identity) -> bool {
+    // The process table could not be read for this pid (EMFILE, hidepid) while the pid still exists: liveness is unknown, not dead.
+    let probe = if unsafe { libc::kill(id.pid, 0) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0)) };
+    unknown_when(id.pid > 1 && read_stat(id.pid).is_some(), probe)
+}
+
+fn unknown_when(stat_read: bool, signal0: Result<(), i32>) -> bool {
+    // Only ESRCH from kill(pid, 0) proves the pid is gone; any other failure to read its stat leaves the answer open.
+    !stat_read && signal0 != Err(libc::ESRCH)
+}
+
 fn tagged(instance_ids: &HashSet<String>) -> HashMap<String, Vec<(i32, u64)>> {
     // One pass over the process list collecting every process tagged with one of these instance ids.
     let mut out: HashMap<String, Vec<(i32, u64)>> = HashMap::new();
@@ -289,6 +300,16 @@ pub fn terminate(ids: &[Identity]) -> Stopped {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreadable_stat_is_unknown_unless_the_pid_is_gone() {
+        assert!(unknown_when(false, Ok(())), "the pid exists but /proc could not be read");
+        assert!(unknown_when(false, Err(libc::EPERM)));
+        assert!(!unknown_when(false, Err(libc::ESRCH)), "ESRCH: really gone");
+        assert!(!unknown_when(true, Ok(())), "a readable stat decides by itself");
+        let gone = Identity { instance_id: "x".into(), pid: i32::MAX - 7, boot_id: boot_id().to_string(), start_ticks: 1 };
+        assert!(!leader_unreadable(&gone));
+    }
     use std::os::unix::process::CommandExt;
     use std::process::{Child, Command};
 

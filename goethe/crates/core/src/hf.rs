@@ -527,8 +527,17 @@ fn is_auth_error(msg: &str) -> bool {
     msg.contains(crate::messages::GATED) || msg.contains("401") || msg.contains("403")
 }
 
+fn refuse_option_like(model_id: &str, revision: &str) -> Result<(), String> {
+    // A model id or revision that starts with "-" would reach the hf command line as an option.
+    match [("model id", model_id), ("revision", revision)].into_iter().find(|(_, v)| v.starts_with('-')) {
+        Some((what, v)) => Err(format!("{what} {v:?} is not valid: it must not start with \"-\"")),
+        None => Ok(()),
+    }
+}
+
 pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: &str, excludes: &[String], total: u64) -> Result<(), String> {
     // hf download resumes partial files and is cheap when everything is already present; every 5 s a line says how far it is.
+    refuse_option_like(model_id, revision)?;
     let program = hf_binary(home)?;
     let mut cmd = match python_of_script(&program) {
         Some(python) => {
@@ -992,7 +1001,7 @@ pub fn fetch_config_json(model_id: &str, revision: &str) -> Result<serde_json::V
     fetch_repo_json(model_id, revision, "config.json")
 }
 
-fn available_bytes(path: &Path) -> Result<u64, String> {
+pub(crate) fn available_bytes(path: &Path) -> Result<u64, String> {
     use std::ffi::CString;
     let cpath = CString::new(path.to_str().ok_or_else(|| "models path is not UTF-8".to_string())?)
         .map_err(|e| e.to_string())?;
@@ -1007,6 +1016,15 @@ fn available_bytes(path: &Path) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_id_or_revision_that_looks_like_an_option_never_reaches_hf() {
+        assert!(refuse_option_like("-h", "main").unwrap_err().contains("model id \"-h\""));
+        assert!(refuse_option_like("org/m", "--local-dir").unwrap_err().contains("revision"));
+        let err = run_hf_download(Path::new("/nonexistent"), "--help", Path::new("/nonexistent/m"), "main", &[], 0).unwrap_err();
+        assert!(err.contains("must not start with"), "refused before looking for hf: {err}");
+        assert_eq!(refuse_option_like("org/m-1", "abc123"), Ok(()));
+    }
 
     #[test]
     fn a_missing_repo_is_not_found_and_never_called_gated() {

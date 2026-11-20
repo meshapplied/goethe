@@ -33,16 +33,44 @@ load() {
   return 1
 }
 
-install_steps() {
-  # The open NVIDIA driver 580+ with the distribution's tools, else NVIDIA's CUDA repository.
-  local id like ver repo_arch tag keyring
+distro_tag() {
+  # NVIDIA's CUDA repository name for this release (ubuntu2404, debian12, rhel9, fedora41); nothing when there is no automatic install.
+  local id like ver
   id="$(os_field ID)"
   like="$(os_field ID_LIKE)"
   ver="$(os_field VERSION_ID)"
-  repo_arch="x86_64"
-  [[ "${ARCH}" == "aarch64" ]] && repo_arch="sbsa"
+  [[ -n "${ver}" ]] || return 0
   case " ${id} ${like} " in
-    *" ubuntu "*)
+    *" ubuntu "*) echo "ubuntu${ver//./}" ;;
+    *" debian "*) echo "debian${ver%%.*}" ;;
+    *" rhel "* | *" centos "* | *" fedora "*) if [[ "${id}" == fedora ]]; then echo "fedora${ver%%.*}"; else echo "rhel${ver%%.*}"; fi ;;
+  esac
+}
+
+nvidia_repo() {
+  local repo_arch=x86_64
+  [[ "${ARCH}" == aarch64 ]] && repo_arch=sbsa
+  echo "https://developer.download.nvidia.com/compute/cuda/repos/$1/${repo_arch}"
+}
+
+reachable() {
+  # Whether the driver packages can be fetched now: Ubuntu's own 580 package, else the NVIDIA repository file the install uses.
+  local tag="$1"
+  if [[ "${tag}" == ubuntu* ]] && apt-get update -qq >/dev/null 2>&1 &&
+    apt-cache policy "nvidia-driver-${DRIVER_MIN}-server-open" 2>/dev/null | grep -q 'Candidate: [0-9]'; then
+    return 0
+  fi
+  case "${tag}" in
+    ubuntu* | debian*) curl -fsSIL -o /dev/null "$(nvidia_repo "${tag}")/cuda-keyring_1.1-1_all.deb" ;;
+    *) curl -fsSIL -o /dev/null "$(nvidia_repo "${tag}")/cuda-${tag}.repo" ;;
+  esac
+}
+
+install_steps() {
+  # The open NVIDIA driver 580+ with the distribution's tools, else NVIDIA's CUDA repository for this release.
+  local tag="$1" keyring
+  case "${tag}" in
+    ubuntu*)
       apt-get update -qq || true
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ubuntu-drivers-common "linux-headers-$(uname -r)" || true
       if timeout 900 ubuntu-drivers install --gpgpu "nvidia:${DRIVER_MIN}-server-open"; then
@@ -51,28 +79,21 @@ install_steps() {
       if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "nvidia-driver-${DRIVER_MIN}-server-open"; then
         return 0
       fi
-      tag="ubuntu${ver//./}"
       ;;
-    *" debian "*)
+    debian*)
       apt-get update -qq || true
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "linux-headers-$(uname -r)" || true
-      tag="debian${ver%%.*}"
       ;;
-    *" rhel "* | *" centos "* | *" fedora "*)
-      if [[ "${id}" == "fedora" ]]; then tag="fedora${ver%%.*}"; else tag="rhel${ver%%.*}"; fi
+    *)
       dnf -y install dnf-plugins-core "kernel-devel-$(uname -r)" kernel-headers || true
-      [[ "${id}" == "fedora" ]] || dnf -y install epel-release || true
-      dnf config-manager --add-repo "https://developer.download.nvidia.com/compute/cuda/repos/${tag}/${repo_arch}/cuda-${tag}.repo"
+      [[ "${tag}" == fedora* ]] || dnf -y install epel-release || true
+      dnf config-manager --add-repo "$(nvidia_repo "${tag}")/cuda-${tag}.repo"
       dnf -y install nvidia-open || dnf -y module install nvidia-driver:open-dkms
       return
       ;;
-    *)
-      echo "no automatic driver install for ${id:-this distribution}; install the NVIDIA driver ${DRIVER_MIN} or newer from https://www.nvidia.com/drivers" >&2
-      return 1
-      ;;
   esac
   keyring="$(mktemp)"
-  curl -fsSL -o "${keyring}" "https://developer.download.nvidia.com/compute/cuda/repos/${tag}/${repo_arch}/cuda-keyring_1.1-1_all.deb"
+  curl -fsSL -o "${keyring}" "$(nvidia_repo "${tag}")/cuda-keyring_1.1-1_all.deb"
   dpkg -i "${keyring}"
   rm -f "${keyring}"
   apt-get update -qq
@@ -80,6 +101,17 @@ install_steps() {
 }
 
 install() {
+  # Nothing is removed until this release has an automatic install and its packages answer, so a refused install keeps the driver it had.
+  local tag
+  tag="$(distro_tag)"
+  if [[ -z "${tag}" ]]; then
+    echo "no automatic driver install for $(os_field ID || true); install the NVIDIA driver ${DRIVER_MIN} or newer from https://www.nvidia.com/drivers" >&2
+    return 1
+  fi
+  if ! reachable "${tag}"; then
+    echo "the NVIDIA driver packages for ${tag} cannot be reached right now (network or repository); nothing was changed, run goethe doctor --fix again later" >&2
+    return 1
+  fi
   if mokutil --sb-state 2>/dev/null | grep -qi enabled; then
     echo "Secure Boot is on: if the driver module is built locally, set the MOK password it asks for and enroll it at the next boot"
   fi
@@ -87,7 +119,7 @@ install() {
     echo "removing the driver installed from NVIDIA's .run file first, so the packaged driver can replace it"
     nvidia-uninstall --silent || true
   fi
-  install_steps
+  install_steps "${tag}"
   modprobe nvidia 2>/dev/null || true
   reboot_note
 }

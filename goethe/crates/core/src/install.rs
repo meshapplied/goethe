@@ -2038,6 +2038,16 @@ mod tests {
         assert!(!say_once(&said, "note: first"), "the second check of the same install stays quiet");
     }
 
+    fn wait_until_runnable(script: &Path) {
+        // A process another test forks while this script is still open for writing holds it busy (ETXTBSY) until it execs; wait that out.
+        for _ in 0..100 {
+            match std::process::Command::new(script).output() {
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                _ => return,
+            }
+        }
+    }
+
     #[test]
     fn the_pack_lookup_runs_in_the_engine_layer_that_was_installed_a_moment_before() {
         use std::os::unix::fs::PermissionsExt;
@@ -2055,7 +2065,9 @@ mod tests {
                     let bin = home.path().join("py-env/bin");
                     fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
                     fs::write(bin.join("python"), "#!/bin/sh\necho \"py-env python: $*\"\n").map_err(|e| e.to_string())?;
-                    fs::set_permissions(bin.join("python"), fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())
+                    fs::set_permissions(bin.join("python"), fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+                    wait_until_runnable(&bin.join("python"));
+                    Ok(())
                 },
                 by_structure: &|_| {
                     let (_, out) = run(&["pack".to_string(), "match".to_string()])?;
@@ -2080,7 +2092,7 @@ mod tests {
     #[test]
     fn a_failed_pack_lookup_falls_back_to_the_plain_runtime() {
         let opts = InstallOpts { yes: true, ..Default::default() };
-        assert!(offered(&opts, Some(login()), &["sm_120a"], Err("the platform answered 502".into()), Ok(())).0.unwrap().is_none(), "the next engine serves it, after saying why");
+        assert!(offered(&opts, Some(login()), &["sm_120a"], Err("the console answered 502".into()), Ok(())).0.unwrap().is_none(), "the next engine serves it, after saying why");
         assert!(offered(&opts, Some(login()), &["sm_120a"], matched(), Err("no space left".into())).0.unwrap().is_none());
     }
 

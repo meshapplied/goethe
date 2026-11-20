@@ -270,7 +270,9 @@ class Matrix(unittest.TestCase):
                 for args in (["update", "--check", "--yes"], ["update", "--yes"], ["update", "engine", "--yes"]):
                     r = c.run(*args)
                     clean(self, r)
-                    self.assertLessEqual(r.lines, 3, r.out + r.err)
+                    self.assertLessEqual(r.lines, 4, r.out + r.err)
+                    if "--check" in args:
+                        self.assertIn("everything is up to date", r.out, "--check ends with its summary")
             finally:
                 c.close()
         finally:

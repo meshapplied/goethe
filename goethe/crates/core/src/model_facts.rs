@@ -5,6 +5,15 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 pub const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+pub const SHAPE_MAX: u64 = 1 << 24;
+const SHAPE_KEYS: &[&str] = &[
+    "num_hidden_layers", "n_layer", "num_attention_heads", "n_head", "num_key_value_heads", "multi_query_group_num",
+    "num_global_key_value_heads", "swa_num_key_value_heads", "head_dim", "global_head_dim", "v_head_dim", "swa_head_dim",
+    "swa_v_head_dim", "hidden_size", "n_embd", "d_model", "kv_lora_rank", "qk_rope_head_dim", "index_head_dim",
+    "linear_num_value_heads", "linear_num_key_heads", "linear_key_head_dim", "linear_value_head_dim", "linear_conv_kernel_dim",
+    "mamba_num_heads", "mamba_head_dim", "ssm_state_size", "n_groups", "conv_kernel", "short_conv_kernel_size",
+    "n_routed_experts", "moe_intermediate_size",
+];
 
 #[derive(Debug, Clone)]
 pub struct ModelFacts {
@@ -35,25 +44,33 @@ const LM_KEYS: &[&str] = &[
 ];
 
 pub fn resolve_language_config(cfg: &Value) -> Result<&Value, String> {
-    // The nested language-model config of multimodal wrappers, or the root config.
+    // The nested language-model config of multimodal wrappers, or the root config; refused when a shape figure is beyond any real model.
+    let lm = find_language_config(cfg).ok_or("cannot read language model config")?;
+    for key in SHAPE_KEYS {
+        if let Some(v) = read_u64(lm, cfg, &[key]).filter(|v| *v > SHAPE_MAX) {
+            return Err(format!("config.json has {key} = {v}, beyond any real model (at most {SHAPE_MAX})"));
+        }
+    }
+    Ok(lm)
+}
+
+fn find_language_config(cfg: &Value) -> Option<&Value> {
     for key in LM_KEYS {
         if let Some(v) = cfg.get(key) {
             if language_shape_present(v) {
-                return Ok(v);
+                return Some(v);
             }
         }
     }
     if language_shape_present(cfg) {
-        return Ok(cfg);
+        return Some(cfg);
     }
-    if let Some(map) = cfg.as_object() {
-        for v in map.values() {
-            if v.is_object() && language_shape_present(v) {
-                return Ok(v);
-            }
-        }
-    }
-    Err("cannot read language model config".to_string())
+    cfg.as_object()?.values().find(|v| v.is_object() && language_shape_present(v))
+}
+
+pub fn mul(factors: &[u64]) -> u64 {
+    // A product of config figures that saturates instead of wrapping, so an absurd shape can only ever look too big.
+    factors.iter().fold(1u64, |a, &x| a.saturating_mul(x))
 }
 
 fn language_shape_present(v: &Value) -> bool {
@@ -73,14 +90,6 @@ pub fn facts_from_install_dir(dir: &Path, registry_arch: Option<&str>) -> Result
     facts_from_config(&cfg, weights_gb(dir)?, registry_arch, &model_id)
 }
 
-pub fn linear_state_bytes_in_dir(dir: &Path) -> u64 {
-    // Per-request linear-attention state of the model in dir, 0 for models without such layers or an unreadable config.
-    let Ok(cfg) = read_config(dir) else { return 0 };
-    let Ok(lm) = resolve_language_config(&cfg) else { return 0 };
-    let layers = read_u64(lm, &cfg, &["num_hidden_layers", "n_layer"]).unwrap_or(0);
-    linear_state_bytes(lm, layer_plan(lm, layers))
-}
-
 pub fn facts_from_config(
     cfg: &Value,
     static_gb: f64,
@@ -88,7 +97,7 @@ pub fn facts_from_config(
     model_id: &str,
 ) -> Result<ModelFacts, String> {
     // Derive KV per token from full-attention layers only, plus per-request window and state sizes.
-    let lm = resolve_language_config(cfg).map_err(|_| format!("{model_id}: cannot read language model config"))?;
+    let lm = resolve_language_config(cfg).map_err(|e| format!("{model_id}: {e}"))?;
     let num_attention_heads = require_u64(lm, cfg, &["num_attention_heads", "n_head"], model_id)?;
     let block_layers = lm.get("layers_block_type").and_then(|v| v.as_array()).map(|b| b.len() as u64);
     let layers = match read_u64(lm, cfg, &["num_hidden_layers", "n_layer"]).or(block_layers) {
@@ -186,7 +195,7 @@ fn attention_kv(
         let indexer = read_u64(lm, cfg, &["index_head_dim"]).unwrap_or(0);
         let mla_layers = if plan.full > 0 { plan.full } else { layers };
         return Ok(KvShape {
-            elems: mla_layers * (rank + rope + indexer),
+            elems: mul(&[mla_layers, rank + rope + indexer]),
             heads: 1,
             attention: if hybrid { "hybrid" } else { "mla" }.to_string(),
             swa_elems: 0,
@@ -202,7 +211,7 @@ fn attention_kv(
     if lm.get("compress_ratios").is_some() || (lm.get("sliding_window").is_some() && kv_heads == 1) {
         eprintln!("note: {model_id}: compressed attention; the legacy kv_elems_per_token is an upper bound, the memory spec is exact");
         return Ok(KvShape {
-            elems: 2 * layers * head_dim,
+            elems: mul(&[2, layers, head_dim]),
             heads: 1,
             attention: "gqa".to_string(),
             swa_elems: 0,
@@ -212,10 +221,10 @@ fn attention_kv(
     let full_dim = read_u64(lm, cfg, &["global_head_dim"]).unwrap_or(head_dim);
     let window = read_u64(lm, cfg, &["sliding_window"]).unwrap_or(max_ctx).min(max_ctx);
     Ok(KvShape {
-        elems: 2 * plan.full * full_heads * full_dim,
+        elems: mul(&[2, plan.full, full_heads, full_dim]),
         heads: full_heads,
         attention: if hybrid { "hybrid" } else { "gqa" }.to_string(),
-        swa_elems: 2 * plan.swa * kv_heads * head_dim * window,
+        swa_elems: mul(&[2, plan.swa, kv_heads, head_dim, window]),
     })
 }
 
@@ -240,23 +249,23 @@ pub fn linear_state_bytes_as(lm: &Value, plan: LayerPlan, ssm_dtype_bytes: Optio
             Some(d) if d.contains("16") => 2,
             _ => 4,
         });
-        let per_layer = vh * kd * vd * ssm_bytes + (2 * kh * kd + vh * vd) * (kernel - 1) * 2;
-        return per_layer * plan.linear;
+        let per_layer = mul(&[vh, kd, vd, ssm_bytes]).saturating_add(mul(&[2 * kh * kd + vh * vd, kernel - 1, 2]));
+        return mul(&[per_layer, plan.linear]);
     }
     let kda = |k: &str| lm.pointer(&format!("/linear_attn_config/{k}")).and_then(|v| v.as_u64());
     if let (Some(k), None) = (get("short_conv_kernel_size"), lm.get("linear_attn_config")) {
         let (h, d) = (get("num_attention_heads").unwrap_or(0), get("head_dim").unwrap_or(0));
-        return (h * d * d * ssm_dtype_bytes.unwrap_or(4) + 3 * h * d * (k.max(1) - 1) * 2) * plan.linear;
+        return mul(&[mul(&[h, d, d, ssm_dtype_bytes.unwrap_or(4)]).saturating_add(mul(&[3, h, d, k.max(1) - 1, 2])), plan.linear]);
     }
     if let (Some(h), Some(d)) = (kda("num_heads"), kda("head_dim")) {
         let kernel = kda("short_conv_kernel_size").unwrap_or(4).max(1);
-        return (h * d * d * ssm_dtype_bytes.unwrap_or(4) + 3 * h * d * (kernel - 1) * 2) * plan.linear;
+        return mul(&[mul(&[h, d, d, ssm_dtype_bytes.unwrap_or(4)]).saturating_add(mul(&[3, h, d, kernel - 1, 2])), plan.linear]);
     }
     if let (Some(h), Some(hd), Some(state)) = (get("mamba_num_heads"), get("mamba_head_dim"), get("ssm_state_size")) {
         let groups = get("n_groups").unwrap_or(1);
         let kernel = get("conv_kernel").unwrap_or(4).max(1);
-        let per_layer = h * hd * state * ssm_dtype_bytes.unwrap_or(4) + (h * hd + 2 * groups * state) * (kernel - 1) * 2;
-        return per_layer * plan.linear;
+        let per_layer = mul(&[h, hd, state, ssm_dtype_bytes.unwrap_or(4)]).saturating_add(mul(&[h * hd + 2 * groups * state, kernel - 1, 2]));
+        return mul(&[per_layer, plan.linear]);
     }
     0
 }
@@ -335,7 +344,7 @@ pub fn weight_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
         let names: BTreeSet<&str> = map.values().filter_map(|x| x.as_str()).collect();
         let mut out = Vec::new();
         for n in names {
-            let p = dir.join(n);
+            let p = shard_path(dir, n)?;
             if !p.is_file() {
                 return Err(format!("{} is listed in model.safetensors.index.json but missing", p.display()));
             }
@@ -351,6 +360,15 @@ pub fn weight_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
         .collect();
     out.sort();
     Ok(out)
+}
+
+pub fn shard_path(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    // A shard named by a safetensors index, refused when the name would leave the model folder (absolute or with ..).
+    let rel = Path::new(name);
+    if name.is_empty() || !rel.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+        return Err(format!("{}: model.safetensors.index.json names {name:?}, which is outside the model folder", dir.display()));
+    }
+    Ok(dir.join(rel))
 }
 
 pub fn weights_gb(dir: &Path) -> Result<f64, String> {
@@ -532,5 +550,32 @@ mod tests {
         assert!(weight_files(dir.path()).unwrap_err().contains("missing"));
         std::fs::remove_file(dir.path().join("model.safetensors.index.json")).unwrap();
         assert_eq!(weight_files(dir.path()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn absurd_shapes_are_refused_and_products_saturate() {
+        let huge = json!({"num_hidden_layers": 1u64 << 40, "num_attention_heads": 32, "head_dim": 128});
+        let e = facts_from_config(&huge, 0.0, None, "evil").unwrap_err();
+        assert!(e.contains("num_hidden_layers") && e.contains("beyond any real model"), "{e}");
+        assert!(crate::memory_spec::from_config(&huge, None).is_err());
+        let big = json!({"num_hidden_layers": SHAPE_MAX, "num_attention_heads": SHAPE_MAX, "num_key_value_heads": SHAPE_MAX, "head_dim": SHAPE_MAX,
+            "layer_types": vec!["sliding_attention"; 4], "sliding_window": u64::MAX, "max_position_embeddings": u64::MAX});
+        let f = facts_from_config(&big, 0.0, None, "big").unwrap();
+        assert_eq!((f.kv_elems_per_token, f.swa_kv_elems_per_request), (0, u64::MAX), "saturated, not wrapped");
+        let spec = crate::memory_spec::from_config(&big, None).unwrap();
+        assert_eq!(spec.swa_bytes_per_token, 1 << 52, "2^24 heads x 2^25 dims x 2 bytes x 4 layers fits in u64");
+        assert_eq!(spec.swa_tokens(u64::MAX), u64::MAX);
+        assert_eq!(mul(&[1 << 40, 1 << 40]), u64::MAX);
+    }
+
+    #[test]
+    fn index_shards_outside_the_folder_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["../x.safetensors", "/etc/hostname", "sub/../../x.safetensors", ""] {
+            let index = json!({"weight_map": {"a": bad}});
+            std::fs::write(dir.path().join("model.safetensors.index.json"), index.to_string()).unwrap();
+            assert!(weight_files(dir.path()).unwrap_err().contains("outside the model folder"), "{bad}");
+        }
+        assert_eq!(shard_path(dir.path(), "sub/model.safetensors").unwrap(), dir.path().join("sub/model.safetensors"));
     }
 }

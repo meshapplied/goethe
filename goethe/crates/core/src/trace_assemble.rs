@@ -69,10 +69,11 @@ fn append(obj: &mut Map<String, Value>, field: &str, s: &str) {
     }
 }
 
-fn copy_head(out: &mut Map<String, Value>, e: &Value, keys: &[&str]) {
-    for k in keys {
-        if let Some(v) = e.get(*k).filter(|v| !v.is_null()) {
-            out.entry(k.to_string()).or_insert_with(|| v.clone());
+fn copy_head(out: &mut Map<String, Value>, e: &Value) {
+    // Every top-level field an event carries (id, model, an engine's own extras such as timings), the last value kept; choices are merged on their own.
+    for (k, v) in e.as_object().into_iter().flatten() {
+        if !v.is_null() && !matches!(k.as_str(), "choices" | "object" | "error") {
+            out.insert(k.clone(), v.clone());
         }
     }
 }
@@ -100,10 +101,7 @@ fn chat(events: &[Value]) -> Value {
             out.insert("error".into(), err.clone());
             continue;
         }
-        copy_head(&mut out, e, &["id", "created", "model", "system_fingerprint"]);
-        if let Some(u) = e.get("usage").filter(|u| !u.is_null()) {
-            out.insert("usage".into(), u.clone());
-        }
+        copy_head(&mut out, e);
         for c in e.get("choices").and_then(Value::as_array).into_iter().flatten() {
             let idx = c.get("index").and_then(Value::as_u64).unwrap_or(0);
             let ch = choices.entry(idx).or_insert_with(|| {
@@ -199,10 +197,7 @@ fn completions(events: &[Value]) -> Value {
             out.insert("error".into(), err.clone());
             continue;
         }
-        copy_head(&mut out, e, &["id", "created", "model"]);
-        if let Some(u) = e.get("usage").filter(|u| !u.is_null()) {
-            out.insert("usage".into(), u.clone());
-        }
+        copy_head(&mut out, e);
         for c in e.get("choices").and_then(Value::as_array).into_iter().flatten() {
             let idx = c.get("index").and_then(Value::as_u64).unwrap_or(0);
             let ch = choices.entry(idx).or_insert_with(|| {
@@ -469,6 +464,18 @@ mod tests {
         }
         out.push_str("data: [DONE]\n\n");
         out.into_bytes()
+    }
+
+    #[test]
+    fn an_engines_own_top_level_fields_are_kept() {
+        let raw = sse(&[
+            json!({"id": "c1", "model": "m", "system_fingerprint": "b1", "choices": [{"index": 0, "delta": {"content": "Hi"}}]}),
+            json!({"id": "c1", "choices": [], "usage": {"completion_tokens": 1}, "timings": {"predicted_per_second": 70.5}}),
+        ]);
+        let v = assemble(Api::Chat, true, &raw);
+        assert_eq!((v["system_fingerprint"].clone(), v["timings"]["predicted_per_second"].clone(), v["usage"]["completion_tokens"].clone()), (json!("b1"), json!(70.5), json!(1)));
+        let raw = sse(&[json!({"id": "t1", "system_fingerprint": "b1", "choices": [{"index": 0, "text": "Paris"}]})]);
+        assert_eq!(assemble(Api::Completions, true, &raw)["system_fingerprint"], "b1");
     }
 
     #[test]

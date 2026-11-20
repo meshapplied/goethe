@@ -213,7 +213,8 @@ fn init_schema(con: &Connection) -> rusqlite::Result<()> {
 }
 
 fn ensure_columns(con: &Connection) -> rusqlite::Result<()> {
-    // Columns added after schema version 1, without a version bump so an older goethe still opens the database.
+    // Columns and tables added after schema version 1, without a version bump so an older goethe still opens the database.
+    crate::usage_log::ensure_tables(con)?;
     let has_token = || con.prepare("SELECT token FROM api_keys LIMIT 0").is_ok();
     match has_token() {
         true => Ok(()),

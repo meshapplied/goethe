@@ -77,7 +77,14 @@ impl Dirs {
 }
 
 pub fn rc_block(shell: Shell, script: &Path) -> String {
-    let path = script.display().to_string().replace('"', "\\\"");
+    // The marked block that sources the script; the path is escaped for a double-quoted shell word.
+    let mut path = String::new();
+    for c in script.display().to_string().chars() {
+        if matches!(c, '"' | '\\' | '$' | '`') {
+            path.push('\\');
+        }
+        path.push(c);
+    }
     let start = match shell {
         Shell::Zsh => "(( $+functions[compdef] )) || { autoload -Uz compinit && compinit; }\n",
         _ => "",
@@ -86,20 +93,26 @@ pub fn rc_block(shell: Shell, script: &Path) -> String {
 }
 
 pub fn without_block(text: &str) -> String {
-    // The rc text with Goethe's block taken out, and nothing else touched.
+    // The rc text with Goethe's block taken out, and nothing else touched; a block whose end marker is gone is left in place, so the lines after it are never lost.
     let mut out = String::new();
+    let mut held = String::new();
     let mut inside = false;
     for line in text.split_inclusive('\n') {
         let bare = line.trim_end_matches('\n');
         if bare == BEGIN {
+            out.push_str(&std::mem::take(&mut held));
             inside = true;
+            held.push_str(line);
         } else if inside && bare == END {
             inside = false;
-        } else if !inside {
+            held.clear();
+        } else if inside {
+            held.push_str(line);
+        } else {
             out.push_str(line);
         }
     }
-    out
+    out + &held
 }
 
 pub fn with_block(text: &str, block: &str) -> String {
@@ -113,10 +126,23 @@ pub fn with_block(text: &str, block: &str) -> String {
 }
 
 fn write(path: &Path, text: &str) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // Replace the file in one rename (a crash never leaves half an rc file), keeping its mode; a symlinked rc file is written where the link points.
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let dir = target.parent().ok_or_else(|| format!("{}: no parent folder", target.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.goethe-{}", std::process::id()));
+    let done = std::fs::write(&tmp, text)
+        .and_then(|()| match std::fs::metadata(&target) {
+            Ok(m) => std::fs::set_permissions(&tmp, m.permissions()),
+            Err(_) => Ok(()),
+        })
+        .and_then(|()| std::fs::rename(&tmp, &target));
+    if let Err(e) = done {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: {e}", target.display()));
     }
-    std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,6 +232,33 @@ mod tests {
         assert_eq!(without_block(&once), "export A=1\nalias ll='ls -l'\n");
         assert_eq!(without_block("no block here\n"), "no block here\n");
         assert!(!rc_block(Shell::Bash, Path::new("/x")).contains("compinit"));
+    }
+
+    #[test]
+    fn rc_files_keep_their_mode_and_symlinks_and_leave_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("dotfiles/zshrc");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "export A=1\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&real, tmp.path().join(".zshrc")).unwrap();
+        install(&dirs(tmp.path(), true), Shell::Zsh, "zsh script").unwrap();
+        assert!(std::fs::symlink_metadata(tmp.path().join(".zshrc")).unwrap().file_type().is_symlink(), "the link stays a link");
+        assert!(std::fs::read_to_string(&real).unwrap().contains("# goethe completion"));
+        assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+        let names: Vec<String> = std::fs::read_dir(real.parent().unwrap()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["zshrc"], "no temp file left behind");
+    }
+
+    #[test]
+    fn a_block_without_its_end_marker_keeps_every_line_after_it() {
+        let broken = "export A=1\n# goethe completion (goethe completion remove takes this out)\nsource x\nexport B=2\n";
+        assert_eq!(without_block(broken), broken, "nothing after the start marker is dropped");
+        let twice = with_block(broken, &rc_block(Shell::Bash, Path::new("/x")));
+        assert_eq!(without_block(&twice), broken, "a new block after a broken one comes out alone");
+        let path = rc_block(Shell::Bash, Path::new("/h/a$b`c\\d\"e/goethe"));
+        assert!(path.contains(r#""/h/a\$b\`c\\d\"e/goethe""#), "{path}");
     }
 
     #[test]
