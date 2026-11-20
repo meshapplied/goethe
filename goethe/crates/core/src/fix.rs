@@ -107,16 +107,11 @@ pub fn compiler_packages(distro: &str) -> Vec<String> {
 }
 
 pub fn ffmpeg_packages(distro: &str) -> Vec<String> {
-    // Distro package that provides libavdevice.so.58–62 for the pinned torchcodec.
+    // Distro package that provides libavdevice.so.58 to 62 for the pinned torchcodec (Fedora/RHEL ship it as ffmpeg-free).
     let words: Vec<&str> = distro.split_whitespace().collect();
     let has = |d: &str| words.contains(&d);
-    if has("ubuntu") || has("debian") {
-        vec!["ffmpeg".to_string()]
-    } else if has("suse") || has("opensuse") || has("sles") {
-        vec!["ffmpeg".to_string()]
-    } else {
-        vec!["ffmpeg-free".to_string()]
-    }
+    let deb_or_suse = ["ubuntu", "debian", "suse", "opensuse", "sles"].iter().any(|d| has(d));
+    vec![if deb_or_suse { "ffmpeg" } else { "ffmpeg-free" }.to_string()]
 }
 
 pub fn package_command(distro: &str, pkgs: &[String]) -> Vec<String> {

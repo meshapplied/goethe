@@ -292,7 +292,6 @@ fn check_compiler() -> Check {
     }
 }
 
-/// FFmpeg 4 to 8 sonames that the pinned torchcodec loads (libavdevice pulls in the rest).
 pub(crate) const AVDEVICE: std::ops::RangeInclusive<u32> = 58..=62;
 
 pub(crate) fn find_libavdevice() -> Option<u32> {
