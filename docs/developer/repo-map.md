@@ -17,7 +17,6 @@ Where things are. "Product" means it ships in the Goethe package or decides what
 | `ternary-kernels/` | optional | The `ternary_runtime` Python library for ternary models. `build_cdn.sh --with-ternary` packs it as `goethe/ternary-kernels.tar.zst`; keep it off the public origin. |
 | `lab/`, `tests/` (root), `examples/`, `ruff.toml` | no | `goethe-lab`, the Python research launcher, with its unit tests and example cards. CI lints and tests them, but nothing here ships. |
 | `modal/` | no | Local, git-ignored proof of concept. |
-| `WINDOWS-COMPATIBILITY.md` | no | Untracked plan. |
 
 ## goethe/
 
@@ -29,12 +28,13 @@ Where things are. "Product" means it ships in the Goethe package or decides what
 | `crates/core/` | `goethe-core`, the library both binaries use; nearly all logic lives here (modules below). `build.rs` embeds the git commit and build date. |
 | `nginx/` | `goethe_gateway.conf.tmpl` (the gateway) and `goethe_public.conf.tmpl` (the public share listener). Rendered by `nginx.rs` and `public_share.rs`. |
 | `cdn/install.sh` | The `curl \| bash` installer, with the release public key substituted in at build. |
+| `cdn/install.ps1` | The Windows installer: enables WSL2 if needed, then runs `install.sh` inside Ubuntu. |
 | `cdn/v1/registry.json` | The model catalog, also compiled into the binary as a fallback. `cdn/v1/sglang_support.json` lists the architectures the pinned SGLang serves. |
 | `pyenv/` | `bootstrap.sh` (builds the py-env), `layers.sh` (regenerates layer locks), `requirements*.in` and `requirements*.lock` (hash-locked, with x86_64 and aarch64 variants). |
 | `sglang/` | `PIN` (upstream commit), `goethe-marlin.patch`, `apply.sh`. |
 | `goethe-engine/PIN` | goethe-engine wheel version, URL and sha256, compiled into the binary. |
 | `llama-cpp/` | `PIN` (release tag, commit, archive URLs and sha256 for Linux CUDA, cudart and macOS), `ARCHS` (architectures the pin serves), `update_archs.sh`. |
-| `packaging/` | Build, sign and release scripts ([packages.md](packages.md), [workflows.md](workflows.md#release)). `release_pub.pem` is the production public key. `nvfp4-patch/` duplicates `nvfp4-kernels/NINFER_PIN` and patches; nothing references it. |
+| `packaging/` | Build, sign and release scripts ([packages.md](packages.md), [workflows.md](workflows.md#release)). `release_pub.pem` is the production public key. `nvfp4-patch/` copies `nvfp4-kernels/NINFER_PIN` and the head patch; `engines/ninfer.rs` compiles them into the binary, so keep both copies in step. |
 | `tests/` | Integration tests ([workflows.md](workflows.md#tests)). |
 | `experimental/goethe-kernels/` | Archived kernel work; not built, not packaged. |
 | `dist/`, `target/`, `target-portable/` | Build output; not tracked. |

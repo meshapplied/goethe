@@ -34,7 +34,7 @@ The hard rules from [AGENTS.md](../../AGENTS.md), the conventions the code follo
   - Avoid `unwrap` and `expect` outside tests and startup.
 - **SQL.** Use parameters. `format!` may only interpolate constants (table names, status lists).
 - **Files.** Write files other people must not read with `write_private` (temp, 0600, rename). Never follow a symlink you did not create.
-- **Schema changes.** Add columns and tables in `db::ensure_columns` or `ensure_tables`, without a schema version bump, so an older goethe still opens the database.
+- **Schema changes.** Add columns and tables in `db::ensure_columns` or `usage_log::ensure_tables`, without a schema version bump, so an older goethe still opens the database.
 - **Dependencies.** Add a crate only when a small module cannot do the job ([packages.md](packages.md#rust)).
 
 ## Comments and naming

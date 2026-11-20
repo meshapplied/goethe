@@ -36,13 +36,13 @@ The `goethe` to `goethed` protocol is JSON lines over the Unix socket. Each line
 
 1. `GOETHE_HOME`;
 2. else the home whose `bin/` holds the running binary (links followed, the folder must contain the `.goethe-home` marker);
-3. else `/workspace/.goethe` when writable (RunPod, Vast.ai);
-4. else `/var/lib/goethe` for root;
+3. else `/workspace/.goethe` when it exists or `/workspace` is writable (RunPod, Vast.ai);
+4. else `/var/lib/goethe` when it exists and is writable;
 5. else `~/.goethe`.
 
 On macOS the home is `~/.goethe`.
 
-**Settings.** `paths::setting` reads a few settings from the environment first, then from `goethe.env`: `GOETHE_PKG_URL`, `GOETHE_REGISTRY_URL`, `GOETHE_PKG_TOKEN` and `GOETHE_PLATFORM_URL`.
+**Settings.** `paths::setting` reads a few settings from the environment first, then from `goethe.env`: `GOETHE_PKG_URL`, `GOETHE_REGISTRY_URL` and `GOETHE_PKG_TOKEN`. Every other setting, `GOETHE_PLATFORM_URL` included, comes from the environment only.
 
 | Path under the home | What |
 |---|---|
@@ -69,7 +69,7 @@ On macOS the home is `~/.goethe`.
 
 ### state.db
 
-One schema created by `db.rs`, version 1. New columns and tables are added in `ensure_columns`/`ensure_tables` without a version bump, so an older Goethe still opens a newer database.
+One schema created by `db.rs`, version 1. New columns and tables are added in `db::ensure_columns` or `usage_log::ensure_tables` (called from `db.rs`) without a version bump, so an older Goethe still opens a newer database.
 
 | Table | Holds |
 |---|---|

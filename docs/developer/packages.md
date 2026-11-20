@@ -69,7 +69,7 @@ Goethe owns a hermetic Python 3.11 environment at `$GOETHE_HOME/py-env`, built b
   2. Rerun `llama-cpp/update_archs.sh` so `llama-cpp/ARCHS` lists the architectures the new build serves.
   3. The macOS workflow runs when the pin changes.
 - **NInfer.**
-  1. Move `NINFER_REV` in `nvfp4-kernels/NINFER_PIN`. CI's `ninfer-patch` job checks that the patches still apply to it.
+  1. Move `NINFER_REV` in `nvfp4-kernels/NINFER_PIN` and in `goethe/packaging/nvfp4-patch/NINFER_PIN`, the copy compiled into the binary (`engines/ninfer.rs`). CI's `ninfer-patch` job checks that the patches still apply to it.
   2. If the model artifact changes, update the constants in `engines/ninfer.rs` too.
 
 ## nginx
@@ -85,8 +85,8 @@ Goethe ships its own nginx so the gateway behaves the same everywhere. It is bui
 
 `uv` builds the SGLang wheel and installs the py-env.
 
-- **Pin:** version and per-arch sha256 in `packaging/build_cdn.sh` (`UV_VERSION`, `UV_SHA256`). The aarch64 job in `.github/workflows/release.yml` repeats the version and sha256, and CI's `package-smoke` job names the version too.
-- **Bumping:** change all three places together.
+- **Pin:** version and per-arch sha256 in `packaging/build_cdn.sh` (`UV_VERSION`, `UV_SHA256`). The aarch64 job in `.github/workflows/release.yml` repeats the version and sha256, and the `build` job there and CI's `package-smoke` job name the version too.
+- **Bumping:** change all four places together.
 - **Installed path:** `$GOETHE_HOME/bin/uv`.
 
 ## CUDA forward compatibility
@@ -98,7 +98,7 @@ On drivers 535 to 579, CUDA 13 runs through NVIDIA's forward-compatibility libra
 `build_cdn.sh` assembles `goethe/dist/cdn`, which release CI publishes at `https://pkg.goethe.sh`:
 
 ```
-SHA256SUMS, SHA256SUMS.sig, VERSION, BUILDINFO, install.sh, LICENSE, NOTICE
+SHA256SUMS, SHA256SUMS.sig, VERSION, BUILDINFO, install.sh, install.ps1, LICENSE, NOTICE
 bin/linux-x86_64/{goethe,goethed,nginx,uv}  bin/linux-aarch64/...  bin/darwin-aarch64/{goethe,goethed,nginx}
 pyenv/bootstrap.sh, pyenv/requirements*.lock
 wheels/LATEST, wheels/sglang-*.whl
@@ -106,5 +106,5 @@ v1/registry.json, v1/registry.json.sig
 goethe/ternary-kernels.tar.zst   (only with --with-ternary)
 ```
 
-- **Build steps:** `build_bin.sh` builds the portable Linux binaries in an Ubuntu 20.04 container. `sign_cdn.sh` writes `VERSION`, `SHA256SUMS` and the signature and verifies them with the key embedded in `install.sh`. `pages_site.sh` lays out the Pages site: the newest release at the root (what older installers read) and the newest 4 under `v/<version>/`.
+- **Build steps:** `build_bin.sh` builds the portable Linux binaries in an Ubuntu 20.04 container. `sign_cdn.sh` writes `VERSION`, `SHA256SUMS` and the signature and verifies them with the key embedded in `install.sh`. `pages_site.sh` lays out the Pages site: the release being deployed at the root (what older installers read) and the newest 4 under `v/<version>/`.
 - **`BUILDINFO`** records the SGLang fork commit and whether its tree was dirty.

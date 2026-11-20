@@ -21,7 +21,7 @@ cargo build --locked --features goethe/test-release-key   # what the e2e and mut
 
 - **Unsigned:** `GOETHE_ALLOW_UNSIGNED=1`.
 - **Signed with a dev key:** `GOETHE_SIGN_KEY=<dev key>` plus `GOETHE_RELEASE_PUB=<dev public key>`, so `install.sh` embeds the dev key.
-- **Release (`--release`):** `GOETHE_SIGN_KEY` and `GOETHE_RELEASE_PUB_FPR`. It refuses `GOETHE_RELEASE_PUB` and always embeds `packaging/release_pub.pem`.
+- **Release (`--release`):** `GOETHE_RELEASE_PUB_FPR`, plus `GOETHE_SIGN_KEY` or `GOETHE_ALLOW_UNSIGNED=1` (release CI builds unsigned and signs in `merge`). It refuses `GOETHE_RELEASE_PUB` and always embeds `packaging/release_pub.pem`.
 
 To install from a local package tree:
 
@@ -122,9 +122,10 @@ CI also runs `ruff` over `lab` and `tests`, `shellcheck -S warning` over several
 
 | Workflow | Runs on | Does |
 |---|---|---|
-| `ci.yml` | push and PR to `main` and `dev`, nightly, manual | The `changes` job decides from the changed paths which jobs run. Jobs: `python` (lab suite on 3.11 and 3.13); `lint`; `attribution` (fails on an AI co-author or "Generated with" line in new commits); `ninfer-patch`; `engine-test` (cargo test, clippy, test-key build, gate 0 and stage 6); `e2e-user` (`e2e_cli.py FreshUser` and `Matrix`). `gate` is the one required check: every job passed or was skipped for a false flag, and every job is listed in its `needs`. Main, nightly and manual runs add `package-smoke`: an unsigned x86_64 package, the portable binary runs, and it refuses a foreign key set in its environment. Nightly and manual runs add `mutants`. |
+| `ci.yml` | push and PR to `main` and `dev`, nightly, manual | The `changes` job decides from the changed paths which jobs run. Jobs: `python` (lab suite on 3.11 and 3.13); `lint`; `attribution` (fails on an AI co-author or "Generated with" line in new commits); `ninfer-patch`; `engine-test` (cargo test, clippy, test-key build, gate 0 and stage 6); `e2e-user` (`e2e_cli.py FreshUser` and `Matrix`). `gate` is the one required check: every job passed or was skipped for a false flag, and every job except `package-smoke` and `mutants` is listed in its `needs`. Main, nightly and manual runs add `package-smoke`: an unsigned x86_64 package, the portable binary runs, and it refuses a foreign key set in its environment. Nightly and manual runs add `mutants`. |
 | `installer.yml` | PRs that touch the installer, setup, fix, update, service, nginx or release-key code, nginx packaging, or `tests/vm` | The `curl \| bash` install in a Rocky 9 VM: root and user installs, reinstall, upgrade, tampering, pinning, uninstall. |
 | `macos.yml` | PRs that touch the crates, packaging, installer, llama.cpp pin; `mac-support` and `mac/**` branches | Unit tests and clippy on macOS, package build and `macos_e2e.sh`. |
+| `wsl-install.yml` | PRs to `main` and `dev` that touch `cdn/install.ps1` or `cdn/install.sh`, manual | The Windows install path: `install.ps1` on a Windows runner, then `install.sh` inside WSL2 Ubuntu. |
 | `engine-pin.yml` | daily, manual | Opens a PR to `dev` that moves `goethe-engine/PIN` to the newest release. |
 | `release.yml` | tag `vX.Y.Z` on `main`, manual | The release (below). |
 | `pages.yml` | manual, with a tag | Serves an already published release on Pages again. Use it when `publish` succeeded but `pages` failed. |
@@ -142,16 +143,16 @@ Releases come from GitHub Actions on `main`, never from a laptop. The maintainer
    1. `guard`: the commit is on `main` and the tag equals the version in `crates/goethe/Cargo.toml`.
    2. `ci`: runs CI unless a push run already passed on that commit.
    3. In parallel: `build` (the x86_64 package with `build_cdn.sh --release`), `build-aarch64`, `nginx-aarch64` and `build-macos` (build plus e2e).
-   4. `merge`: one package; `SHA256SUMS` and the registry signature recomputed and re-signed, then verified with the key embedded in `install.sh`, with the fingerprint and `BUILDINFO` checked.
+   4. `merge`: waits for approval on the `release` environment, the only job that sees the signing key. It makes one package; `SHA256SUMS` and the registry signature recomputed and re-signed, then verified with the key embedded in `install.sh`, with the fingerprint and `BUILDINFO` checked.
    5. `install-smoke`: an install in a clean Ubuntu 22.04 container.
-   6. `publish`: waits for approval on the `release` environment, then creates the GitHub Release.
+   6. `publish`: creates the GitHub Release and uploads the signed package, `install.sh` and `install.ps1`.
    7. `pages`: deploys `pkg.goethe.sh`.
 5. Existing installs update with `goethe update`.
 
 ### Keys
 
 - **Generating:** `packaging/keygen.sh <dir>` creates a P-256 `release.key` (mode 600) and `release_pub.pem`, and refuses to overwrite either.
-- **Repository settings:** the secret `GOETHE_SIGN_KEY` holds the private key. The variable `GOETHE_RELEASE_PUB_FPR` holds the sha256 of the DER public key, the one `packaging/release_pub.pem` must match.
+- **Repository settings:** the `release` environment's secret `GOETHE_SIGN_KEY` holds the private key (not a repository secret). The variable `GOETHE_RELEASE_PUB_FPR` holds the sha256 of the DER public key, the one `packaging/release_pub.pem` must match.
 - **Losing the key** means existing installs cannot verify new releases. A key rollover is a new binary that carries the new key, published in a package list signed by the old key.
 
 ## Recipes
