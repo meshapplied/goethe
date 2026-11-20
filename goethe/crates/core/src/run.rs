@@ -88,17 +88,21 @@ fn signal_worker(read_end: i32, models: &Mutex<Vec<String>>, unload: &dyn Fn(&st
             return;
         }
     }
-    eprintln!("\ninterrupted; unloading what this run loaded");
     let list = std::mem::take(&mut *lock(models));
     list.iter().for_each(|m| unload(m));
     leave(128 + byte as i32);
 }
 
 fn unload_model(model: &str) {
-    match crate::rpc::call("unload", json!({"model_id": model, "all": false, "force": false})) {
-        Ok(_) => eprintln!("unloaded {model} (goethe run loaded it; --keep leaves it loaded)"),
-        Err(e) => eprintln!("could not unload {model}: {e}"),
-    }
+    unload_quietly(model);
+}
+
+pub(crate) fn unload_quietly(model: &str) {
+    // Hand the unload to a detached goethe unload: run leaves at once and says nothing, the model drains and goes in the background.
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().unwrap_or_else(|_| "goethe".into());
+    let null = std::process::Stdio::null;
+    let _ = std::process::Command::new(exe).args(["unload", model]).stdin(null()).stdout(null()).stderr(null()).process_group(0).spawn();
 }
 
 pub fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, String> {
@@ -112,7 +116,7 @@ pub fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, Str
 
 pub const RUN_CTX: u64 = 100_000;
 
-fn wait_routed(home: &std::path::Path, model: &str) -> std::sync::Arc<crate::gateway_cache::Snapshot> {
+pub(crate) fn wait_routed(home: &std::path::Path, model: &str) -> std::sync::Arc<crate::gateway_cache::Snapshot> {
     // The gateway view once the model serves, or after 15 minutes (target then says it is not loaded).
     let end = std::time::Instant::now() + std::time::Duration::from_secs(900);
     loop {
@@ -125,7 +129,7 @@ fn wait_routed(home: &std::path::Path, model: &str) -> std::sync::Arc<crate::gat
     }
 }
 
-fn run_ctx(home: &std::path::Path, model: &str) -> Option<u64> {
+pub(crate) fn run_ctx(home: &std::path::Path, model: &str) -> Option<u64> {
     // The context run loads a model with: RUN_CTX, or the model's maximum when that is smaller; None (the load default) when unknown.
     let con = crate::db::open(home).ok()?;
     let max: i64 = con.query_row("SELECT COALESCE(max_ctx, default_ctx) FROM installed_models WHERE model_id = ?1", [model], |r| r.get(0)).ok()?;
@@ -171,14 +175,22 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
         args[0] = first;
     }
     let installed = crate::models::installed_ids(&home);
+    let mut picked_load = false;
     if args.is_empty() && interactive(&None, opts.plain) {
         match crate::menu::pick_model()? {
-            Some(m) => args.push(m),
+            Some((m, loaded_here)) => {
+                picked_load = loaded_here;
+                args.push(m);
+            }
             None => return Ok(()),
         }
     }
     let (model, input) = route(&args, &snap.serving_models(), &installed.iter().map(String::as_str).collect::<Vec<_>>())?;
     let mut loaded = Loaded::new(opts.keep);
+    if picked_load {
+        loaded.add(&model);
+        snap = wait_routed(&home, &model);
+    }
     if load_need(snap.routes(&model).iter().any(|r| !r.draining), installed.contains(&model), &model)? {
         let live = crate::menu::installed_and_loaded(&home).iter().any(|(m, on)| *m == model && *on);
         if live {

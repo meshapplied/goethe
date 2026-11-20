@@ -309,11 +309,12 @@ enum Phase {
     Failed(String),
 }
 
-struct LoadJob {
-    model: String,
+pub(crate) struct LoadJob {
+    pub(crate) model: String,
+    ctx: Option<u64>,
     phase: Phase,
     frac: f64,
-    shown: u32,
+    pub(crate) shown: u32,
     ticks: u32,
 }
 
@@ -324,8 +325,8 @@ fn goethe_cmd() -> std::process::Command {
 }
 
 impl LoadJob {
-    fn new(model: String) -> LoadJob {
-        LoadJob { model, phase: Phase::Up(None), frac: 0.0, shown: 0, ticks: 0 }
+    pub(crate) fn new(model: String, ctx: Option<u64>) -> LoadJob {
+        LoadJob { model, ctx, phase: Phase::Up(None), frac: 0.0, shown: 0, ticks: 0 }
     }
 
 
@@ -344,7 +345,7 @@ impl LoadJob {
                 Ok(Some(st)) if !st.success() => Phase::Failed("goethed did not start; goethe up shows why".to_string()),
                 _ => Phase::Up(Some(c)),
             },
-            Phase::Start => match goethe_cmd().args(["load", &self.model, "--no-wait", "--json", "--yes"]).output() {
+            Phase::Start => match goethe_cmd().args(["load", &self.model, "--no-wait", "--json", "--yes"]).args(self.ctx.map(|c| format!("--ctx={c}"))).output() {
                 Ok(o) if o.status.success() => match crate::rpc::parse_load_instance_id(&String::from_utf8_lossy(&o.stdout)) {
                     Some(instance) => Phase::Loading { instance, gpus: Vec::new(), need_mb: 0, base_mb: 0 },
                     None if String::from_utf8_lossy(&o.stdout).contains("already loaded") => {
@@ -385,7 +386,7 @@ impl LoadJob {
         };
     }
 
-    fn tick(&mut self) {
+    pub(crate) fn tick(&mut self) {
         // The percent climbs one at a time toward what the load measured; goethed is asked every half second.
         if self.ticks.is_multiple_of(8) {
             self.advance();
@@ -396,11 +397,11 @@ impl LoadJob {
         }
     }
 
-    fn finished(&self) -> bool {
+    pub(crate) fn finished(&self) -> bool {
         matches!(self.phase, Phase::Done) && self.shown >= 100
     }
 
-    fn failure(&self) -> Option<String> {
+    pub(crate) fn failure(&self) -> Option<String> {
         // The reason a load failed, in two lines at most: the first, and the one that names the engine log.
         let Phase::Failed(why) = &self.phase else { return None };
         let lines: Vec<&str> = why.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
@@ -558,7 +559,7 @@ impl Page for Menu {
                     } else if let Some((id, false)) = s.models.get(s.at).cloned() {
                         match &self.job {
                             Some(j) => self.note = Some(format!("{} is loading; one model loads at a time", j.model)),
-                            None => self.job = Some(LoadJob::new(id)),
+                            None => self.job = Some(LoadJob::new(id, None)),
                         }
                     }
                 }
@@ -713,32 +714,72 @@ fn report(result: Result<(), String>) {
 struct ModelPick {
     models: Vec<(String, bool)>,
     at: usize,
+    job: Option<LoadJob>,
+    ready: Option<usize>,
+    note: Option<String>,
 }
 
 impl Page for ModelPick {
     fn render(&self, width: usize, height: usize) -> Vec<String> {
-        // goethe run without a model: the installed models at the top, loaded ones first and marked.
+        // goethe run without a model: the installed models at the top, loaded ones first and marked; one that is not loaded loads here, its bar beside it.
         let mut out = vec![String::new(), format!("  {}", paint("Choose a model to run", Color::Bold)), String::new()];
         for (i, (id, loaded)) in self.models.iter().enumerate() {
-            let state = if *loaded { format!("  {}", sgr(&crate::theme::secondary(), "loaded")) } else { String::new() };
+            let state = match self.job.as_ref().filter(|j| j.model == *id) {
+                Some(j) => format!("  {}  {:>3}%", fine_bar(j.shown), j.shown),
+                None if *loaded => format!("  {}", sgr(&crate::theme::secondary(), "loaded")),
+                None => String::new(),
+            };
             out.push(match i == self.at {
                 true => format!("{} {}{state}", sgr(&hl(), "\u{27a4}"), sgr(&hl(), id)),
                 false => format!("  {id}{state}"),
             });
         }
-        screen(out, width, height, gray("\u{2191}\u{2193} move   Enter run   q quit"))
+        if let Some(n) = &self.note {
+            out.push(String::new());
+            out.extend(n.lines().map(|l| format!("  {}", paint(l, Color::Red))));
+        }
+        let keys = if self.job.is_some() { "loading...   q quit" } else { "\u{2191}\u{2193} move   Enter run   q quit" };
+        screen(out, width, height, gray(keys))
     }
 
     fn key(&mut self, input: Input) -> Flow {
         let n = self.models.len();
+        if self.job.is_some() {
+            return match input {
+                Input::Interrupt | Input::Char('q') | Input::Esc => Flow::Quit,
+                _ => Flow::Stay,
+            };
+        }
+        self.note = None;
         match input {
             Input::Up | Input::Char('k') => self.at = (self.at + n - 1) % n,
             Input::Down | Input::Char('j') => self.at = (self.at + 1) % n,
-            Input::Enter => return Flow::Pick(self.at),
+            Input::Enter if self.models[self.at].1 => return Flow::Pick(self.at),
+            Input::Enter => self.job = Some(LoadJob::new(self.models[self.at].0.clone(), crate::run::run_ctx(&goethe_home(), &self.models[self.at].0))),
             Input::Left | Input::Esc | Input::Interrupt | Input::Char('q') => return Flow::Quit,
             _ => {}
         }
         Flow::Stay
+    }
+
+    fn every(&self) -> Option<std::time::Duration> {
+        self.job.as_ref().map(|_| std::time::Duration::from_millis(60))
+    }
+
+    fn tick(&mut self) {
+        // The load in place: when it runs the model is chosen, when it fails the reason shows under the list.
+        let Some(j) = self.job.as_mut() else { return };
+        j.tick();
+        if j.finished() {
+            self.ready = Some(self.at);
+        } else if let Some(why) = j.failure() {
+            self.note = Some(why);
+            self.job = None;
+        }
+    }
+
+    fn finished(&self) -> bool {
+        self.ready.is_some()
     }
 }
 
@@ -752,15 +793,19 @@ pub fn metrics() -> Result<(), String> {
     Tty::open()?.run(&mut MetricsPage(view)).map(|_| ())
 }
 
-pub fn pick_model() -> Result<Option<String>, String> {
-    // The model goethe run should use, chosen from the installed ones; None when there are none or the list is left.
+pub fn pick_model() -> Result<Option<(String, bool)>, String> {
+    // The model goethe run should use, chosen from the installed ones and loaded on the list when it was not, with whether the list loaded it; None when the list is left.
     let models = installed_and_loaded(&goethe_home());
     if models.is_empty() {
         return Err("no model is installed: goethe install MODEL".to_string());
     }
-    let mut page = ModelPick { models, at: 0 };
+    let mut page = ModelPick { models, at: 0, job: None, ready: None, note: None };
     let picked = Tty::open()?.run(&mut page)?;
-    Ok(picked.and_then(|i| page.models.get(i).map(|(id, _)| id.clone())))
+    let started_here = page.ready.is_some();
+    if let (Some(j), false) = (&page.job, started_here) {
+        crate::run::unload_quietly(&j.model);
+    }
+    Ok(picked.or(page.ready).and_then(|i| page.models.get(i).map(|(id, _)| (id.clone(), started_here))))
 }
 
 pub fn run() -> Result<(), String> {
@@ -1353,14 +1398,12 @@ fn apply_picks(removals: &[String], installs: &[String]) -> Result<(), String> {
     crate::step::set_compact(true);
     let mut failed = Vec::new();
     for id in removals {
-        println!("{}", paint(&format!("Uninstalling {id}"), Color::Bold));
         if let Err(e) = crate::models::run_remove(id, true, false, Some(false)) {
             report(Err(e));
             failed.push(id.clone());
         }
     }
     for id in installs {
-        println!("{}", paint(&format!("Installing {id}"), Color::Bold));
         let opts = crate::install::InstallOpts {
             model_id: id.clone(),
             ctx: None,
@@ -1539,7 +1582,7 @@ mod tests {
 
     #[test]
     fn a_load_climbs_one_percent_at_a_time_on_a_bar_no_wider() {
-        let mut j = LoadJob::new("org/m".into());
+        let mut j = LoadJob::new("org/m".into(), None);
         j.phase = Phase::Loading { instance: "i".into(), gpus: vec![3], need_mb: 1000, base_mb: 0 };
         j.frac = 0.3;
         j.ticks = 1;
@@ -1581,12 +1624,17 @@ mod tests {
 
     #[test]
     fn run_without_a_model_lists_the_installed_ones_at_the_top() {
-        let mut p = ModelPick { models: vec![("org/a".into(), true), ("org/b".into(), false)], at: 0 };
+        let mut p = ModelPick { models: vec![("org/a".into(), true), ("org/b".into(), false)], at: 0, job: None, ready: None, note: None };
         let t = text(p.render(100, 20));
         assert!(t[1].contains("Choose a model to run") && t[3].starts_with('\u{27a4}') && t[3].contains("org/a") && t[3].contains("loaded") && t[4].contains("org/b"), "{t:?}");
-        assert!(matches!(p.key(Input::Up), Flow::Stay) && p.at == 1, "up from the first wraps to the last");
-        assert!(matches!(p.key(Input::Enter), Flow::Pick(1)));
+        assert!(matches!(p.key(Input::Enter), Flow::Pick(0)), "a loaded model runs at once");
         assert!(matches!(p.key(Input::Char('q')), Flow::Quit) && matches!(p.key(Input::Left), Flow::Quit), "q and the left arrow leave without running");
+        assert!(matches!(p.key(Input::Up), Flow::Stay) && p.at == 1, "up from the first wraps to the last");
+        assert!(matches!(p.key(Input::Enter), Flow::Stay) && p.job.as_ref().is_some_and(|j| j.model == "org/b"), "one that is not loaded loads on the list");
+        p.job.as_mut().unwrap().shown = 40;
+        let t = text(p.render(100, 20));
+        assert!(t[4].contains("org/b") && t[4].contains("40%") && t.iter().any(|l| l.contains("loading...")), "{t:?}");
+        assert!(matches!(p.key(Input::Down), Flow::Stay) && p.at == 1, "the list holds still while it loads");
     }
 
     #[test]

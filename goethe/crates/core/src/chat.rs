@@ -12,6 +12,7 @@ const TYPING: &str = "[Esc] commands  [Enter] send";
 const COMMANDS: &str = "[m] model  [q] quit  [i] type";
 const SURE: &str = "exit? Enter = exit, q = back";
 const PICKING: &str = "[Up] [Down] move  [Enter] choose  [Esc] back";
+const LOADING: &str = "loading into VRAM  [Esc] cancel";
 
 pub fn split_think(raw: &str, last: bool) -> (String, String) {
     // The model's reasoning and its answer: complete think blocks, an unclosed one, and everything before a closing tag that has no opening one are reasoning; while streaming, a tag cut in half stays out of the answer.
@@ -99,6 +100,7 @@ pub(crate) enum Act {
     Audio(String),
     Picker,
     Chose(usize),
+    CancelLoad,
     Quit,
 }
 
@@ -127,12 +129,13 @@ pub(crate) struct Ui {
     follow: bool,
     size: (usize, usize),
     session: (u64, f64),
+    loading: Option<(String, u32)>,
     last_reply: Option<(u64, f64)>,
 }
 
 impl Ui {
     pub(crate) fn new(header: String, thinking: bool) -> Ui {
-        Ui { mode: Mode::Typing, back: Mode::Typing, input: Vec::new(), at: 0, entries: Vec::new(), header, picks: Vec::new(), pick: 0, streaming: false, thinking, waiting: None, scroll: 0, follow: true, size: (80, 24), session: (0, 0.0), last_reply: None }
+        Ui { mode: Mode::Typing, back: Mode::Typing, input: Vec::new(), at: 0, entries: Vec::new(), header, picks: Vec::new(), pick: 0, streaming: false, thinking, waiting: None, scroll: 0, follow: true, size: (80, 24), session: (0, 0.0), loading: None, last_reply: None }
     }
 
     pub(crate) fn key(&mut self, key: Input) -> Act {
@@ -182,6 +185,12 @@ impl Ui {
                 Act::None
             }
             (Mode::Command, Input::Char('m')) => Act::Picker,
+            (Mode::Pick, Input::Esc | Input::Char('q')) if self.loading.is_some() => {
+                self.loading = None;
+                self.mode = Mode::Command;
+                Act::CancelLoad
+            }
+            (Mode::Pick, _) if self.loading.is_some() => Act::None,
             (Mode::Pick, Input::Up) => {
                 self.pick = self.pick.saturating_sub(1);
                 Act::None
@@ -190,10 +199,7 @@ impl Ui {
                 self.pick = (self.pick + 1).min(self.picks.len().saturating_sub(1));
                 Act::None
             }
-            (Mode::Pick, Input::Enter) => {
-                self.mode = Mode::Typing;
-                Act::Chose(self.pick)
-            }
+            (Mode::Pick, Input::Enter) => Act::Chose(self.pick),
             (Mode::Pick, Input::Esc | Input::Char('q')) => {
                 self.mode = Mode::Command;
                 Act::None
@@ -329,7 +335,14 @@ impl Ui {
                         (false, true) => Style::Plain,
                         (false, false) => Style::Dim,
                     };
-                    paint(&fit(&format!("{mark}{id}{}", if *loaded { "" } else { "  (not loaded)" }), width), style)
+                    match &self.loading {
+                        Some((m, pct)) if m == id => {
+                            let bar = format!("  {}", crate::progress::bar(*pct));
+                            let name = fit(&format!("{mark}{id}"), width.saturating_sub(visible_width(&bar))).trim_end().to_string();
+                            format!("{}{bar}", paint(&name, style))
+                        }
+                        _ => paint(&fit(&format!("{mark}{id}{}", if *loaded { "" } else { "  (not loaded)" }), width), style),
+                    }
                 })
                 .collect()
         } else {
@@ -357,6 +370,7 @@ impl Ui {
             Mode::Typing => TYPING,
             Mode::Command => COMMANDS,
             Mode::Confirm => SURE,
+            Mode::Pick if self.loading.is_some() => LOADING,
             Mode::Pick => PICKING,
         };
         let stats = self.stats(width.saturating_sub(keys.chars().count() + 4));
@@ -388,15 +402,15 @@ fn read_bytes(buf: &mut [u8]) -> usize {
     usize::try_from(unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) }).unwrap_or(0)
 }
 
-fn stop_asked() -> bool {
-    // Ctrl-C or Esc pressed while a reply streams: stop it, keep what arrived.
+fn typed_ahead() -> Vec<Input> {
+    // Keys pressed while a reply streams: they edit the line (Enter queues it), Ctrl-C or Esc stops the reply and keeps what arrived.
     let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
     if unsafe { libc::poll(&mut fds, 1, 0) } <= 0 {
-        return false;
+        return Vec::new();
     }
     let mut buf = [0u8; 256];
     let n = read_bytes(&mut buf);
-    parse_input(&buf[..n]).iter().any(|k| matches!(k, Input::Interrupt | Input::Esc))
+    parse_input(&buf[..n])
 }
 
 struct State {
@@ -404,6 +418,8 @@ struct State {
     ui: Ui,
     msgs: Vec<Value>,
     last: Vec<String>,
+    queued: std::collections::VecDeque<String>,
+    job: Option<crate::menu::LoadJob>,
 }
 
 impl State {
@@ -430,8 +446,19 @@ impl State {
         self.ui.waiting = Some(clock);
         draw(&mut self.ui, &mut self.last);
         let (mut first, mut end) = (None, clock);
-        let State { t, ui, msgs, last, .. } = self;
+        let State { t, ui, msgs, last, queued, .. } = self;
         let result = t.api.chat(&t.model, msgs, &mut |piece| {
+            let mut go_on = true;
+            for k in typed_ahead() {
+                match k {
+                    Input::Esc | Input::Interrupt => go_on = false,
+                    k => {
+                        if let Act::Send(text) = ui.key(k) {
+                            queued.push_back(text);
+                        }
+                    }
+                }
+            }
             if !piece.is_empty() {
                 end = Instant::now();
                 first.get_or_insert(end);
@@ -440,7 +467,7 @@ impl State {
                 raw.push_str(piece);
             }
             draw(ui, last);
-            !stop_asked()
+            go_on
         });
         self.ui.streaming = false;
         self.ui.waiting = None;
@@ -468,24 +495,56 @@ impl State {
         }
     }
 
+    fn choose(&mut self, i: usize) {
+        // A loaded model is used at once; one that is not loads here, its bar beside it in the list.
+        let (id, up) = self.ui.picks[i].clone();
+        if id == self.t.model {
+            self.ui.mode = Mode::Typing;
+            return;
+        }
+        if up {
+            match crate::run::target(&id) {
+                Ok(next) => self.switch(next),
+                Err(e) => self.ui.note(&e),
+            }
+            self.ui.mode = Mode::Typing;
+            return;
+        }
+        let ctx = crate::run::run_ctx(&crate::paths::goethe_home(), &id);
+        self.ui.loading = Some((id.clone(), 0));
+        self.job = Some(crate::menu::LoadJob::new(id, ctx));
+    }
+
+    fn load_step(&mut self, loaded: &mut Loaded) {
+        // Tick the load the picker started: its percent on the list, then the new conversation, or the reason it failed.
+        let Some(j) = self.job.as_mut() else { return };
+        j.tick();
+        self.ui.loading = Some((j.model.clone(), j.shown));
+        if j.finished() {
+            let id = j.model.clone();
+            self.job = None;
+            self.ui.loading = None;
+            self.ui.mode = Mode::Typing;
+            loaded.add(&id);
+            crate::run::wait_routed(&crate::paths::goethe_home(), &id);
+            match crate::run::target(&id) {
+                Ok(next) => self.switch(next),
+                Err(e) => self.ui.note(&e),
+            }
+        } else if let Some(why) = j.failure() {
+            self.job = None;
+            self.ui.loading = None;
+            self.ui.mode = Mode::Command;
+            self.ui.note(&why);
+        }
+    }
+
     fn switch(&mut self, to: Target) {
         self.ui.entries.push(Entry::Divider(format!("new conversation with {}", to.model)));
         self.ui.header = header(&to);
         self.msgs.clear();
         self.t = to;
     }
-}
-
-fn run_child(command: &[String]) {
-    // A goethe command in the normal terminal, as if typed, then back on Enter.
-    let exe = std::env::current_exe().unwrap_or_else(|_| "goethe".into());
-    println!("\n$ goethe {}\n", command.join(" "));
-    if let Err(e) = std::process::Command::new(exe).args(command).status() {
-        println!("could not run it: {e}");
-    }
-    print!("\nPress Enter to go back.");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-    let _ = std::io::stdin().read_line(&mut String::new());
 }
 
 pub(crate) fn run(t: Target, loaded: &mut Loaded, thinking: bool) -> Result<(), String> {
@@ -497,17 +556,23 @@ pub(crate) fn run(t: Target, loaded: &mut Loaded, thinking: bool) -> Result<(), 
     }));
     let mut _raw = Some(crate::term::RawMode::enter().ok_or("could not switch the terminal to raw mode")?);
     let mut _screen = Some(Screen::open());
-    let mut st = State { ui: Ui::new(header(&t), thinking), t, msgs: Vec::new(), last: Vec::new() };
+    let mut st = State { ui: Ui::new(header(&t), thinking), t, msgs: Vec::new(), last: Vec::new(), queued: Default::default(), job: None };
     let mut size = screen_size();
     let mut buf = [0u8; 256];
     loop {
         draw(&mut st.ui, &mut st.last);
+        if let Some(text) = st.queued.pop_front() {
+            st.send(text);
+            continue;
+        }
         let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
-        if unsafe { libc::poll(&mut fds, 1, Duration::from_millis(250).as_millis() as i32) } <= 0 {
+        let wait = if st.job.is_some() { 60 } else { 250 };
+        if unsafe { libc::poll(&mut fds, 1, Duration::from_millis(wait).as_millis() as i32) } <= 0 {
             if screen_size() != size {
                 size = screen_size();
                 st.last.clear();
             }
+            st.load_step(loaded);
             continue;
         }
         let n = read_bytes(&mut buf);
@@ -521,27 +586,10 @@ pub(crate) fn run(t: Target, loaded: &mut Loaded, thinking: bool) -> Result<(), 
                 Act::Send(text) => st.send(text),
                 Act::Audio(path) => st.audio(&path),
                 Act::Picker => st.ui.open_picker(crate::menu::installed_and_loaded(&crate::paths::goethe_home())),
-                Act::Chose(i) => {
-                    let (id, up) = st.ui.picks[i].clone();
-                    if id == st.t.model {
-                        continue;
-                    }
-                    if !up {
-                        _screen = None;
-                        _raw = None;
-                        run_child(&["load".to_string(), id.clone()]);
-                        _raw = crate::term::RawMode::enter();
-                        _screen = Some(Screen::open());
-                        st.last.clear();
-                    }
-                    match crate::run::target(&id) {
-                        Ok(next) => {
-                            if !up {
-                                loaded.add(&id);
-                            }
-                            st.switch(next);
-                        }
-                        Err(e) => st.ui.note(&e),
+                Act::Chose(i) => st.choose(i),
+                Act::CancelLoad => {
+                    if let Some(j) = st.job.take() {
+                        crate::run::unload_quietly(&j.model);
                     }
                 }
             }
@@ -648,6 +696,12 @@ mod tests {
         let shown = ui.render(60, 10).join("\n");
         assert!(shown.contains("org/a") && shown.contains("org/b  (not loaded)") && shown.contains("[Enter] choose"), "{shown}");
         assert_eq!(keys(&mut ui, &[Input::Down, Input::Enter]), vec![Act::None, Act::Chose(1)]);
+        ui.loading = Some(("org/b".into(), 40));
+        let shown = ui.render(60, 10).join("\n");
+        assert!(shown.contains(" 40%") && !shown.contains("(not loaded)") && shown.contains("[Esc] cancel"), "the load runs on the list: {shown}");
+        assert_eq!(keys(&mut ui, &[Input::Up, Input::Enter]), vec![Act::None, Act::None], "the list holds still while it loads");
+        assert_eq!(ui.key(Input::Esc), Act::CancelLoad);
+        assert!(ui.loading.is_none() && ui.mode == Mode::Command);
     }
 
     #[test]
