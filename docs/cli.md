@@ -411,7 +411,7 @@ The GPU table of the menu's Status page: per GPU the VRAM in use, a 10-block bar
 
 ### `goethe doctor`
 
-Checks the machine and the setup: GPU and driver, compiler, Python environment, gateway, ports and keys. Each problem comes with its fix. With `--hardware` it prints the hardware profile instead: GPUs, CPU, memory, disk, OS, container and cloud provider. GPU links, NUMA nodes and processes are in `--json` and `hardware_state.json`; `goethe gpu` shows the processes. To see where `goethe load` would place a model right now, and the memory it needs, use `goethe load <model> --dry-run`.
+Checks the machine and the setup: GPU and driver, compiler, FFmpeg, Python environment, gateway, ports and keys. Each problem comes with its fix. With `--hardware` it prints the hardware profile instead: GPUs, CPU, memory, disk, OS, container and cloud provider. GPU links, NUMA nodes and processes are in `--json` and `hardware_state.json`; `goethe gpu` shows the processes. To see where `goethe load` would place a model right now, and the memory it needs, use `goethe load <model> --dry-run`.
 
 | Option | Description |
 |---|---|

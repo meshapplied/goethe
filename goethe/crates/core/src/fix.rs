@@ -25,6 +25,7 @@ pub struct Facts {
     pub geforce_only: bool,
     pub compat_installed: bool,
     pub compiler_packages: Option<Vec<String>>,
+    pub ffmpeg_packages: Option<Vec<String>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -64,6 +65,12 @@ pub fn decide(f: &Facts) -> Verdict {
     if let Some(pkgs) = &f.compiler_packages {
         fixes.push((Fix::Compiler(pkgs.clone()), "SGLang builds GPU kernels on a model's first load and needs a C++ compiler (gcc 9 to 15)".to_string()));
     }
+    if let Some(pkgs) = &f.ffmpeg_packages {
+        fixes.push((
+            Fix::Compiler(pkgs.clone()),
+            "SGLang's torchcodec loads system FFmpeg (4 to 8) when a model starts".to_string(),
+        ));
+    }
     if fixes.is_empty() {
         let state = match (&f.driver, f.pci_gpus) {
             (Some(v), _) => format!("NVIDIA driver {v}"),
@@ -99,6 +106,19 @@ pub fn compiler_packages(distro: &str) -> Vec<String> {
     }
 }
 
+pub fn ffmpeg_packages(distro: &str) -> Vec<String> {
+    // Distro package that provides libavdevice.so.58–62 for the pinned torchcodec.
+    let words: Vec<&str> = distro.split_whitespace().collect();
+    let has = |d: &str| words.contains(&d);
+    if has("ubuntu") || has("debian") {
+        vec!["ffmpeg".to_string()]
+    } else if has("suse") || has("opensuse") || has("sles") {
+        vec!["ffmpeg".to_string()]
+    } else {
+        vec!["ffmpeg-free".to_string()]
+    }
+}
+
 pub fn package_command(distro: &str, pkgs: &[String]) -> Vec<String> {
     let words: Vec<&str> = distro.split_whitespace().collect();
     let mut cmd: Vec<String> = if words.contains(&"ubuntu") || words.contains(&"debian") {
@@ -122,6 +142,8 @@ fn facts(home: &Path) -> Facts {
         .map(|n| (0..n.device_count().unwrap_or(0)).filter_map(|i| n.device_by_index(i).ok()?.name().ok()).collect())
         .unwrap_or_default();
     let compiler = matches!(crate::host_compiler::verdict(crate::host_compiler::find().as_ref(), &p.distro), crate::host_compiler::Verdict::Unusable(_));
+    let sglang = crate::pyenv::has(home, crate::pyenv::Layer::Sglang);
+    let ffmpeg_missing = crate::doctor::find_libavdevice().is_none();
     Facts {
         pci_gpus: p.pci_gpus.len(),
         container: p.container,
@@ -133,7 +155,8 @@ fn facts(home: &Path) -> Facts {
         blackwell: p.blackwell_or_newer,
         geforce_only: !names.is_empty() && names.iter().all(|n| { let l = n.to_lowercase(); l.contains("geforce") || l.contains("titan") }),
         compat_installed: crate::cuda_compat::installed(home),
-        compiler_packages: (compiler && crate::pyenv::has(home, crate::pyenv::Layer::Sglang)).then(|| compiler_packages(&p.distro)),
+        compiler_packages: (compiler && sglang).then(|| compiler_packages(&p.distro)),
+        ffmpeg_packages: (ffmpeg_missing && sglang).then(|| ffmpeg_packages(&p.distro)),
     }
 }
 
@@ -277,6 +300,20 @@ mod tests {
         assert_eq!(apt[2], "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \"$@\"", "a fresh image has no package lists yet");
         assert_eq!(apt[3..], ["sh", "build-essential"]);
         assert_eq!(package_command("rhel", &["gcc".into()]), ["dnf", "-y", "install", "gcc"]);
+    }
+
+    #[test]
+    fn ffmpeg_is_offered_for_sglang_when_libavdevice_is_missing() {
+        let f = Facts { ffmpeg_packages: Some(ffmpeg_packages("ubuntu debian")), ..card() };
+        assert_eq!(
+            decide(&f),
+            Verdict::Fixes(vec![(
+                Fix::Compiler(vec!["ffmpeg".into()]),
+                "SGLang's torchcodec loads system FFmpeg (4 to 8) when a model starts".into()
+            )])
+        );
+        assert_eq!(ffmpeg_packages("rocky rhel centos fedora"), vec!["ffmpeg-free"]);
+        assert_eq!(ffmpeg_packages("opensuse suse"), vec!["ffmpeg"]);
     }
 
     #[test]
