@@ -32,12 +32,12 @@ impl ApiError {
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ApiError::Network(e) => write!(f, "cannot reach the platform: {e}"),
-            ApiError::Unauthorized => f.write_str("the platform no longer accepts this node's token (removed or revoked)"),
-            ApiError::RateLimited(d) => write!(f, "the platform asked to wait {} s (rate limit)", d.as_secs()),
-            ApiError::Status(code, err) if err.is_empty() => write!(f, "the platform answered HTTP {code}"),
-            ApiError::Status(code, err) => write!(f, "the platform answered HTTP {code} ({err})"),
-            ApiError::Malformed(e) => write!(f, "the platform sent an unexpected answer: {e}"),
+            ApiError::Network(e) => write!(f, "cannot reach the console: {e}"),
+            ApiError::Unauthorized => f.write_str("the console no longer accepts this node's token (removed or revoked)"),
+            ApiError::RateLimited(d) => write!(f, "the console asked to wait {} s (rate limit)", d.as_secs()),
+            ApiError::Status(code, err) if err.is_empty() => write!(f, "the console answered HTTP {code}"),
+            ApiError::Status(code, err) => write!(f, "the console answered HTTP {code} ({err})"),
+            ApiError::Malformed(e) => write!(f, "the console sent an unexpected answer: {e}"),
         }
     }
 }
@@ -269,7 +269,7 @@ pub fn parse_started(v: &Value, base: &str) -> Result<Started, ApiError> {
     let check = if base.starts_with("http://") { crate::platform::check_dev_link } else { crate::platform::check_link };
     let uri = check(&r.verification_uri_complete).map_err(|_| malformed("the verification link is not a valid https URL"))?;
     if !verification_on_base(base, &uri) {
-        return Err(malformed("the verification link is not on the platform"));
+        return Err(malformed("the verification link is not on the console"));
     }
     Ok(Started {
         device_code: Secret::new(r.device_code),

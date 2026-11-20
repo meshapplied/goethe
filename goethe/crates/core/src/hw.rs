@@ -87,7 +87,7 @@ pub fn profile(home: &Path) -> Result<HardwareState, String> {
     let mut links = Vec::new();
     for (n, a) in gpus.iter().enumerate() {
         for b in &gpus[n + 1..] {
-            links.push(classify_link(&nvml, a.index, b.index)?);
+            links.push(classify_link(&nvml, a.index, b.index).unwrap_or_else(|_| unknown_link(a.index, b.index)));
         }
     }
     let environment = host::probe_environment(crate::nginx::public_port_u16(home));
@@ -117,14 +117,31 @@ pub fn write_state(home: &Path, state: &HardwareState) -> Result<(), String> {
     write_atomic(&path, &data).map_err(|e| format!("write hardware_state.json: {e}"))
 }
 
-pub fn run_pick_gpus(tp: Option<u64>, model: Option<&str>) -> Result<(), String> {
-    // Where goethe load would place a model now (its full budget), or an empty engine of a given tp.
+pub struct PickArgs<'a> {
+    pub tp: Option<u64>,
+    pub model: Option<&'a str>,
+    pub ctx: Option<u64>,
+    pub max_conc: Option<u64>,
+    pub gpus: &'a [u32],
+}
+
+pub fn run_pick_gpus(args: PickArgs) -> Result<(), String> {
+    // Where goethe load would place a model now (its full budget, on the GPUs named and at the ctx and concurrency asked), or an empty engine of a given tp.
     let home = goethe_home();
-    let view = crate::recommend::View::new(&home, profile(&home)?);
-    let pinned = tp.map(|t| t.max(1) as usize);
+    let mut view = crate::recommend::View::new(&home, profile(&home)?);
+    if let Some(g) = args.gpus.iter().find(|g| !view.gpus.iter().any(|x| x.index == **g)) {
+        return Err(format!("there is no gpu{g} (goethe gpu lists them)"));
+    }
+    if !args.gpus.is_empty() {
+        view.gpus.retain(|g| args.gpus.contains(&g.index));
+    }
+    let pinned = args.tp.map(|t| t.max(1) as usize);
+    let model = args.model;
     let (what, fit) = match model {
         Some(id) => {
-            let (input, card_tp) = crate::models::fit_input(&home, id)?;
+            let (mut input, card_tp) = crate::models::fit_input(&home, id)?;
+            input.ctx = args.ctx.unwrap_or(input.ctx);
+            input.max_conc = args.max_conc.unwrap_or(input.max_conc);
             let fit = view.fit(id, &input, pinned.or(card_tp));
             (format!("{id} "), fit.map(|f| (f.describe(&input), f.gpus)))
         }
@@ -341,7 +358,14 @@ pub struct GpuUsage {
     pub managed_mb: u64,
     pub processes: Vec<(u32, bool)>,
     pub memory_util: Option<u32>,
+    pub gpu_util: Option<u32>,
+    pub power_mw: Option<u32>,
+    pub power_limit_mw: Option<u32>,
+    pub temp_c: Option<u32>,
+    pub throttle: u64,
 }
+
+pub const THROTTLE_MASK: u64 = 0x04 | 0x08 | 0x10 | 0x20 | 0x40 | 0x80;
 
 #[cfg_attr(target_os = "macos", allow(unreachable_code))]
 pub fn gpu_usage(managed: &HashSet<i32>) -> Result<Vec<GpuUsage>, String> {
@@ -358,9 +382,29 @@ pub fn gpu_usage(managed: &HashSet<i32>) -> Result<Vec<GpuUsage>, String> {
             managed_mb,
             processes: ours.iter().map(|(p, _)| (*p as u32, true)).collect(),
             memory_util: accel.busy_pct,
+            gpu_util: accel.busy_pct,
+            power_mw: None,
+            power_limit_mw: None,
+            temp_c: None,
+            throttle: 0,
         }]);
     }
-    let nvml = crate::nvidia_driver::nvml()?;
+    usage_with(&crate::nvidia_driver::nvml()?, managed)
+}
+
+pub fn gpu_usage_shared(managed: &HashSet<i32>) -> Result<Vec<GpuUsage>, String> {
+    // gpu_usage on one NVML session kept for the life of the process, for callers that sample every few seconds.
+    #[cfg(target_os = "macos")]
+    return gpu_usage(managed);
+    #[cfg(not(target_os = "macos"))]
+    match crate::nvidia_driver::shared_nvml() {
+        Some(nvml) => usage_with(nvml, managed),
+        None => Err("NVML is not available".to_string()),
+    }
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn usage_with(nvml: &Nvml, managed: &HashSet<i32>) -> Result<Vec<GpuUsage>, String> {
     let count = nvml.device_count().map_err(|e| format!("device count: {e}"))?;
     let mut out = Vec::new();
     for index in 0..count {
@@ -379,12 +423,18 @@ pub fn gpu_usage(managed: &HashSet<i32>) -> Result<Vec<GpuUsage>, String> {
         }
         seen.sort_unstable();
         let owned = |pid: u32| managed.contains(&(pid as i32));
+        let util = dev.utilization_rates().ok();
         out.push(GpuUsage {
             index,
             used_mb,
             managed_mb: seen.iter().filter(|(pid, _)| owned(*pid)).map(|(_, mb)| mb).sum(),
             processes: seen.iter().map(|(pid, _)| (*pid, owned(*pid))).collect(),
-            memory_util: dev.utilization_rates().ok().map(|u| u.memory.min(100)),
+            memory_util: util.as_ref().map(|u| u.memory.min(100)),
+            gpu_util: util.as_ref().map(|u| u.gpu.min(100)),
+            power_mw: dev.power_usage().ok(),
+            power_limit_mw: dev.enforced_power_limit().ok(),
+            temp_c: dev.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu).ok(),
+            throttle: dev.current_throttle_reasons().map(|r| r.bits() & THROTTLE_MASK).unwrap_or(0),
         });
     }
     Ok(out)
@@ -452,6 +502,11 @@ fn common_ancestor(a: &nvml_wrapper::Device, b: nvml_wrapper::Device) -> Result<
 #[cfg(not(target_os = "linux"))]
 fn common_ancestor(_: &nvml_wrapper::Device, _: nvml_wrapper::Device) -> Result<String, String> {
     Err("no NVIDIA topology on this system".to_string())
+}
+
+fn unknown_link(a: u32, b: u32) -> LinkState {
+    // A pair NVML cannot place (WSL2 and some virtual GPUs have no topology): ranked as the slowest link instead of failing the profile.
+    LinkState { a, b, link_type: link_class("").to_string(), topo: String::new() }
 }
 
 fn classify_link(nvml: &Nvml, a: u32, b: u32) -> Result<LinkState, String> {
@@ -626,6 +681,7 @@ mod tests {
         assert_eq!(link_class("PXB"), "PCIE_SWITCH");
         assert_eq!(link_class("NODE"), "SAME_NUMA");
         assert_eq!(link_class("SYS"), "CROSS_SOCKET");
+        assert_eq!(unknown_link(0, 1).link_type, "CROSS_SOCKET", "an unplaceable pair is ranked slowest");
         assert!(link_rank("NV12") < link_rank("PCIE_SWITCH"));
         assert!(link_rank("PHB") < link_rank("SAME_NUMA"));
         let state: HardwareState = serde_json::from_str(

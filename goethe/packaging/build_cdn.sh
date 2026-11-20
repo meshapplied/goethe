@@ -111,6 +111,7 @@ write_buildinfo() {
     echo "fork_untracked_files=${untracked}"
     echo "patch_sha256=$(sha256sum "${ROOT}/sglang/goethe-marlin.patch" | awk '{print $1}')"
     echo "uv_version=${UV_VERSION}"
+    echo "nginx_version=$(sed -n 's/^NGINX_VERSION=//p' "${ROOT}/packaging/nginx_versions.sh")"
     echo "rust_toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' "${ROOT}/rust-toolchain.toml")"
     echo "arches=${ARCHES}"
     echo "release=${RELEASE}"
@@ -181,7 +182,6 @@ for a in "${ARCH_LIST[@]}"; do
   fi
 done
 
-cp "${ROOT}/cdn/goethed.service" "${DIST}/goethed.service"
 cp "${ROOT}/../LICENSE" "${ROOT}/../NOTICE" "${DIST}/"
 cp "${ROOT}/cdn/v1/registry.json" "${DIST}/v1/registry.json"
 (cd "${ROOT}" && cargo test --locked -q -p goethe-core --lib -- --exact pyenv::tests::layer_locks_are_subsets_of_the_main_lock)

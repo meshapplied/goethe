@@ -138,7 +138,7 @@ fn interactive(input: &Option<String>, plain: bool) -> bool {
 }
 
 pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
-    // MODEL INPUT as given; an installed model that is not loaded is loaded first (and unloaded at the end unless --keep).
+    // MODEL INPUT as given, or on a terminal without either a model picked from the installed ones; one that is not loaded is loaded first (and unloaded at the end unless --keep).
     let home = goethe_home();
     let mut snap = GatewayCache::open(&home).exact();
     let mut args = args.to_vec();
@@ -146,6 +146,12 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
         args[0] = first;
     }
     let installed = crate::models::installed_ids(&home);
+    if args.is_empty() && interactive(&None, opts.plain) {
+        match crate::menu::pick_model()? {
+            Some(m) => args.push(m),
+            None => return Ok(()),
+        }
+    }
     let (model, input) = route(&args, &snap.serving_models(), &installed.iter().map(String::as_str).collect::<Vec<_>>())?;
     let mut loaded = Loaded::new(opts.keep);
     if load_need(snap.routes(&model).iter().any(|r| !r.draining), installed.contains(&model), &model)? {
@@ -167,13 +173,13 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
     let (api, llama) = (&t.api, t.llama);
     match (t.kind.as_str(), input) {
         ("embedding", Some(text)) => api.embed(&model, &text).map(|e| println!("{}", embed_line(&e))),
-        ("speech", Some(path)) => api.transcribe(&model, std::path::Path::new(&path), llama).map(|text| println!("{text}")),
+        ("speech", Some(path)) => api.transcribe(&model, std::path::Path::new(&path), llama).map(|text| println!("{}", for_stdout(&text))),
         ("speech", None) => {
             let wav = record()?;
             let done = api.transcribe(&model, &wav, llama);
             let _ = std::fs::remove_file(&wav);
             let _ = wav.parent().map(std::fs::remove_dir);
-            done.map(|text| println!("{text}"))
+            done.map(|text| println!("{}", for_stdout(&text)))
         }
         (_, Some(text)) => api.chat(&model, &[json!({"role": "user", "content": text})], &mut |_| true).map(|reply| println!("{}", shown(&reply, opts.thinking))),
         (_, None) => {
@@ -199,6 +205,12 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
             }
         }
     }
+}
+
+fn for_stdout(text: &str) -> String {
+    // A transcript as received for a pipe; on a terminal without control characters.
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() { crate::chat::clean(text) } else { text.to_string() }
 }
 
 fn shown(reply: &str, thinking: bool) -> String {

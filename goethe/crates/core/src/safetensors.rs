@@ -22,7 +22,7 @@ pub fn header_tensor_bytes(header: &[u8], pred: &dyn Fn(&str) -> bool) -> Result
         }
         let start = offsets[0].as_u64().unwrap_or(0);
         let end = offsets[1].as_u64().unwrap_or(0);
-        total += end.saturating_sub(start);
+        total = total.saturating_add(end.saturating_sub(start));
     }
     Ok(total)
 }
@@ -46,7 +46,7 @@ pub fn tensor_bytes_in_file(path: &Path, pred: &dyn Fn(&str) -> bool) -> Result<
 pub fn tensor_bytes_in_dir(dir: &Path, pred: &dyn Fn(&str) -> bool) -> Result<u64, String> {
     let mut total = 0u64;
     for f in weight_files(dir)? {
-        total += tensor_bytes_in_file(&f, pred)?;
+        total = total.saturating_add(tensor_bytes_in_file(&f, pred)?);
     }
     Ok(total)
 }
@@ -106,5 +106,11 @@ mod tests {
         }"#;
         assert_eq!(header_tensor_bytes(header, &tensor_counts_marlin_extra).unwrap(), 1100);
         assert_eq!(header_tensor_bytes(header, &is_ple_embedding).unwrap(), 4000);
+    }
+
+    #[test]
+    fn hostile_offsets_saturate_instead_of_overflowing() {
+        let header = br#"{"a.weight_packed": {"data_offsets": [0, 18446744073709551615]}, "b.weight_packed": {"data_offsets": [0, 18446744073709551615]}}"#;
+        assert_eq!(header_tensor_bytes(header, &tensor_counts_marlin_extra).unwrap(), u64::MAX);
     }
 }

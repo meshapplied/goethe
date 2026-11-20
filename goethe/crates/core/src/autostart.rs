@@ -50,18 +50,6 @@ pub fn restore_enabled(home: &Path) -> bool {
     v != "off"
 }
 
-pub fn set_restore_enabled(on: bool) -> Result<(), String> {
-    let home = goethe_home();
-    let con = db::open(&home).map_err(|e| e.to_string())?;
-    let v = if on { "on" } else { "off" };
-    con.execute(
-        "INSERT OR REPLACE INTO goethe_settings (key, value) VALUES ('restore_desired', ?1)",
-        [v],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 pub fn spawn_restore_background() {
     if !restore_enabled(&goethe_home()) {
         return;

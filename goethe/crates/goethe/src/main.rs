@@ -20,6 +20,9 @@ use goethe_core::learn;
 use goethe_core::trace;
 use serde_json::{json, Value};
 
+const CTX_MAX: u64 = 1 << 24;
+const MAX_CONC: u64 = 4096;
+
 const KEY_HELP: &str = "On a terminal, goethe api keys alone opens a menu to add, scope, show or delete keys.
 
 Create a key (goethe api lists it again later):
@@ -118,6 +121,8 @@ enum Commands {
     },
     #[command(display_order = 3, about = "Whether Goethe runs, the API address, its keys and the models it serves.")]
     Status,
+    #[command(display_order = 3, about = "Requests, tokens, speed and GPU use per model and API key over a chosen range, from the local usage log.")]
+    Metrics,
     #[command(display_order = 4, about = "Running models in detail: GPUs, port, memory, requests and speed.")]
     Ps {
         #[arg(long, help = "JSON rows with instance_id, slot_key, status, restarts.")]
@@ -135,9 +140,9 @@ enum Commands {
         load: bool,
         #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::gpus), long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "Default GPUs, as goethe gpu lists them: --gpu gpu2 gpu3.")]
         gpu: Vec<u32>,
-        #[arg(long, help = "Default context length.")]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=CTX_MAX), help = "Default context length.")]
         ctx: Option<u64>,
-        #[arg(long = "max-conc", help = "Default max concurrent requests.")]
+        #[arg(long = "max-conc", value_parser = clap::value_parser!(u64).range(1..=MAX_CONC), help = "Default max concurrent requests.")]
         max_conc: Option<u64>,
         #[arg(long, help = "With --load, return once the engine starts instead of waiting until it answers.")]
         no_wait: bool,
@@ -183,9 +188,9 @@ enum Commands {
         gpu: Vec<u32>,
         #[arg(long, value_name = "N", conflicts_with = "gpu", help = "Split the model across N GPUs that goethe picks (with --gpu, the number of GPUs given is used).")]
         tp: Option<u64>,
-        #[arg(long, help = "Context length for this load.")]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=CTX_MAX), help = "Context length for this load.")]
         ctx: Option<u64>,
-        #[arg(long = "max-conc", help = "Max concurrent requests.")]
+        #[arg(long = "max-conc", value_parser = clap::value_parser!(u64).range(1..=MAX_CONC), help = "Max concurrent requests.")]
         max_conc: Option<u64>,
         #[arg(long, help = "Expert parallel size (SGLang --ep-size).")]
         ep: Option<u64>,
@@ -217,7 +222,7 @@ enum Commands {
     },
     #[command(display_order = 9, about = "Try a model by hand: a chat screen on a terminal without INPUT, else one reply, an embedding summary or an audio file's transcript. Loads an installed model that is not loaded and unloads it again.")]
     Run {
-        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", num_args = 0..=2, help = "[MODEL] [INPUT]: MODEL may be left out when one model is loaded.")]
+        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", num_args = 0..=2, help = "[MODEL] [INPUT]: without either, on a terminal, a list of the installed models opens to pick from; with INPUT alone, MODEL may be left out when one model is loaded.")]
         args: Vec<String>,
         #[arg(long, help = "Leave a model loaded that this command loaded (it is unloaded when run ends otherwise).")]
         keep: bool,
@@ -281,7 +286,7 @@ enum Commands {
         public: bool,
         #[arg(long, help = "Print the hardware profile instead: GPUs and links, CPU, RAM, disk, OS, container and cloud.")]
         hardware: bool,
-        #[arg(long, hide = true, help = "Print the heartbeat goethed would send the platform now, without sending it.")]
+        #[arg(long, hide = true, help = "Print the heartbeat goethed would send the console now, without sending it.")]
         snapshot: bool,
         #[arg(long, help = "Fix what doctor finds on this machine (NVIDIA driver, CUDA forward compatibility, a C++ compiler), asking before each change.")]
         fix: bool,
@@ -308,7 +313,7 @@ enum Commands {
         #[arg(long, help = "Skip confirmation.")]
         yes: bool,
     },
-    #[command(display_order = 19, about = "Link this node to the Goethe platform (optional): a browser login, or --authkey for headless machines.")]
+    #[command(display_order = 19, about = "Link this node to the Goethe console (optional): a browser login, or --authkey for headless machines.")]
     Login {
         #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::platform_urls), long = "platform-url", value_name = "URL", help = "Platform to link to (default: the GOETHE_PLATFORM_URL setting, else https://goethe.sh).")]
         platform_url: Option<String>,
@@ -317,7 +322,7 @@ enum Commands {
         #[arg(long, value_name = "WHEN", help = "How long the login lasts: never, or 12h, 30d, 4w; on a linked node it only changes that.")]
         lifetime: Option<String>,
     },
-    #[command(display_order = 20, about = "Unlink this node from the Goethe platform and remove its local credentials.")]
+    #[command(display_order = 20, about = "Unlink this node from the Goethe console and remove its local credentials.")]
     Logout,
     #[command(hide = true, about = "Finish an install: run by install.sh once it verified this goethe; safe to run again to repair or upgrade.")]
     Setup {
@@ -327,7 +332,7 @@ enum Commands {
         from: Option<String>,
         #[arg(long = "keep-file-url", help = "Keep a file:// package host for later updates.")]
         keep_file_url: bool,
-        #[arg(long = "platform-url", value_name = "URL", help = "Platform to log in to.")]
+        #[arg(long = "platform-url", value_name = "URL", help = "Console URL to log in to.")]
         platform_url: Option<String>,
         #[arg(long = "no-link", help = "Do not link goethe and goethed onto PATH.")]
         no_link: bool,
@@ -562,7 +567,7 @@ fn pick_model(query: &str, hits: Vec<String>, what: &str) -> Result<Option<Strin
 }
 
 fn installed_id(id: &str, strict: bool) -> String {
-    // The installed model the user meant: exact id, any case, folder name or alias, else every model whose id has all the words; strict callers stop when nothing matches.
+    // The installed model the user meant: exact id, any case, folder name or exact alias, else every model whose id has all the words; strict callers stop when nothing matches.
     let home = goethe_home();
     let exact = (validate_model_id(id).is_ok()).then(|| models::resolve_installed_id(&home, id));
     let near = match exact {
@@ -575,10 +580,12 @@ fn installed_id(id: &str, strict: bool) -> String {
         Some(Err(e)) => Some(e),
         None => None,
     };
-    if let Some((_, target)) = alias::list().unwrap_or_default().into_iter().find(|(a, _)| a.eq_ignore_ascii_case(id)) {
+    let aliases = alias::list().unwrap_or_default();
+    if let Some((_, target)) = aliases.iter().find(|(a, _)| a == id) {
         eprintln!("using installed model {target} (alias {id})");
-        return target;
+        return target.clone();
     }
+    let near = aliases.iter().find(|(a, _)| a.eq_ignore_ascii_case(id)).map(|(a, _)| format!("no installed model or alias is {id}; aliases match case exactly: did you mean {a}?")).or(near);
     match pick_model(id, models::word_matches(id, &models::installed_ids(&home)), "installed model") {
         Ok(Some(found)) => found,
         Ok(None) if strict => {
@@ -591,6 +598,21 @@ fn installed_id(id: &str, strict: bool) -> String {
             std::process::exit(2);
         }
     }
+}
+
+fn exact_installed(id: &str, installed: &[String], aliases: &[(String, String)]) -> Result<String, String> {
+    // A destructive command without a question (--yes) takes only an exact installed id or alias; a near match is named, never acted on.
+    if installed.iter().any(|m| m == id) {
+        return Ok(id.to_string());
+    }
+    if let Some((_, target)) = aliases.iter().find(|(a, _)| a == id) {
+        return Ok(target.clone());
+    }
+    let near = models::word_matches(id, installed);
+    Err(match near.is_empty() {
+        true => format!("{id} is not an installed model id or alias (goethe models lists them)"),
+        false => format!("with --yes, name the model exactly; {id} matches {}", near.join(", ")),
+    })
 }
 
 fn quant_suffix(query: &str) -> (String, Option<String>) {
@@ -656,6 +678,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("goethe up", "start Goethe now and at every boot"),
         ("goethe down", "stop Goethe; loaded models come back on the next up"),
         ("goethe status", "running or not, the API address, keys and served models"),
+        ("goethe metrics", "requests, tokens, speed and GPU use per model and key over time"),
         ("goethe ps", "running models in detail: GPUs, memory, requests, speed"),
     ]),
     ("Models", &[
@@ -694,7 +717,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("goethe doctor --hardware", "the hardware profile: GPUs and links, CPU, RAM, disk, OS"),
         ("goethe update", "signed update of Goethe, its engines and kernel packs"),
         ("goethe uninstall", "remove Goethe and the models it installed"),
-        ("goethe login", "link this node to the Goethe platform (optional)"),
+        ("goethe login", "link this node to the Goethe console (optional)"),
         ("goethe logout", "unlink it and remove its local credentials"),
         ("goethe completion install", "tab completion for your shell"),
     ]),
@@ -769,6 +792,7 @@ fn main() {
             }
         }),
         Commands::Status => do_status(),
+        Commands::Metrics => goethe_core::menu::metrics(),
         Commands::Ps { json } => do_ps(json),
         Commands::Install {
             model,
@@ -825,7 +849,10 @@ fn main() {
         }
         Commands::Remove { model, yes, force, traces } => {
             let traces = traces.map(|t| t == "delete");
-            each(model, |id| models::run_remove(&installed_id(&id, false), yes, force, traces))
+            each(model, |id| {
+                let id = if yes { exact_installed(&id, &models::installed_ids(&goethe_home()), &alias::list().unwrap_or_default())? } else { installed_id(&id, false) };
+                models::run_remove(&id, yes, force, traces)
+            })
         }
         Commands::Load {
             model,
@@ -864,7 +891,7 @@ fn main() {
             });
             match (saved, dry_run) {
                 (Some(Err(e)), _) => Err(e),
-                (_, true) => hw::run_pick_gpus(tp, Some(checked_id(&model_id))),
+                (_, true) => hw::run_pick_gpus(hw::PickArgs { tp, model: Some(checked_id(&model_id)), ctx, max_conc, gpus: &gpu }),
                 _ => do_load(DoLoadArgs {
                     model_id,
                     gpus: opt_gpus(gpu).map(|v| v.iter().map(u32::to_string).collect::<Vec<_>>().join(",")),
@@ -1619,12 +1646,15 @@ fn do_ps(json: bool) -> Result<(), String> {
     }
     if json {
         println!("{}", reply.stdout.trim());
-    } else {
-        if let Ok(Value::Array(rows)) = serde_json::from_str(reply.stdout.trim()) {
-            print_ps_table(&rows);
-        }
+        return Ok(());
     }
-    Ok(())
+    match serde_json::from_str(reply.stdout.trim()) {
+        Ok(Value::Array(rows)) => {
+            print_ps_table(&rows);
+            Ok(())
+        }
+        _ => Err("goethed answered ps with something that is not a list of instances; goethe ps --json shows it raw".to_string()),
+    }
 }
 
 fn do_gateway_bind(addr: &str) -> Result<(), String> {
@@ -2018,6 +2048,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn remove_with_yes_needs_an_exact_id_or_alias() {
+        let ids = vec!["org/Qwen-27B".to_string(), "org/Qwen-8B".to_string()];
+        let aliases = vec![("fast".to_string(), "org/Qwen-8B".to_string())];
+        assert_eq!(exact_installed("org/Qwen-27B", &ids, &aliases).unwrap(), "org/Qwen-27B");
+        assert_eq!(exact_installed("fast", &ids, &aliases).unwrap(), "org/Qwen-8B");
+        let e = exact_installed("qwen 27b", &ids, &aliases).unwrap_err();
+        assert!(e.contains("name the model exactly") && e.contains("org/Qwen-27B"), "{e}");
+        assert!(exact_installed("org/qwen-27b", &ids, &aliases).is_err(), "case must match too");
+        assert!(exact_installed("FAST", &ids, &aliases).is_err());
+        assert!(exact_installed("llama", &ids, &aliases).unwrap_err().contains("not an installed model"));
+    }
+
+    #[test]
     fn a_quant_suffix_is_split_off_the_model() {
         assert_eq!(quant_suffix("org/m-GGUF:Q8_0"), ("org/m-GGUF".to_string(), Some("Q8_0".to_string())));
         assert_eq!(quant_suffix("qwen 8b:q4_k_m"), ("qwen 8b".to_string(), Some("q4_k_m".to_string())));
@@ -2132,6 +2175,11 @@ mod tests {
     fn models_are_words_and_gpus_are_names() {
         assert!(parse(&["load", "org/m", "--gpu", "gpu2", "gpu3"]).is_ok());
         assert!(parse(&["load", "org/m", "--gpu", "gpu2,gpu3", "--ctx", "4096"]).is_ok());
+        assert!(parse(&["load", "org/m", "--ctx", "16777216", "--max-conc", "4096"]).is_ok(), "the maxima themselves are accepted");
+        for bad in [["--ctx", "0"], ["--ctx", "16777217"], ["--max-conc", "0"], ["--max-conc", "18446744073709551615"]] {
+            assert!(parse(&["load", "org/m", bad[0], bad[1]]).is_err(), "{bad:?}");
+            assert!(parse(&["install", "org/m", bad[0], bad[1]]).is_err(), "{bad:?}");
+        }
         assert!(parse(&["load", "org/m", "--gpu", "gpux"]).is_err());
         assert!(parse(&["load", "org/m", "--gpu", "gpu2", "--tp", "2"]).is_err(), "the GPUs given are the split");
         let Commands::Load { model, extra, .. } = parse(&["load", "qwen", "27b", "--ctx", "4096", "--", "--chunked-prefill-size", "8"]).unwrap().command else { panic!() };

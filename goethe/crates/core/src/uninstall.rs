@@ -43,7 +43,7 @@ pub fn run(opts: UninstallOpts) -> Result<(), String> {
     }
     let linked = crate::platform_cli::is_linked(&home);
     if linked {
-        plan.push("log this node out of the platform and delete its credentials".to_string());
+        plan.push("log this node out of the console and delete its credentials".to_string());
     }
     plan.push(format!("delete everything else in {}", home.display()));
     plan.push("remove installer symlinks that point into GOETHE_HOME".to_string());

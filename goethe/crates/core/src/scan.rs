@@ -531,6 +531,9 @@ fn check_weights(dir: &Path) -> Result<(), String> {
             .values()
             .filter_map(|v| v.as_str())
             .collect();
+        for s in &shards {
+            crate::model_facts::shard_path(dir, s)?;
+        }
         let missing: Vec<&&str> = shards.iter().filter(|s| !dir.join(s).is_file()).collect();
         if let Some(first) = missing.first() {
             return Err(format!("missing shard {first} ({} of {} present)", shards.len() - missing.len(), shards.len()));

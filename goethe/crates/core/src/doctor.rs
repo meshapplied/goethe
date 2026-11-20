@@ -90,7 +90,7 @@ type CheckFn = fn(&Path) -> Check;
 const CHECKS: &[(&str, CheckFn)] = &[
     ("hardware", check_hardware),
     ("driver", check_driver),
-    ("platform", check_platform),
+    ("console", check_platform),
     ("glibc", |_| check_glibc()),
     ("nginx", check_nginx),
     ("goethe_home", check_goethe_home),
@@ -113,7 +113,7 @@ const CHECKS: &[(&str, CheckFn)] = &[
 
 const MAC_CHECKS: &[(&str, CheckFn)] = &[
     ("hardware", check_mac_hardware),
-    ("platform", check_platform),
+    ("console", check_platform),
     ("llama.cpp", check_llama_cpp),
     ("nginx", check_nginx),
     ("goethe_home", check_goethe_home),
@@ -248,7 +248,7 @@ fn platform_note(link: crate::platform_cli::Link) -> (&'static str, String) {
 
 fn check_platform(home: &Path) -> Check {
     let (status, note) = platform_note(crate::platform_cli::link_state(home, crate::service::goethed_running()));
-    check("platform", status, note)
+    check("console", status, note)
 }
 
 fn check(name: &str, status: &str, hint: impl Into<String>) -> Check {
@@ -854,14 +854,14 @@ fn is_writable(path: &Path) -> bool {
 }
 
 fn available_gb(path: &Path) -> Result<f64, String> {
-    use std::ffi::CString;
-    let cpath = CString::new(path.to_str().ok_or("path")?).map_err(|e| e.to_string())?;
+    // Free space in GiB, the unit weights_gb uses, so the comparison with the largest model is like for like.
+    let cpath = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|e| e.to_string())?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
     let rc = unsafe { libc::statvfs(cpath.as_ptr(), &mut stat) };
     if rc != 0 {
-        return Err("statvfs failed".into());
+        return Err(format!("cannot read free space of {}: {}", path.display(), std::io::Error::last_os_error()));
     }
-    Ok((stat.f_bavail as u64 * stat.f_frsize as u64) as f64 / 1e9)
+    Ok(stat.f_bavail as f64 * stat.f_frsize as f64 / crate::model_facts::GIB)
 }
 
 #[cfg(test)]
@@ -906,7 +906,7 @@ mod tests {
         assert!(platform_note(Link::NotLinked).1.contains("goethe login"));
         assert_eq!(platform_note(Link::Linked { workspace: "w".into(), revoked: false, heartbeat: "OK".into(), ok: true }).0, "OK");
         assert_eq!(platform_note(Link::Linked { workspace: "w".into(), revoked: true, heartbeat: String::new(), ok: false }).0, "WARN");
-        assert!(CHECKS.iter().any(|(n, _)| *n == "driver") && CHECKS.iter().any(|(n, _)| *n == "platform"));
+        assert!(CHECKS.iter().any(|(n, _)| *n == "driver") && CHECKS.iter().any(|(n, _)| *n == "console"));
     }
 
     #[test]

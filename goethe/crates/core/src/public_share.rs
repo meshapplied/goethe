@@ -166,7 +166,7 @@ pub fn parse_duration(raw: &str) -> Result<i64, String> {
     // 30m, 5h or 1d: a whole number and one unit, from 1 minute to 7 days.
     let s = raw.trim().to_ascii_lowercase();
     let bad = || format!("duration must be minutes, hours or days such as 30m, 5h or 1d, got {raw:?}");
-    let (num, unit) = s.split_at(s.len().saturating_sub(1));
+    let (num, unit) = s.split_at(s.char_indices().last().map_or(0, |(i, _)| i));
     let n: i64 = num.parse().map_err(|_| bad())?;
     let secs = match unit {
         "m" => n.checked_mul(60),
@@ -592,7 +592,7 @@ pub fn nginx_block(home: &Path, mux_port: u16, modern_http2: bool, max_body_mb: 
     if !cert_path(home).is_file() && ensure_cert(home, None).is_err() {
         return String::new();
     }
-    let mut allow: String = share.allow.iter().map(|c| format!("    allow {c};\n")).collect();
+    let mut allow: String = share.allow.iter().filter_map(|c| security::canonical_cidr(c).ok()).map(|c| format!("    allow {c};\n")).collect();
     allow.push_str("    deny all;\n");
     const TMPL: &str = include_str!("../../../nginx/goethe_public.conf.tmpl");
     TMPL.replace("{{PORT}}", &share.port.to_string())
@@ -672,7 +672,7 @@ mod tests {
         assert_eq!(parse_duration("5h"), Ok(18_000));
         assert_eq!(parse_duration("1D"), Ok(86_400));
         assert_eq!(parse_duration("7d"), Ok(MAX_SECS));
-        for bad in ["", "h", "0m", "8d", "59s", "1.5h", "-1h", "1w", "10000000000000000d", "5 h"] {
+        for bad in ["", "h", "0m", "8d", "59s", "1.5h", "-1h", "1w", "10000000000000000d", "5 h", "5é", "é"] {
             assert!(parse_duration(bad).is_err(), "{bad}");
         }
     }
@@ -764,6 +764,15 @@ mod tests {
         let block = nginx_block(h, 30000, true, 64);
         assert!(block.contains("deny all;"), "{block}");
         assert!(!block.contains("allow "), "empty allowlist must not admit the world: {block}");
+    }
+
+    #[test]
+    fn an_edited_share_file_cannot_write_nginx_directives() {
+        let dir = home_with_keys();
+        let h = dir.path();
+        store(h, &Share { allow: vec!["198.51.100.7/32; include /etc/passwd".into(), "198.51.100.8".into()], ..share(true, now() + 600) }).unwrap();
+        let block = nginx_block(h, 30000, true, 64);
+        assert!(!block.contains("include") && block.contains("allow 198.51.100.8/32;\n    deny all;"), "{block}");
     }
 
     #[test]

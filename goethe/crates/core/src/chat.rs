@@ -42,8 +42,9 @@ pub fn split_think(raw: &str, last: bool) -> (String, String) {
 }
 
 pub fn plain_text(raw: &str, thinking: bool, color: bool) -> String {
-    // A finished reply for a pipe or a plain terminal: the answer, with the reasoning dimmed under a thinking marker when asked for.
-    let (think, answer) = split_think(raw, true);
+    // A finished reply for a pipe or a plain terminal: the answer, with the reasoning dimmed under a thinking marker when asked for; on a terminal without the model's control characters.
+    let raw = if color { clean(raw) } else { raw.to_string() };
+    let (think, answer) = split_think(&raw, true);
     match (thinking && !think.is_empty(), color) {
         (false, _) => answer,
         (true, true) => format!("\x1b[2mthinking\n{think}\x1b[0m\n\n{answer}"),
@@ -68,7 +69,7 @@ pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-fn clean(text: &str) -> String {
+pub(crate) fn clean(text: &str) -> String {
     // What a model sent, safe to draw: control characters (escape sequences included) are dropped, a tab is a space.
     text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).map(|c| if c == '\t' { ' ' } else { c }).collect()
 }
@@ -543,6 +544,18 @@ impl State {
     }
 }
 
+fn run_child(command: &[String]) {
+    // A goethe command in the normal terminal, as if typed, then back on Enter.
+    let exe = std::env::current_exe().unwrap_or_else(|_| "goethe".into());
+    println!("\n$ goethe {}\n", command.join(" "));
+    if let Err(e) = std::process::Command::new(exe).args(command).status() {
+        println!("could not run it: {e}");
+    }
+    print!("\nPress Enter to go back.");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let _ = std::io::stdin().read_line(&mut String::new());
+}
+
 pub(crate) fn run(t: Target, loaded: &mut Loaded, thinking: bool) -> Result<(), String> {
     // The screen until quit; the terminal is restored on every way out (guards drop, and a panic leaves the alternate screen first).
     let prev = std::panic::take_hook();
@@ -577,7 +590,7 @@ pub(crate) fn run(t: Target, loaded: &mut Loaded, thinking: bool) -> Result<(), 
                 Act::Audio(path) => st.audio(&path),
                 Act::Export => st.export(),
                 Act::Record => st.record(),
-                Act::Picker => st.ui.open_picker(crate::home::models()),
+                Act::Picker => st.ui.open_picker(crate::menu::installed_and_loaded(&crate::paths::goethe_home())),
                 Act::Chose(i) => {
                     let (id, up) = st.ui.picks[i].clone();
                     if id == st.t.model {
@@ -586,7 +599,7 @@ pub(crate) fn run(t: Target, loaded: &mut Loaded, thinking: bool) -> Result<(), 
                     if !up {
                         _screen = None;
                         _raw = None;
-                        crate::home::run_child(&["load".to_string(), id.clone()]);
+                        run_child(&["load".to_string(), id.clone()]);
                         _raw = crate::term::RawMode::enter();
                         _screen = Some(Screen::open());
                         st.last.clear();
@@ -732,6 +745,12 @@ mod tests {
         let text = shown.render(40, 8).join("\n");
         assert!(text.contains("thinking") && text.contains("a long thought") && text.contains("done"), "{text}");
         assert_eq!(ui.render(10, 3).len(), 3, "a tiny terminal gets a one-line message");
+    }
+
+    #[test]
+    fn a_reply_printed_on_a_terminal_cannot_send_escape_sequences() {
+        assert_eq!(plain_text("hi\x1b]52;c;ZXZpbA==\x07 there", false, true), "hi]52;c;ZXZpbA== there");
+        assert_eq!(plain_text("raw\x1b[1m", false, false), "raw\x1b[1m", "a pipe gets the reply byte for byte");
     }
 
     #[test]

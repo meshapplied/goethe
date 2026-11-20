@@ -185,8 +185,13 @@ pub fn parse_expires(raw: &str) -> Result<String, String> {
     // "30d" (days from now) or a real calendar date YYYY-MM-DD.
     let s = raw.trim();
     if let Some(days) = s.strip_suffix('d') {
-        let n: i64 = days.parse().map_err(|_| format!("invalid expires: {raw}"))?;
-        let dt = chrono::Utc::now() + chrono::Duration::days(n);
+        let dt = days
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n >= 0)
+            .and_then(chrono::Duration::try_days)
+            .and_then(|d| chrono::Utc::now().checked_add_signed(d))
+            .ok_or_else(|| format!("invalid expires: {raw}"))?;
         return Ok(dt.format("%Y-%m-%d").to_string());
     }
     chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
@@ -356,16 +361,6 @@ pub fn sync_api_keys_conf(home: &Path) {
     write_api_keys_best_effort(home, &con);
 }
 
-pub fn gateway_reload(home: &Path) -> Result<(), String> {
-    nginx::reload(home).map_err(|e| {
-        if e.starts_with("gateway is down:") {
-            e
-        } else {
-            format!("gateway is down: {e}")
-        }
-    })
-}
-
 fn write_api_keys_best_effort(home: &Path, con: &Connection) {
     if let Err(e) = rewrite_api_keys_conf(con, home) {
         eprintln!("warning: api_keys.conf: {e}");
@@ -495,6 +490,9 @@ mod tests {
         assert!(!token.contains(&id));
         assert_eq!(token_hash("x").len(), 64);
         assert!(parse_expires("2026-02-30").is_err());
+        for bad in ["-1d", "99999999999999d", "9223372036854775807d"] {
+            assert!(parse_expires(bad).is_err(), "{bad} is refused, not a panic or a key that expired already");
+        }
         assert_eq!(parse_expires("2030-01-31").unwrap(), "2030-01-31");
     }
 }

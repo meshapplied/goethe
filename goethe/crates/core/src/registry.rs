@@ -173,6 +173,9 @@ fn fetch_any(url: &str) -> Result<Registry, String> {
         let sig = std::fs::read(format!("{}.sig", path.display())).ok();
         return finish_registry(url, text, sig.as_deref());
     }
+    if let Some(why) = crate::update::plain_http_refusal(url) {
+        return Err(why);
+    }
     if url.starts_with("http://") || url.starts_with("https://") {
         return fetch_http_cached(url).or_else(|e| if url == DEFAULT_REGISTRY_URL { bundled() } else { Err(e) });
     }

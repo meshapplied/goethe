@@ -3,6 +3,7 @@
 use crate::keys_menu::fit;
 use crate::models::PickRow;
 use crate::term::{paint, Color};
+pub(super) use crate::status_view::{pad, strip as plain};
 
 pub(super) const LOGO: [&str; 4] = [
     "  ___   ___   ___  _____  _  _   ___ ",
@@ -33,21 +34,6 @@ pub(super) fn gray(text: &str) -> String {
     paint(text, Color::Gray)
 }
 
-pub(super) fn plain(s: &str) -> String {
-    // The text without its color codes.
-    let mut out = String::new();
-    let mut esc = false;
-    for c in s.chars() {
-        match (esc, c) {
-            (false, '\x1b') => esc = true,
-            (true, 'm') => esc = false,
-            (true, _) => {}
-            (false, c) => out.push(c),
-        }
-    }
-    out
-}
-
 pub(super) fn clip(line: String, width: usize) -> String {
     // A line wider than the terminal loses its colors and is cut with an ellipsis, so nothing wraps.
     if crate::term::visible_width(&line) <= width {
@@ -65,8 +51,13 @@ pub(super) fn screen(mut lines: Vec<String>, width: usize, height: usize, footer
     lines.resize(height, String::new());
     lines.into_iter().map(|l| clip(l, width)).collect()
 }
-pub(super) fn pad(line: &str, width: usize) -> String {
-    format!("{line}{}", " ".repeat(width.saturating_sub(crate::term::visible_width(line))))
+pub(super) fn example_below(out: &mut Vec<String>, indent: usize, example: &[String]) {
+    // A schema example under the menu, one empty line apart, at the submenu's indent: its rows hold nothing else, so a copied curl command carries no menu text into the shell.
+    if example.is_empty() {
+        return;
+    }
+    out.push(String::new());
+    out.extend(example.iter().map(|l| if l.is_empty() { String::new() } else { format!("{}{l}", " ".repeat(indent)) }));
 }
 
 pub(super) fn columns(out: &mut Vec<String>, start: usize, left_width: usize, middle: &[String], right: &[String]) {

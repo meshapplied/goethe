@@ -69,14 +69,14 @@ pub(super) fn launch_finish(starting: Starting, notices: String) -> (Value, Stri
         "slot_key": starting.params.slot_key,
     });
     let sk = starting.params.slot_key.clone().unwrap_or_default();
-    load_slot::slot_in_flight_inc(&sk);
+    let in_flight = load_slot::slot_in_flight(&sk);
     thread::spawn(move || {
         let slot = slot_lock(&sk);
         let _guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let _in_flight = in_flight;
         let mut starting = starting;
         startup(&mut starting);
         drop(starting);
-        load_slot::slot_in_flight_dec(&sk);
     });
     (result, notices)
 }
@@ -88,8 +88,14 @@ pub(super) fn startup(s: &mut Starting) {
         match wait_engine_ready(s) {
             Startup::Ready => {
                 warm_up(s);
-                if mark_running(s) {
-                    learn_overhead(s);
+                match mark_running(s) {
+                    Ok(true) => learn_overhead(s),
+                    Ok(false) => {}
+                    Err(e) => {
+                        append_goethed_log(&s.home, &format!("{}: could not record RUNNING ({e}); stopping the engine\n", s.instance_id));
+                        load_slot::push_instance_notice(&s.instance_id, &format!("could not record RUNNING: {e}"));
+                        fail_engine(s);
+                    }
                 }
                 return;
             }
@@ -248,26 +254,22 @@ pub(super) fn learn_weights(s: &Starting) {
     );
 }
 
-pub(super) fn mark_running(s: &Starting) -> bool {
-    // STARTING to RUNNING and the desired slot in one transaction, so a concurrent unload can never resurrect it.
-    let Ok(mut con) = db::open(&s.home) else {
-        return false;
-    };
-    let Ok(tx) = con.transaction_with_behavior(TransactionBehavior::Immediate) else {
-        return false;
-    };
+pub(super) fn mark_running(s: &Starting) -> Result<bool, String> {
+    // STARTING to RUNNING and the desired slot in one transaction, so a concurrent unload can never resurrect it; Ok(false) when the row left STARTING (an unload won).
+    let mut con = db::open(&s.home).map_err(|e| e.to_string())?;
+    let tx = con.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
     let changed = tx
         .execute(
             "UPDATE loaded_instances SET status = 'RUNNING' WHERE instance_id = ?1 AND status = 'STARTING'",
             [&s.instance_id],
         )
-        .unwrap_or(0);
+        .map_err(|e| e.to_string())?;
     if changed == 1 {
-        let _ = autostart::mark_desired(&tx, &s.params);
+        autostart::mark_desired(&tx, &s.params).map_err(|e| format!("desired load: {e}"))?;
     }
-    let ok = tx.commit().is_ok() && changed == 1;
+    tx.commit().map_err(|e| e.to_string())?;
     crate::platform::state_changed();
-    ok
+    Ok(changed == 1)
 }
 
 pub(super) fn cancel_engine(s: &Starting) {

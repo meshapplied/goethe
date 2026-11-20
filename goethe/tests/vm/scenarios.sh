@@ -6,7 +6,7 @@ set -uo pipefail
 DISTRO="$1"
 VERSION="$2"
 CDN="http://10.0.2.2:8999"
-export GOETHE_RELEASE_PUB=/tmp/test_pub.pem GOETHE_LOGIN=0
+export GOETHE_RELEASE_PUB=/tmp/test_pub.pem GOETHE_LOGIN=0 GOETHE_ALLOW_HTTP=1
 G="${HOME}/.goethe/bin/goethe"
 fails=0
 
@@ -28,7 +28,7 @@ install_as_user() {
 install_as_root() {
   local pkg="$1"
   shift
-  curl -fsSL "${CDN}/${pkg}/install.sh" | sudo env GOETHE_PKG_URL="${CDN}/${pkg}" GOETHE_RELEASE_PUB="${GOETHE_RELEASE_PUB}" GOETHE_LOGIN=0 "$@" bash >/tmp/out.log 2>&1
+  curl -fsSL "${CDN}/${pkg}/install.sh" | sudo env GOETHE_PKG_URL="${CDN}/${pkg}" GOETHE_RELEASE_PUB="${GOETHE_RELEASE_PUB}" GOETHE_LOGIN=0 GOETHE_ALLOW_HTTP=1 "$@" bash >/tmp/out.log 2>&1
 }
 
 show() { sed 's/^/    | /' /tmp/out.log | tail -n "${1:-12}"; }
@@ -111,6 +111,10 @@ echo "== a tampered package"
 if install_as_user t; then fail "a tampered goethe is refused"; show; else pass "a tampered goethe is refused"; fi
 check "it says why" has "does not match the signed package list" /tmp/out.log
 check "the install is untouched" test "$(sha "${HOME}/.goethe/bin/goethe")" = "$(sum_of b goethe)"
+
+echo "== plain http to a host that is not this machine"
+if install_as_user a GOETHE_ALLOW_HTTP=0; then fail "plain http is refused"; show; else pass "plain http is refused"; fi
+check "it says why" has "is plain http" /tmp/out.log
 
 echo "== a pinned version"
 if install_as_user a GOETHE_VERSION="${VERSION}"; then pass "pinned install"; else fail "pinned install"; show; fi
