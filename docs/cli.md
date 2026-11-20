@@ -433,7 +433,7 @@ CLI help text stays the source of truth for flags and examples. A later pass can
 
 | Option | Description |
 |---|---|
-| `--check` | Only show what's available |
+| `--check` | Only show what would change: one line per component (goethe and goethed by version and commit, nginx by version, SGLang by wheel, goethe-engine, the ternary pack), then a summary such as `2 updates available (goethe, nginx): run goethe update` or `everything is up to date`. Changes nothing |
 | `--yes` | Don't ask |
 | `--allow-downgrade` | Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries); not with `engine` |
 

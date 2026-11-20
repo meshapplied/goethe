@@ -10,6 +10,7 @@ For people who change Goethe itself: the `goethe` CLI, the `goethed` daemon, the
 | [workflows.md](workflows.md) | You build, test, lint, release, or add a command, RPC, engine, registry model or heartbeat field. |
 | [security.md](security.md) | You touch keys, signatures, the gateway, the public share, file permissions or anything that leaves the machine. |
 | [best-practices.md](best-practices.md) | Before your first change, and as the checklist before every pull request. |
+| [audit1.md](audit1.md) | You want the findings of the November 2026 audit: what was fixed, the open risks and what to do about them. |
 
 The rules agents and humans follow in this repo are in [AGENTS.md](../../AGENTS.md). Where this documentation and the code disagree, the code wins; fix the documentation in the same pull request.
 

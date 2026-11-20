@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Goethe installer: check this machine, verify the signed package, then the verified goethe sets itself up (goethe setup) the same way on Linux and macOS.
+# Goethe installer for Linux, macOS, and WSL (Windows uses install.ps1, which runs this script inside Ubuntu).
 
 set -euo pipefail
 

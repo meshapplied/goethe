@@ -11,6 +11,7 @@ pub mod host_compiler;
 pub mod hw;
 pub mod inflight;
 pub mod install;
+pub mod install_gguf;
 pub mod load_wait;
 pub mod memory_spec;
 pub mod model_facts;

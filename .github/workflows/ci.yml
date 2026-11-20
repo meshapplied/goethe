@@ -93,7 +93,16 @@ jobs:
         run: python3 tests/lint_style.py
       - name: Shell syntax of installer and packaging scripts
         working-directory: goethe
-        run: for f in cdn/install.sh packaging/*.sh tests/gate.sh tests/*.sh; do bash -n "$f"; done
+        run: |
+          for f in cdn/install.sh packaging/*.sh tests/gate.sh tests/*.sh; do bash -n "$f"; done
+          test -f cdn/install.ps1
+          python3 -c "
+          p=open('cdn/install.ps1','rb').read()
+          assert p.startswith(b'#'), 'install.ps1 must start with a comment'
+          assert b'WSL' in p and b'install.sh' in p, 'install.ps1 must hand off to install.sh'
+          assert all(b<128 for b in p), 'install.ps1 must be ASCII-only for Windows PowerShell 5.1'
+          assert len(p)>500
+          "
 
   attribution:
     runs-on: ubuntu-24.04

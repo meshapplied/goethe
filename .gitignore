@@ -40,3 +40,6 @@ modal/
 goethe/tests/icl/
 goethe/tests/learn/.work/
 goethe/tests/vm/.work/
+
+# Local equivalence-gate baselines
+.equiv-split-base/

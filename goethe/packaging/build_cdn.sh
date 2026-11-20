@@ -111,6 +111,7 @@ write_buildinfo() {
     echo "fork_untracked_files=${untracked}"
     echo "patch_sha256=$(sha256sum "${ROOT}/sglang/goethe-marlin.patch" | awk '{print $1}')"
     echo "uv_version=${UV_VERSION}"
+    echo "nginx_version=$(sed -n 's/^NGINX_VERSION=//p' "${ROOT}/packaging/nginx_versions.sh")"
     echo "rust_toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' "${ROOT}/rust-toolchain.toml")"
     echo "arches=${ARCHES}"
     echo "release=${RELEASE}"
@@ -187,6 +188,7 @@ cp "${ROOT}/cdn/v1/registry.json" "${DIST}/v1/registry.json"
 cp "${ROOT}"/pyenv/requirements*.lock "${ROOT}/pyenv/bootstrap.sh" "${DIST}/pyenv/"
 "${ROOT}/packaging/subst_install_pubkey.sh" "${ROOT}/cdn/install.sh" "${RELEASE_PUB}" \
   "${DIST}/install.sh"
+cp "${ROOT}/cdn/install.ps1" "${DIST}/install.ps1"
 if [[ -n "${GOETHE_SIGN_KEY:-}" ]]; then
   "${ROOT}/packaging/sign_cdn.sh" "${DIST}" "${GOETHE_SIGN_KEY}"
 fi

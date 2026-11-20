@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `goethe update --check` names nginx by version (from the package's BUILDINFO, which now records it), marks a rebuild of the same wheel or version as "another build", and ends with a summary of what would change.
 - `goethe run` without a model opens a list of the installed models to pick from (loaded ones first); a model that is not loaded is loaded for the chat and unloaded after unless `--keep`.
 - goethed keeps a local usage log, linked or not: per-model requests by outcome, prompt and generated token counts, latency and time-to-first-token histograms and decode speed, plus 5 s GPU and host samples (utilisation, VRAM, power, temperature, throttling, CPU, RAM, disk), as clock-minute rows for 48 hours and hourly rows for 90 days in `state.db`. Counts and timings only. A linked node sends the new minute rows with its heartbeat (per model, GPU and host; no API keys). See Usage log in `docs/cli.md`.
 - The gateway streams every chat, completions, Anthropic messages and Responses request from the engine and rebuilds the reply for a client that did not stream, so time to first token, decode speed and token counts are measured for every request with any engine.

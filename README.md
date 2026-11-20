@@ -21,8 +21,14 @@
 Goethe turns a Linux machine into your own API, compatible with OpenAI, Anthropic and LiteLLM clients. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
 
 ```bash
-curl -fsSL https://goethe.sh/install.sh | bash
+curl -fsSL https://pkg.goethe.sh/install.sh | bash
 goethe
+```
+
+On Windows 10/11 (x64), elevated PowerShell (enables WSL2, then runs the same `install.sh` inside Ubuntu):
+
+```powershell
+irm https://pkg.goethe.sh/install.ps1 | iex
 ```
 
 `goethe` on its own starts Goethe and, the first time, walks you through three steps: install a model, serve it through the API, and configure who can reach it. If you prefer plain commands, these do the same:

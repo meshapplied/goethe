@@ -64,12 +64,10 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     let want_ternary = opts.ternary || (want_engines && ternary_installed(home));
     let (sglang, engine) = if want_engines { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
     let ternary = if want_ternary { ternary_delta(home, &sums) } else { None };
-    let nginx = nginx_delta(home, &sums, &arch);
     let local_commit = option_env!("GOETHE_GIT_COMMIT").unwrap_or("unknown");
-    let remote_commit = fetch_verified(pkg, &sums, "BUILDINFO", tmp)
-        .ok()
-        .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|text| buildinfo_commit(&text, local_commit.trim_end_matches("-dirty").len()));
+    let buildinfo = fetch_verified(pkg, &sums, "BUILDINFO", tmp).ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
+    let remote_commit = buildinfo_commit(&buildinfo, local_commit.trim_end_matches("-dirty").len());
+    let nginx = nginx_delta(home, &sums, &arch, buildinfo_value(&buildinfo, "nginx_version"));
     let published = published_label(&remote_ver, remote_commit.as_deref(), local_commit, bins && order == Ordering::Equal);
     let installed = if bins { build_label(&local_ver, Some(local_commit)) } else { published.clone() };
     let parts = [
@@ -84,6 +82,7 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
         println!("{}", d.line(what));
     }
     if opts.check_only || pending.iter().all(|(_, d)| !d.differs) {
+        println!("{}", check_summary(&pending));
         return Ok(());
     }
     let what = pending.iter().filter(|(_, d)| d.differs).map(|(w, _)| *w).collect::<Vec<_>>().join(", ");
@@ -166,25 +165,49 @@ fn binaries_differ(home: &Path, sums: &Path, arch: &str) -> Result<bool, String>
     Ok(false)
 }
 
-fn nginx_delta(home: &Path, sums: &Path, arch: &str) -> Option<Delta> {
-    // Bundled nginx when the package ships one and the on-disk binary differs (or is missing).
+fn nginx_delta(home: &Path, sums: &Path, arch: &str, published_version: Option<&str>) -> Option<Delta> {
+    // Bundled nginx when the package ships one and the on-disk binary differs (or is missing), named by version where both sides know it.
     let rel = format!("bin/{}/nginx", platform_dir(arch));
     let want = lookup_sum(sums, &rel).ok()?;
     let dest = home.join("nginx-root/usr/sbin/nginx");
     let have = sha256_file(&dest).ok();
+    let version = crate::nginx::nginx_version(&dest).map(|(a, b, c)| format!("{a}.{b}.{c}"));
+    let (installed, published) = nginx_labels(have.as_deref(), version.as_deref(), &want, published_version);
+    Some(Delta { installed: Some(installed), published, differs: have.as_deref() != Some(want.as_str()) })
+}
+
+fn nginx_labels(have_sha: Option<&str>, have_version: Option<&str>, want_sha: &str, want_version: Option<&str>) -> (String, String) {
+    // Versions when both are known ("1.30.6" -> "1.30.7", or "another build" of the same version), else 12-character hashes.
     let short = |s: &str| s.chars().take(12).collect::<String>();
-    Some(Delta {
-        installed: have.as_deref().map(short).or(Some("missing".into())),
-        published: short(&want),
-        differs: have.as_deref() != Some(want.as_str()),
-    })
+    let Some(have_sha) = have_sha else {
+        return ("missing".to_string(), want_version.map_or_else(|| short(want_sha), str::to_string));
+    };
+    match (have_version, want_version) {
+        (Some(h), _) if have_sha == want_sha => (h.to_string(), h.to_string()),
+        (Some(h), Some(w)) if h == w => (h.to_string(), format!("{w} (another build)")),
+        (Some(h), Some(w)) => (h.to_string(), w.to_string()),
+        _ => (short(have_sha), short(want_sha)),
+    }
+}
+
+fn buildinfo_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines().find_map(|l| l.trim().strip_prefix(key)?.strip_prefix('=').map(str::trim)).filter(|v| !v.is_empty())
 }
 
 fn buildinfo_commit(text: &str, len: usize) -> Option<String> {
     // engine_commit from BUILDINFO, shortened like the local commit, with -dirty for a dirty tree.
-    let value = |key: &str| text.lines().find_map(|l| l.trim().strip_prefix(key)?.strip_prefix('=').map(str::trim));
-    let commit: String = value("engine_commit").filter(|c| !c.is_empty())?.chars().take(len.max(7)).collect();
-    Some(if value("engine_dirty") == Some("1") { format!("{commit}-dirty") } else { commit })
+    let commit: String = buildinfo_value(text, "engine_commit")?.chars().take(len.max(7)).collect();
+    Some(if buildinfo_value(text, "engine_dirty") == Some("1") { format!("{commit}-dirty") } else { commit })
+}
+
+fn check_summary(pending: &[(&str, Delta)]) -> String {
+    // The last line of goethe update --check: what would change, or that nothing would.
+    let due: Vec<&str> = pending.iter().filter(|(_, d)| d.differs).map(|(w, _)| *w).collect();
+    match due.len() {
+        0 => "everything is up to date".to_string(),
+        1 => format!("1 update available ({}): run goethe update", due[0]),
+        n => format!("{n} updates available ({}): run goethe update", due.join(", ")),
+    }
 }
 
 fn build_label(version: &str, commit: Option<&str>) -> String {
@@ -225,7 +248,9 @@ impl Delta {
 
     fn line(&self, what: &str) -> String {
         let installed = self.installed.as_deref().unwrap_or("not recorded");
-        if self.differs {
+        if self.differs && installed == self.published {
+            format!("update available: {what} {installed} -> another build of it")
+        } else if self.differs {
             format!("update available: {what} {installed} -> {}", self.published)
         } else {
             format!("{what} {installed} is up to date")
@@ -588,6 +613,21 @@ fn upgrade_summary(before: usize, kept: usize, running: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_names_nginx_by_version_and_ends_with_a_summary() {
+        assert_eq!(nginx_labels(Some("aaaa"), Some("1.30.6"), "bbbb", Some("1.30.7")), ("1.30.6".into(), "1.30.7".into()));
+        assert_eq!(nginx_labels(Some("aaaa"), Some("1.30.7"), "bbbb", Some("1.30.7")), ("1.30.7".into(), "1.30.7 (another build)".into()));
+        assert_eq!(nginx_labels(Some("aaaaaaaaaaaaaaaa"), None, "bbbbbbbbbbbbbbbb", Some("1.30.7")), ("aaaaaaaaaaaa".into(), "bbbbbbbbbbbb".into()), "an older package names hashes");
+        assert_eq!(nginx_labels(None, None, "bbbb", Some("1.30.7")), ("missing".into(), "1.30.7".into()));
+        assert_eq!(nginx_labels(Some("aaaa"), Some("1.30.7"), "aaaa", None), ("1.30.7".into(), "1.30.7".into()), "the same file is the same version");
+        assert_eq!(Delta::of("w.whl", "w.whl", true).line("SGLang"), "update available: SGLang w.whl -> another build of it");
+        let up = Delta::of("1", "1", false);
+        let due = |w| Delta { installed: Some("a".into()), published: "b".into(), differs: w };
+        assert_eq!(check_summary(&[("goethe", up)]), "everything is up to date");
+        assert_eq!(check_summary(&[("goethe", due(true)), ("nginx", due(true)), ("SGLang", due(false))]), "2 updates available (goethe, nginx): run goethe update");
+        assert_eq!(buildinfo_value("a=1\nnginx_version=1.30.7\n", "nginx_version"), Some("1.30.7"));
+    }
 
     #[test]
     fn a_file_package_is_read_from_disk() {

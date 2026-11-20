@@ -32,10 +32,18 @@ Goethe turns a Linux machine into your own API, compatible with OpenAI, Anthropi
 ## Quick install
 
 ```bash
-curl -fsSL https://goethe.sh/install.sh | bash
+curl -fsSL https://pkg.goethe.sh/install.sh | bash
 goethe login
 goethe
 ```
+
+**Windows 10/11 (x64):** elevated PowerShell runs the same installer inside WSL2 Ubuntu:
+
+```powershell
+irm https://pkg.goethe.sh/install.ps1 | iex
+```
+
+Then in WSL: `goethe up` and `goethe api expose local`. From Windows use HTTPS: `curl.exe -k https://127.0.0.1:8443/`.
 
 `goethe login` links the machine to the Goethe console, which also unlocks optimised kernels; it is optional. `goethe` on its own starts Goethe and, while nothing is installed, walks you through three steps: install a model, serve it through the API, and configure who can reach it. You can stop after any step and continue later with `goethe`. If you prefer plain commands:
 
