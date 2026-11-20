@@ -24,12 +24,13 @@ Throughput (one RTX 5090, replayed agent turns, mean context ~28k, thinking on):
 
 ## Patches
 
-`install.sh` and `fetch_model.sh` apply two changes by default. Speculative decoding stays exact, so the output distribution does not change.
+`install.sh` and `fetch_model.sh` apply three changes by default. Speculative decoding stays exact, so the output distribution does not change.
 
 - `patches/ninfer-dn-sched.patch`: a better tile for the MLP down projection at 16 tokens or fewer. Same output bit for bit, about 1.4 % faster.
+- `patches/openai-tool-name-128.patch`: accepts tool names up to 128 characters (`[A-Za-z0-9_-]{1,128}`) instead of 64 on the OpenAI chat route.
 - `patches/apply_head.py`: the draft-token shortlist behind `--lm-head-draft` never contained `<tool_call>` and `</tool_call>`, so every tool call cost rejected drafts. This swaps 677 rows of it in the model file, about 3.5 % faster on agent traffic. The original rows are kept in `<model>.head-orig`.
 
-Together about 5 % faster decode, see [RESULTS.md](RESULTS.md#patches). The throughput table above was measured without them. `NVFP4_PATCHES=0 ./install.sh` builds NInfer unpatched, `NVFP4_HEAD=0 ./fetch_model.sh` keeps or restores the original head.
+The two speed patches together give about 5 % faster decode, see [RESULTS.md](RESULTS.md#patches). The throughput table in RESULTS.md was measured without them. `NVFP4_PATCHES=0 ./install.sh` builds NInfer unpatched, `NVFP4_HEAD=0 ./fetch_model.sh` keeps or restores the original head.
 
 Third-party attribution: [NOTICE](NOTICE).
 

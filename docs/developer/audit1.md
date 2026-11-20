@@ -109,6 +109,7 @@ These are ordered by what to do first. Each has a recommended action and its cos
      - pin every action to a commit SHA.
    - **Cost:** half a day, plus one release to verify.
    - **Priority:** do this before the next release.
+   - **Status:** done. The `build` job runs with `GOETHE_ALLOW_UNSIGNED=1`, `GOETHE_SIGN_KEY` is a `release`-environment secret used only by `merge`, and every action in `release.yml` is pinned by SHA.
 2. **goethe-engine and NInfer receive the engine key on their command line**, where any local user can read it (`/proc/<pid>/cmdline`) and call the engine directly, skipping gateway auth.
    - **Do:** have goethe-engine (and the NInfer server) read `GOETHE_ENGINE_API_KEY` from the environment, as SGLang's boot shim and llama.cpp already do; then drop the argument in `engines/goethe_engine.rs` and `engines/ninfer.rs`.
    - **Cost:** a small change in the goethe-engine repo plus a pin bump.
@@ -133,7 +134,7 @@ These are ordered by what to do first. Each has a recommended action and its cos
    - **Registry:** use the cached registry offline, and send the package token for registry requests.
    - **CLI and repo housekeeping:**
      - `restore_desired` has no setter left; add `goethe config restore on|off` or drop the knob;
-     - pin uv in one place (it is in three);
+     - pin uv in one place (it is in four);
      - narrow about 90 `pub` items that are only used inside their own file.
 
 ## Suggestions

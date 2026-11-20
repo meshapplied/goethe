@@ -5,7 +5,7 @@ The trust model, the rules that keep it, and the risks that are known and still 
 ## Release trust
 
 - **The trust anchor.** `goethe/packaging/release_pub.pem` (P-256) is compiled into every binary by `release_key.rs`. Every release-key signature check goes through `release_key::verify`, and a test enforces that.
-  - A key in the home or the environment is never trusted. A release binary refuses to run while `GOETHE_RELEASE_PUB` is set.
+  - A key in the home or the environment is never trusted. A release binary fails every release-key signature check while `GOETHE_RELEASE_PUB` is set.
   - Only a build with the `test-release-key` feature reads `GOETHE_RELEASE_PUB`, and `lint_style.py` keeps that feature out of every shipped build path.
 - **What is signed.** `SHA256SUMS` lists every file of the package and `SHA256SUMS.sig` signs it. `v1/registry.json` has its own `.sig`.
   - `install.sh` carries the same public key (substituted at build) and verifies the list with `openssl` before it runs any downloaded binary.
@@ -30,7 +30,7 @@ A check that cannot complete refuses. Silent success is a bug. Concretely:
 - **Unreadable signature.** A signature that is missing, unreadable or made with another key stops the install or update with a message that says what to do.
 - **Gateway allowlist.** The gateway denies every address by default: the config is `include allowlist.conf; deny all;`, and an empty allowlist admits nobody.
 - **Public share.** It is refused, with a reason code, when no window is open, the key is not in the window, the key is an admin key, the grant has ended, or the client address is not in the grant's CIDRs. Its nginx block always ends in `deny all`, and allow entries are canonicalized before they are written.
-- **Pack lookup.** A pack lookup that fails is an error, not a silent fallback to the plain runtime (`GOETHE_ALLOW_FALLBACK` and `--fallback` are explicit).
+- **Pack lookup.** When a kernel pack cannot run here, the plain runtime takes over and goethe says why; it is never silent. `GOETHE_ALLOW_FALLBACK=0` makes it an error, and `--fallback` overrides that. A `pack_only` model with no pack for this GPU is refused before any download.
 - **Model scope.** An empty or unparseable model scope admits no model.
 - **Foreign GPU processes.** Goethe never stops a process it did not start. A load onto a GPU with foreign processes asks first and exits 3 without `--yes`.
 
@@ -89,7 +89,6 @@ A check that cannot complete refuses. Silent success is a bug. Concretely:
 These are known and not fixed yet. Fix them through normal pull requests, and remove the line when you do.
 
 - **Engine key on argv (high on shared hosts).** goethe-engine and NInfer receive `--api-key` on the command line, so any local user can read it from `/proc/<pid>/cmdline` and call the engine port directly, past auth, scope and limits. SGLang and llama.cpp already read the key from the environment. The fix needs goethe-engine and NInfer to read `GOETHE_ENGINE_API_KEY`.
-- **Signing key exposure in CI.** The signing key is present in the release `build` job while third-party build code runs. Sign only in `merge` under the `release` environment, and pin actions by commit SHA.
 - **Raw tokens at rest.** `api_keys.token` keeps raw tokens at rest, readable by anyone who can read `state.db` (same user).
 - **Public share and X-Real-IP.** The public-share mux listener is on loopback (`127.0.0.2`, or `127.0.0.1:<mux+200>` on macOS). A local user can connect to it directly and set `X-Real-IP`, so the share's address check holds only behind nginx. Local users can use any key on the private listener anyway, so this grants nothing new.
 - **Blocking cache refresh.** `GatewayCache` refreshes under a std mutex on the async request path. Another process holding a write lock can stall a runtime worker for up to the 200 ms busy timeout.
