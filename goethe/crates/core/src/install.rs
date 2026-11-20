@@ -200,7 +200,7 @@ fn install_model(home: &Path, opts: &InstallOpts) -> Result<String, String> {
         match install_hub(home, opts) {
             Ok(t) => t,
             Err(e) if gated_but_installed(&e, is_installed(home, &opts.model_id), opts.force) => {
-                println!("{} is already installed; --force downloads it again", opts.model_id);
+                crate::step::say(&format!("{} is already installed; --force downloads it again", opts.model_id));
                 return Ok(opts.model_id.clone());
             }
             Err(e) => return Err(e),
@@ -362,9 +362,9 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                     let marlin = pack_marlin_gb(&cfg, &choice.offer.hf_repo, &rev, &files);
                     let cap = plan.variants.iter().position(|v| *v == files).and_then(|i| plan.variant_ids.get(i)).and_then(|id| crate::packs::variant_max_ctx(&plan.prefix, id));
                     let view = if opts.load { crate::recommend::View::new(home, hw) } else { crate::recommend::View::capacity(home, hw) };
-                    println!("{}", pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: cap }, &card_dir)?);
+                    crate::step::say(&pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: cap }, &card_dir)?);
                 }
-                (Err(e), _) | (_, Err(e)) => eprintln!("note: the per-GPU fit was not checked before the download: {e}"),
+                (Err(e), _) | (_, Err(e)) => crate::step::note(&format!("note: the per-GPU fit was not checked before the download: {e}")),
             }
             confirm(opts, &format!("{} ({}, {:.1} GB) with optimised kernels for {}{spec}", opts.model_id, choice.offer.format, bytes(&files) as f64 / GIB, choice.offer.arch))?;
             let pack_dl = DownloadOpts { revision: Some(rev), force: opts.force, no_verify: opts.no_verify, only: Some(files.clone()) };
@@ -376,7 +376,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 let only = Some(d.files.iter().map(|f| f.0.clone()).collect());
                 let dl = DownloadOpts { revision: d.revision, force: opts.force, no_verify: opts.no_verify, only };
                 if let Err(e) = hf::ensure_model(home, &d.repo, &card_dir.join("drafter"), &dl) {
-                    eprintln!("note: speculative decoding off: {e}");
+                    crate::step::note(&format!("note: speculative decoding off: {e}"));
                 }
             }
             gguf_metadata(home, &card_dir, &choice.offer.format, &files)?;
@@ -402,13 +402,13 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         Choice::Sglang => None,
         Choice::Gguf(files) => Some(files),
         Choice::Build { repo, why } => {
-            println!("{}: {why}; installing its GGUF build {repo} with llama.cpp", opts.model_id);
+            crate::step::say(&format!("{}: {why}; installing its GGUF build {repo} with llama.cpp", opts.model_id));
             return install_hub(home, &InstallOpts { model_id: repo, ..opts.clone() });
         }
     };
     if gguf.is_none() && !cfg!(target_os = "macos") {
         if let crate::host_compiler::Verdict::Unusable(why) = crate::host_compiler::verdict(crate::host_compiler::find().as_ref(), &crate::nvidia_driver::probe().distro) {
-            eprintln!("note: SGLang builds GPU kernels when this model first loads: {why}");
+            crate::step::note(&format!("note: SGLang builds GPU kernels when this model first loads: {why}"));
         }
     }
     if !hf::offline_mode() {
@@ -449,7 +449,7 @@ fn readable<T>(choice: Option<T>, meta: impl FnOnce(&T) -> Result<(), String>, a
     match (meta(&c), allow) {
         (Ok(()), _) => Ok(Some(c)),
         (Err(e), true) => {
-            eprintln!("note: the optimised kernels were not used, serving with the plain runtime: {e}");
+            crate::step::note(&format!("note: the optimised kernels were not used, serving with the plain runtime: {e}"));
             Ok(None)
         }
         (Err(e), false) => Err(format!("the optimised kernels for these weights cannot be used: {e}; {FALLBACK_HINT}")),
@@ -489,7 +489,10 @@ fn config_for_pack(home: &Path, opts: &InstallOpts, dir: &Path, c: &PackChoice, 
 fn confirm(opts: &InstallOpts, plan: &str) -> Result<(), String> {
     // One line before any download: what, how big, which engine; a terminal confirms it unless --yes.
     if opts.yes || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
-        println!("{plan}");
+        match crate::step::compact() {
+            true => println!("{}", crate::term::paint(&opts.model_id, crate::term::Color::Bold)),
+            false => println!("{plan}"),
+        }
         return Ok(());
     }
     match crate::term::ask(&format!("{plan}: download? [Y/n]"), "y")?.to_ascii_lowercase().starts_with('y') {
@@ -623,7 +626,7 @@ fn ternary_base_revision(pack_dir: &Path, base: &str) -> Option<String> {
     let cfg: Value = serde_json::from_str(&text).ok()?;
     if let Some(named) = cfg.get("base_model").and_then(|v| v.as_str()) {
         if named != base {
-            eprintln!("warning: pack was built for base {named}, registry names {base}");
+            crate::step::note(&format!("warning: pack was built for base {named}, registry names {base}"));
         }
     }
     cfg.get("base_revision").and_then(|v| v.as_str()).map(String::from)
@@ -831,7 +834,7 @@ pub fn vram_estimate(dir: &Path, cfg: &Value, facts: &model_facts::ModelFacts, e
         && !sgl::has_flag(extra, "--no-ple-offload-embedding");
     let ple_gb = if ple_offload {
         safetensors::tensor_bytes_in_dir(dir, &safetensors::is_ple_embedding).unwrap_or_else(|e| {
-            eprintln!("warning: offloaded embedding size unknown: {e}");
+            crate::step::note(&format!("warning: offloaded embedding size unknown: {e}"));
             0
         }) as f64
             / GIB
@@ -897,7 +900,7 @@ fn register(home: &Path, opts: &InstallOpts, mut t: Target) -> Result<(), String
         }
         t.pack = None;
         planned = plan(home, opts, &t)?;
-        println!("{why}; using {}", crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?.id);
+        crate::step::say(&format!("{why}; using {}", crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?.id));
     }
     ensure_runtime(home, crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?)?;
     commit(home, &planned, "installed", &mut std::io::stdout())
@@ -1044,7 +1047,7 @@ pub fn unpack_failed(home: &Path, model_id: &str, log: &str) -> Result<bool, Str
     let engine = crate::engines::of_card(&toml::Value::Table(p.table.clone()))?;
     ensure_runtime(home, engine)?;
     p.table.insert(PACK_SKIPPED.into(), toml::Value::String(why.clone()));
-    println!("{why}; using {}", engine.id);
+    crate::step::say(&format!("{why}; using {}", engine.id));
     commit(home, &p, "installed", &mut std::io::sink())?;
     Ok(true)
 }
@@ -1107,7 +1110,7 @@ fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) 
     let variant = crate::packs::finish(home, &p.dir, &c.offer.arch, plan, &broker, &run);
     drop(beat);
     let variant = variant?;
-    println!("{}", crate::step::row("kernels", &format!("{} verified{}", c.offer.arch, crate::step::took(started.elapsed()))));
+    crate::step::say(&crate::step::row("kernels", &format!("{} verified{}", c.offer.arch, crate::step::took(started.elapsed()))));
     pack_card(home, p, &c.offer.arch, &variant, cli_ctx)
 }
 
@@ -1328,7 +1331,7 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         match safetensors::marlin_extra_bytes_in_dir(dir) {
             Ok(n) => Some(n as f64 / GIB),
             Err(e) => {
-                eprintln!("warning: marlin_extra_gb scan skipped: {e}");
+                crate::step::note(&format!("warning: marlin_extra_gb scan skipped: {e}"));
                 None
             }
         }
@@ -1423,9 +1426,17 @@ pub fn commit(home: &Path, p: &Planned, verb: &str, out: &mut dyn Write) -> Resu
     )
     .map_err(|e| format!("state.db: {e}"))?;
     if let Some(note) = drop_shadowing_alias(&con, &p.model_id)? {
-        eprintln!("warning: {note}");
+        crate::step::note(&format!("warning: {note}"));
     }
     let runtime = crate::engines::of_card(&toml::Value::Table(p.table.clone())).map_or("sglang", |e| e.id);
+    if crate::step::compact() && verb == "installed" {
+        let kernel = crate::models::engine_label(Some(runtime));
+        let line = match crate::models::installed_fit(home, &p.model_id) {
+            Some((gb, ctx, _)) => format!("Model installed: kernel: {kernel}  ctx: {ctx}  total maximum VRAM: {gb:.1} GB"),
+            None => format!("Model installed: kernel: {kernel}  ctx: {}", p.ctx),
+        };
+        return writeln!(out, "{line}").map_err(|e| e.to_string());
+    }
     let per_request = crate::progress::size((p.vram.kv_bytes_per_token as f64 * p.ctx as f64 + p.vram.state_gb / 4.0 * GIB) as u64);
     let quant = p.quant.as_deref().map_or(String::new(), |q| format!("  {q}"));
     let said = if verb == "installed" { String::new() } else { format!("{verb} ") };
@@ -1602,7 +1613,7 @@ pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), Stri
         if json_out {
             eprintln!("{message}");
         } else {
-            println!("{message}");
+            crate::step::say(&message);
         }
     }
     let iid = reply
@@ -1633,7 +1644,8 @@ pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), Stri
         println!("{out}");
     } else {
         let secs = (!no_wait).then(|| started.elapsed().as_secs_f64());
-        println!("{}", load_status_line(&model_id, &iid, row.as_ref(), &reply.result, secs));
+        let line = load_status_line(&model_id, &iid, row.as_ref(), &reply.result, secs);
+        if no_wait { println!("{line}") } else { crate::step::say(&line) }
     }
     Ok(())
 }

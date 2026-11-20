@@ -148,7 +148,7 @@ Unloads a model and deletes the files Goethe downloaded. For a folder you regist
 
 ### `goethe load <model> [-- <engine options>]`
 
-Loads a model and waits until it answers. Goethe picks the GPUs and sizes the memory unless you choose.
+Loads a model and waits until it answers. Goethe picks the GPUs and sizes the memory unless you choose. On a terminal it shows the context window, the concurrency and the VRAM it will hold, then a bar that fills as the model reaches VRAM; piped, or with `--verbose`, it prints the plan and a final `RUNNING:` line.
 
 | Option | Description |
 |---|---|
@@ -186,7 +186,7 @@ Stops a model. Requests in progress finish first.
 
 ### `goethe run [MODEL] [INPUT]`
 
-Tries a model by hand. Without MODEL or INPUT on a terminal, a list of the installed models opens at the top of the screen (loaded ones first, marked `loaded`): ↑↓ move, Enter runs the chosen one, `q` or ← leaves. With text it prints one reply (a text model), an embedding summary (`dims= norm= [first 4]`) or, for an audio file, its transcript. With no INPUT on a terminal it opens an ephemeral chat screen; with no terminal, or `--plain`, a plain `> ` prompt (a speech model records from the microphone). An installed model that is not loaded is loaded first, like `goethe load` but with a 100,000-token context (or the model's maximum when smaller; reduced when the GPU cannot fit it), and unloaded when run ends unless `--keep`; run never installs. It talks to the model's own engine on 127.0.0.1 with its engine key, not through the gateway, and creates no API key.
+Tries a model by hand. Without MODEL or INPUT on a terminal, a list of the installed models opens at the top of the screen (loaded ones first, marked `loaded`): ↑↓ move, Enter runs the chosen one, `q` or ← leaves. With text it prints one reply (a text model), an embedding summary (`dims= norm= [first 4]`) or, for an audio file, its transcript. With no INPUT on a terminal it opens an ephemeral chat screen; with no terminal, or `--plain`, a plain `> ` prompt (a speech model takes an audio file as INPUT). An installed model that is not loaded is loaded first, like `goethe load` but with a 100,000-token context (or the model's maximum when smaller; reduced when the GPU cannot fit it), and unloaded when run ends unless `--keep`. A model that was loaded (or loading) before run started stays loaded; run never installs. It talks to the model's own engine on 127.0.0.1 with its engine key, not through the gateway, and creates no API key.
 
 | Option | Description |
 |---|---|
@@ -194,7 +194,7 @@ Tries a model by hand. Without MODEL or INPUT on a terminal, a list of the insta
 | `--plain` | No chat screen |
 | `--thinking` | Show the model's reasoning, dimmed, with the answer (hidden by default) |
 
-Chat screen: the model on the top line, the conversation from the top row down (it follows the reply as it streams), your line and the keys at the bottom. Each message starts with a `➤ User` or `➤ Model` line in the theme's colors. Once a reply is in, the keys line also shows this chat's generated tokens and average decode speed (tokens over the time from first to last token), with the last reply's when there is room; these chats are not in the usage log and the numbers go when it closes. Typing: Enter sends, Esc opens the command keys. Commands: `m` pick or load another model (starts a new conversation), `e` export, `r` record (speech models), `i` or Enter back to typing, `q` quit (Enter confirms, `q` goes back; Ctrl-C asks the same). Up and Down or `k` and `j` scroll a line, Page Up and Page Down (or Ctrl-U and Ctrl-D, also while typing) a page, `g` and `G` jump to the top and the end; the screen follows the stream again at the end or on the next send. `/audio PATH` sends an audio file to a speech model; an embedding model shows `dims=` and `norm=` for each line. Nothing is written when you close it. `e` writes `goethe-chat-<UTC time>/` here in the [trace format](traces.md) (`0700` folder, `0600` files; embeddings as `embeddings.json`), with the model's raw text, reasoning included.
+Chat screen: the model on the top line, the conversation from the top row down (it follows the reply as it streams), your line and the keys at the bottom. Each message starts with a `➤ User` or `➤ Model` line in the theme's colors. Once a reply is in, the keys line also shows this chat's generated tokens and average decode speed (tokens over the time from first to last token), with the last reply's when there is room; these chats are not in the usage log and the numbers go when it closes. Typing: Enter sends, Esc opens the command keys. Commands: `m` pick or load another model (starts a new conversation), `i` or Enter back to typing, `q` quit at once (Ctrl-C asks first). Up and Down or `k` and `j` scroll a line, Page Up and Page Down (or Ctrl-U and Ctrl-D, also while typing) a page, `g` and `G` jump to the top and the end; the screen follows the stream again at the end or on the next send. `/audio PATH` sends an audio file to a speech model; an embedding model shows `dims=` and `norm=` for each line. Nothing is written.
 
 ### `goethe metrics`
 

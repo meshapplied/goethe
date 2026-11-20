@@ -174,8 +174,6 @@ fn the_chat_screen_streams_a_reply_and_leaves_cleanly_without_writing_a_file() {
     let end_again = screen_of(&seen);
     assert!(end_again[1..=20].iter().any(|r| r.contains("row 70")) && !end_again[0].contains("scrolled"), "G follows again: {end_again:?}");
     type_keys(&master, "q");
-    read_until(&master, &mut seen, "exit? Enter = exit, q = back");
-    type_keys(&master, "\r");
     let end = Instant::now() + Duration::from_secs(10);
     let status = loop {
         if let Some(s) = child.try_wait().unwrap() {

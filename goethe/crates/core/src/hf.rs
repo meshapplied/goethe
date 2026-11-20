@@ -778,7 +778,7 @@ fn verify_model(
         })
     });
     let total: u64 = lfs.iter().map(|s| s.size).sum();
-    let say = total >= 256 << 20;
+    let say = total >= 256 << 20 && !crate::step::compact();
     if say {
         crate::progress::eprint_line("verifying".to_string());
     }

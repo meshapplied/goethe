@@ -328,12 +328,6 @@ impl LoadJob {
         LoadJob { model, phase: Phase::Up(None), frac: 0.0, shown: 0, ticks: 0 }
     }
 
-    fn managed_mb(gpus: &[u32]) -> u64 {
-        // VRAM goethe's engines hold on these GPUs now.
-        let home = goethe_home();
-        let managed = crate::db::open(&home).map(|c| crate::placement::managed_pids(&c)).unwrap_or_default();
-        crate::hw::gpu_usage(&managed).unwrap_or_default().iter().filter(|u| gpus.contains(&u.index)).map(|u| u.managed_mb).sum()
-    }
 
     fn advance(&mut self) {
         // goethed up (started quietly when down), the load sent, then the instance's VRAM against its budget until it runs.
@@ -377,10 +371,10 @@ impl LoadJob {
                             let r = row.as_ref().unwrap_or(&serde_json::Value::Null);
                             gpus = r["gpu_indices"].as_array().into_iter().flatten().filter_map(|g| g.as_u64()).map(|g| g as u32).collect();
                             need_mb = (r["allocated_vram_gb_per_gpu"].as_f64().unwrap_or(0.0) * 1024.0) as u64 * gpus.len() as u64;
-                            base_mb = Self::managed_mb(&gpus);
+                            base_mb = crate::load_wait::managed_mb(&gpus);
                         }
                         if need_mb > 0 {
-                            let grown = Self::managed_mb(&gpus).saturating_sub(base_mb) as f64 / need_mb as f64;
+                            let grown = crate::load_wait::managed_mb(&gpus).saturating_sub(base_mb) as f64 / need_mb as f64;
                             self.frac = self.frac.max(grown.min(0.95));
                         }
                         Phase::Loading { instance, gpus, need_mb, base_mb }
@@ -1356,6 +1350,7 @@ fn install_page(tty: &mut Tty) -> Result<(), String> {
 
 fn apply_picks(removals: &[String], installs: &[String]) -> Result<(), String> {
     // Every chosen change in turn, uninstalls first so their disk space is free for the installs; one failure never stops the others.
+    crate::step::set_compact(true);
     let mut failed = Vec::new();
     for id in removals {
         println!("{}", paint(&format!("Uninstalling {id}"), Color::Bold));

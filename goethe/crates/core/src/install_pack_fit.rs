@@ -19,7 +19,7 @@ pub(super) fn pack_marlin_gb(cfg: &Value, repo: &str, rev: &str, files: &[String
         match hf::safetensors_header(repo, rev, f).and_then(|h| safetensors::header_tensor_bytes(&h, &safetensors::tensor_counts_marlin_extra)) {
             Ok(n) => bytes += n,
             Err(e) => {
-                eprintln!("note: the Marlin copy is not counted in the fit: {e}");
+                crate::step::note(&format!("note: the Marlin copy is not counted in the fit: {e}"));
                 return 0.0;
             }
         }

@@ -25,6 +25,33 @@ fn log() -> MutexGuard<'static, Option<Log>> {
     LOG.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+static COMPACT: AtomicBool = AtomicBool::new(false);
+
+pub fn set_compact(on: bool) {
+    // On a terminal, install, remove and load show only the model, progress bars and their result; the rest goes to the log.
+    COMPACT.store(on && !verbose(), Ordering::Relaxed);
+}
+
+pub fn compact() -> bool {
+    COMPACT.load(Ordering::Relaxed)
+}
+
+pub fn say(text: &str) {
+    // A detail line on stdout, kept in the log; only the log when compact.
+    log_line(text);
+    if !compact() {
+        println!("{text}");
+    }
+}
+
+pub fn note(text: &str) {
+    // A note or warning on stderr, kept in the log; only the log when compact.
+    log_line(text);
+    if !compact() {
+        eprintln!("{text}");
+    }
+}
+
 pub fn set_verbose(on: bool) {
     VERBOSE.store(on, Ordering::Relaxed);
 }

@@ -61,8 +61,24 @@ fn span(seconds: u64) -> String {
     }
 }
 
+pub fn bar(percent: u32) -> String {
+    // Twenty cells filled in eighths in the theme's main color, then the percent: one line that moves about every half percent.
+    let eighths = (percent.min(100) * 160 + 50) / 100;
+    let (full, part) = ((eighths / 8) as usize, (eighths % 8) as usize);
+    let partial = ["", "\u{258f}", "\u{258e}", "\u{258d}", "\u{258c}", "\u{258b}", "\u{258a}", "\u{2589}"][part];
+    let rest = "\u{2591}".repeat(20 - full - usize::from(!partial.is_empty()));
+    let done = crate::theme::paint(&crate::theme::main(), &format!("{}{partial}", "\u{2588}".repeat(full)));
+    format!("{done}{rest} {:>3}%", percent.min(100))
+}
+
 pub fn line(label: &str, done: u64, total: Option<u64>, bytes_per_s: f64) -> String {
-    // "model: 1.2 GB of 4.7 GB, 85 MB/s, about 41 s left".
+    // "model: 1.2 GB of 4.7 GB, 85 MB/s, about 41 s left"; compact, a bar with the sizes.
+    if crate::step::compact() {
+        return match total {
+            Some(t) if t > 0 => format!("{}  {} of {}", bar((done.min(t) * 100 / t) as u32), size(done.min(t)), size(t)),
+            _ => size(done),
+        };
+    }
     let rate = format!("{:.0} MB/s", bytes_per_s / (1u64 << 20) as f64);
     match total {
         Some(t) if done >= t => format!("{label}: {} complete, finishing up", size(t)),
@@ -97,6 +113,10 @@ impl Ticker {
         let label = label.to_string();
         let handle = thread::spawn(move || {
             let (mut last, mut at, began) = (done(), Instant::now(), Instant::now());
+            let compact = crate::step::compact();
+            if compact {
+                say(line(&label, last, total, 0.0));
+            }
             while !flag.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(20).min(every));
                 if at.elapsed() < spaced(every, began.elapsed()) {
@@ -106,6 +126,9 @@ impl Ticker {
                 let rate = now.saturating_sub(last) as f64 / at.elapsed().as_secs_f64();
                 say(line(&label, now, total, rate));
                 (last, at) = (now, Instant::now());
+            }
+            if compact {
+                say(line(&label, done(), total, 0.0));
             }
         });
         Ticker { stop, handle: Some(handle) }
@@ -162,7 +185,7 @@ impl Beat {
     pub fn start(label: &str, say: impl Fn(String) + Send + 'static) -> Beat {
         // Silent while a byte counter is already talking (the counters and this beat are all counted in ACTIVE).
         Beat::every(label, every(), move |l| {
-            if ACTIVE.load(Ordering::Relaxed) <= 1 {
+            if ACTIVE.load(Ordering::Relaxed) <= 1 && !crate::step::compact() {
                 say(l);
             }
         })
