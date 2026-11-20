@@ -25,6 +25,7 @@ pub struct Facts {
     pub geforce_only: bool,
     pub compat_installed: bool,
     pub compiler_packages: Option<Vec<String>>,
+    pub ffmpeg_packages: Option<Vec<String>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -64,6 +65,12 @@ pub fn decide(f: &Facts) -> Verdict {
     if let Some(pkgs) = &f.compiler_packages {
         fixes.push((Fix::Compiler(pkgs.clone()), "SGLang builds GPU kernels on a model's first load and needs a C++ compiler (gcc 9 to 15)".to_string()));
     }
+    if let Some(pkgs) = &f.ffmpeg_packages {
+        fixes.push((
+            Fix::Compiler(pkgs.clone()),
+            "SGLang's torchcodec loads system FFmpeg (4 to 8) when a model starts".to_string(),
+        ));
+    }
     if fixes.is_empty() {
         let state = match (&f.driver, f.pci_gpus) {
             (Some(v), _) => format!("NVIDIA driver {v}"),
@@ -99,10 +106,18 @@ pub fn compiler_packages(distro: &str) -> Vec<String> {
     }
 }
 
+pub fn ffmpeg_packages(distro: &str) -> Vec<String> {
+    // Distro package that provides libavdevice.so.58 to 62 for the pinned torchcodec (Fedora/RHEL ship it as ffmpeg-free).
+    let words: Vec<&str> = distro.split_whitespace().collect();
+    let has = |d: &str| words.contains(&d);
+    let deb_or_suse = ["ubuntu", "debian", "suse", "opensuse", "sles"].iter().any(|d| has(d));
+    vec![if deb_or_suse { "ffmpeg" } else { "ffmpeg-free" }.to_string()]
+}
+
 pub fn package_command(distro: &str, pkgs: &[String]) -> Vec<String> {
     let words: Vec<&str> = distro.split_whitespace().collect();
     let mut cmd: Vec<String> = if words.contains(&"ubuntu") || words.contains(&"debian") {
-        vec!["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "-qq"]
+        vec!["sh", "-c", "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \"$@\"", "sh"]
     } else if words.iter().any(|w| w.contains("suse") || *w == "sles") {
         vec!["zypper", "-n", "install"]
     } else {
@@ -122,6 +137,8 @@ fn facts(home: &Path) -> Facts {
         .map(|n| (0..n.device_count().unwrap_or(0)).filter_map(|i| n.device_by_index(i).ok()?.name().ok()).collect())
         .unwrap_or_default();
     let compiler = matches!(crate::host_compiler::verdict(crate::host_compiler::find().as_ref(), &p.distro), crate::host_compiler::Verdict::Unusable(_));
+    let sglang = crate::pyenv::has(home, crate::pyenv::Layer::Sglang);
+    let ffmpeg_missing = crate::doctor::find_libavdevice().is_none();
     Facts {
         pci_gpus: p.pci_gpus.len(),
         container: p.container,
@@ -133,7 +150,8 @@ fn facts(home: &Path) -> Facts {
         blackwell: p.blackwell_or_newer,
         geforce_only: !names.is_empty() && names.iter().all(|n| { let l = n.to_lowercase(); l.contains("geforce") || l.contains("titan") }),
         compat_installed: crate::cuda_compat::installed(home),
-        compiler_packages: (compiler && crate::pyenv::has(home, crate::pyenv::Layer::Sglang)).then(|| compiler_packages(&p.distro)),
+        compiler_packages: (compiler && sglang).then(|| compiler_packages(&p.distro)),
+        ffmpeg_packages: (ffmpeg_missing && sglang).then(|| ffmpeg_packages(&p.distro)),
     }
 }
 
@@ -162,14 +180,15 @@ fn which(cmd: &str) -> bool {
     std::env::var("PATH").unwrap_or_default().split(':').any(|d| Path::new(d).join(cmd).is_file())
 }
 
+fn script_argv(prefix: Vec<String>, action: &str) -> Vec<String> {
+    // The compiled-in script goes to bash as an argument, never through a file another process of this user could swap before sudo runs it.
+    let mut argv = prefix;
+    argv.extend(["bash", "-c", include_str!("fix_driver.sh"), "fix_driver.sh", action].map(String::from));
+    argv
+}
+
 fn run_script(home: &Path, action: &str, as_root: bool) -> Result<(), String> {
-    const SCRIPT: &str = include_str!("fix_driver.sh");
-    let dir = home.join("run");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join("fix_driver.sh");
-    std::fs::write(&path, SCRIPT).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut argv = if as_root { root_prefix()? } else { Vec::new() };
-    argv.extend(["bash".to_string(), path.display().to_string(), action.to_string()]);
+    let argv = script_argv(if as_root { root_prefix()? } else { Vec::new() }, action);
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]).env("GOETHE_HOME", home);
     if action == "compat" {
@@ -177,7 +196,6 @@ fn run_script(home: &Path, action: &str, as_root: bool) -> Result<(), String> {
         cmd.env("PYTHON", home.join("py-env/bin/python"));
     }
     let status = cmd.status().map_err(|e| format!("{}: {e}", argv[0]))?;
-    let _ = std::fs::remove_file(&path);
     status.success().then_some(()).ok_or_else(|| format!("the {action} step did not finish; goethe doctor shows what is still wrong"))
 }
 
@@ -273,15 +291,54 @@ mod tests {
         let f = Facts { compiler_packages: Some(compiler_packages("ubuntu debian")), ..card() };
         assert_eq!(decide(&f), Verdict::Fixes(vec![(Fix::Compiler(vec!["build-essential".into()]), "SGLang builds GPU kernels on a model's first load and needs a C++ compiler (gcc 9 to 15)".into())]));
         assert_eq!(compiler_packages("rocky rhel centos fedora"), vec!["gcc", "gcc-c++", "make"]);
-        assert_eq!(package_command("debian ", &["build-essential".into()])[2..], ["apt-get", "install", "-y", "-qq", "build-essential"]);
+        let apt = package_command("debian ", &["build-essential".into()]);
+        assert_eq!(apt[2], "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \"$@\"", "a fresh image has no package lists yet");
+        assert_eq!(apt[3..], ["sh", "build-essential"]);
         assert_eq!(package_command("rhel", &["gcc".into()]), ["dnf", "-y", "install", "gcc"]);
+    }
+
+    #[test]
+    fn ffmpeg_is_offered_for_sglang_when_libavdevice_is_missing() {
+        let f = Facts { ffmpeg_packages: Some(ffmpeg_packages("ubuntu debian")), ..card() };
+        assert_eq!(
+            decide(&f),
+            Verdict::Fixes(vec![(
+                Fix::Compiler(vec!["ffmpeg".into()]),
+                "SGLang's torchcodec loads system FFmpeg (4 to 8) when a model starts".into()
+            )])
+        );
+        assert_eq!(ffmpeg_packages("rocky rhel centos fedora"), vec!["ffmpeg-free"]);
+        assert_eq!(ffmpeg_packages("opensuse suse"), vec!["ffmpeg"]);
     }
 
     #[test]
     fn the_fix_script_parses_and_knows_its_actions() {
         let out = Command::new("bash").args(["-n", concat!(env!("CARGO_MANIFEST_DIR"), "/src/fix_driver.sh")]).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        let usage = Command::new("bash").args([concat!(env!("CARGO_MANIFEST_DIR"), "/src/fix_driver.sh"), "nonsense"]).output().unwrap();
+        let argv = script_argv(vec!["env".into()], "nonsense");
+        let usage = Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
         assert_eq!(usage.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&usage.stderr).contains("usage: fix_driver.sh load|open|install|compat"));
+    }
+
+    #[test]
+    fn the_driver_install_knows_its_repository_before_it_removes_anything() {
+        let script = include_str!("fix_driver.sh");
+        let body = &script[..script.rfind("case \"${1:-}\" in").unwrap()];
+        let dir = tempfile::tempdir().unwrap();
+        let tag = |os: &str| {
+            let f = dir.path().join("os-release");
+            std::fs::write(&f, os).unwrap();
+            let out = Command::new("bash").args(["-c", &format!("{body}\ndistro_tag")]).env("GOETHE_OS_RELEASE", &f).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(tag("ID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n"), "ubuntu2404");
+        assert_eq!(tag("ID=debian\nVERSION_ID=\"12\"\n"), "debian12");
+        assert_eq!(tag("ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"9.4\"\n"), "rhel9");
+        assert_eq!(tag("ID=fedora\nVERSION_ID=41\n"), "fedora41");
+        assert_eq!(tag("ID=arch\n"), "", "no automatic install, so install stops before nvidia-uninstall");
+        let install = &script[script.find("\ninstall() {").unwrap()..];
+        let order = |s: &str| install.find(s).unwrap();
+        assert!(order("reachable \"${tag}\"") < order("nvidia-uninstall --silent") && order("[[ -z \"${tag}\" ]]") < order("nvidia-uninstall --silent"));
     }
 }

@@ -530,11 +530,6 @@ fn write_configs(home: &Path, bin: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn write_gateway_configs(home: &Path) -> Result<(), String> {
-    let _lock = gateway_lock(home)?;
-    write_configs(home, &active_bin(home))
-}
-
 fn tls_names() -> Vec<String> {
     // Loopback, hostname, every interface IP, and GOETHE_TLS_NAMES (so --cacert to the bind address verifies).
     let mut names: Vec<String> = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];

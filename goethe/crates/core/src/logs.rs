@@ -70,8 +70,11 @@ pub fn run_logs(
 }
 
 fn resolve_log_path(home: &Path, target: &str) -> Result<PathBuf, String> {
-    // inst-<id> directly, else the model's newest instance log, else the legacy per-model file.
-    if target.starts_with("inst-") {
+    // inst-<id> directly, else the model's newest instance log, else the legacy per-model file; a target that could leave logs/ is refused.
+    if target.is_empty() || target.starts_with('/') || target.contains('\\') || target.split('/').any(|c| c == ".." || c == ".") {
+        return Err(format!("{target:?} is not a model or instance id"));
+    }
+    if target.starts_with("inst-") && target.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
         let p = home.join("logs").join(format!("{target}.log"));
         if p.is_file() {
             return Ok(p);
@@ -296,5 +299,19 @@ mod tests {
         assert_eq!(newest_log_for_model(dir.path(), "m/a"), Some(logs.join("inst-a.log")));
         assert_eq!(newest_log_for_model(dir.path(), "m/b"), Some(logs.join("inst-b.log")));
         assert_eq!(newest_log_for_model(dir.path(), "m/c"), None, "other models' logs must not match");
+    }
+
+    #[test]
+    fn a_log_target_cannot_leave_the_logs_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("logs")).unwrap();
+        fs::write(dir.path().join("secret.log"), b"x\n").unwrap();
+        fs::write(dir.path().join("logs/inst-ok.log"), b"y\n").unwrap();
+        for bad in ["../secret", "/etc/passwd", "org/..", "", "a\\b"] {
+            let r = resolve_log_path(dir.path(), bad);
+            assert!(r.as_ref().is_err_and(|e| !e.contains("no log found")), "{bad}: {r:?}");
+        }
+        assert!(resolve_log_path(dir.path(), "inst-x/../../secret").is_err());
+        assert_eq!(resolve_log_path(dir.path(), "inst-ok").unwrap(), dir.path().join("logs/inst-ok.log"));
     }
 }

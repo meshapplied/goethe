@@ -33,7 +33,7 @@ Exit codes:
 - [API access](#api-access): `api`, `api keys`, `api expose`, `api allow`, `api domain`, `api share`
 - [Learning and traces](#learning-and-traces): `learn`, `trace`
 - [GPUs and system](#gpus-and-system): `gpu`, `doctor`, `update`, `uninstall`, `completion`, `--version`
-- [Platform](#platform): `login`, `logout`
+- [Console](#console): `login`, `logout`
 
 ## Start and stop
 
@@ -47,6 +47,7 @@ On a terminal, plain `goethe` opens the menu on its own screen:
 | Install models | A table of the catalog models that fit this machine's GPUs, with their size and the VRAM they need, under the machine's VRAM and storage. Space selects models, a custom Hugging Face id and a token for gated models can be typed below the table, and Enter installs them |
 | API keys and gateway | API keys (create, scope, show or delete), network exposure (local, VPN or private network, public) and the public address ([`goethe api share`](#goethe-api-share-duration)) |
 | Status | Whether Goethe runs, the environment, then live tables of the GPUs (VRAM, processes, allowed or denied, memory bandwidth), CPU and memory |
+| Metrics | From the [usage log](#usage-log), over the last hour, 24 hours, 7 days, this month (from the 1st), 30 or 90 days (↑ the next, longer range, ↓ back): per model the requests, errors (client and server errors, rate limits, cancelled), prompt and generated tokens, average time to first token, average decode speed and the 95th-percentile latency, with a total row; per GPU the average and peak utilisation, memory bandwidth, average VRAM, average power against its limit, peak temperature and any throttling, with the host's CPU, RAM and free disk; and per API key the requests and tokens, by whole days. Requests for a model Goethe does not serve and requests refused by a key's rate limit have their own rows |
 
 ↑↓ move, Enter opens, ← goes back, `q` quits. On the main menu 1, 2 and 3 pick a color theme (default, sea, earth); the choice is remembered. Without a terminal, `goethe` prints the commands.
 
@@ -60,7 +61,7 @@ Starts Goethe and the API gateway, and starts them at every boot from now on. Mo
 
 ### `goethe status`
 
-Whether Goethe is running, the API address, the names and ids of your API keys, the models it serves, and the public gateway while it is open ([`goethe api share`](#goethe-api-share-duration)). The last lines show the [platform](#platform) link (`Linked (workspace X)`, `Not linked`, or `Revoked`) and, when linked, the last heartbeat (`OK (2 s ago)` or `failing: <reason>`).
+Whether Goethe is running, the API address, the names and ids of your API keys, the models it serves, and the public gateway while it is open ([`goethe api share`](#goethe-api-share-duration)). The last lines show the [console](#console) link (`Linked (workspace X)`, `Not linked`, or `Revoked`) and, when linked, the last heartbeat (`OK (2 s ago)` or `failing: <reason>`).
 
 ### `goethe down`
 
@@ -185,7 +186,7 @@ Stops a model. Requests in progress finish first.
 
 ### `goethe run [MODEL] [INPUT]`
 
-Tries a model by hand. With text it prints one reply (a text model), an embedding summary (`dims= norm= [first 4]`) or, for an audio file, its transcript. With no INPUT on a terminal it opens an ephemeral chat screen; with no terminal, or `--plain`, a plain `> ` prompt (a speech model records from the microphone). An installed model that is not loaded is loaded first, like `goethe load`, and unloaded when run ends unless `--keep`; run never installs. It talks to the model's own engine on 127.0.0.1 with its engine key, not through the gateway, and creates no API key.
+Tries a model by hand. Without MODEL or INPUT on a terminal, a list of the installed models opens at the top of the screen (loaded ones first, marked `loaded`): ↑↓ move, Enter runs the chosen one, `q` or ← leaves. With text it prints one reply (a text model), an embedding summary (`dims= norm= [first 4]`) or, for an audio file, its transcript. With no INPUT on a terminal it opens an ephemeral chat screen; with no terminal, or `--plain`, a plain `> ` prompt (a speech model records from the microphone). An installed model that is not loaded is loaded first, like `goethe load`, and unloaded when run ends unless `--keep`; run never installs. It talks to the model's own engine on 127.0.0.1 with its engine key, not through the gateway, and creates no API key.
 
 | Option | Description |
 |---|---|
@@ -194,6 +195,10 @@ Tries a model by hand. With text it prints one reply (a text model), an embeddin
 | `--thinking` | Show the model's reasoning, dimmed, with the answer (hidden by default) |
 
 Chat screen: the model on the top line, the conversation from the top row down (it follows the reply as it streams), your line and the keys at the bottom. Typing: Enter sends, Esc opens the command keys. Commands: `m` pick or load another model (starts a new conversation), `e` export, `r` record (speech models), `i` or Enter back to typing, `q` quit (Enter confirms, `q` goes back; Ctrl-C asks the same). Up and Down or `k` and `j` scroll a line, Page Up and Page Down (or Ctrl-U and Ctrl-D, also while typing) a page, `g` and `G` jump to the top and the end; the screen follows the stream again at the end or on the next send. `/audio PATH` sends an audio file to a speech model; an embedding model shows `dims=` and `norm=` for each line. Nothing is written when you close it. `e` writes `goethe-chat-<UTC time>/` here in the [trace format](traces.md) (`0700` folder, `0600` files; embeddings as `embeddings.json`), with the model's raw text, reasoning included.
+
+### `goethe metrics`
+
+The menu's Metrics page as a command: model usage, API key usage per model, and GPU and host use from the [usage log](#usage-log). On a terminal ↑ moves to the next, longer range and ↓ back (1 h, 24 h, 7 d, this month, 30 d, 90 d; 24 h first) and ← or `q` leaves; when the output is not a terminal it prints the last 24 hours once.
 
 ### `goethe ps`
 
@@ -326,7 +331,7 @@ goethe api share stop --key ci                                       # stop shar
 goethe api share stop                                                # close the public gateway
 ```
 
-Every shared key uses the same public gateway, each until its own time and from its own addresses. The gateway stays open until the last key's time ends. A key whose time has ended is refused while the others keep working, and the addresses only it allowed are dropped from the gateway. Sharing a key again starts its time over (`5h` means 5 hours from now) and replaces its addresses; the other keys are not touched. Without `--key`, the keys of the last opening are shared again. Opening prints the URL, each key with the models it may use, the certificate to send along, and a `curl` command to try it. The keys stay the same, so a recipient can keep using the key you sent. Connections in progress are not interrupted. The menu's Public address page does the same with a form: the key, how long, and optional addresses. `goethe status` shows the gateway while it is open, and a node linked to the platform shows the public URL and when it closes on its page.
+Every shared key uses the same public gateway, each until its own time and from its own addresses. The gateway stays open until the last key's time ends. A key whose time has ended is refused while the others keep working, and the addresses only it allowed are dropped from the gateway. Sharing a key again starts its time over (`5h` means 5 hours from now) and replaces its addresses; the other keys are not touched. Without `--key`, the keys of the last opening are shared again. Opening prints the URL, each key with the models it may use, the certificate to send along, and a `curl` command to try it. The keys stay the same, so a recipient can keep using the key you sent. Connections in progress are not interrupted. The menu's Public address page does the same with a form: the key, how long, and optional addresses. `goethe status` shows the gateway while it is open, and a node linked to the console shows the public URL and when it closes on its page.
 
 | Option | Description |
 |---|---|
@@ -406,7 +411,7 @@ The GPU table of the menu's Status page: per GPU the VRAM in use, a 10-block bar
 
 ### `goethe doctor`
 
-Checks the machine and the setup: GPU and driver, compiler, Python environment, gateway, ports and keys. Each problem comes with its fix. With `--hardware` it prints the hardware profile instead: GPUs, CPU, memory, disk, OS, container and cloud provider. GPU links, NUMA nodes and processes are in `--json` and `hardware_state.json`; `goethe gpu` shows the processes. To see where `goethe load` would place a model right now, and the memory it needs, use `goethe load <model> --dry-run`.
+Checks the machine and the setup: GPU and driver, compiler, FFmpeg, Python environment, gateway, ports and keys. Each problem comes with its fix. With `--hardware` it prints the hardware profile instead: GPUs, CPU, memory, disk, OS, container and cloud provider. GPU links, NUMA nodes and processes are in `--json` and `hardware_state.json`; `goethe gpu` shows the processes. To see where `goethe load` would place a model right now, and the memory it needs, use `goethe load <model> --dry-run`.
 
 | Option | Description |
 |---|---|
@@ -428,13 +433,13 @@ CLI help text stays the source of truth for flags and examples. A later pass can
 
 | Option | Description |
 |---|---|
-| `--check` | Only show what's available |
+| `--check` | Only show what would change: one line per component (goethe and goethed by version and commit, nginx by version, SGLang by wheel, goethe-engine, the ternary pack), then a summary such as `2 updates available (goethe, nginx): run goethe update` or `everything is up to date`. Changes nothing |
 | `--yes` | Don't ask |
 | `--allow-downgrade` | Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries); not with `engine` |
 
 ### `goethe uninstall`
 
-Removes Goethe and the models it installed. Folders of your own that you registered stay. A node linked to the platform is logged out first (best effort) and its credentials go with the rest.
+Removes Goethe and the models it installed. Folders of your own that you registered stay. A node linked to the console is logged out first (best effort) and its credentials go with the rest.
 
 | Option | Description |
 |---|---|
@@ -457,9 +462,15 @@ fish and bash with the bash-completion package load the script from their own co
 
 Prints the version, and the upgrade command when a newer version is available. `goethe --build-info` adds the commit and build date.
 
-## Platform
+## Console
 
-Linking is optional. A node that is not linked never contacts the platform. A linked node's goethed sends a health snapshot every 10 seconds, and right after a model loads or unloads: hostname, OS, environment (bare metal, VM, container, cloud), network addresses, the gateway address (and the public gateway's address and end time while [`goethe api share`](#goethe-api-share-duration) is open), GPUs with memory use, installed and loaded models, and the node's API key inventory (id, name, prefix, model scope, expiry — never the raw key). It never sends API key secrets, engine keys, prompts, traces, file paths, environment variables or command lines. Inference never depends on the platform.
+Linking is optional. A node that is not linked never contacts the console. A linked node's goethed sends a health snapshot every 10 seconds, and right after a model loads or unloads: hostname, OS, environment (bare metal, VM, container, cloud), network addresses, the gateway address (and the public gateway's address and end time while [`goethe api share`](#goethe-api-share-duration) is open), GPUs with memory use, installed and loaded models, the node's API key inventory (id, name, prefix, model scope, expiry — never the raw key), and the finished minutes of the [usage log](#usage-log) the console has not confirmed yet (per model, GPU and host; never per API key, never prompt or reply text). It never sends API key secrets, engine keys, prompts, traces, file paths, environment variables or command lines. Inference never depends on the console.
+
+### Usage log
+
+goethed keeps a usage log whether or not the node is linked. It holds counts and timings only, never a prompt, a reply or the text of a token. Every 5 seconds (10 on a Mac) it samples each GPU (utilisation, memory-bandwidth use, VRAM used by Goethe and by other processes, power and its limit, temperature, throttle reasons; on a Mac the GPU's busy % and memory in use) and the host (CPU %, RAM, free disk under `GOETHE_HOME/models`, and on a Mac the memory pressure level). Each finished request adds to its model's row for that clock minute: the requests by outcome (ok, client error, server error, rate-limited, cancelled), prompt and generated token counts, a latency and a time-to-first-token histogram, and the decode speed. The gateway streams every generation request (chat, completions, Anthropic messages, Responses) from the engine, so each reply is timed the same way: time to first token, and decode speed from the first to the last token. A request the client did not stream gets the reply rebuilt into the one body a non-streaming call returns. Token counts are the ones the engine reports; on the OpenAI routes the gateway asks for them (`stream_options.include_usage`) and passes the extra usage chunk on only to a client that asked for it.
+
+Rows are per clock minute, kept 48 hours, and are rolled into hourly rows kept 90 days: counts are added, hardware readings keep their mean and peak. A minute with no requests has no model row. The tables (`usage_*`, `gpu_*`, `host_*`) live in `GOETHE_HOME/state.db` and take a few MB at most. A linked node adds the minute rows the console has not confirmed yet to its heartbeat (`usage`, per model, GPU and host, never per API key); per-key totals stay local.
 
 ### `goethe login`
 
@@ -467,14 +478,14 @@ Links this node to a workspace. Prints a link and a code, then waits until the l
 
 | Option | Description |
 |---|---|
-| `--authkey <msh_ak_...>` | Link without a browser, with an auth key from the platform; `--authkey -` reads it from stdin so it stays out of the process list |
+| `--authkey <msh_ak_...>` | Link without a browser, with an auth key from the console; `--authkey -` reads it from stdin so it stays out of the process list |
 | `--lifetime <when>` | How long the login lasts: `never`, or a time such as `12h`, `30d` or `4w`. On a linked node it only changes that |
-| `--platform-url <url>` | Another platform (default: `GOETHE_PLATFORM_URL`, else `https://goethe.sh`). Must be HTTPS; plain HTTP only for `localhost` and `*.localhost` |
+| `--platform-url <url>` | Another console URL (default: `GOETHE_PLATFORM_URL`, else `https://goethe.sh`). Must be HTTPS; plain HTTP only for `localhost` and `*.localhost` |
 
 The installer takes the same flags: `curl -fsSL .../install.sh | bash -s -- --authkey msh_ak_...` (or `GOETHE_AUTHKEY=...`).
 
-The credentials and the heartbeat state live in `GOETHE_HOME/platform/` (directory 0700, files 0600). Goethe refuses a credentials file or folder other users can read, a symlink, or one you do not own, and says how to fix it; it also refuses a `GOETHE_HOME` that every user can write to (a group-writable one is fine). When the platform revokes the node (for example after it is removed there), heartbeats stop and `goethe status` says `Revoked` until the next `goethe login`.
+The credentials and the heartbeat state live in `GOETHE_HOME/platform/` (directory 0700, files 0600). Goethe refuses a credentials file or folder other users can read, a symlink, or one you do not own, and says how to fix it; it also refuses a `GOETHE_HOME` that every user can write to (a group-writable one is fine). When the console revokes the node (for example after it is removed there), heartbeats stop and `goethe status` says `Revoked` until the next `goethe login`.
 
 ### `goethe logout`
 
-Removes this node from its workspace and deletes the local credentials. When the platform cannot be reached, the local link is still removed and the node shows offline on the platform until you remove it there.
+Removes this node from its workspace and deletes the local credentials. When the console cannot be reached, the local link is still removed and the node shows offline on the console until you remove it there.

@@ -1210,6 +1210,9 @@ impl Store {
         // Runs on the request path with no model call or disk write, except for reading back a session after a restart.
         let value: Value = serde_json::from_slice(body).ok()?;
         let parsed = parse_request(api, &value)?;
+        if !self.has_room(key_id, session) {
+            return None;
+        }
         let handle = self.session(key_id, session);
         let mut s = lock(&handle);
         if s.model != model && !s.block.is_empty() {
@@ -1222,6 +1225,12 @@ impl Store {
         let job = if due && s.can_start(Instant::now()) { begin(&handle, &mut s, ctx) } else { None };
         let block = if usable { s.block.clone() } else { String::new() };
         Some(Step { block, job })
+    }
+
+    fn has_room(&self, key_id: &str, session: &str) -> bool {
+        // A session id not yet in memory starts only below MAX_SESSIONS live ones, so a flood of new X-Session-Id values cannot grow memory for the hour before eviction.
+        let all = lock(&self.sessions);
+        all.len() < MAX_SESSIONS || all.contains_key(&file_id(key_id, session))
     }
 
     pub fn note_rejected(&self, key_id: &str, session: &str) {
@@ -1976,6 +1985,19 @@ mod tests {
         assert!(clip_ends(&s, 5).contains("..."));
         assert_eq!(head(&s, 3), "\u{e9}");
         assert_eq!(tail(&s, 3), "\u{e9}");
+    }
+
+    #[test]
+    fn new_sessions_stop_at_the_live_cap_and_known_ones_go_on() {
+        let store = Store::open(std::env::temp_dir().join("unused-learn-store-cap"));
+        for i in 0..MAX_SESSIONS {
+            let _ = store.session("k", &format!("s{i}"));
+        }
+        assert!(store.has_room("k", "s0"), "a session already in memory goes on");
+        assert!(!store.has_room("k", "new"), "a new session id waits until quiet ones are evicted");
+        let body = br#"{"messages": [{"role": "user", "content": "hi"}]}"#;
+        assert!(store.observe("k", "new", "m", Api::Chat, body, 1000).is_none());
+        assert_eq!(lock(&store.sessions).len(), MAX_SESSIONS);
     }
 
     #[test]

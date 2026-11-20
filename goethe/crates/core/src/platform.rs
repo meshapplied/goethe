@@ -64,7 +64,7 @@ pub fn check_url(raw: &str) -> Result<String, String> {
     // HTTPS with a host and no credentials, query or fragment; plain HTTP only for loopback and *.localhost.
     let url = raw.trim().trim_end_matches('/');
     if url.contains(['?', '#']) {
-        return Err(format!("platform URL {url:?} must not have a query or fragment"));
+        return Err(format!("console URL {url:?} must not have a query or fragment"));
     }
     check_link(url)
 }
@@ -73,21 +73,21 @@ pub fn check_link(raw: &str) -> Result<String, String> {
     // A link under the same policy as the platform URL, query allowed: https, or http on loopback only.
     let url = raw.trim();
     if url.is_empty() || url.len() > 1024 || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return Err(format!("{raw:?} is not a usable platform URL"));
+        return Err(format!("{raw:?} is not a usable console URL"));
     }
     let (scheme, rest) = url
         .split_once("://")
-        .ok_or_else(|| format!("platform URL {url:?} needs a scheme, like {DEFAULT_PLATFORM_URL}"))?;
+        .ok_or_else(|| format!("console URL {url:?} needs a scheme, like {DEFAULT_PLATFORM_URL}"))?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     if authority.contains('@') {
-        return Err(format!("platform URL {url:?} must not carry a user name or password"));
+        return Err(format!("console URL {url:?} must not carry a user name or password"));
     }
-    let host = url_host(authority).ok_or_else(|| format!("platform URL {url:?} has no valid host"))?;
+    let host = url_host(authority).ok_or_else(|| format!("console URL {url:?} has no valid host"))?;
     match scheme.to_ascii_lowercase().as_str() {
         "https" => {}
         "http" if is_loopback_host(&host) => {}
-        "http" => return Err(format!("platform URL {url:?} must use https (plain http is only allowed for localhost)")),
-        other => return Err(format!("platform URL {url:?} has scheme {other:?}; use https")),
+        "http" => return Err(format!("console URL {url:?} must use https (plain http is only allowed for localhost)")),
+        other => return Err(format!("console URL {url:?} has scheme {other:?}; use https")),
     }
     Ok(format!("{}://{rest}", scheme.to_ascii_lowercase()))
 }

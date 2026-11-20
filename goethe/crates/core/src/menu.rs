@@ -1,4 +1,4 @@
-// goethe with no arguments on a terminal: the main menu (Quick setup, Install models, API keys and gateway, Status) and its pages.
+// goethe with no arguments on a terminal: the main menu (Quick setup, Install models, API keys and gateway, Status, Metrics) and its pages.
 
 use crate::keys_menu::{fit, frame_update, parse_input, screen_size, window, Input, Screen};
 use crate::models::{PickData, PickRow};
@@ -6,67 +6,11 @@ use crate::paths::goethe_home;
 use crate::term::{paint, Color, RawMode};
 use std::io::{IsTerminal, Write};
 
-const LOGO: [&str; 4] = [
-    "  ___   ___   ___  _____  _  _   ___ ",
-    " / __| / _ \\ | __||_   _|| || | | __|",
-    "| (_ || (_) || _|   | |  | __ | | _| ",
-    " \\___| \\___/ |___|  |_|  |_||_| |___|",
-];
-const SITE: &str = "https://goethe.sh/";
-const GAP: &str = "   ";
-fn hl() -> String {
-    // The theme's main color, bold: the highlighted entry, the cursor and the logo.
-    format!("1;{}", crate::theme::main())
-}
-
-fn mark() -> String {
-    // The theme's secondary color: selection dots and text carets.
-    format!("1;{}", crate::theme::secondary())
-}
-
-fn sgr(code: &str, text: &str) -> String {
-    if text.is_empty() || !crate::term::color_enabled() {
-        return text.to_string();
-    }
-    format!("\x1b[{code}m{text}\x1b[0m")
-}
-
-fn gray(text: &str) -> String {
-    paint(text, Color::Gray)
-}
-
-fn plain(s: &str) -> String {
-    // The text without its color codes.
-    let mut out = String::new();
-    let mut esc = false;
-    for c in s.chars() {
-        match (esc, c) {
-            (false, '\x1b') => esc = true,
-            (true, 'm') => esc = false,
-            (true, _) => {}
-            (false, c) => out.push(c),
-        }
-    }
-    out
-}
-
-fn clip(line: String, width: usize) -> String {
-    // A line wider than the terminal loses its colors and is cut with an ellipsis, so nothing wraps.
-    if crate::term::visible_width(&line) <= width {
-        line
-    } else {
-        fit(&plain(&line), width).trim_end().to_string()
-    }
-}
-
-fn screen(mut lines: Vec<String>, width: usize, height: usize, footer: String) -> Vec<String> {
-    // The content, a gap and the keys line right under it, padded to exactly height lines.
-    lines.truncate(height.saturating_sub(2));
-    lines.push(String::new());
-    lines.push(format!("  {footer}"));
-    lines.resize(height, String::new());
-    lines.into_iter().map(|l| clip(l, width)).collect()
-}
+#[path = "menu_draw.rs"]
+mod menu_draw;
+use menu_draw::{brand, columns, example_below, fine_bar, gb, gray, hl, mark, name_style, screen, sgr, themes_line, GAP};
+#[cfg(test)]
+use menu_draw::{plain, LOGO, SITE};
 
 enum Flow {
     Stay,
@@ -230,6 +174,38 @@ impl Page for StatusPage {
     }
 }
 
+struct MetricsPage(crate::metrics_view::MetricsView);
+
+impl Page for MetricsPage {
+    fn render(&self, width: usize, height: usize) -> Vec<String> {
+        screen(crate::metrics_view::render(&self.0, width), width, height, gray("\u{2191}\u{2193} range   \u{2190} back   q quit"))
+    }
+
+    fn key(&mut self, input: Input) -> Flow {
+        match input {
+            Input::Left | Input::Esc => Flow::Leave,
+            Input::Interrupt | Input::Char('q') => Flow::Quit,
+            Input::Up | Input::Char('k') => {
+                self.0.step(true);
+                Flow::Stay
+            }
+            Input::Down | Input::Char('j') => {
+                self.0.step(false);
+                Flow::Stay
+            }
+            _ => Flow::Stay,
+        }
+    }
+
+    fn every(&self) -> Option<std::time::Duration> {
+        Some(crate::metrics_view::REFRESH)
+    }
+
+    fn tick(&mut self) {
+        self.0.refresh();
+    }
+}
+
 struct Notice(String);
 
 impl Page for Notice {
@@ -279,7 +255,7 @@ impl SideState {
     }
 }
 
-fn installed_and_loaded(home: &std::path::Path) -> Vec<(String, bool)> {
+pub(crate) fn installed_and_loaded(home: &std::path::Path) -> Vec<(String, bool)> {
     // Installed models by id, each with whether an instance of it is loaded (not failed or cancelled), loaded ones first.
     let Ok(con) = crate::db::open(home) else { return Vec::new() };
     let loaded: Vec<String> = con
@@ -325,24 +301,6 @@ fn side_rows(side: &SideState, job: Option<&LoadJob>) -> Vec<String> {
     }
 }
 
-fn pad(line: &str, width: usize) -> String {
-    format!("{line}{}", " ".repeat(width.saturating_sub(crate::term::visible_width(line))))
-}
-
-fn columns(out: &mut Vec<String>, start: usize, left_width: usize, middle: &[String], right: &[String]) {
-    // Lay a submenu column, and the content beside it, to the right of the lines from `start` on.
-    let mw = middle.iter().map(|l| crate::term::visible_width(l)).max().unwrap_or(0);
-    for k in 0..middle.len().max(right.len()) {
-        if out.len() <= start + k {
-            out.push(String::new());
-        }
-        let left = pad(&out[start + k], left_width);
-        let mid = middle.get(k).map_or_else(|| " ".repeat(mw), |m| pad(m, mw));
-        let rest = right.get(k).map_or(String::new(), |r| format!("{GAP}{r}"));
-        out[start + k] = format!("{left}{mid}{rest}").trim_end().to_string();
-    }
-}
-
 enum Phase {
     Up(Option<std::process::Child>),
     Start,
@@ -357,15 +315,6 @@ struct LoadJob {
     frac: f64,
     shown: u32,
     ticks: u32,
-}
-
-fn fine_bar(percent: u32) -> String {
-    // Ten cells, each filled in eighths, so the bar moves in steps of about one percent without getting wider.
-    let eighths = (percent.min(100) * 80 + 50) / 100;
-    let (full, part) = ((eighths / 8) as usize, (eighths % 8) as usize);
-    let partial = ["", "\u{258f}", "\u{258e}", "\u{258d}", "\u{258c}", "\u{258b}", "\u{258a}", "\u{2589}"][part];
-    let used = full + usize::from(!partial.is_empty());
-    format!("{}{}", sgr(&crate::theme::main(), &format!("{}{partial}", "\u{2588}".repeat(full))), gray(&"\u{2591}".repeat(10 - used)))
 }
 
 fn goethe_cmd() -> std::process::Command {
@@ -565,8 +514,9 @@ impl Page for Menu {
             });
         }
         if let Some(s) = side {
-            let right = if focused && s.kind == Side::Schemas { crate::api_schema::example(crate::api_schema::NAMES[s.at], &s.base, crate::api_schema::MODEL, crate::api_schema::KEY) } else { Vec::new() };
-            columns(&mut out, start, 2 + tw + GAP.len(), &side_rows(s, self.job.as_ref()), &right);
+            let example = if focused && s.kind == Side::Schemas { crate::api_schema::example(crate::api_schema::NAMES[s.at], &s.base, crate::api_schema::MODEL, crate::api_schema::KEY) } else { Vec::new() };
+            columns(&mut out, start, 2 + tw + GAP.len(), &side_rows(s, self.job.as_ref()), &[]);
+            example_below(&mut out, 2 + tw + GAP.len(), &example);
         }
         if let Some(n) = &self.note {
             out.push(String::new());
@@ -683,7 +633,8 @@ impl Page for SchemaPage {
             .enumerate()
             .map(|(i, n)| if i == self.at { format!("{} {}", sgr(&hl(), "\u{27a4}"), sgr(&hl(), n)) } else { format!("  {n}") })
             .collect();
-        columns(&mut out, start, 0, &names, &crate::api_schema::example(crate::api_schema::NAMES[self.at], &self.base, crate::api_schema::MODEL, crate::api_schema::KEY));
+        columns(&mut out, start, 0, &names, &[]);
+        example_below(&mut out, 4, &crate::api_schema::example(crate::api_schema::NAMES[self.at], &self.base, crate::api_schema::MODEL, crate::api_schema::KEY));
         screen(out, width, height, gray("\u{2191}\u{2193} move   \u{2190} back"))
     }
 
@@ -700,26 +651,6 @@ impl Page for SchemaPage {
     }
 }
 
-fn brand() -> Vec<String> {
-    // The small GOETHE inscription in the theme's main color, the site below it in the third.
-    let mut out = vec![String::new()];
-    out.extend(LOGO.iter().map(|l| format!("  {}", sgr(&crate::theme::main(), l))));
-    out.push(format!("  {}", sgr(&crate::theme::third(), SITE)));
-    out.push(String::new());
-    out
-}
-
-fn themes_line() -> String {
-    // The themes on the main menu's keys line: number and name, the active one in its main color with a bar after it.
-    let now = crate::theme::current();
-    let items: Vec<String> = crate::theme::ALL
-        .iter()
-        .enumerate()
-        .map(|(i, t)| if *t == now { format!("{}{}", sgr(&hl(), &format!("{} {}", i + 1, t.name())), sgr(&hl(), "|")) } else { gray(&format!("{} {} ", i + 1, t.name())) })
-        .collect();
-    format!("{}  {}", gray("theme"), items.join("  "))
-}
-
 fn main_menu() -> Menu {
     Menu {
         heading: Vec::new(),
@@ -729,11 +660,12 @@ fn main_menu() -> Menu {
             Choice { title: "Install models", detail: "pick models that fit your GPUs", side: None },
             Choice { title: "API keys and gateway", detail: "keys, who can reach the API, a public address", side: None },
             Choice { title: "Status", detail: "Goethe, the API and the models it serves", side: None },
+            Choice { title: "Metrics", detail: "requests, tokens and GPU use over time", side: None },
         ],
         at: 0,
         hint: "\u{2191}\u{2193} move   Enter open   q quit",
         top: true,
-        gap_before: None,
+        gap_before: Some(4),
         side: None,
         off: Vec::new(),
         job: None,
@@ -784,6 +716,59 @@ fn report(result: Result<(), String>) {
     }
 }
 
+struct ModelPick {
+    models: Vec<(String, bool)>,
+    at: usize,
+}
+
+impl Page for ModelPick {
+    fn render(&self, width: usize, height: usize) -> Vec<String> {
+        // goethe run without a model: the installed models at the top, loaded ones first and marked.
+        let mut out = vec![String::new(), format!("  {}", paint("Choose a model to run", Color::Bold)), String::new()];
+        for (i, (id, loaded)) in self.models.iter().enumerate() {
+            let state = if *loaded { format!("  {}", sgr(&crate::theme::secondary(), "loaded")) } else { String::new() };
+            out.push(match i == self.at {
+                true => format!("{} {}{state}", sgr(&hl(), "\u{27a4}"), sgr(&hl(), id)),
+                false => format!("  {id}{state}"),
+            });
+        }
+        screen(out, width, height, gray("\u{2191}\u{2193} move   Enter run   q quit"))
+    }
+
+    fn key(&mut self, input: Input) -> Flow {
+        let n = self.models.len();
+        match input {
+            Input::Up | Input::Char('k') => self.at = (self.at + n - 1) % n,
+            Input::Down | Input::Char('j') => self.at = (self.at + 1) % n,
+            Input::Enter => return Flow::Pick(self.at),
+            Input::Left | Input::Esc | Input::Interrupt | Input::Char('q') => return Flow::Quit,
+            _ => {}
+        }
+        Flow::Stay
+    }
+}
+
+pub fn metrics() -> Result<(), String> {
+    // goethe metrics: the menu's Metrics page on a terminal (\u{2191}\u{2193} range, \u{2190} or q leaves); printed once when the output is not a terminal.
+    let view = crate::metrics_view::MetricsView::new();
+    if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        println!("{}", crate::metrics_view::render(&view, crate::status_view::MAX_WIDTH + 4).join("\n"));
+        return Ok(());
+    }
+    Tty::open()?.run(&mut MetricsPage(view)).map(|_| ())
+}
+
+pub fn pick_model() -> Result<Option<String>, String> {
+    // The model goethe run should use, chosen from the installed ones; None when there are none or the list is left.
+    let models = installed_and_loaded(&goethe_home());
+    if models.is_empty() {
+        return Err("no model is installed: goethe install MODEL".to_string());
+    }
+    let mut page = ModelPick { models, at: 0 };
+    let picked = Tty::open()?.run(&mut page)?;
+    Ok(picked.and_then(|i| page.models.get(i).map(|(id, _)| id.clone())))
+}
+
 pub fn run() -> Result<(), String> {
     // goethe: the main menu until q; each choice runs, then the menu comes back.
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
@@ -805,11 +790,12 @@ pub fn run() -> Result<(), String> {
             Some(1) => {}
             Some(2) => install_page(&mut tty)?,
             Some(3) => access_page(&mut tty)?,
-            Some(_) => {
+            Some(4) => {
                 tty.draw(&Notice("Reading the GPUs...".to_string()));
                 let mut page = StatusPage(crate::status_view::StatusView::new());
                 tty.run(&mut page)?;
             }
+            Some(_) => drop(tty.run(&mut MetricsPage(crate::metrics_view::MetricsView::new()))?),
         }
         if tty.quit {
             return Ok(());
@@ -1126,20 +1112,6 @@ struct Picker {
     status: String,
 }
 
-fn gb(v: f64) -> String {
-    let v = v.max(0.0);
-    if v >= 1000.0 {
-        format!("{:.1} TB", v / 1000.0)
-    } else {
-        format!("{v:.1} GB")
-    }
-}
-
-fn name_style(r: &PickRow, here: bool) -> &'static str {
-    // Installed models and the one under the cursor have bold names.
-    if r.installed || here { "1" } else { "" }
-}
-
 impl Picker {
     fn new(data: PickData) -> Picker {
         let chosen = vec![false; data.rows.len()];
@@ -1418,14 +1390,15 @@ mod tests {
         assert_eq!(t[1].trim_end(), format!("  {}", LOGO[0]).trim_end());
         assert_eq!(t[5].trim(), SITE);
         let first = t.iter().position(|l| l.contains("Quick setup")).unwrap();
-        for (i, title) in ["Quick setup", "Load/Unload", "Install models", "API keys and gateway", "Status"].iter().enumerate() {
+        for (i, title) in ["Quick setup", "Load/Unload", "Install models", "API keys and gateway"].iter().enumerate() {
             assert!(t[first + i].contains(title), "no gap between choices: {t:?}");
         }
+        assert!(t[first + 4].is_empty() && t[first + 5].contains("Status") && t[first + 6].contains("Metrics"), "an empty line before Status: {t:?}");
         assert!(t[first].starts_with('\u{27a4}'));
-        assert!(t[first + 5].is_empty() && t[first + 6].contains("Enter open"), "the keys line follows the menu: {t:?}");
-        assert!(t[first + 6].contains("theme  ") && t[first + 6].contains("2 sea") && t[first + 6].contains("3 earth"), "{}", t[first + 6]);
+        assert!(t[first + 7].is_empty() && t[first + 8].contains("Enter open"), "the keys line follows the menu: {t:?}");
+        assert!(t[first + 8].contains("theme  ") && t[first + 8].contains("2 sea") && t[first + 8].contains("3 earth"), "{}", t[first + 8]);
         let active = crate::theme::current().name();
-        assert!(t[first + 6].contains(&format!("{active}|")), "a bar marks the active theme: {}", t[first + 6]);
+        assert!(t[first + 8].contains(&format!("{active}|")), "a bar marks the active theme: {}", t[first + 8]);
         assert!(!text(access_menu().render(100, 40)).iter().any(|l| l.contains("theme  ")), "themes only on the main menu");
         assert_eq!(t.len(), 40);
     }
@@ -1447,7 +1420,11 @@ mod tests {
             s.base = "https://127.0.0.1:8443/v1".into();
         }
         let inside = text(m.render(200, 40));
-        assert!(inside.iter().any(|l| l.contains("openai") && l.contains("Base URL")), "{inside:?}");
+        assert!(inside.iter().any(|l| l.contains("Base URL")), "{inside:?}");
+        let curl = inside.iter().position(|l| l.contains("curl -k")).unwrap();
+        for l in &inside[curl..curl + 4] {
+            assert!(!["API keys", "Network exposure", "Public address", "API schema", "openai", "anthropic", "litellm"].iter().any(|w| l.contains(w)), "a copied curl line carries no menu text: {l}");
+        }
         assert!(inside.iter().any(|l| l.contains("Authorization: Bearer API_KEY")));
         m.key(Input::Down);
         let anthropic = text(m.render(200, 40));
@@ -1539,11 +1516,13 @@ mod tests {
     }
 
     #[test]
-    fn quick_setup_ends_with_the_three_schemas_beside_each_other() {
+    fn quick_setup_ends_with_the_three_schemas_and_the_example_below_them() {
         let mut p = SchemaPage { model: "org/m".into(), key: "goethe_sk_x".into(), base: "https://100.64.1.2:8443/v1".into(), at: 0 };
         let t = text(p.render(200, 40));
         assert!(t.iter().any(|l| l.contains("Your API is ready")) && t.iter().any(|l| l.contains("goethe_sk_x")));
-        assert!(t.iter().any(|l| l.contains("openai") && l.contains("https://100.64.1.2:8443/v1")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("Base URL") && l.contains("https://100.64.1.2:8443/v1")), "{t:?}");
+        let curl = t.iter().position(|l| l.contains("curl -k")).unwrap();
+        assert!(t[curl..curl + 4].iter().all(|l| !l.contains("openai") && !l.contains("anthropic") && !l.contains("litellm")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("Bearer API_KEY")), "the schema keeps its placeholders");
         p.key(Input::Down);
         p.key(Input::Down);
@@ -1551,10 +1530,30 @@ mod tests {
     }
 
     #[test]
+    fn up_moves_metrics_to_the_next_range_and_down_back() {
+        let mut p = MetricsPage(crate::metrics_view::MetricsView { range: 1, ..Default::default() });
+        p.key(Input::Up);
+        assert_eq!(p.0.range, 2, "up: 24 h to 7 d");
+        p.key(Input::Down);
+        p.key(Input::Down);
+        assert_eq!(p.0.range, 0, "down: back to 1 h");
+    }
+
+    #[test]
+    fn run_without_a_model_lists_the_installed_ones_at_the_top() {
+        let mut p = ModelPick { models: vec![("org/a".into(), true), ("org/b".into(), false)], at: 0 };
+        let t = text(p.render(100, 20));
+        assert!(t[1].contains("Choose a model to run") && t[3].starts_with('\u{27a4}') && t[3].contains("org/a") && t[3].contains("loaded") && t[4].contains("org/b"), "{t:?}");
+        assert!(matches!(p.key(Input::Up), Flow::Stay) && p.at == 1, "up from the first wraps to the last");
+        assert!(matches!(p.key(Input::Enter), Flow::Pick(1)));
+        assert!(matches!(p.key(Input::Char('q')), Flow::Quit) && matches!(p.key(Input::Left), Flow::Quit), "q and the left arrow leave without running");
+    }
+
+    #[test]
     fn digits_and_enter_pick_and_q_leaves() {
         let mut m = main_menu();
         m.key(Input::Up);
-        assert!(matches!(m.key(Input::Enter), Flow::Pick(4)), "up from the first wraps to the last");
+        assert!(matches!(m.key(Input::Enter), Flow::Pick(5)), "up from the first wraps to the last");
         assert!(matches!(m.key(Input::Right), Flow::Stay), "only Enter opens a choice without a submenu");
         assert!(matches!(m.key(Input::Left), Flow::Stay), "the left arrow on the top menu does not quit goethe");
         assert!(matches!(m.key(Input::Char('q')), Flow::Quit), "q quits goethe");

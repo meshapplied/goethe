@@ -9,6 +9,9 @@ on:
   schedule:
     - cron: "17 3 * * *"
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -23,7 +26,7 @@ jobs:
       python: ${{ steps.flags.outputs.python }}
       patches: ${{ steps.flags.outputs.patches }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: What the pull request touches (push/schedule/dispatch runs everything)
@@ -71,8 +74,8 @@ jobs:
       matrix:
         python: ["3.11", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -t .
@@ -81,8 +84,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
       - run: uvx ruff@0.17.0 check lab tests
       - run: shellcheck -S warning install.sh goethe/tests/accept.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
       - name: Style lint (headers, function comments, no dashes or emojis, leak guard, pinned ruff with the repo rules)
@@ -90,13 +93,22 @@ jobs:
         run: python3 tests/lint_style.py
       - name: Shell syntax of installer and packaging scripts
         working-directory: goethe
-        run: for f in cdn/install.sh packaging/*.sh tests/gate.sh tests/*.sh; do bash -n "$f"; done
+        run: |
+          for f in cdn/install.sh packaging/*.sh tests/gate.sh tests/*.sh; do bash -n "$f"; done
+          test -f cdn/install.ps1
+          python3 -c "
+          p=open('cdn/install.ps1','rb').read()
+          assert p.startswith(b'#'), 'install.ps1 must start with a comment'
+          assert b'WSL' in p and b'install.sh' in p, 'install.ps1 must hand off to install.sh'
+          assert all(b<128 for b in p), 'install.ps1 must be ASCII-only for Windows PowerShell 5.1'
+          assert len(p)>500
+          "
 
   attribution:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: No AI tool listed as co-author in new commits
@@ -129,7 +141,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: patch applies to the pinned NInfer commit
         run: |
           . nvfp4-kernels/NINFER_PIN
@@ -147,10 +159,10 @@ jobs:
       run:
         working-directory: goethe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Rust toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: goethe
           shared-key: goethe-dev
@@ -176,10 +188,10 @@ jobs:
       run:
         working-directory: goethe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Rust toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: goethe
           shared-key: goethe-dev
@@ -200,10 +212,10 @@ jobs:
       run:
         working-directory: goethe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Rust toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: goethe
           shared-key: goethe-dev
@@ -220,7 +232,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Every job passed (or was skipped for a false flag) and every job is listed
         env:
           NEEDS: ${{ toJSON(needs) }}
@@ -246,13 +258,13 @@ jobs:
     timeout-minutes: 30
     if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Patched SGLang source at the pinned commit
         run: |
           . goethe/sglang/PIN
           git clone --quiet --filter=blob:none --no-checkout "$SGLANG_REPO" sglang-fork
           git -C sglang-fork checkout --quiet "$SGLANG_REV"
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           version: "0.13.1"
       - name: Unsigned x86_64 package build (binaries, patched wheel, locks)

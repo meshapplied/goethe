@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Goethe installer: check this machine, verify the signed package, then the verified goethe sets itself up (goethe setup) the same way on Linux and macOS.
+# Goethe installer for Linux, macOS, and WSL (Windows uses install.ps1, which runs this script inside Ubuntu).
 
 set -euo pipefail
 
@@ -126,6 +126,26 @@ get() {
   curl -fsSL --retry 3 --retry-delay 2 -K <(auth_conf) "${BASE}/$1" -o "$2"
 }
 
+check_pkg_url() {
+  # https or file:// only; plain http just for a loopback host, or a test host with GOETHE_ALLOW_HTTP=1, because the package token travels with every request.
+  local host
+  case "$1" in
+    https://* | file://*) return 0 ;;
+    http://*)
+      host="${1#http://}"
+      host="${host%%[/?#]*}"
+      host="${host##*@}"
+      if [[ "${host}" == \[* ]]; then host="${host%%]*}]"; else host="${host%%:*}"; fi
+      if [[ "${host}" == localhost || "${host}" == "[::1]" || "${host}" =~ ^127\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        return 0
+      fi
+      [[ "${GOETHE_ALLOW_HTTP:-0}" == 1 ]] && return 0
+      die "${1} is plain http; use https, file:// or a loopback address (GOETHE_ALLOW_HTTP=1 allows a test host)"
+      ;;
+    *) die "GOETHE_PKG_URL must be an https:// or file:// URL, got ${1}" ;;
+  esac
+}
+
 pick_base() {
   # Every file of one install comes from one release: a pinned version's folder, else the newest release's folder (the package root when it has none).
   local latest
@@ -166,10 +186,12 @@ older_release() {
   get install.sh "${TMP}/release-install.sh" || die "could not download that release's install.sh"
   [[ "$(sha256_of "${TMP}/release-install.sh")" == "${want}" ]] || die "that release's install.sh does not match its signed package list"
   echo "  this release predates goethe setup; running its own installer"
-  local args=()
-  [[ -n "${AUTHKEY}" ]] && args+=(--authkey "${AUTHKEY}")
+  local args=() script
   [[ -n "${PLATFORM_URL}" ]] && args+=(--platform-url "${PLATFORM_URL}")
-  GOETHE_PKG_URL="${BASE}" exec bash "${TMP}/release-install.sh" "${args[@]}"
+  script="$(cat "${TMP}/release-install.sh")"
+  rm -rf "${TMP}"
+  trap - EXIT
+  GOETHE_PKG_URL="${BASE}" GOETHE_AUTHKEY="${AUTHKEY}" exec bash -c "${script}" install.sh ${args[@]+"${args[@]}"}
 }
 
 show_banner() {
@@ -207,6 +229,7 @@ main() {
   need_tools
   CDN="${GOETHE_PKG_URL:-${DEFAULT_PKG_URL}}"
   CDN="${CDN%/}"
+  check_pkg_url "${CDN}"
   pick_base
   TMP="$(mktemp -d "${TMPDIR:-/tmp}/goethe-install.XXXXXX")"
   trap 'rm -rf "${TMP}"' EXIT

@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 const VRAM_SEGMENTS: usize = 10;
 const BAND_SEGMENTS: usize = 10;
 const HALF_SEGMENTS: usize = 16;
-const GAP: &str = "   ";
-const MAX_WIDTH: usize = 120;
+pub(crate) const GAP: &str = "   ";
+pub(crate) const MAX_WIDTH: usize = 120;
 const SLOW: Duration = Duration::from_secs(1);
 pub const FAST: Duration = Duration::from_millis(100);
 
@@ -21,17 +21,17 @@ fn sgr(code: &str, text: &str) -> String {
     format!("\x1b[{code}m{text}\x1b[0m")
 }
 
-fn blue(text: &str) -> String {
+pub(crate) fn blue(text: &str) -> String {
     // Titles in the theme's main color.
     sgr(&crate::theme::main(), text)
 }
 
-fn pad(text: &str, width: usize) -> String {
+pub(crate) fn pad(text: &str, width: usize) -> String {
     // Pad a colored string to a visible width.
     format!("{text}{}", " ".repeat(width.saturating_sub(visible_width(text))))
 }
 
-fn rpad(text: &str, width: usize) -> String {
+pub(crate) fn rpad(text: &str, width: usize) -> String {
     format!("{}{text}", " ".repeat(width.saturating_sub(visible_width(text))))
 }
 
@@ -45,7 +45,7 @@ fn bar(fraction: f64, segments: usize) -> String {
     format!("{}{}", "\u{2588}".repeat(full), paint(&"\u{2591}".repeat(segments - full), Color::Gray))
 }
 
-fn colored_bar(fraction: f64, segments: usize, color: &str) -> String {
+pub(crate) fn colored_bar(fraction: f64, segments: usize, color: &str) -> String {
     let full = blocks(fraction, segments);
     format!("{}{}", sgr(color, &"\u{2588}".repeat(full)), paint(&"\u{2591}".repeat(segments - full), Color::Gray))
 }
@@ -86,7 +86,7 @@ fn size(gb: f64) -> String {
     }
 }
 
-fn section(icon: &str, title: &str, width: usize) -> String {
+pub(crate) fn section(icon: &str, title: &str, width: usize) -> String {
     // "◉ CPU  ╌╌╌╌", the title in the brand blue and a dashed rule to the width.
     let head = format!("{icon} {title}  ");
     format!("{}{}", blue(&head), paint(&"\u{254c}".repeat(width.saturating_sub(head.chars().count())), Color::Gray))
@@ -402,7 +402,7 @@ pub fn gpu_lines(gpus: &[GpuLine], width: usize) -> Vec<String> {
     out
 }
 
-fn clip(text: &str, width: usize) -> String {
+pub(crate) fn clip(text: &str, width: usize) -> String {
     // Cut a colored cell to its width with an ellipsis, dropping its colors only when it is too long.
     if visible_width(text) <= width {
         return text.to_string();
@@ -411,7 +411,7 @@ fn clip(text: &str, width: usize) -> String {
     plain.chars().take(width.saturating_sub(1)).chain(['\u{2026}']).collect()
 }
 
-fn strip(s: &str) -> String {
+pub(crate) fn strip(s: &str) -> String {
     let mut out = String::new();
     let mut esc = false;
     for c in s.chars() {

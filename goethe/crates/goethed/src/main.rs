@@ -124,16 +124,23 @@ fn handle_client(stream: UnixStream) {
 }
 
 fn bind_socket(sock: &std::path::Path) -> TokioUnixListener {
-    // Bind goethe.sock (owner only); the instance lock already cleared any stale file.
+    // Bind goethe.sock owner-only from the first instant (umask during bind, then chmod; failing that, refuse to serve); the instance lock already cleared any stale file.
     use std::os::unix::fs::PermissionsExt;
     if let Some(parent) = sock.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let std_listener = UnixListener::bind(sock).unwrap_or_else(|e| {
+    let old = unsafe { libc::umask(0o177) };
+    let bound = UnixListener::bind(sock);
+    unsafe { libc::umask(old) };
+    let std_listener = bound.unwrap_or_else(|e| {
         eprintln!("bind {}: {e}", sock.display());
         std::process::exit(1);
     });
-    let _ = std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600));
+    if let Err(e) = std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600)) {
+        eprintln!("chmod 600 {}: {e}", sock.display());
+        let _ = std::fs::remove_file(sock);
+        std::process::exit(1);
+    }
     std_listener
         .set_nonblocking(true)
         .expect("nonblocking goethe.sock");
@@ -174,6 +181,7 @@ async fn main() {
     eprintln!("goethed listening on {}", sock.display());
     goethe_core::autostart::spawn_restore_background();
     heartbeat::spawn(home.clone());
+    goethe_core::usage_log::spawn(home.clone());
     let _ = goethe_core::log_rotation::run_rotation_pass(&home);
     let home_rot = home.clone();
     let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
@@ -245,6 +253,7 @@ async fn main() {
     }
     goethe_core::trace::flush(Duration::from_secs(5));
     goethe_core::learn::flush();
+    goethe_core::usage_log::flush(&home);
     shutdown::shutdown_daemon(&home, &sock, keep);
     std::process::exit(exit_code);
 }
@@ -264,6 +273,16 @@ async fn drain_mux(home: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_socket_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("goethed-perm-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _listener = bind_socket(&path);
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[tokio::test]
     async fn a_request_that_arrives_after_accept_is_still_read() {

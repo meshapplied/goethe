@@ -51,7 +51,7 @@ fn check(dir: &Path, pem: &str, body: &[u8], sig: &[u8]) -> Result<bool, String>
         Ok(path)
     };
     let (key, body, sig) = (write("key.pem", pem.as_bytes())?, write("body", body)?, write("body.sig", sig)?);
-    let status = Command::new("openssl")
+    let status = Command::new(openssl()?)
         .args(["dgst", "-sha256", "-verify"])
         .arg(&key)
         .arg("-signature")
@@ -62,6 +62,16 @@ fn check(dir: &Path, pem: &str, body: &[u8], sig: &[u8]) -> Result<bool, String>
         .status()
         .map_err(|e| format!("cannot check a signature: openssl did not run ({e}); install openssl"))?;
     Ok(status.success())
+}
+
+const OPENSSL: [&str; 3] = ["/usr/bin/openssl", "/bin/openssl", "/usr/local/bin/openssl"];
+
+fn openssl() -> Result<&'static str, String> {
+    // The system openssl by absolute path, never the first one on PATH, which a planted binary that always answers yes could be.
+    OPENSSL
+        .into_iter()
+        .find(|p| Path::new(p).is_file())
+        .ok_or_else(|| format!("cannot check a signature: no openssl in {}; install openssl", OPENSSL.join(", ")))
 }
 
 #[cfg(test)]
@@ -125,6 +135,16 @@ mod tests {
         assert_eq!(tampered, format!("the package list: {MISMATCH}"));
         assert!(verify_with_key(&other, "the package list", b"SHA256SUMS body", &sig).is_err());
         assert!(!MISMATCH.contains("release_pub") && MISMATCH.contains("update goethe with the installer"));
+    }
+
+    #[test]
+    fn the_openssl_that_checks_comes_from_a_system_folder_not_path() {
+        let found = openssl().unwrap();
+        assert!(OPENSSL.contains(&found) && found.starts_with('/'));
+        let src = include_str!("release_key.rs");
+        let code = src.split("\n#[cfg(test)]\npub(crate) mod test_key").next().unwrap();
+        assert_eq!(code.matches("Command::new(").count(), 1, "one openssl call");
+        assert!(code.contains("Command::new(openssl()?)"));
     }
 
     #[test]

@@ -23,6 +23,8 @@ pub struct StateSnapshot {
     pub gpus: Vec<Gpu>,
     pub models: Models,
     pub apis: Vec<Api>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::usage_log::Report>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -178,6 +180,7 @@ impl Collector {
             gpus: con.as_ref().map(|c| gpus(c, home)).unwrap_or_default(),
             models,
             apis: con.as_ref().map(apis).unwrap_or_default(),
+            usage: con.as_ref().and_then(crate::usage_log::report),
         }
     }
 
@@ -508,28 +511,35 @@ fn apis(con: &rusqlite::Connection) -> Vec<Api> {
         .unwrap_or_default()
 }
 
-pub fn loaded_signature(s: &StateSnapshot) -> Vec<(String, String)> {
-    s.models.loaded.iter().map(|l| (l.instance_id.clone(), l.status.clone())).collect()
+pub fn encode(s: &StateSnapshot) -> Result<Vec<u8>, String> {
+    encode_sent(s).map(|(data, _)| data)
 }
 
-pub fn encode(s: &StateSnapshot) -> Result<Vec<u8>, String> {
-    // JSON within the 256 KB limit; an oversize snapshot drops installed models first, then everything but the node.
+pub fn encode_sent(s: &StateSnapshot) -> Result<(Vec<u8>, Option<i64>), String> {
+    // JSON within the 256 KB limit, and the end of the usage rows it still carries; an oversize snapshot drops installed models first, then halves the usage rows (older minutes kept, so the cursor still moves), then everything but the node.
     let mut s = s.clone();
-    for _ in 0..3 {
+    let mut stripped = false;
+    loop {
         let data = serde_json::to_vec(&s).map_err(|e| e.to_string())?;
         if data.len() <= crate::platform_api::MAX_SNAPSHOT_BYTES {
-            return Ok(data);
+            return Ok((data, s.usage.as_ref().map(|u| u.to)));
         }
         if !s.models.installed.is_empty() {
             s.models.installed.clear();
-        } else {
+        } else if let Some(u) = s.usage.as_mut() {
+            if !u.halve() {
+                s.usage = None;
+            }
+        } else if !stripped {
+            stripped = true;
             s.network.addresses.clear();
             s.models.loaded.clear();
             s.gpus.clear();
             s.apis.clear();
+        } else {
+            return Err("the snapshot does not fit in 256 KB".to_string());
         }
     }
-    Err("the snapshot does not fit in 256 KB".to_string())
 }
 
 #[cfg(test)]
@@ -733,6 +743,24 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&data).unwrap();
         assert_eq!(v["models"]["installed"], serde_json::json!([]));
         assert_eq!(v["models"]["loaded"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_oversize_usage_report_is_sent_in_older_halves_so_the_cursor_moves() {
+        let (_dir, home) = seeded_home();
+        let mut s = Collector::new(String::new()).build(&home, "interval", None);
+        let stats = crate::usage_log::Requests { latency_hist: vec![1; 12], ttft_hist: vec![1; 12], ..Default::default() };
+        let models = (0..400)
+            .map(|i| crate::usage_log::ModelRow { t: 60 * (i / 4), model: format!("{}{i}", "m".repeat(400)), stats: stats.clone() })
+            .collect();
+        s.usage = Some(crate::usage_log::Report { from: 0, to: 6000, bounds_ms: vec![], models, gpus: vec![], host: vec![] });
+        let (data, to) = encode_sent(&s).unwrap();
+        assert!(data.len() <= crate::platform_api::MAX_SNAPSHOT_BYTES);
+        let v: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        let sent = v["usage"]["models"].as_array().unwrap();
+        let to = to.expect("some usage rows still go");
+        assert!(to < 6000 && !sent.is_empty() && sent.iter().all(|r| r["t"].as_i64().unwrap() < to));
+        assert_eq!(sent.len(), 4 * (to / 60) as usize, "every minute before the cursor is sent whole");
     }
 
     #[test]

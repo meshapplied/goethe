@@ -1,0 +1,57 @@
+# Windows → WSL install path. Not a nested Win11 VM (slow). Uses the hosted
+# windows-2025 runner + WSL2 Ubuntu, same shape real users hit after features exist.
+name: wsl-install
+
+on:
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - "goethe/cdn/install.ps1"
+      - "goethe/cdn/install.sh"
+      - ".github/workflows/wsl-install.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wsl-install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-wsl:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Parse install.ps1
+        shell: pwsh
+        run: |
+          $errs = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            "$pwd/goethe/cdn/install.ps1", [ref]$null, [ref]$errs)
+          if ($errs) {
+            $errs | ForEach-Object { $_.ToString() }
+            exit 1
+          }
+
+      - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7.2.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          additional-packages: curl ca-certificates
+
+      - name: install.ps1 (WSL already ready; same install.sh as Linux)
+        shell: pwsh
+        env:
+          GOETHE_LOGIN: "0"
+        run: |
+          # Runner is elevated; features and Ubuntu-24.04 are already present.
+          # This exercises the stub's distro/systemd/install.sh handoff, not feature enable + reboot.
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$pwd/goethe/cdn/install.ps1"
+
+      - name: goethe is on PATH inside Ubuntu-24.04
+        shell: pwsh
+        run: |
+          wsl.exe -d Ubuntu-24.04 -- bash -lc 'command -v goethe && goethe --version'

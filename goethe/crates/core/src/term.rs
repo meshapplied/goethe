@@ -228,7 +228,6 @@ enum Key {
     Down,
     Enter,
     Cancel,
-    Space,
     Digit(usize),
     Other,
 }
@@ -240,7 +239,6 @@ fn parse_key(bytes: &[u8]) -> Key {
         [0x1b, b'[' | b'O', b'B', ..] | [b'j', ..] => Key::Down,
         [b'\r' | b'\n', ..] => Key::Enter,
         [0x03, ..] | [0x1b] | [b'q', ..] | [0x1b, b'[' | b'O', b'D', ..] => Key::Cancel,
-        [b' ', ..] => Key::Space,
         [d @ b'1'..=b'9', ..] => Key::Digit(usize::from(d - b'1')),
         _ => Key::Other,
     }
@@ -279,6 +277,9 @@ pub(crate) fn read_keys(buf: &mut [u8; 16]) -> std::io::Result<usize> {
 fn step(options: &[String], selected: usize, key: Key) -> usize {
     // The highlighted row after one key: arrows wrap around and skip blank spacer rows, digit n jumps to the nth choice.
     let choices: Vec<usize> = (0..options.len()).filter(|&i| !options[i].is_empty()).collect();
+    if choices.is_empty() {
+        return selected;
+    }
     let at = choices.iter().position(|&i| i == selected).unwrap_or(0);
     let n = choices.len().max(1);
     match key {
@@ -300,19 +301,46 @@ pub fn ask(question: &str, default: &str) -> Result<String, String> {
 }
 
 pub fn ask_secret(question: &str) -> Result<String, String> {
-    // Like ask, without echoing what is typed (tokens and passwords).
-    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
-    let quiet = unsafe { libc::tcgetattr(0, &mut saved) } == 0 && {
-        let mut t = saved;
-        t.c_lflag &= !libc::ECHO;
-        unsafe { libc::tcsetattr(0, libc::TCSANOW, &t) == 0 }
+    // Like ask, without echoing what is typed (tokens and passwords); keys are read raw so Ctrl-C cancels with the terminal restored.
+    eprint!("{question} ");
+    std::io::stderr().flush().ok();
+    let Some(raw) = RawMode::enter() else {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+        return Ok(line.trim().to_string());
     };
-    let answer = ask(question, "");
-    if quiet {
-        unsafe { libc::tcsetattr(0, libc::TCSANOW, &saved) };
-        eprintln!();
-    }
+    let mut typed = Vec::new();
+    let mut buf = [0u8; 64];
+    let answer = loop {
+        let n = std::io::Read::read(&mut std::io::stdin(), &mut buf).map_err(|e| e.to_string())?;
+        match secret_keys(&mut typed, &buf[..n]) {
+            Some(done) => break done,
+            None => continue,
+        }
+    };
+    drop(raw);
+    eprintln!();
     answer
+}
+
+fn secret_keys(typed: &mut Vec<u8>, bytes: &[u8]) -> Option<Result<String, String>> {
+    // One read at a secret prompt: Enter finishes, Ctrl-C (or Ctrl-D and end of input on an empty line) cancels, Backspace deletes; None asks for more.
+    if bytes.is_empty() {
+        return Some(Err("cancelled".to_string()));
+    }
+    for &b in bytes {
+        match b {
+            b'\r' | b'\n' => return Some(Ok(String::from_utf8_lossy(typed).trim().to_string())),
+            0x03 => return Some(Err("cancelled".to_string())),
+            0x04 if typed.is_empty() => return Some(Err("cancelled".to_string())),
+            0x7f | 0x08 => {
+                while typed.pop().is_some_and(|c| c & 0xc0 == 0x80) {}
+            }
+            b if b < 0x20 => {}
+            b => typed.push(b),
+        }
+    }
+    None
 }
 
 pub(crate) struct RawMode(libc::termios);
@@ -350,7 +378,6 @@ fn terminal_width() -> usize {
 }
 
 pub const MENU_KEYS: &str = "\u{2191}\u{2193} move   Enter open   \u{2190} back";
-pub const CHECK_KEYS: &str = "\u{2191}\u{2193} move   Space tick   Enter confirm   \u{2190} back";
 
 fn keys_line(text: &str) -> String {
     // The keys line under every menu, as in the goethe menu: a gap, then the keys in gray.
@@ -411,61 +438,6 @@ pub fn select(options: &[String], default: usize) -> Result<Option<usize>, Strin
                     }
                 }
             }
-        }
-    }
-}
-
-fn draw_checklist(options: &[String], checked: &[bool], at: usize, redraw: bool) {
-    // Each option behind [x] or [ ], the one under the cursor in light blue; a redraw first moves back up over them.
-    let mut out = String::new();
-    if redraw {
-        out.push_str(&format!("\x1b[{}A", options.len() + 2));
-    }
-    let width = terminal_width().saturating_sub(7).max(10);
-    for (i, o) in options.iter().enumerate() {
-        let o: String = if o.chars().count() > width { o.chars().take(width - 1).chain(['.']).collect() } else { o.clone() };
-        let mark = if checked[i] { "[x]" } else { "[ ]" };
-        let line = if i == at { format!("\x1b[1;{}m\u{27a4} {mark} {o}\x1b[0m", crate::theme::main()) } else { format!("  {mark} {o}") };
-        out.push_str(&format!("\r\x1b[2K{line}\n"));
-    }
-    out.push_str(&keys_line(CHECK_KEYS));
-    eprint!("{out}");
-    std::io::stderr().flush().ok();
-}
-
-pub fn select_many(options: &[String], checked: &[bool]) -> Result<Option<Vec<bool>>, String> {
-    // Checkbox menu: arrows move, Space ticks, Enter confirms the ticks, q cancels; Err when there is no terminal.
-    if options.is_empty() || !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
-        return Err("no terminal for a menu".to_string());
-    }
-    let mut ticks: Vec<bool> = (0..options.len()).map(|i| checked.get(i).copied().unwrap_or(false)).collect();
-    let raw = RawMode::enter().ok_or("could not switch the terminal to raw mode")?;
-    eprint!("\x1b[?25l");
-    let mut at = 0;
-    draw_checklist(options, &ticks, at, false);
-    let mut buf = [0u8; 16];
-    loop {
-        let n = read_keys(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            drop(raw);
-            return Ok(None);
-        }
-        for key in parse_keys(&buf[..n]) {
-            match key {
-                Key::Enter => {
-                    drop(raw);
-                    return Ok(Some(ticks));
-                }
-                Key::Cancel => {
-                    drop(raw);
-                    return Ok(None);
-                }
-                Key::Space => ticks[at] = !ticks[at],
-                Key::Up => at = (at + options.len() - 1) % options.len(),
-                Key::Down => at = (at + 1) % options.len(),
-                _ => continue,
-            }
-            draw_checklist(options, &ticks, at, true);
         }
     }
 }
@@ -531,7 +503,6 @@ mod tests {
         assert_eq!(parse_key(b"\x03"), Key::Cancel);
         assert_eq!(parse_key(b"\x1b"), Key::Cancel);
         assert_eq!(parse_key(b"3"), Key::Digit(2));
-        assert_eq!(parse_key(b" "), Key::Space);
         assert_eq!(parse_keys(b"\x1b[B\x1b[B\r"), vec![Key::Down, Key::Down, Key::Enter]);
         let three: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
         assert_eq!(step(&three, 0, Key::Up), 2);
@@ -543,6 +514,17 @@ mod tests {
         assert_eq!(step(&spaced, 0, Key::Down), 2, "the blank spacer row is skipped");
         assert_eq!(step(&spaced, 2, Key::Up), 0);
         assert_eq!(step(&spaced, 0, Key::Digit(1)), 2, "digits count choices, not rows");
+        assert_eq!(step(&[String::new()], 0, Key::Down), 0, "only blank rows: nothing to move to, no panic");
+    }
+
+    #[test]
+    fn a_secret_prompt_finishes_on_enter_and_ctrl_c_cancels() {
+        let mut t = Vec::new();
+        assert_eq!(secret_keys(&mut t, b"hf_ab"), None);
+        assert_eq!(secret_keys(&mut t, "c\u{e9}\x7f\x7fd\r".as_bytes()), Some(Ok("hf_abd".to_string())), "backspace removes a whole character");
+        assert_eq!(secret_keys(&mut Vec::new(), b"tok\x03"), Some(Err("cancelled".to_string())));
+        assert_eq!(secret_keys(&mut Vec::new(), b"\x04"), Some(Err("cancelled".to_string())));
+        assert_eq!(secret_keys(&mut Vec::new(), b""), Some(Err("cancelled".to_string())), "end of input");
     }
 
     #[test]

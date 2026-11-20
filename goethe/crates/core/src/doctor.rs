@@ -90,7 +90,7 @@ type CheckFn = fn(&Path) -> Check;
 const CHECKS: &[(&str, CheckFn)] = &[
     ("hardware", check_hardware),
     ("driver", check_driver),
-    ("platform", check_platform),
+    ("console", check_platform),
     ("glibc", |_| check_glibc()),
     ("nginx", check_nginx),
     ("goethe_home", check_goethe_home),
@@ -109,11 +109,12 @@ const CHECKS: &[(&str, CheckFn)] = &[
     ("registry", check_registry),
     ("nvidia_driver", |_| check_nvidia_driver()),
     ("compiler", |_| check_compiler()),
+    ("ffmpeg", |_| check_ffmpeg()),
 ];
 
 const MAC_CHECKS: &[(&str, CheckFn)] = &[
     ("hardware", check_mac_hardware),
-    ("platform", check_platform),
+    ("console", check_platform),
     ("llama.cpp", check_llama_cpp),
     ("nginx", check_nginx),
     ("goethe_home", check_goethe_home),
@@ -248,7 +249,7 @@ fn platform_note(link: crate::platform_cli::Link) -> (&'static str, String) {
 
 fn check_platform(home: &Path) -> Check {
     let (status, note) = platform_note(crate::platform_cli::link_state(home, crate::service::goethed_running()));
-    check("platform", status, note)
+    check("console", status, note)
 }
 
 fn check(name: &str, status: &str, hint: impl Into<String>) -> Check {
@@ -288,6 +289,28 @@ fn check_compiler() -> Check {
         crate::host_compiler::Verdict::Ok(label) => check("compiler", "OK", label),
         crate::host_compiler::Verdict::TooNew(why) => check("compiler", "WARN", why),
         crate::host_compiler::Verdict::Unusable(why) => check("compiler", "FAIL", why),
+    }
+}
+
+pub(crate) const AVDEVICE: std::ops::RangeInclusive<u32> = 58..=62;
+
+pub(crate) fn find_libavdevice() -> Option<u32> {
+    // Probe the sonames torchcodec dlopens; a hit means SGLang models can start without a missing-lib traceback.
+    AVDEVICE.into_iter().find(|n| {
+        std::ffi::CString::new(format!("libavdevice.so.{n}"))
+            .is_ok_and(|c| !unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_LAZY) }.is_null())
+    })
+}
+
+fn check_ffmpeg() -> Check {
+    // SGLang's torchcodec loads system FFmpeg when a model starts; warn early instead of a libavutil traceback in the engine log.
+    match find_libavdevice() {
+        Some(n) => check("ffmpeg", "OK", format!("FFmpeg {}", n - 54)),
+        None => check(
+            "ffmpeg",
+            "WARN",
+            "FFmpeg 4 to 8 not found; SGLang models need it to start: sudo apt install ffmpeg (or sudo dnf install ffmpeg-free)",
+        ),
     }
 }
 
@@ -854,14 +877,14 @@ fn is_writable(path: &Path) -> bool {
 }
 
 fn available_gb(path: &Path) -> Result<f64, String> {
-    use std::ffi::CString;
-    let cpath = CString::new(path.to_str().ok_or("path")?).map_err(|e| e.to_string())?;
+    // Free space in GiB, the unit weights_gb uses, so the comparison with the largest model is like for like.
+    let cpath = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|e| e.to_string())?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
     let rc = unsafe { libc::statvfs(cpath.as_ptr(), &mut stat) };
     if rc != 0 {
-        return Err("statvfs failed".into());
+        return Err(format!("cannot read free space of {}: {}", path.display(), std::io::Error::last_os_error()));
     }
-    Ok((stat.f_bavail as u64 * stat.f_frsize as u64) as f64 / 1e9)
+    Ok(stat.f_bavail as f64 * stat.f_frsize as f64 / crate::model_facts::GIB)
 }
 
 #[cfg(test)]
@@ -906,7 +929,7 @@ mod tests {
         assert!(platform_note(Link::NotLinked).1.contains("goethe login"));
         assert_eq!(platform_note(Link::Linked { workspace: "w".into(), revoked: false, heartbeat: "OK".into(), ok: true }).0, "OK");
         assert_eq!(platform_note(Link::Linked { workspace: "w".into(), revoked: true, heartbeat: String::new(), ok: false }).0, "WARN");
-        assert!(CHECKS.iter().any(|(n, _)| *n == "driver") && CHECKS.iter().any(|(n, _)| *n == "platform"));
+        assert!(CHECKS.iter().any(|(n, _)| *n == "driver") && CHECKS.iter().any(|(n, _)| *n == "console"));
     }
 
     #[test]
@@ -920,6 +943,17 @@ mod tests {
     fn the_hugging_face_check_uses_the_gated_wording_of_install() {
         assert!(hf::GATED_WAYS.contains("goethe install DIR --name ID"));
         assert!(hf::gated_guidance("org/m").contains(&hf::GATED_WAYS.replace("ID", "org/m")));
+    }
+
+    #[test]
+    fn ffmpeg_range_follows_the_pinned_torchcodec() {
+        // Keep doctor + doctor --fix aligned with the torchcodec pin (Levente Orban, #140).
+        let bumped = "torchcodec changed: set AVDEVICE to the FFmpeg it loads, then this pin";
+        assert!(include_str!("../../../pyenv/requirements.in").contains("\ntorchcodec==0.15.0\n"), "{bumped}");
+        assert!(include_str!("../../../pyenv/requirements.aarch64.in").contains("/torchcodec-0.15.0%2B"), "{bumped}");
+        assert!(CHECKS.iter().any(|(n, _)| *n == "ffmpeg"), "doctor must list ffmpeg");
+        assert_eq!(*AVDEVICE.start(), 58);
+        assert_eq!(*AVDEVICE.end(), 62);
     }
 
     #[test]

@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# Write VERSION, SHA256SUMS and SHA256SUMS.sig for a dist/cdn tree and verify with the key embedded in install.sh.
+# Write VERSION and SHA256SUMS for a dist/cdn tree; with a signing key also sign them and verify with install.sh's key.
 
 set -euo pipefail
 
-DIST="${1:?usage: sign_cdn.sh <dist/cdn> <signing-key>}"
-KEY="${2:?usage: sign_cdn.sh <dist/cdn> <signing-key>}"
+DIST="${1:?usage: sign_cdn.sh <dist/cdn> [signing-key]}"
+KEY="${2:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VER="$(grep -E '^version\s*=' "${ROOT}/crates/goethe/Cargo.toml" | head -n1 | sed 's/.*"\(.*\)".*/\1/')"
 printf '%s\n' "${VER}" >"${DIST}/VERSION"
 (
   cd "${DIST}"
-  find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
+  find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig ! -name registry.json.sig | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
     sha256sum "${f}" | awk -v p="${f}" '{print $1 "  " p}'
   done
 ) >"${DIST}/SHA256SUMS"
+if [[ -z "${KEY}" ]]; then
+  echo "wrote ${DIST}/SHA256SUMS (version ${VER}, unsigned)"
+  exit 0
+fi
 openssl dgst -sha256 -sign "${KEY}" -out "${DIST}/SHA256SUMS.sig" "${DIST}/SHA256SUMS"
 if [[ -f "${DIST}/v1/registry.json" ]]; then
   openssl dgst -sha256 -sign "${KEY}" -out "${DIST}/v1/registry.json.sig" "${DIST}/v1/registry.json"

@@ -286,7 +286,7 @@ fn packs_text(offers: &[(&crate::packs::Offer, Option<f64>)], linked: bool) -> S
     let how = if linked {
         "goethe install MODEL downloads the model and its verified kernels".to_string()
     } else {
-        "optimised kernels install on nodes logged in to the Goethe platform: goethe login".to_string()
+        "optimised kernels install on nodes logged in to the Goethe console: goethe login".to_string()
     };
     format!("\n{}\n{}\n{how}\n", paint("Optimised kernels for this machine", Color::Bold), table.render())
 }

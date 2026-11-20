@@ -246,7 +246,12 @@ def lint_leaks() -> None:
         return
     repo = Path(top.stdout.strip())
     listed = subprocess.run(["git", "-C", str(repo), "ls-files", "-z"], capture_output=True, text=True).stdout
-    for name in filter(None, listed.split("\0")):
+    names = [n for n in listed.split("\0") if n]
+    local_prefix = (".local/", ".agents/skills/", ".cursor/skills/", ".claude/skills/")
+    for name in names:
+        if name == "PROJECT.md" or name.startswith(local_prefix):
+            problems.append(f"{name}:1: local-only path must not be tracked")
+            continue
         path = repo / name
         if path.suffix in NO_TEXT or path.resolve() == Path(__file__).resolve() or not path.is_file():
             continue

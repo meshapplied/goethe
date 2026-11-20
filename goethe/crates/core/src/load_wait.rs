@@ -6,15 +6,6 @@ use std::time::{Duration, Instant};
 
 pub const DEFAULT_LOAD_WAIT: Duration = Duration::from_secs(600);
 
-pub fn wait_after_load_stdout(stdout: &str, no_wait: bool) -> Result<(), String> {
-    if no_wait {
-        return Ok(());
-    }
-    let instance_id = rpc::parse_load_instance_id(stdout)
-        .ok_or_else(|| "load did not return instance_id".to_string())?;
-    wait_for_instance(&instance_id, DEFAULT_LOAD_WAIT)
-}
-
 const BANNER: &str = "Loading into VRAM...";
 
 fn heartbeat(secs: u64) -> String {

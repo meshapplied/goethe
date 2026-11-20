@@ -29,6 +29,12 @@ pub fn init_nvml() -> Result<Nvml, nvml_wrapper::error::NvmlError> {
     Nvml::builder().lib_path(std::ffi::OsStr::new("libnvidia-ml.so.1")).init().or_else(|_| Nvml::init())
 }
 
+pub fn shared_nvml() -> Option<&'static Nvml> {
+    // One NVML session for the whole process, for samplers that would otherwise initialise NVML every few seconds.
+    static NVML: std::sync::OnceLock<Option<Nvml>> = std::sync::OnceLock::new();
+    NVML.get_or_init(|| init_nvml().ok()).as_ref()
+}
+
 pub fn nvml() -> Result<Nvml, String> {
     // NVML, or an error that says why the driver is unusable and how to fix it.
     init_nvml().map_err(|e| match diagnose(&probe()) {
