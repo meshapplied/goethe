@@ -6,7 +6,9 @@ This README is for building and releasing Goethe. To install and use it, see the
 
 ## Install
 
-    curl -fsSL https://goethe.sh/install.sh | bash
+    curl -fsSL https://pkg.goethe.sh/install.sh | bash
+
+On Windows (elevated PowerShell), `irm https://pkg.goethe.sh/install.ps1 | iex` enables WSL2 if needed and runs that same `install.sh` inside Ubuntu.
 
 The installer verifies a signed manifest, creates a Python environment with SGLang, installs `goethe` and `goethed` and links `goethe` into `/usr/local/bin` (or `~/.local/bin`), then ends with `goethe`. It does not start goethed or turn on start at boot; `goethe` or `goethe up` does. Re-running it over a running goethed applies the new binaries to it and keeps engines serving. No root needed. State lives in `$GOETHE_HOME`, else in the home whose `bin/` holds the running binary (links are followed, so the linked `goethe` finds a custom home), else `/workspace/.goethe`, else `/var/lib/goethe`, else `~/.goethe`.
 

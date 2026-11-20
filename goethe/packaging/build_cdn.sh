@@ -188,6 +188,7 @@ cp "${ROOT}/cdn/v1/registry.json" "${DIST}/v1/registry.json"
 cp "${ROOT}"/pyenv/requirements*.lock "${ROOT}/pyenv/bootstrap.sh" "${DIST}/pyenv/"
 "${ROOT}/packaging/subst_install_pubkey.sh" "${ROOT}/cdn/install.sh" "${RELEASE_PUB}" \
   "${DIST}/install.sh"
+cp "${ROOT}/cdn/install.ps1" "${DIST}/install.ps1"
 if [[ -n "${GOETHE_SIGN_KEY:-}" ]]; then
   "${ROOT}/packaging/sign_cdn.sh" "${DIST}" "${GOETHE_SIGN_KEY}"
 fi

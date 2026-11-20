@@ -118,6 +118,7 @@ jobs:
           fpr="$(openssl pkey -pubin -in "$RUNNER_TEMP/embedded.pem" -outform DER | sha256sum | cut -d' ' -f1)"
           [[ "$fpr" == "${{ vars.GOETHE_RELEASE_PUB_FPR }}" ]]
           bash -n install.sh
+          test -f install.ps1
           bin/linux-x86_64/goethe --version
           bin/linux-x86_64/goethe --help >/dev/null
           file bin/linux-x86_64/goethe | grep -q "x86-64"
@@ -269,6 +270,7 @@ jobs:
           path: |
             goethe-cdn-*.tar.zst
             cdn/install.sh
+            cdn/install.ps1
             cdn/SHA256SUMS
             cdn/SHA256SUMS.sig
           retention-days: 30
@@ -317,7 +319,7 @@ jobs:
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Goethe $VERSION" --generate-notes
           fi
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
-            goethe-cdn-*.tar.zst cdn/install.sh cdn/SHA256SUMS cdn/SHA256SUMS.sig
+            goethe-cdn-*.tar.zst cdn/install.sh cdn/install.ps1 cdn/SHA256SUMS cdn/SHA256SUMS.sig
 
   pages:
     needs: [guard, merge, publish]
