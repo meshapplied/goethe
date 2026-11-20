@@ -459,7 +459,7 @@ Prints the version, and the upgrade command when a newer version is available. `
 
 ## Platform
 
-Linking is optional. A node that is not linked never contacts the platform. A linked node's goethed sends a health snapshot every 10 seconds, and right after a model loads or unloads: hostname, OS, environment (bare metal, VM, container, cloud), network addresses, the gateway address (and the public gateway's address and end time while [`goethe api share`](#goethe-api-share-duration) is open), GPUs with memory use, installed and loaded models, and the node's API keys (name, key, model scope, expiry; the platform stores keys encrypted and shows them only to members who may manage the node). It never sends engine keys, prompts, traces, file paths, environment variables or command lines. Inference never depends on the platform.
+Linking is optional. A node that is not linked never contacts the platform. A linked node's goethed sends a health snapshot every 10 seconds, and right after a model loads or unloads: hostname, OS, environment (bare metal, VM, container, cloud), network addresses, the gateway address (and the public gateway's address and end time while [`goethe api share`](#goethe-api-share-duration) is open), GPUs with memory use, installed and loaded models, and the node's API key inventory (id, name, prefix, model scope, expiry — never the raw key). It never sends API key secrets, engine keys, prompts, traces, file paths, environment variables or command lines. Inference never depends on the platform.
 
 ### `goethe login`
 
