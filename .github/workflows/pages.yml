@@ -38,7 +38,7 @@ jobs:
         run: |
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$TAG is not a tag like v0.1.9"; exit 1; }
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "goethe-cdn-${TAG#v}.tar.zst"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: src
           sparse-checkout: goethe/packaging
@@ -49,13 +49,13 @@ jobs:
         run: |
           bash src/goethe/packaging/pages_site.sh "goethe-cdn-${TAG#v}.tar.zst" site
           test "$(cat site/VERSION)" = "${TAG#v}" || { echo "::error::the package is $(cat site/VERSION), not ${TAG#v}"; exit 1; }
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           path: site
           name: github-pages-${{ github.run_attempt }}
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
         with:
           artifact_name: github-pages-${{ github.run_attempt }}
           timeout: 1800000
