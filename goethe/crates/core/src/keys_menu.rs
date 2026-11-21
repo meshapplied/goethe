@@ -518,6 +518,8 @@ pub(crate) enum Style {
     Yellow,
     Selected,
     Hovered,
+    Secondary,
+    Third,
 }
 
 pub(crate) struct Line {
@@ -551,6 +553,8 @@ pub(crate) fn paint(text: &str, style: Style) -> String {
         Style::Red => "31".to_string(),
         Style::Yellow => "33".to_string(),
         Style::Selected => format!("1;{}", crate::theme::main()),
+        Style::Secondary => return crate::theme::paint(&crate::theme::secondary(), text),
+        Style::Third => return crate::theme::paint(&crate::theme::third(), text),
     };
     format!("\x1b[{code}m{text}\x1b[0m")
 }

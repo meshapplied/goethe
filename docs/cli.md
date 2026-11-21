@@ -44,7 +44,8 @@ On a terminal, plain `goethe` opens the menu on its own screen:
 | Entry | What it does |
 |---|---|
 | Quick setup | Install a model, serve it through the API and choose who can reach it, step by step |
-| Install models | A table of the catalog models that fit this machine's GPUs, with their size and the VRAM they need, under the machine's VRAM and storage. Space selects models, a custom Hugging Face id and a token for gated models can be typed below the table, and Enter installs them |
+| Load/Unload | The installed models, loaded ones marked. Enter unloads a loaded model (Space marks several to unload together). On one that is not loaded, Enter asks where: Auto (goethe picks, as `goethe load` does) or the GPUs you mark with Space, several splitting one copy (`goethe load --gpu`); each GPU shows its free memory and whether the model fits on it alone, GPUs that are not allowed are gray, and the line under them is the plan `goethe load` would use (tp, context and GB per GPU). Enter loads, with a bar beside the model |
+| Install models | A table of the catalog models that fit this machine's GPUs, with their size and the VRAM they need, under the machine's VRAM and storage. Space selects a model to install, or an installed one (filled dot) to uninstall, whose dot then turns the theme's third color. Above the keys the screen shows what Enter will do (`install: ...`, `uninstall: ...`); Enter uninstalls first, then installs, each one in turn, and goes on when one fails. A custom Hugging Face id and a token for gated models can be typed below the table. The table comes back after, with the new state |
 | API keys and gateway | API keys (create, scope, show or delete), network exposure (local, VPN or private network, public) and the public address ([`goethe api share`](#goethe-api-share-duration)) |
 | Status | Whether Goethe runs, the environment, then live tables of the GPUs (VRAM, processes, allowed or denied, memory bandwidth), CPU and memory |
 | Metrics | From the [usage log](#usage-log), over the last hour, 24 hours, 7 days, this month (from the 1st), 30 or 90 days (↑ the next, longer range, ↓ back): per model the requests, errors (client and server errors, rate limits, cancelled), prompt and generated tokens, average time to first token, average decode speed and the 95th-percentile latency, with a total row; per GPU the average and peak utilisation, memory bandwidth, average VRAM, average power against its limit, peak temperature and any throttling, with the host's CPU, RAM and free disk; and per API key the requests and tokens, by whole days. Requests for a model Goethe does not serve and requests refused by a key's rate limit have their own rows |
@@ -148,7 +149,7 @@ Unloads a model and deletes the files Goethe downloaded. For a folder you regist
 
 ### `goethe load <model> [-- <engine options>]`
 
-Loads a model and waits until it answers. Goethe picks the GPUs and sizes the memory unless you choose.
+Loads a model and waits until it answers. Goethe picks the GPUs and sizes the memory unless you choose. On a terminal it shows the context window, the concurrency and the VRAM it will hold, then a bar that fills as the model reaches VRAM; piped, or with `--verbose`, it prints the plan and a final `RUNNING:` line.
 
 | Option | Description |
 |---|---|
@@ -186,7 +187,7 @@ Stops a model. Requests in progress finish first.
 
 ### `goethe run [MODEL] [INPUT]`
 
-Tries a model by hand. Without MODEL or INPUT on a terminal, a list of the installed models opens at the top of the screen (loaded ones first, marked `loaded`): ↑↓ move, Enter runs the chosen one, `q` or ← leaves. With text it prints one reply (a text model), an embedding summary (`dims= norm= [first 4]`) or, for an audio file, its transcript. With no INPUT on a terminal it opens an ephemeral chat screen; with no terminal, or `--plain`, a plain `> ` prompt (a speech model records from the microphone). An installed model that is not loaded is loaded first, like `goethe load` but with a 100,000-token context (or the model's maximum when smaller; reduced when the GPU cannot fit it), and unloaded when run ends unless `--keep`; run never installs. It talks to the model's own engine on 127.0.0.1 with its engine key, not through the gateway, and creates no API key.
+Tries a model by hand. Without MODEL or INPUT on a terminal, a list of the installed models opens at the top of the screen (loaded ones first, marked `loaded`): ↑↓ move, Enter runs the chosen one (one that is not loaded loads right there, its bar beside it), `q` or ← leaves. With text it prints one reply (a text model), an embedding summary (`dims= norm= [first 4]`) or, for an audio file, its transcript. With no INPUT on a terminal it opens an ephemeral chat screen; with no terminal, or `--plain`, a plain `> ` prompt (a speech model takes an audio file as INPUT). An installed model that is not loaded is loaded first, like `goethe load` but with a 100,000-token context (or the model's maximum when smaller; reduced when the GPU cannot fit it), and unloaded quietly in the background when run ends unless `--keep`. A model that was loaded (or loading) before run started stays loaded; run never installs. It talks to the model's own engine on 127.0.0.1 with its engine key, not through the gateway, and creates no API key.
 
 | Option | Description |
 |---|---|
@@ -194,7 +195,7 @@ Tries a model by hand. Without MODEL or INPUT on a terminal, a list of the insta
 | `--plain` | No chat screen |
 | `--thinking` | Show the model's reasoning, dimmed, with the answer (hidden by default) |
 
-Chat screen: the model on the top line, the conversation from the top row down (it follows the reply as it streams), your line and the keys at the bottom. Typing: Enter sends, Esc opens the command keys. Commands: `m` pick or load another model (starts a new conversation), `e` export, `r` record (speech models), `i` or Enter back to typing, `q` quit (Enter confirms, `q` goes back; Ctrl-C asks the same). Up and Down or `k` and `j` scroll a line, Page Up and Page Down (or Ctrl-U and Ctrl-D, also while typing) a page, `g` and `G` jump to the top and the end; the screen follows the stream again at the end or on the next send. `/audio PATH` sends an audio file to a speech model; an embedding model shows `dims=` and `norm=` for each line. Nothing is written when you close it. `e` writes `goethe-chat-<UTC time>/` here in the [trace format](traces.md) (`0700` folder, `0600` files; embeddings as `embeddings.json`), with the model's raw text, reasoning included.
+Chat screen: the model on the top line, the conversation from the top row down (it follows the reply as it streams), your line and the keys at the bottom. Each message starts with a `➤ User` or `➤ Model` line in the theme's colors. Once a reply is in, the keys line also shows this chat's generated tokens and average decode speed (tokens over the time from first to last token), with the last reply's when there is room; these chats are not in the usage log and the numbers go when it closes. Typing: Enter sends, Esc opens the command keys; you can type while a reply streams, and Enter then sends the line after it (Esc stops the reply). Commands: `m` pick another model (one that is not loaded loads on the list; Esc cancels; a new conversation starts), `i` or Enter back to typing, `q` quit at once (Ctrl-C asks first). Up and Down or `k` and `j` scroll a line, Page Up and Page Down (or Ctrl-U and Ctrl-D, also while typing) a page, `g` and `G` jump to the top and the end; the screen follows the stream again at the end or on the next send. `/audio PATH` sends an audio file to a speech model; an embedding model shows `dims=` and `norm=` for each line. Nothing is written.
 
 ### `goethe metrics`
 
@@ -433,13 +434,15 @@ CLI help text stays the source of truth for flags and examples. A later pass can
 
 | Option | Description |
 |---|---|
-| `--check` | Only show what would change: one line per component (goethe and goethed by version and commit, nginx by version, SGLang by wheel, goethe-engine, the ternary pack), then a summary such as `2 updates available (goethe, nginx): run goethe update` or `everything is up to date`. Changes nothing |
+| `--check` | Only show what would change: one line per component (goethe and goethed by version, nginx by version, SGLang by wheel, goethe-engine, the ternary pack), then a summary such as `2 updates available (goethe, nginx): run goethe update` or `everything is up to date`. Changes nothing |
 | `--yes` | Don't ask |
 | `--allow-downgrade` | Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries); not with `engine` |
 
 ### `goethe uninstall`
 
-Removes Goethe and the models it installed. Folders of your own that you registered stay. A node linked to the console is logged out first (best effort) and its credentials go with the rest.
+Stops Goethe and its engines, then removes everything Goethe installed: the models it downloaded (also a `models` folder linked to another disk, whose own folder stays), the inference engines (the Python environment with goethe-engine and SGLang, llama.cpp, the ternary kernels), the kernel packs, and the rest of the Goethe home. The NInfer weights that `goethe install` put in `~/.cache/goethe/nvfp4` go too. Before asking, it lists the models with their total size, the engines and the kernel packs it will delete.
+
+Folders of your own files stay: for a model registered in place only Goethe's links go, and a folder of yours inside `models` loses only Goethe's card. A trace folder in the home stays. A node linked to the console is logged out first (best effort) and its credentials go with the rest. When something cannot be deleted, the rest still goes, the command names what is left and exits non-zero.
 
 | Option | Description |
 |---|---|
@@ -474,7 +477,7 @@ Rows are per clock minute, kept 48 hours, and are rolled into hourly rows kept 9
 
 ### `goethe login`
 
-Links this node to a workspace. Prints a link and a code, then waits until the login is approved in the browser (Ctrl-C cancels; the code expires after 15 minutes). Logging in again replaces the current link and logs the old node out. A running goethed sends its first heartbeat within a second; otherwise it starts with `goethe up`.
+Links this node to a workspace. Prints a link and a code, then waits until the login is approved in the browser (Ctrl-C cancels; the code expires after 15 minutes). Logging in again replaces the current link. Each install has its own key (`GOETHE_HOME/platform/install_key`, made on the first login, kept through `goethe logout` and `goethe update`), so logging in again to the same workspace links the same node, with its name, cluster, shares and analytics, instead of adding a new one. A node removed on the console, another workspace, or a new install (after `goethe uninstall`) gets a new node. A running goethed sends its first heartbeat within a second; otherwise it starts with `goethe up`.
 
 | Option | Description |
 |---|---|
@@ -488,4 +491,4 @@ The credentials and the heartbeat state live in `GOETHE_HOME/platform/` (directo
 
 ### `goethe logout`
 
-Removes this node from its workspace and deletes the local credentials. When the console cannot be reached, the local link is still removed and the node shows offline on the console until you remove it there.
+Ends this node's login and deletes the local credentials. The console keeps the node, offline and with its token revoked, so the next `goethe login` to that workspace links the same node again; remove it on the console to delete it and its analytics. When the console cannot be reached, the local link is still removed and the node shows offline on the console.

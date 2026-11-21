@@ -23,6 +23,11 @@ pub(super) fn mark() -> String {
     format!("1;{}", crate::theme::secondary())
 }
 
+pub(super) fn drop_mark() -> String {
+    // The theme's third color: an installed model chosen to be uninstalled.
+    format!("1;{}", crate::theme::third())
+}
+
 pub(super) fn sgr(code: &str, text: &str) -> String {
     if text.is_empty() || !crate::term::color_enabled() {
         return text.to_string();

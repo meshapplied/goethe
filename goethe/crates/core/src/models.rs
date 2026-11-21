@@ -497,6 +497,14 @@ pub fn fit_input(home: &Path, model_id: &str) -> Result<(ChooserInput, Option<us
     Ok((m.input, (m.default_tp > 0).then_some(m.default_tp as usize)))
 }
 
+pub fn installed_fit(home: &Path, model_id: &str) -> Option<(f64, u64, u64)> {
+    // An installed model's VRAM in total over its GPUs at its full context and concurrency, with that context and concurrency.
+    let (input, pinned) = fit_input(home, model_id).ok()?;
+    let view = View::capacity(home, crate::placement::load_hw(home)?);
+    let f = view.fit(model_id, &input, pinned).ok()?;
+    Some((f.need.total() * f.tp as f64, f.ctx, f.max_conc))
+}
+
 fn card_value(dir: &Path) -> toml::Value {
     fs::read_to_string(dir.join(install::CARD_FILE))
         .ok()
@@ -607,8 +615,20 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool, delete_traces: Option<
             ))?
         }
     };
+    let compact = crate::step::compact();
+    let progress = |done: usize, of: usize| {
+        if compact {
+            crate::progress::eprint_line(crate::progress::bar((done * 100 / of.max(1)) as u32));
+        }
+    };
+    let steps = plan.delete.len() + usize::from(instances > 0) + 1;
+    if compact {
+        println!("{}", crate::term::paint(model_id, crate::term::Color::Bold));
+        progress(0, steps);
+    }
     if instances > 0 {
         unload(model_id, force)?;
+        progress(1, steps);
     }
     let tx = con.transaction().map_err(|e| format!("state.db: {e}"))?;
     for sql in [
@@ -619,28 +639,34 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool, delete_traces: Option<
         tx.execute(sql, [model_id]).map_err(|e| format!("state.db: {e}"))?;
     }
     tx.commit().map_err(|e| format!("state.db: {e}"))?;
-    for p in &plan.delete {
+    for (i, p) in plan.delete.iter().enumerate() {
         remove_owned(&home, p)?;
-        println!("deleted {}", p.display());
+        crate::step::say(&format!("deleted {}", p.display()));
+        progress(i + 1 + usize::from(instances > 0), steps);
     }
     match &plan.source {
-        Some(src) => println!(
+        Some(src) => crate::step::say(&format!(
             "removed {model_id} from goethe; its files were not deleted. To delete them run:\n  rm -rf {}",
             shell_quote(src)
-        ),
-        None => println!("removed {model_id}"),
+        )),
+        None => crate::step::say(&format!("removed {model_id}")),
     }
     if drop_traces {
         if let Some(t) = trace::delete_model_traces(&home, model_id)? {
-            println!("deleted {} trace session(s) ({}) in {}", t.sessions, trace::human_bytes(t.bytes), t.folder.display());
+            crate::step::say(&format!("deleted {} trace session(s) ({}) in {}", t.sessions, trace::human_bytes(t.bytes), t.folder.display()));
         }
     } else if let Some(t) = &traces {
-        println!(
+        crate::step::say(&format!(
             "kept {} trace session(s) ({}) recorded with {model_id}. To delete them run:\n  rm -rf {}",
             t.sessions,
             trace::human_bytes(t.bytes),
             shell_quote(&t.folder.to_string_lossy())
-        );
+        ));
+    }
+    if compact {
+        progress(steps, steps);
+        crate::progress::end_line();
+        println!("Successfully uninstalled");
     }
     Ok(())
 }

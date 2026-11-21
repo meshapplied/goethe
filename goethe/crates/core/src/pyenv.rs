@@ -157,7 +157,7 @@ pub fn ensure(home: &Path, layer: Layer) -> Result<(), String> {
     }
     check_disk(home, layer)?;
     if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        println!("{}", progress_line(home, layer));
+        crate::step::say(&progress_line(home, layer));
     }
     let tmp = home.join(".pyenv-staging");
     let _ = fs::remove_dir_all(&tmp);

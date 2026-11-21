@@ -236,7 +236,7 @@ Models that were loaded when Goethe stopped come back when it starts again, incl
 | `goethe gpu` | VRAM, processes and bandwidth per GPU, live until `q`; `allow` / `deny` GPUs |
 | `goethe doctor` | Setup check with a fix for each problem; `--hardware` prints GPUs, CPU, memory, disk and cloud provider |
 | `goethe update` | Install the latest Goethe (`--check` to only look; `engine` or `rollback` as a word) |
-| `goethe uninstall` | Remove Goethe and its models (`--keep-models` to keep them) |
+| `goethe uninstall` | Remove Goethe with its models, engines and kernel packs (`--keep-models` to keep the models) |
 | `goethe completion install` | Tab completion for bash, zsh or fish: commands, models, keys, GPUs |
 | `goethe login` | Optional: link this node to the Goethe console to see its health there (`--authkey` without a browser) |
 | `goethe logout` | Unlink it again |
@@ -422,7 +422,7 @@ After installing, open a new terminal if `goethe` is not found yet. Goethe keeps
 ```bash
 goethe update --check      # is there a new version?
 goethe update              # install it; loaded models keep serving
-goethe uninstall           # remove Goethe and its models; add --keep-models to keep them
+goethe uninstall           # remove Goethe, its models, engines and kernel packs; --keep-models keeps the models
 ```
 
 ## Where it runs

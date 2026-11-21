@@ -1,18 +1,18 @@
-// goethe run with no input on a terminal: an ephemeral chat screen. The conversation lives in memory; only e (export) writes files, in the trace format.
+// goethe run with no input on a terminal: an ephemeral chat screen. The conversation lives in memory and nothing is written.
 
 use crate::keys_menu::{fit, frame_update, paint, parse_input, screen_size, Input, Screen, Style};
 use crate::term::visible_width;
 use crate::run::{embed_line, Loaded, Target};
-use crate::trace::Capture;
 use serde_json::{json, Value};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 const OPEN: &str = "<think>";
 const CLOSE: &str = "</think>";
 const TYPING: &str = "[Esc] commands  [Enter] send";
-const COMMANDS: &str = "[m] model  [e] export  [r] record  [q] quit  [i] type";
+const COMMANDS: &str = "[m] model  [q] quit  [i] type";
 const SURE: &str = "exit? Enter = exit, q = back";
 const PICKING: &str = "[Up] [Down] move  [Enter] choose  [Esc] back";
+const LOADING: &str = "loading into VRAM  [Esc] cancel";
 
 pub fn split_think(raw: &str, last: bool) -> (String, String) {
     // The model's reasoning and its answer: complete think blocks, an unclosed one, and everything before a closing tag that has no opening one are reasoning; while streaming, a tag cut in half stays out of the answer.
@@ -100,8 +100,7 @@ pub(crate) enum Act {
     Audio(String),
     Picker,
     Chose(usize),
-    Export,
-    Record,
+    CancelLoad,
     Quit,
 }
 
@@ -129,11 +128,14 @@ pub(crate) struct Ui {
     scroll: usize,
     follow: bool,
     size: (usize, usize),
+    session: (u64, f64),
+    loading: Option<(String, u32)>,
+    last_reply: Option<(u64, f64)>,
 }
 
 impl Ui {
     pub(crate) fn new(header: String, thinking: bool) -> Ui {
-        Ui { mode: Mode::Typing, back: Mode::Typing, input: Vec::new(), at: 0, entries: Vec::new(), header, picks: Vec::new(), pick: 0, streaming: false, thinking, waiting: None, scroll: 0, follow: true, size: (80, 24) }
+        Ui { mode: Mode::Typing, back: Mode::Typing, input: Vec::new(), at: 0, entries: Vec::new(), header, picks: Vec::new(), pick: 0, streaming: false, thinking, waiting: None, scroll: 0, follow: true, size: (80, 24), session: (0, 0.0), loading: None, last_reply: None }
     }
 
     pub(crate) fn key(&mut self, key: Input) -> Act {
@@ -177,18 +179,18 @@ impl Ui {
             }
             (Mode::Typing, Input::Char(c)) => self.insert(c),
             (Mode::Typing, Input::Space) => self.insert(' '),
-            (Mode::Command, Input::Char('q')) => {
-                self.back = Mode::Command;
-                self.mode = Mode::Confirm;
-                Act::None
-            }
+            (Mode::Command, Input::Char('q')) => Act::Quit,
             (Mode::Command, Input::Char('i') | Input::Enter | Input::Esc) => {
                 self.mode = Mode::Typing;
                 Act::None
             }
             (Mode::Command, Input::Char('m')) => Act::Picker,
-            (Mode::Command, Input::Char('e')) => Act::Export,
-            (Mode::Command, Input::Char('r')) => Act::Record,
+            (Mode::Pick, Input::Esc | Input::Char('q')) if self.loading.is_some() => {
+                self.loading = None;
+                self.mode = Mode::Command;
+                Act::CancelLoad
+            }
+            (Mode::Pick, _) if self.loading.is_some() => Act::None,
             (Mode::Pick, Input::Up) => {
                 self.pick = self.pick.saturating_sub(1);
                 Act::None
@@ -197,10 +199,7 @@ impl Ui {
                 self.pick = (self.pick + 1).min(self.picks.len().saturating_sub(1));
                 Act::None
             }
-            (Mode::Pick, Input::Enter) => {
-                self.mode = Mode::Typing;
-                Act::Chose(self.pick)
-            }
+            (Mode::Pick, Input::Enter) => Act::Chose(self.pick),
             (Mode::Pick, Input::Esc | Input::Char('q')) => {
                 self.mode = Mode::Command;
                 Act::None
@@ -270,7 +269,12 @@ impl Ui {
         let wrap = |text: &str, style: Style, out: &mut Vec<(String, Style)>| out.extend(wrap(&clean(text), width).into_iter().map(|l| (l, style)));
         for (i, e) in self.entries.iter().enumerate() {
             match e {
-                Entry::User(t) => wrap(&format!("> {t}"), Style::Bold, &mut out),
+                Entry::User(_) => out.push(("\u{27a4} User".to_string(), Style::Secondary)),
+                Entry::Reply(_) | Entry::Vector(_) => out.push(("\u{27a4} Model".to_string(), Style::Third)),
+                _ => {}
+            }
+            match e {
+                Entry::User(t) => wrap(t, Style::Bold, &mut out),
                 Entry::Vector(t) => wrap(t, Style::Plain, &mut out),
                 Entry::Note(t) => wrap(t, Style::Dim, &mut out),
                 Entry::Divider(t) => wrap(&format!("-- {t} --"), Style::Dim, &mut out),
@@ -295,6 +299,23 @@ impl Ui {
         out
     }
 
+    pub(crate) fn count(&mut self, tokens: u64, seconds: f64) {
+        // One finished reply (its completion tokens, first to last token in seconds) into the session totals.
+        self.session = (self.session.0 + tokens, self.session.1 + seconds);
+        self.last_reply = Some((tokens, seconds));
+    }
+
+    fn stats(&self, room: usize) -> String {
+        // Tokens generated this session and the decode speed, with the last reply's when there is room.
+        if self.session.0 == 0 {
+            return String::new();
+        }
+        let speed = |(n, s): (u64, f64)| if s > 0.0 { format!(" \u{b7} {:.1} tok/s", n as f64 / s) } else { String::new() };
+        let total = format!("{} tokens{}", self.session.0, speed(self.session));
+        let last = self.last_reply.map(|l| format!("{total}  (last {}{})", l.0, speed(l))).unwrap_or_default();
+        [last, total].into_iter().find(|t| t.chars().count() <= room).unwrap_or_default()
+    }
+
     pub(crate) fn render(&self, width: usize, height: usize) -> Vec<String> {
         // Header, scrollback (its tail), the input line and the keys of the mode.
         if width < 24 || height < 6 {
@@ -314,7 +335,14 @@ impl Ui {
                         (false, true) => Style::Plain,
                         (false, false) => Style::Dim,
                     };
-                    paint(&fit(&format!("{mark}{id}{}", if *loaded { "" } else { "  (not loaded)" }), width), style)
+                    match &self.loading {
+                        Some((m, pct)) if m == id => {
+                            let bar = format!("  {}", crate::progress::bar(*pct));
+                            let name = fit(&format!("{mark}{id}"), width.saturating_sub(visible_width(&bar))).trim_end().to_string();
+                            format!("{}{bar}", paint(&name, style))
+                        }
+                        _ => paint(&fit(&format!("{mark}{id}{}", if *loaded { "" } else { "  (not loaded)" }), width), style),
+                    }
                 })
                 .collect()
         } else {
@@ -342,72 +370,14 @@ impl Ui {
             Mode::Typing => TYPING,
             Mode::Command => COMMANDS,
             Mode::Confirm => SURE,
+            Mode::Pick if self.loading.is_some() => LOADING,
             Mode::Pick => PICKING,
         };
-        out.push(paint(&fit(keys, width), Style::Dim));
+        let stats = self.stats(width.saturating_sub(keys.chars().count() + 4));
+        let gap = width.saturating_sub(keys.chars().count() + stats.chars().count());
+        out.push(paint(&fit(&format!("{keys}{}{stats}", " ".repeat(gap)), width), Style::Dim));
         out
     }
-}
-
-struct Turn {
-    started: SystemTime,
-    seconds: f64,
-    ttft: Option<f64>,
-    messages: Vec<Value>,
-    reply: String,
-}
-
-fn captures(model: &str, instance: &str, dir: &std::path::Path, turns: &[Turn]) -> Vec<Capture> {
-    // Each turn as the request goethe would have seen and its reply, for the trace writer.
-    turns
-        .iter()
-        .enumerate()
-        .map(|(i, t)| Capture {
-            dir: dir.to_path_buf(),
-            max_gb: 1e9,
-            path: "/chat/completions".into(),
-            request_id: format!("run-{i}"),
-            key_id: "goethe-run".into(),
-            instance_id: instance.to_string(),
-            model: model.to_string(),
-            session_hint: None,
-            learn_note: None,
-            request: json!({"model": model, "messages": t.messages}).to_string().into_bytes(),
-            started_at: t.started,
-            duration_s: t.seconds,
-            ttft_s: t.ttft,
-            status: 200,
-            sse: false,
-            complete: true,
-            response: json!({"object": "chat.completion", "model": model, "choices": [{"index": 0, "message": {"role": "assistant", "content": t.reply}, "finish_reason": "stop"}]}).to_string().into_bytes(),
-            truncated: false,
-        })
-        .collect()
-}
-
-fn export_dir() -> Result<std::path::PathBuf, String> {
-    Ok(std::env::current_dir().map_err(|e| e.to_string())?.join(format!("goethe-chat-{}", chrono::Utc::now().format("%Y%m%dT%H%M%SZ"))))
-}
-
-fn export(model: &str, instance: &str, turns: &[Turn], vectors: &[(String, Vec<f64>)]) -> Result<std::path::PathBuf, String> {
-    // The chat in the trace layout (docs/traces.md) in a new folder here; embeddings as JSON beside it. Nothing is overwritten.
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    if turns.is_empty() && vectors.is_empty() {
-        return Err("nothing to export yet".into());
-    }
-    let dir = export_dir()?;
-    if turns.is_empty() {
-        std::fs::DirBuilder::new().mode(0o700).create(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    } else {
-        crate::trace::export(&crate::paths::goethe_home(), &dir, captures(model, instance, &dir, turns))?;
-    }
-    if !vectors.is_empty() {
-        let rows: Vec<Value> = vectors.iter().map(|(input, e)| json!({"input": input, "embedding": e})).collect();
-        let path = dir.join("embeddings.json");
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        std::io::Write::write_all(&mut f, serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?.as_bytes()).map_err(|e| e.to_string())?;
-    }
-    Ok(dir)
 }
 
 fn draw(ui: &mut Ui, last: &mut Vec<String>) {
@@ -432,24 +402,24 @@ fn read_bytes(buf: &mut [u8]) -> usize {
     usize::try_from(unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) }).unwrap_or(0)
 }
 
-fn stop_asked() -> bool {
-    // Ctrl-C or Esc pressed while a reply streams: stop it, keep what arrived.
+fn typed_ahead() -> Vec<Input> {
+    // Keys pressed while a reply streams: they edit the line (Enter queues it), Ctrl-C or Esc stops the reply and keeps what arrived.
     let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
     if unsafe { libc::poll(&mut fds, 1, 0) } <= 0 {
-        return false;
+        return Vec::new();
     }
     let mut buf = [0u8; 256];
     let n = read_bytes(&mut buf);
-    parse_input(&buf[..n]).iter().any(|k| matches!(k, Input::Interrupt | Input::Esc))
+    parse_input(&buf[..n])
 }
 
 struct State {
     t: Target,
     ui: Ui,
     msgs: Vec<Value>,
-    turns: Vec<Turn>,
-    vectors: Vec<(String, Vec<f64>)>,
     last: Vec<String>,
+    queued: std::collections::VecDeque<String>,
+    job: Option<crate::menu::LoadJob>,
 }
 
 impl State {
@@ -458,14 +428,11 @@ impl State {
             "embedding" => {
                 self.ui.entries.push(Entry::User(text.clone()));
                 match self.t.api.embed(&self.t.model, &text) {
-                    Ok(e) => {
-                        self.ui.entries.push(Entry::Vector(embed_line(&e)));
-                        self.vectors.push((text, e));
-                    }
+                    Ok(e) => self.ui.entries.push(Entry::Vector(embed_line(&e))),
                     Err(e) => self.ui.note(&e),
                 }
             }
-            "speech" => self.ui.note("this is a speech model: /audio PATH sends a file, r records"),
+            "speech" => self.ui.note("this is a speech model: /audio PATH sends a file"),
             _ => self.chat(text),
         }
     }
@@ -475,24 +442,38 @@ impl State {
         self.msgs.push(json!({"role": "user", "content": text}));
         self.ui.entries.push(Entry::Reply(String::new()));
         self.ui.streaming = true;
-        let (started, clock) = (SystemTime::now(), Instant::now());
+        let clock = Instant::now();
         self.ui.waiting = Some(clock);
         draw(&mut self.ui, &mut self.last);
-        let mut ttft = None;
-        let State { t, ui, msgs, last, .. } = self;
+        let (mut first, mut end) = (None, clock);
+        let State { t, ui, msgs, last, queued, .. } = self;
         let result = t.api.chat(&t.model, msgs, &mut |piece| {
-            ttft.get_or_insert_with(|| clock.elapsed().as_secs_f64());
+            let mut go_on = true;
+            for k in typed_ahead() {
+                match k {
+                    Input::Esc | Input::Interrupt => go_on = false,
+                    k => {
+                        if let Act::Send(text) = ui.key(k) {
+                            queued.push_back(text);
+                        }
+                    }
+                }
+            }
+            if !piece.is_empty() {
+                end = Instant::now();
+                first.get_or_insert(end);
+            }
             if let Some(Entry::Reply(raw)) = ui.entries.last_mut() {
                 raw.push_str(piece);
             }
             draw(ui, last);
-            !stop_asked()
+            go_on
         });
         self.ui.streaming = false;
         self.ui.waiting = None;
         match result {
-            Ok(reply) => {
-                self.turns.push(Turn { started, seconds: clock.elapsed().as_secs_f64(), ttft, messages: self.msgs.clone(), reply: reply.clone() });
+            Ok((reply, tokens)) => {
+                self.ui.count(tokens, first.map_or(0.0, |f| (end - f).as_secs_f64()));
                 self.msgs.push(json!({"role": "assistant", "content": reply}));
             }
             Err(e) => {
@@ -514,25 +495,47 @@ impl State {
         }
     }
 
-    fn record(&mut self) {
-        if self.t.kind != "speech" {
-            return self.ui.note("r records for a speech model; this one takes text");
+    fn choose(&mut self, i: usize) {
+        // A loaded model is used at once; one that is not loads here, its bar beside it in the list.
+        let (id, up) = self.ui.picks[i].clone();
+        if id == self.t.model {
+            self.ui.mode = Mode::Typing;
+            return;
         }
-        match crate::run::record() {
-            Ok(wav) => {
-                self.audio(&wav.to_string_lossy());
-                let _ = std::fs::remove_file(&wav);
-                let _ = wav.parent().map(std::fs::remove_dir);
+        if up {
+            match crate::run::target(&id) {
+                Ok(next) => self.switch(next),
+                Err(e) => self.ui.note(&e),
             }
-            Err(e) => self.ui.note(&e),
+            self.ui.mode = Mode::Typing;
+            return;
         }
-        self.last.clear();
+        let ctx = crate::run::run_ctx(&crate::paths::goethe_home(), &id);
+        self.ui.loading = Some((id.clone(), 0));
+        self.job = Some(crate::menu::LoadJob::new(id, ctx));
     }
 
-    fn export(&mut self) {
-        match export(&self.t.model, &self.t.instance, &self.turns, &self.vectors) {
-            Ok(dir) => self.ui.note(&format!("exported to {}", dir.display())),
-            Err(e) => self.ui.note(&e),
+    fn load_step(&mut self, loaded: &mut Loaded) {
+        // Tick the load the picker started: its percent on the list, then the new conversation, or the reason it failed.
+        let Some(j) = self.job.as_mut() else { return };
+        j.tick();
+        self.ui.loading = Some((j.model.clone(), j.shown));
+        if j.finished() {
+            let id = j.model.clone();
+            self.job = None;
+            self.ui.loading = None;
+            self.ui.mode = Mode::Typing;
+            loaded.add(&id);
+            crate::run::wait_routed(&crate::paths::goethe_home(), &id);
+            match crate::run::target(&id) {
+                Ok(next) => self.switch(next),
+                Err(e) => self.ui.note(&e),
+            }
+        } else if let Some(why) = j.failure() {
+            self.job = None;
+            self.ui.loading = None;
+            self.ui.mode = Mode::Command;
+            self.ui.note(&why);
         }
     }
 
@@ -544,18 +547,6 @@ impl State {
     }
 }
 
-fn run_child(command: &[String]) {
-    // A goethe command in the normal terminal, as if typed, then back on Enter.
-    let exe = std::env::current_exe().unwrap_or_else(|_| "goethe".into());
-    println!("\n$ goethe {}\n", command.join(" "));
-    if let Err(e) = std::process::Command::new(exe).args(command).status() {
-        println!("could not run it: {e}");
-    }
-    print!("\nPress Enter to go back.");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-    let _ = std::io::stdin().read_line(&mut String::new());
-}
-
 pub(crate) fn run(t: Target, loaded: &mut Loaded, thinking: bool) -> Result<(), String> {
     // The screen until quit; the terminal is restored on every way out (guards drop, and a panic leaves the alternate screen first).
     let prev = std::panic::take_hook();
@@ -565,17 +556,23 @@ pub(crate) fn run(t: Target, loaded: &mut Loaded, thinking: bool) -> Result<(), 
     }));
     let mut _raw = Some(crate::term::RawMode::enter().ok_or("could not switch the terminal to raw mode")?);
     let mut _screen = Some(Screen::open());
-    let mut st = State { ui: Ui::new(header(&t), thinking), t, msgs: Vec::new(), turns: Vec::new(), vectors: Vec::new(), last: Vec::new() };
+    let mut st = State { ui: Ui::new(header(&t), thinking), t, msgs: Vec::new(), last: Vec::new(), queued: Default::default(), job: None };
     let mut size = screen_size();
     let mut buf = [0u8; 256];
     loop {
         draw(&mut st.ui, &mut st.last);
+        if let Some(text) = st.queued.pop_front() {
+            st.send(text);
+            continue;
+        }
         let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
-        if unsafe { libc::poll(&mut fds, 1, Duration::from_millis(250).as_millis() as i32) } <= 0 {
+        let wait = if st.job.is_some() { 60 } else { 250 };
+        if unsafe { libc::poll(&mut fds, 1, Duration::from_millis(wait).as_millis() as i32) } <= 0 {
             if screen_size() != size {
                 size = screen_size();
                 st.last.clear();
             }
+            st.load_step(loaded);
             continue;
         }
         let n = read_bytes(&mut buf);
@@ -588,30 +585,11 @@ pub(crate) fn run(t: Target, loaded: &mut Loaded, thinking: bool) -> Result<(), 
                 Act::Quit => return Ok(()),
                 Act::Send(text) => st.send(text),
                 Act::Audio(path) => st.audio(&path),
-                Act::Export => st.export(),
-                Act::Record => st.record(),
                 Act::Picker => st.ui.open_picker(crate::menu::installed_and_loaded(&crate::paths::goethe_home())),
-                Act::Chose(i) => {
-                    let (id, up) = st.ui.picks[i].clone();
-                    if id == st.t.model {
-                        continue;
-                    }
-                    if !up {
-                        _screen = None;
-                        _raw = None;
-                        run_child(&["load".to_string(), id.clone()]);
-                        _raw = crate::term::RawMode::enter();
-                        _screen = Some(Screen::open());
-                        st.last.clear();
-                    }
-                    match crate::run::target(&id) {
-                        Ok(next) => {
-                            if !up {
-                                loaded.add(&id);
-                            }
-                            st.switch(next);
-                        }
-                        Err(e) => st.ui.note(&e),
+                Act::Chose(i) => st.choose(i),
+                Act::CancelLoad => {
+                    if let Some(j) = st.job.take() {
+                        crate::run::unload_quietly(&j.model);
                     }
                 }
             }
@@ -622,7 +600,6 @@ pub(crate) fn run(t: Target, loaded: &mut Loaded, thinking: bool) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn keys(ui: &mut Ui, ks: &[Input]) -> Vec<Act> {
         ks.iter().map(|k| ui.key(*k)).collect()
@@ -678,17 +655,13 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_q_while_typing_is_text_and_the_quit_prompt_needs_enter() {
+    fn a_bare_q_while_typing_is_text_and_esc_q_quits_at_once() {
         let mut ui = Ui::new("m".into(), false);
         typed(&mut ui, "quick");
         assert_eq!(ui.input.iter().collect::<String>(), "quick");
         assert_eq!(ui.key(Input::Esc), Act::None);
         assert_eq!(ui.mode, Mode::Command);
-        assert_eq!(ui.key(Input::Char('q')), Act::None);
-        assert_eq!(ui.mode, Mode::Confirm);
-        assert_eq!(ui.key(Input::Char('q')), Act::None, "q goes back");
-        assert_eq!(ui.mode, Mode::Command);
-        assert_eq!(keys(&mut ui, &[Input::Char('q'), Input::Enter]), vec![Act::None, Act::Quit], "Enter exits");
+        assert_eq!(ui.key(Input::Char('q')), Act::Quit, "Esc then q leaves without asking");
         let mut ui = Ui::new("m".into(), false);
         assert_eq!(ui.key(Input::Interrupt), Act::None);
         assert_eq!(ui.key(Input::Char('x')), Act::None, "any other key returns");
@@ -709,7 +682,7 @@ mod tests {
         typed(&mut ui, "/audio /tmp/a.wav ");
         assert_eq!(ui.key(Input::Enter), Act::Audio("/tmp/a.wav".into()));
         ui.key(Input::Esc);
-        assert_eq!([Input::Char('m'), Input::Char('e'), Input::Char('r')].map(|k| ui.key(k)), [Act::Picker, Act::Export, Act::Record]);
+        assert_eq!([Input::Char('m'), Input::Char('e'), Input::Char('r')].map(|k| ui.key(k)), [Act::Picker, Act::None, Act::None], "no export or record");
         assert_eq!(ui.key(Input::Char('i')), Act::None);
         assert_eq!(ui.mode, Mode::Typing);
     }
@@ -723,6 +696,12 @@ mod tests {
         let shown = ui.render(60, 10).join("\n");
         assert!(shown.contains("org/a") && shown.contains("org/b  (not loaded)") && shown.contains("[Enter] choose"), "{shown}");
         assert_eq!(keys(&mut ui, &[Input::Down, Input::Enter]), vec![Act::None, Act::Chose(1)]);
+        ui.loading = Some(("org/b".into(), 40));
+        let shown = ui.render(60, 10).join("\n");
+        assert!(shown.contains(" 40%") && !shown.contains("(not loaded)") && shown.contains("[Esc] cancel"), "the load runs on the list: {shown}");
+        assert_eq!(keys(&mut ui, &[Input::Up, Input::Enter]), vec![Act::None, Act::None], "the list holds still while it loads");
+        assert_eq!(ui.key(Input::Esc), Act::CancelLoad);
+        assert!(ui.loading.is_none() && ui.mode == Mode::Command);
     }
 
     #[test]
@@ -734,17 +713,45 @@ mod tests {
         assert_eq!(typing.len(), 8);
         assert!(typing[0].contains("org/m  (llama.cpp, text)") && typing[7].contains("[Esc] commands  [Enter] send"));
         let all = typing.join("\n");
-        assert!(all.contains("> hi") && all.contains("Hello!") && all.contains("thinking (3 words)") && !all.contains("thought it over"), "{all}");
+        assert!(all.contains("\u{27a4} User ") && all.contains("hi") && all.contains("\u{27a4} Model") && all.contains("Hello!") && all.contains("thinking (3 words)") && !all.contains("thought it over"), "{all}");
         assert!(typing[6].starts_with("> ab"), "{:?}", typing[6]);
         ui.key(Input::Esc);
-        assert!(ui.render(70, 8)[7].contains("[m] model  [e] export  [r] record  [q] quit  [i] type"));
-        ui.key(Input::Char('q'));
-        assert!(ui.render(40, 8)[7].contains("exit? Enter = exit, q = back"));
+        assert!(ui.render(70, 8)[7].contains("[m] model  [q] quit  [i] type"));
+        ui.key(Input::Interrupt);
+        assert!(ui.render(40, 8)[7].contains("exit? Enter = exit, q = back"), "Ctrl-C asks first");
         let mut shown = Ui::new("m".into(), true);
         shown.entries = vec![Entry::Reply("a long thought</think>done".into())];
         let text = shown.render(40, 8).join("\n");
         assert!(text.contains("thinking") && text.contains("a long thought") && text.contains("done"), "{text}");
         assert_eq!(ui.render(10, 3).len(), 3, "a tiny terminal gets a one-line message");
+    }
+
+    #[test]
+    fn each_turn_is_labelled_with_who_said_it_in_the_theme_colors() {
+        let mut ui = Ui::new("m".into(), false);
+        ui.entries = vec![Entry::User("hi".into()), Entry::Reply("Hello!".into()), Entry::Note("a note".into())];
+        let lines = ui.lines(40);
+        let user = ("\u{27a4} User".to_string(), Style::Secondary);
+        let model = ("\u{27a4} Model".to_string(), Style::Third);
+        assert_eq!(lines, [user, ("hi".into(), Style::Bold), model, ("Hello!".into(), Style::Plain), ("a note".into(), Style::Dim)]);
+        ui.entries = vec![Entry::User("x".repeat(50))];
+        assert_eq!(ui.lines(40).iter().map(|l| visible_width(&l.0)).collect::<Vec<_>>(), [6, 40, 10], "text wraps by itself, the label apart");
+    }
+
+    #[test]
+    fn the_keys_line_shows_the_session_tokens_and_decode_speed_once_a_reply_is_in() {
+        let mut ui = Ui::new("m".into(), false);
+        assert!(!ui.render(80, 8)[7].contains("tokens"), "nothing before the first reply");
+        ui.count(100, 4.0);
+        ui.count(300, 6.0);
+        let keys = ui.render(80, 8)[7].clone();
+        assert!(keys.contains("[Esc] commands  [Enter] send") && keys.contains("400 tokens \u{b7} 40.0 tok/s  (last 300 \u{b7} 50.0 tok/s)"), "{keys}");
+        assert_eq!(visible_width(&keys), 80);
+        let narrow = ui.render(60, 8)[7].clone();
+        assert!(narrow.contains("400 tokens \u{b7} 40.0 tok/s") && !narrow.contains("last"), "{narrow}");
+        assert!(!ui.render(40, 8)[7].contains("tokens"), "no room, no stats");
+        ui.count(1, 0.0);
+        assert!(ui.render(80, 8)[7].contains("401 tokens \u{b7} 40.1 tok/s  (last 1)"));
     }
 
     #[test]
@@ -784,23 +791,23 @@ mod tests {
         ui.resize(40, 13);
         ui.entries = vec![Entry::User("first".into()), Entry::Reply("short".into())];
         let screen = ui.render(40, 13);
-        assert!(screen[1].contains("> first") && screen[2].contains("short"), "the first line is on the first body row: {screen:?}");
+        assert!(screen[1].contains("\u{27a4} User") && screen[2].contains("first") && screen[4].contains("short"), "the first line is on the first body row: {screen:?}");
         long_chat(&mut ui);
         let body = |ui: &Ui| ui.render(40, 13)[1..=10].join("|");
-        assert!(body(&ui).contains("line 40") && !body(&ui).contains("> first"), "following: the end is shown, the start scrolled off");
+        assert!(body(&ui).contains("line 40") && !body(&ui).contains("first"), "following: the end is shown, the start scrolled off");
         ui.key(Input::Esc);
         assert_eq!(ui.key(Input::Char('g')), Act::None);
-        assert!(body(&ui).contains("> first") && ui.render(40, 13)[0].contains("scrolled: G follows"), "g goes to the top and leaves the stream");
+        assert!(body(&ui).contains("first") && ui.render(40, 13)[0].contains("scrolled: G follows"), "g goes to the top and leaves the stream");
         ui.key(Input::Down);
         ui.key(Input::Char('j'));
-        assert!(!body(&ui).contains("> first") && body(&ui).contains("line 1"), "j and Down scroll one line");
+        assert!(!body(&ui).contains("first") && body(&ui).contains("line 1"), "j and Down scroll one line");
         ui.key(Input::PageDown);
-        assert!(body(&ui).contains("line 11") && !body(&ui).contains("line 10"), "a page is the window minus one line: {}", body(&ui));
+        assert!(body(&ui).starts_with("line 9 ") && !body(&ui).contains("line 8"), "a page is the window minus one line: {}", body(&ui));
         ui.key(Input::Char('k'));
         ui.key(Input::PageUp);
-        assert!(body(&ui).starts_with("line 1 "), "{}", body(&ui));
+        assert!(body(&ui).contains("first") && !body(&ui).contains("User"), "{}", body(&ui));
         ui.key(Input::PageUp);
-        assert!(body(&ui).contains("> first"), "{}", body(&ui));
+        assert!(body(&ui).contains("\u{27a4} User"), "{}", body(&ui));
         ui.key(Input::Char('G'));
         assert!(body(&ui).contains("line 40") && ui.follow && !ui.render(40, 13)[0].contains("scrolled"), "G jumps to the end and follows again");
         ui.key(Input::Char('g'));
@@ -822,45 +829,4 @@ mod tests {
         assert_eq!(parse_input(b"\x1b[5~\x1b[6~\x15\x04"), [Input::PageUp, Input::PageDown, Input::PageUp, Input::PageDown]);
     }
 
-    #[test]
-    fn an_export_is_in_the_trace_layout_with_private_modes_and_never_overwrites() {
-        let home = tempfile::tempdir().unwrap();
-        let out = tempfile::tempdir().unwrap();
-        let dir = out.path().join("goethe-chat-x");
-        let user = |t: &str| json!({"role": "user", "content": t});
-        let turns = vec![
-            Turn { started: SystemTime::now(), seconds: 1.5, ttft: Some(0.2), messages: vec![user("hi")], reply: "<think>hmm</think>Hello!".into() },
-            Turn {
-                started: SystemTime::now(),
-                seconds: 0.5,
-                ttft: None,
-                messages: vec![user("hi"), json!({"role": "assistant", "content": "<think>hmm</think>Hello!"}), user("and?")],
-                reply: "Fine.".into(),
-            },
-        ];
-        crate::trace::export(home.path(), &dir, captures("org/m", "inst-1", &dir, &turns)).unwrap();
-        let mut files = Vec::new();
-        let mut stack = vec![dir.clone()];
-        while let Some(d) = stack.pop() {
-            for e in std::fs::read_dir(&d).unwrap().flatten() {
-                match e.path().is_dir() {
-                    true => stack.push(e.path()),
-                    false => files.push(e.path()),
-                }
-            }
-        }
-        let session = files.iter().find(|f| f.to_string_lossy().ends_with(".jsonl.gz")).expect("a session file");
-        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
-        assert!(files.iter().all(|f| std::fs::metadata(f).unwrap().permissions().mode() & 0o077 == 0), "files are private");
-        let mut text = String::new();
-        std::io::Read::read_to_string(&mut flate2::read::MultiGzDecoder::new(std::fs::File::open(session).unwrap()), &mut text).unwrap();
-        let rows: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["response"]["body"]["choices"][0]["message"]["content"], "<think>hmm</think>Hello!", "the raw reply, reasoning included");
-        assert_eq!(rows[1]["parent"]["turn_id"], rows[0]["turn_id"], "turns of one chat are one session");
-        assert_eq!((rows[1]["messages_from"].as_u64(), rows[1]["session_id"].clone()), (Some(2), rows[0]["session_id"].clone()));
-        assert_eq!((rows[0]["api"].as_str(), rows[0]["model"].as_str()), (Some("chat.completions"), Some("org/m")));
-        let again = crate::trace::export(home.path(), &dir, captures("org/m", "inst-1", &dir, &turns)).unwrap_err();
-        assert!(again.contains("exists"), "{again}");
-    }
 }

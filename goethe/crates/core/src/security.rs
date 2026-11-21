@@ -387,7 +387,7 @@ fn new_token() -> String {
     format!("goethe_sk_{}", random_hex(16))
 }
 
-fn random_hex(n: usize) -> String {
+pub(crate) fn random_hex(n: usize) -> String {
     // n bytes from /dev/urandom as lowercase hex.
     let mut buf = vec![0u8; n];
     let mut f = fs::File::open("/dev/urandom").expect("urandom");

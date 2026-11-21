@@ -125,6 +125,17 @@ pub struct PickArgs<'a> {
     pub gpus: &'a [u32],
 }
 
+pub fn place(home: &Path, view: &crate::recommend::View, id: &str, tp: Option<usize>, ctx: Option<u64>, max_conc: Option<u64>) -> Result<Result<(crate::recommend::Fit, String), String>, String> {
+    // Where goethe load would put an installed model on the view's GPUs now, with the plan in words, or why it would not fit; Err when the model cannot be read.
+    let (mut input, card_tp) = crate::models::fit_input(home, id)?;
+    input.ctx = ctx.unwrap_or(input.ctx);
+    input.max_conc = max_conc.unwrap_or(input.max_conc);
+    Ok(view.fit(id, &input, tp.or(card_tp)).map(|f| {
+        let desc = f.describe(&input);
+        (f, desc)
+    }))
+}
+
 pub fn run_pick_gpus(args: PickArgs) -> Result<(), String> {
     // Where goethe load would place a model now (its full budget, on the GPUs named and at the ctx and concurrency asked), or an empty engine of a given tp.
     let home = goethe_home();
@@ -138,13 +149,7 @@ pub fn run_pick_gpus(args: PickArgs) -> Result<(), String> {
     let pinned = args.tp.map(|t| t.max(1) as usize);
     let model = args.model;
     let (what, fit) = match model {
-        Some(id) => {
-            let (mut input, card_tp) = crate::models::fit_input(&home, id)?;
-            input.ctx = args.ctx.unwrap_or(input.ctx);
-            input.max_conc = args.max_conc.unwrap_or(input.max_conc);
-            let fit = view.fit(id, &input, pinned.or(card_tp));
-            (format!("{id} "), fit.map(|f| (f.describe(&input), f.gpus)))
-        }
+        Some(id) => (format!("{id} "), place(&home, &view, id, pinned, args.ctx, args.max_conc)?.map(|(f, desc)| (desc, f.gpus))),
         None => {
             let t = pinned.unwrap_or(1);
             let empty = crate::chooser::ChooserInput {

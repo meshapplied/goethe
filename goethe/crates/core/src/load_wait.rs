@@ -13,13 +13,84 @@ fn heartbeat(secs: u64) -> String {
     format!("loading into VRAM, {secs} s")
 }
 
+pub fn managed_mb(gpus: &[u32]) -> u64 {
+    // VRAM goethe's engines hold on these GPUs now.
+    let home = crate::paths::goethe_home();
+    let managed = crate::db::open(&home).map(|c| crate::placement::managed_pids(&c)).unwrap_or_default();
+    crate::hw::gpu_usage(&managed).unwrap_or_default().iter().filter(|u| gpus.contains(&u.index)).map(|u| u.managed_mb).sum()
+}
+
+struct Facts {
+    ctx: i64,
+    max_conc: i64,
+    gb_per_gpu: f64,
+    gpus: Vec<u32>,
+}
+
+fn facts(instance_id: &str) -> Option<Facts> {
+    // The context, concurrency, VRAM budget and GPUs goethed chose for an instance.
+    let con = crate::db::open(&crate::paths::goethe_home()).ok()?;
+    con.query_row(
+        "SELECT ctx_len, max_conc, allocated_vram_gb_per_gpu, gpu_indices FROM loaded_instances WHERE instance_id = ?1",
+        [instance_id],
+        |r| {
+            let csv: String = r.get(3)?;
+            let gpus = csv.split(',').filter_map(|g| g.trim().parse().ok()).collect();
+            Ok(Facts { ctx: r.get(0)?, max_conc: r.get(1)?, gb_per_gpu: r.get(2)?, gpus })
+        },
+    )
+    .ok()
+}
+
+fn head_lines(f: &Facts) -> [String; 3] {
+    let gpus: Vec<String> = f.gpus.iter().map(u32::to_string).collect();
+    [
+        format!("Context window: {} tokens", f.ctx),
+        format!("Max concurrency: {}", f.max_conc),
+        format!("Max VRAM: {:.1} GB (GPU {})", f.gb_per_gpu * f.gpus.len().max(1) as f64, gpus.join(",")),
+    ]
+}
+
+struct Bar {
+    gpus: Vec<u32>,
+    need_mb: u64,
+    base_mb: u64,
+    frac: f64,
+}
+
+impl Bar {
+    fn show(&mut self) {
+        // The share of its budget the instance holds in VRAM so far, at most 95% until it runs.
+        if self.need_mb > 0 {
+            let grown = managed_mb(&self.gpus).saturating_sub(self.base_mb) as f64 / self.need_mb as f64;
+            self.frac = self.frac.max(grown.min(0.95));
+        }
+        crate::progress::eprint_line(crate::progress::bar((self.frac * 100.0) as u32));
+    }
+}
+
 pub fn wait_for_instance(instance_id: &str, timeout: Duration) -> Result<(), String> {
-    // Poll ps until the instance is RUNNING, printing its notices; a final status or a vanished row ends the wait.
-    eprintln!("{BANNER}");
+    // Poll ps until the instance is RUNNING, printing its notices; a final status or a vanished row ends the wait. Compact: the instance's context, concurrency and VRAM, then a bar.
+    let compact = crate::step::compact();
+    if !compact {
+        eprintln!("{BANNER}");
+    }
+    let mut bar: Option<Bar> = None;
     let (started, mut last) = (Instant::now(), Instant::now());
     let deadline = started + timeout;
     while Instant::now() < deadline {
-        if last.elapsed() >= crate::progress::every() {
+        if compact {
+            if bar.is_none() {
+                if let Some(f) = facts(instance_id) {
+                    head_lines(&f).iter().for_each(|l| eprintln!("{l}"));
+                    let need_mb = (f.gb_per_gpu * 1024.0) as u64 * f.gpus.len() as u64;
+                    bar = Some(Bar { base_mb: managed_mb(&f.gpus), gpus: f.gpus, need_mb, frac: 0.0 });
+                }
+            }
+            if let Some(b) = bar.as_mut() {
+                b.show();
+            }
+        } else if last.elapsed() >= crate::progress::every() {
             crate::progress::eprint_line(heartbeat(started.elapsed().as_secs()));
             last = Instant::now();
         }
@@ -36,6 +107,10 @@ pub fn wait_for_instance(instance_id: &str, timeout: Duration) -> Result<(), Str
                         }
                         let st = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
                         if st == "RUNNING" {
+                            if compact {
+                                crate::progress::eprint_line(crate::progress::bar(100));
+                                crate::progress::end_line();
+                            }
                             return Ok(());
                         }
                         if st == "CANCELLED" {

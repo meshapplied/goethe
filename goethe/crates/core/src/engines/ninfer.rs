@@ -76,7 +76,7 @@ pub fn verify_ninfer_file(path: &Path) -> Result<(), String> {
     check_ninfer_with(path, sha256_file)
 }
 
-fn ninfer_cache_file() -> Result<PathBuf, String> {
+pub fn ninfer_cache_file() -> Result<PathBuf, String> {
     let root = if let Some(h) = std::env::var_os("NVFP4_HOME") {
         PathBuf::from(h)
     } else {

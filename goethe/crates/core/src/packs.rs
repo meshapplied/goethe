@@ -892,7 +892,7 @@ pub fn finish_as(
         let started_at = crate::progress::NET_BYTES.load(std::sync::atomic::Ordering::Relaxed);
         let ticker = (total > 0).then(|| {
             let counted = move || crate::progress::NET_BYTES.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(started_at);
-            crate::progress::Ticker::start("kernel pack", Some(total), crate::progress::every(), counted, crate::progress::eprint_line)
+            crate::progress::Ticker::fetching("kernel pack", "the Goethe console", Some(total), crate::progress::every(), counted, crate::progress::eprint_line)
         });
         for (o, l) in runs {
             delta.fetched += l;

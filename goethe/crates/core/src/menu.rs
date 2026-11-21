@@ -8,7 +8,7 @@ use std::io::{IsTerminal, Write};
 
 #[path = "menu_draw.rs"]
 mod menu_draw;
-use menu_draw::{brand, columns, example_below, fine_bar, gb, gray, hl, mark, name_style, screen, sgr, themes_line, GAP};
+use menu_draw::{brand, columns, drop_mark, example_below, fine_bar, gb, gray, hl, mark, name_style, screen, sgr, themes_line, GAP};
 #[cfg(test)]
 use menu_draw::{plain, LOGO, SITE};
 
@@ -309,12 +309,131 @@ enum Phase {
     Failed(String),
 }
 
-struct LoadJob {
-    model: String,
+pub(crate) struct LoadJob {
+    pub(crate) model: String,
+    ctx: Option<u64>,
+    gpus: Vec<u32>,
     phase: Phase,
     frac: f64,
-    shown: u32,
+    pub(crate) shown: u32,
     ticks: u32,
+}
+
+fn gpu_flag(gpus: &[u32]) -> Option<String> {
+    // goethe load's --gpu for the GPUs chosen in the menu, none for goethe's own pick.
+    (!gpus.is_empty()).then(|| format!("--gpu={}", gpus.iter().map(|g| format!("gpu{g}")).collect::<Vec<_>>().join(",")))
+}
+
+struct GpuRow {
+    index: u32,
+    name: String,
+    free_gb: f64,
+    allowed: bool,
+    alone: Result<(), String>,
+}
+
+struct GpuChoice {
+    model: String,
+    rows: Vec<GpuRow>,
+    at: usize,
+    marked: Vec<u32>,
+    plan: Result<String, String>,
+    view: Option<crate::recommend::View>,
+}
+
+impl GpuChoice {
+    fn open(model: String) -> GpuChoice {
+        // Every GPU with its free memory and whether the model fits on it alone, as goethe load --dry-run would place it now.
+        let home = goethe_home();
+        let mut c = GpuChoice { model, rows: Vec::new(), at: 0, marked: Vec::new(), plan: Err(String::new()), view: None };
+        let Some(hw) = crate::placement::load_hw(&home) else {
+            c.plan = Err("no hardware profile yet: goethe doctor --hardware".to_string());
+            return c;
+        };
+        let mut view = crate::recommend::View::new(&home, hw);
+        let allowed = view.gpus.clone();
+        for g in &view.hw.gpus {
+            let live = allowed.iter().find(|a| a.index == g.index);
+            view.gpus = live.into_iter().cloned().collect();
+            let alone = match live {
+                Some(_) => c.fit_on(&view, Some(1)).map(|_| ()),
+                None => Err("not allowed".to_string()),
+            };
+            let free_mb = live.map_or(g.vram_free_mb, |l| l.free_vram_mb);
+            c.rows.push(GpuRow { index: g.index, name: g.name.clone(), free_gb: free_mb as f64 / 1024.0, allowed: live.is_some(), alone });
+        }
+        view.gpus = allowed;
+        c.view = Some(view);
+        c.replan();
+        c
+    }
+
+    fn fit_on(&self, view: &crate::recommend::View, tp: Option<usize>) -> Result<String, String> {
+        match crate::hw::place(&goethe_home(), view, &self.model, tp, None, None) {
+            Ok(Ok((f, _))) => Ok(format!("tp={}  ctx={}  {:.1} GB/GPU", f.tp, f.ctx, f.need.total())),
+            Ok(Err(why)) | Err(why) => Err(why),
+        }
+    }
+
+    fn replan(&mut self) {
+        // The plan goethe load would use for Auto or for the marked GPUs: tp, context and memory per GPU.
+        let Some(mut view) = self.view.take() else { return };
+        let all = view.gpus.clone();
+        if !self.marked.is_empty() {
+            view.gpus.retain(|g| self.marked.contains(&g.index));
+        }
+        self.plan = self.fit_on(&view, (!self.marked.is_empty()).then_some(self.marked.len()));
+        view.gpus = all;
+        self.view = Some(view);
+    }
+
+    fn key(&mut self, input: Input) -> Option<bool> {
+        // Some(true) loads, Some(false) goes back to the list, None stays.
+        let n = self.rows.len() + 1;
+        match input {
+            Input::Up | Input::Char('k') => self.at = (self.at + n - 1) % n,
+            Input::Down | Input::Char('j') => self.at = (self.at + 1) % n,
+            Input::Space if self.at == 0 => {
+                self.marked.clear();
+                self.replan();
+            }
+            Input::Space if self.rows[self.at - 1].allowed => {
+                let g = self.rows[self.at - 1].index;
+                match self.marked.iter().position(|m| *m == g) {
+                    Some(i) => drop(self.marked.remove(i)),
+                    None => self.marked.push(g),
+                }
+                self.marked.sort_unstable();
+                self.replan();
+            }
+            Input::Enter => return Some(true),
+            Input::Left | Input::Esc => return Some(false),
+            _ => {}
+        }
+        None
+    }
+
+    fn lines(&self) -> Vec<String> {
+        // Auto, then each GPU (gray when not allowed), then the plan the choice gives.
+        let cursor = |i: usize| if i == self.at { sgr(&hl(), "\u{27a4}") } else { " ".to_string() };
+        let dot = |on: bool| if on { sgr(&mark(), "\u{25cf}") } else { "\u{25cb}".to_string() };
+        let mut out = vec![format!("{} {} Auto  {}", cursor(0), dot(self.marked.is_empty()), gray("goethe picks the GPUs"))];
+        for (i, r) in self.rows.iter().enumerate() {
+            let text = format!("GPU {}  {}  {:.1} GB free", r.index, r.name, r.free_gb);
+            out.push(match (&r.alone, r.allowed) {
+                (_, false) => format!("{}   {}", cursor(i + 1), gray(&format!("{text}  not allowed"))),
+                (Ok(()), true) => format!("{} {} {text}  {}", cursor(i + 1), dot(self.marked.contains(&r.index)), sgr(&crate::theme::secondary(), "fits")),
+                (Err(_), true) => format!("{} {} {text}  {}", cursor(i + 1), dot(self.marked.contains(&r.index)), gray("too small alone")),
+            });
+        }
+        out.push(String::new());
+        out.push(match &self.plan {
+            Ok(desc) => desc.clone(),
+            Err(why) if why.is_empty() => String::new(),
+            Err(why) => paint(&format!("does not fit: {why}"), Color::Red),
+        });
+        out
+    }
 }
 
 fn goethe_cmd() -> std::process::Command {
@@ -324,16 +443,10 @@ fn goethe_cmd() -> std::process::Command {
 }
 
 impl LoadJob {
-    fn new(model: String) -> LoadJob {
-        LoadJob { model, phase: Phase::Up(None), frac: 0.0, shown: 0, ticks: 0 }
+    pub(crate) fn new(model: String, ctx: Option<u64>) -> LoadJob {
+        LoadJob { model, ctx, gpus: Vec::new(), phase: Phase::Up(None), frac: 0.0, shown: 0, ticks: 0 }
     }
 
-    fn managed_mb(gpus: &[u32]) -> u64 {
-        // VRAM goethe's engines hold on these GPUs now.
-        let home = goethe_home();
-        let managed = crate::db::open(&home).map(|c| crate::placement::managed_pids(&c)).unwrap_or_default();
-        crate::hw::gpu_usage(&managed).unwrap_or_default().iter().filter(|u| gpus.contains(&u.index)).map(|u| u.managed_mb).sum()
-    }
 
     fn advance(&mut self) {
         // goethed up (started quietly when down), the load sent, then the instance's VRAM against its budget until it runs.
@@ -350,7 +463,7 @@ impl LoadJob {
                 Ok(Some(st)) if !st.success() => Phase::Failed("goethed did not start; goethe up shows why".to_string()),
                 _ => Phase::Up(Some(c)),
             },
-            Phase::Start => match goethe_cmd().args(["load", &self.model, "--no-wait", "--json", "--yes"]).output() {
+            Phase::Start => match goethe_cmd().args(["load", &self.model, "--no-wait", "--json", "--yes"]).args(self.ctx.map(|c| format!("--ctx={c}"))).args(gpu_flag(&self.gpus)).output() {
                 Ok(o) if o.status.success() => match crate::rpc::parse_load_instance_id(&String::from_utf8_lossy(&o.stdout)) {
                     Some(instance) => Phase::Loading { instance, gpus: Vec::new(), need_mb: 0, base_mb: 0 },
                     None if String::from_utf8_lossy(&o.stdout).contains("already loaded") => {
@@ -377,10 +490,10 @@ impl LoadJob {
                             let r = row.as_ref().unwrap_or(&serde_json::Value::Null);
                             gpus = r["gpu_indices"].as_array().into_iter().flatten().filter_map(|g| g.as_u64()).map(|g| g as u32).collect();
                             need_mb = (r["allocated_vram_gb_per_gpu"].as_f64().unwrap_or(0.0) * 1024.0) as u64 * gpus.len() as u64;
-                            base_mb = Self::managed_mb(&gpus);
+                            base_mb = crate::load_wait::managed_mb(&gpus);
                         }
                         if need_mb > 0 {
-                            let grown = Self::managed_mb(&gpus).saturating_sub(base_mb) as f64 / need_mb as f64;
+                            let grown = crate::load_wait::managed_mb(&gpus).saturating_sub(base_mb) as f64 / need_mb as f64;
                             self.frac = self.frac.max(grown.min(0.95));
                         }
                         Phase::Loading { instance, gpus, need_mb, base_mb }
@@ -391,7 +504,7 @@ impl LoadJob {
         };
     }
 
-    fn tick(&mut self) {
+    pub(crate) fn tick(&mut self) {
         // The percent climbs one at a time toward what the load measured; goethed is asked every half second.
         if self.ticks.is_multiple_of(8) {
             self.advance();
@@ -402,11 +515,11 @@ impl LoadJob {
         }
     }
 
-    fn finished(&self) -> bool {
+    pub(crate) fn finished(&self) -> bool {
         matches!(self.phase, Phase::Done) && self.shown >= 100
     }
 
-    fn failure(&self) -> Option<String> {
+    pub(crate) fn failure(&self) -> Option<String> {
         // The reason a load failed, in two lines at most: the first, and the one that names the engine log.
         let Phase::Failed(why) = &self.phase else { return None };
         let lines: Vec<&str> = why.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
@@ -434,6 +547,7 @@ struct Menu {
     side: Option<SideState>,
     off: Vec<bool>,
     job: Option<LoadJob>,
+    gpus: Option<GpuChoice>,
     note: Option<String>,
 }
 
@@ -515,7 +629,11 @@ impl Page for Menu {
         }
         if let Some(s) = side {
             let example = if focused && s.kind == Side::Schemas { crate::api_schema::example(crate::api_schema::NAMES[s.at], &s.base, crate::api_schema::MODEL, crate::api_schema::KEY) } else { Vec::new() };
-            columns(&mut out, start, 2 + tw + GAP.len(), &side_rows(s, self.job.as_ref()), &[]);
+            let rows = match &self.gpus {
+                Some(g) => g.lines(),
+                None => side_rows(s, self.job.as_ref()),
+            };
+            columns(&mut out, start, 2 + tw + GAP.len(), &rows, &[]);
             example_below(&mut out, 2 + tw + GAP.len(), &example);
         }
         if let Some(n) = &self.note {
@@ -523,6 +641,7 @@ impl Page for Menu {
             out.extend(n.lines().map(|l| format!("  {}", paint(l, Color::Red))));
         }
         let hint = match side.filter(|s| s.focused).map(|s| s.kind) {
+            Some(Side::Models) if self.gpus.is_some() => gray("\u{2191}\u{2193} move   Space choose GPUs (several split the model)   Enter load   \u{2190} back   q quit"),
             Some(Side::Schemas) => gray("\u{2191}\u{2193} move   \u{2190} back   q quit"),
             Some(Side::Models) => gray("\u{2191}\u{2193} move   Enter load or unload   Space mark loaded models to unload together   \u{2190} back   q quit"),
             None if self.top => format!("{}{GAP}{}", gray(self.hint), themes_line()),
@@ -534,6 +653,23 @@ impl Page for Menu {
     fn key(&mut self, input: Input) -> Flow {
         if matches!(input, Input::Char('q') | Input::Interrupt) {
             return Flow::Quit;
+        }
+        if let Some(mut g) = self.gpus.take() {
+            self.note = None;
+            match g.key(input) {
+                Some(true) if !g.marked.is_empty() && g.plan.is_err() => {
+                    self.note = Some("those GPUs cannot hold it; choose others or Auto".to_string());
+                    self.gpus = Some(g);
+                }
+                Some(true) => {
+                    let mut job = LoadJob::new(g.model, None);
+                    job.gpus = g.marked;
+                    self.job = Some(job);
+                }
+                Some(false) => {}
+                None => self.gpus = Some(g),
+            }
+            return Flow::Stay;
         }
         if let Some(s) = self.side.as_mut().filter(|s| s.focused) {
             let n = s.len().max(1);
@@ -564,7 +700,7 @@ impl Page for Menu {
                     } else if let Some((id, false)) = s.models.get(s.at).cloned() {
                         match &self.job {
                             Some(j) => self.note = Some(format!("{} is loading; one model loads at a time", j.model)),
-                            None => self.job = Some(LoadJob::new(id)),
+                            None => self.gpus = Some(GpuChoice::open(id)),
                         }
                     }
                 }
@@ -669,6 +805,7 @@ fn main_menu() -> Menu {
         side: None,
         off: Vec::new(),
         job: None,
+        gpus: None,
         note: None,
     }
 }
@@ -689,6 +826,7 @@ fn access_menu() -> Menu {
         side: None,
         off: Vec::new(),
         job: None,
+        gpus: None,
         note: None,
     }
 }
@@ -719,32 +857,72 @@ fn report(result: Result<(), String>) {
 struct ModelPick {
     models: Vec<(String, bool)>,
     at: usize,
+    job: Option<LoadJob>,
+    ready: Option<usize>,
+    note: Option<String>,
 }
 
 impl Page for ModelPick {
     fn render(&self, width: usize, height: usize) -> Vec<String> {
-        // goethe run without a model: the installed models at the top, loaded ones first and marked.
+        // goethe run without a model: the installed models at the top, loaded ones first and marked; one that is not loaded loads here, its bar beside it.
         let mut out = vec![String::new(), format!("  {}", paint("Choose a model to run", Color::Bold)), String::new()];
         for (i, (id, loaded)) in self.models.iter().enumerate() {
-            let state = if *loaded { format!("  {}", sgr(&crate::theme::secondary(), "loaded")) } else { String::new() };
+            let state = match self.job.as_ref().filter(|j| j.model == *id) {
+                Some(j) => format!("  {}  {:>3}%", fine_bar(j.shown), j.shown),
+                None if *loaded => format!("  {}", sgr(&crate::theme::secondary(), "loaded")),
+                None => String::new(),
+            };
             out.push(match i == self.at {
                 true => format!("{} {}{state}", sgr(&hl(), "\u{27a4}"), sgr(&hl(), id)),
                 false => format!("  {id}{state}"),
             });
         }
-        screen(out, width, height, gray("\u{2191}\u{2193} move   Enter run   q quit"))
+        if let Some(n) = &self.note {
+            out.push(String::new());
+            out.extend(n.lines().map(|l| format!("  {}", paint(l, Color::Red))));
+        }
+        let keys = if self.job.is_some() { "loading...   q quit" } else { "\u{2191}\u{2193} move   Enter run   q quit" };
+        screen(out, width, height, gray(keys))
     }
 
     fn key(&mut self, input: Input) -> Flow {
         let n = self.models.len();
+        if self.job.is_some() {
+            return match input {
+                Input::Interrupt | Input::Char('q') | Input::Esc => Flow::Quit,
+                _ => Flow::Stay,
+            };
+        }
+        self.note = None;
         match input {
             Input::Up | Input::Char('k') => self.at = (self.at + n - 1) % n,
             Input::Down | Input::Char('j') => self.at = (self.at + 1) % n,
-            Input::Enter => return Flow::Pick(self.at),
+            Input::Enter if self.models[self.at].1 => return Flow::Pick(self.at),
+            Input::Enter => self.job = Some(LoadJob::new(self.models[self.at].0.clone(), crate::run::run_ctx(&goethe_home(), &self.models[self.at].0))),
             Input::Left | Input::Esc | Input::Interrupt | Input::Char('q') => return Flow::Quit,
             _ => {}
         }
         Flow::Stay
+    }
+
+    fn every(&self) -> Option<std::time::Duration> {
+        self.job.as_ref().map(|_| std::time::Duration::from_millis(60))
+    }
+
+    fn tick(&mut self) {
+        // The load in place: when it runs the model is chosen, when it fails the reason shows under the list.
+        let Some(j) = self.job.as_mut() else { return };
+        j.tick();
+        if j.finished() {
+            self.ready = Some(self.at);
+        } else if let Some(why) = j.failure() {
+            self.note = Some(why);
+            self.job = None;
+        }
+    }
+
+    fn finished(&self) -> bool {
+        self.ready.is_some()
     }
 }
 
@@ -758,15 +936,19 @@ pub fn metrics() -> Result<(), String> {
     Tty::open()?.run(&mut MetricsPage(view)).map(|_| ())
 }
 
-pub fn pick_model() -> Result<Option<String>, String> {
-    // The model goethe run should use, chosen from the installed ones; None when there are none or the list is left.
+pub fn pick_model() -> Result<Option<(String, bool)>, String> {
+    // The model goethe run should use, chosen from the installed ones and loaded on the list when it was not, with whether the list loaded it; None when the list is left.
     let models = installed_and_loaded(&goethe_home());
     if models.is_empty() {
         return Err("no model is installed: goethe install MODEL".to_string());
     }
-    let mut page = ModelPick { models, at: 0 };
+    let mut page = ModelPick { models, at: 0, job: None, ready: None, note: None };
     let picked = Tty::open()?.run(&mut page)?;
-    Ok(picked.and_then(|i| page.models.get(i).map(|(id, _)| id.clone())))
+    let started_here = page.ready.is_some();
+    if let (Some(j), false) = (&page.job, started_here) {
+        crate::run::unload_quietly(&j.model);
+    }
+    Ok(picked.or(page.ready).and_then(|i| page.models.get(i).map(|(id, _)| (id.clone(), started_here))))
 }
 
 pub fn run() -> Result<(), String> {
@@ -1174,9 +1356,10 @@ impl Picker {
             let (here, picked) = (i == self.at, self.chosen[i]);
             let cursor = if here { sgr(&hl(), "\u{27a4}") } else { " ".to_string() };
             let mark = match (picked, r.installed) {
-                (true, _) => sgr(&mark(), "\u{25cf}"),
+                (true, false) => sgr(&mark(), "\u{25cf}"),
+                (true, true) => sgr(&drop_mark(), "\u{25cf}"),
                 (false, true) => sgr(&crate::theme::secondary(), "\u{25cf}"),
-                _ => "\u{25cb}".to_string(),
+                (false, false) => "\u{25cb}".to_string(),
             };
             let name = fit(&format!("{}{}", if picked { "  " } else { "" }, r.id), mw + 2);
             let name = match name_style(r, here) {
@@ -1211,23 +1394,39 @@ impl Picker {
         vec![format!("{}   Custom model:  {custom}", cursor(Spot::Custom)), format!("{}   {token}", cursor(Spot::Token))]
     }
 
+    fn chosen_ids(&self, installed: bool) -> Vec<String> {
+        // The chosen models that are (or are not) installed: what Enter uninstalls (or installs).
+        self.data.rows.iter().zip(&self.chosen).filter(|(r, c)| **c && r.installed == installed).map(|(r, _)| r.id.clone()).collect()
+    }
+
     fn installs(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.data.rows.iter().zip(&self.chosen).filter(|(_, c)| **c).map(|(r, _)| r.id.clone()).collect();
-        if !self.custom.trim().is_empty() {
-            ids.push(self.custom.trim().to_string());
+        let mut ids = self.chosen_ids(false);
+        let custom = self.custom.trim();
+        if !custom.is_empty() && !ids.iter().any(|i| i == custom) && !self.data.rows.iter().any(|r| r.installed && r.id == custom) {
+            ids.push(custom.to_string());
         }
         ids
     }
 
+    fn removals(&self) -> Vec<String> {
+        self.chosen_ids(true)
+    }
+
+    fn plan(&self, width: usize) -> Vec<String> {
+        // What Enter would do, one line each: install in the secondary color, uninstall in the third.
+        let line = |word: &str, ids: Vec<String>, code: String| {
+            (!ids.is_empty()).then(|| sgr(&code, fit(&format!("{word}: {}", ids.join(" ")), width.saturating_sub(2)).trim_end()))
+        };
+        [line("install", self.installs(), crate::theme::secondary()), line("uninstall", self.removals(), drop_mark())].into_iter().flatten().collect()
+    }
+
     fn hint(&self) -> String {
-        let n = self.installs().len();
-        let lead = if n > 0 { format!("{n} selected   ") } else { String::new() };
         let keys = match self.spot() {
-            Spot::Model(_) => "\u{2191}\u{2193} move   Space select   Enter install   \u{2190} back",
-            Spot::Custom => "type a Hugging Face id such as org/model   Enter install   \u{2191}\u{2193} move   \u{2190} back",
+            Spot::Model(_) => "\u{2191}\u{2193} move   Space select   Enter apply   \u{2190} back",
+            Spot::Custom => "type a Hugging Face id such as org/model   Enter apply   \u{2191}\u{2193} move   \u{2190} back",
             Spot::Token => "paste a Hugging Face token   Enter use it for these installs   \u{2191}\u{2193} move   \u{2190} back",
         };
-        format!("{lead}{keys}")
+        keys.to_string()
     }
 
     fn enter(&mut self) -> Flow {
@@ -1254,7 +1453,7 @@ impl Picker {
                 return Flow::Stay;
             }
         }
-        if self.installs().is_empty() {
+        if self.installs().is_empty() && self.removals().is_empty() {
             self.status = "Select models with Space, or type a custom model".to_string();
             return Flow::Stay;
         }
@@ -1267,10 +1466,15 @@ impl Page for Picker {
         let mut out = vec![String::new(), format!("  {}", paint("Install models", Color::Bold)), String::new()];
         out.extend(self.summary());
         out.push(String::new());
-        let rows = height.saturating_sub(out.len() + 1 + 3 + 3).max(1);
+        let plan = self.plan(width);
+        let rows = height.saturating_sub(out.len() + 1 + 3 + 3 + plan.len() + usize::from(!plan.is_empty())).max(1);
         out.extend(self.table(width, rows));
         out.push(String::new());
         out.extend(self.fields());
+        if !plan.is_empty() {
+            out.push(String::new());
+            out.extend(plan.into_iter().map(|l| format!("  {l}")));
+        }
         let footer = if self.status.is_empty() { gray(&self.hint()) } else { paint(&self.status, Color::Yellow) };
         screen(out, width, height, footer)
     }
@@ -1290,11 +1494,11 @@ impl Page for Picker {
             Input::Esc | Input::Left => return Flow::Leave,
             Input::Interrupt => return Flow::Quit,
             Input::Char('q') if !typing => return Flow::Quit,
-            Input::Space => match self.spot() {
-                Spot::Model(i) if self.data.rows[i].installed => self.status = format!("{} is already installed", self.data.rows[i].id),
-                Spot::Model(i) => self.chosen[i] = !self.chosen[i],
-                _ => {}
-            },
+            Input::Space => {
+                if let Spot::Model(i) = self.spot() {
+                    self.chosen[i] = !self.chosen[i];
+                }
+            }
             Input::Backspace => match self.spot() {
                 Spot::Custom => drop(self.custom.pop()),
                 Spot::Token => drop(self.token.pop()),
@@ -1312,43 +1516,65 @@ impl Page for Picker {
 }
 
 fn install_page(tty: &mut Tty) -> Result<(), String> {
-    // The table of models that fit; the chosen ones are installed one after the other on the normal screen.
+    // The table of models that fit; Enter uninstalls the chosen installed ones, then installs the others, on the normal screen, and the table comes back.
     let home = goethe_home();
-    tty.draw(&Notice("Reading the catalog and the GPUs...".to_string()));
-    let data = crate::placement::ensure_hw_profile(&home).and_then(|_| crate::models::picker_data(&home));
-    let mut picker = match data {
-        Ok(d) => Picker::new(d),
-        Err(e) => return tty.inside(|| Err(e)),
-    };
-    if tty.run(&mut picker)?.is_none() {
-        return Ok(());
-    }
-    let ids = picker.installs();
-    tty.inside(|| {
-        for id in ids {
-            println!("{}", paint(&format!("Installing {id}"), Color::Bold));
-            report(crate::install::run(crate::install::InstallOpts {
-                model_id: id,
-                ctx: None,
-                max_conc: None,
-                tp: None,
-                gpus: None,
-                load: false,
-                force: false,
-                no_verify: false,
-                name: None,
-                copy_local: false,
-                sglang_args: Vec::new(),
-                no_wait: false,
-                trust_remote_code: false,
-                yes: true,
-                reset: false,
-                quant: None,
-                fallback: false,
-            }));
+    loop {
+        tty.draw(&Notice("Reading the catalog and the GPUs...".to_string()));
+        let data = crate::placement::ensure_hw_profile(&home).and_then(|_| crate::models::picker_data(&home));
+        let mut picker = match data {
+            Ok(d) => Picker::new(d),
+            Err(e) => return tty.inside(|| Err(e)),
+        };
+        if tty.run(&mut picker)?.is_none() || tty.quit {
+            return Ok(());
         }
-        Ok(())
-    })
+        let (removals, installs) = (picker.removals(), picker.installs());
+        tty.inside(|| apply_picks(&removals, &installs))?;
+        if tty.quit {
+            return Ok(());
+        }
+    }
+}
+
+fn apply_picks(removals: &[String], installs: &[String]) -> Result<(), String> {
+    // Every chosen change in turn, uninstalls first so their disk space is free for the installs; one failure never stops the others.
+    crate::step::set_compact(true);
+    let mut failed = Vec::new();
+    for id in removals {
+        if let Err(e) = crate::models::run_remove(id, true, false, Some(false)) {
+            report(Err(e));
+            failed.push(id.clone());
+        }
+    }
+    for id in installs {
+        let opts = crate::install::InstallOpts {
+            model_id: id.clone(),
+            ctx: None,
+            max_conc: None,
+            tp: None,
+            gpus: None,
+            load: false,
+            force: false,
+            no_verify: false,
+            name: None,
+            copy_local: false,
+            sglang_args: Vec::new(),
+            no_wait: false,
+            trust_remote_code: false,
+            yes: true,
+            reset: false,
+            quant: None,
+            fallback: false,
+        };
+        if let Err(e) = crate::install::run(opts) {
+            report(Err(e));
+            failed.push(id.clone());
+        }
+    }
+    match failed.len() {
+        0 => Ok(()),
+        _ => Err(format!("not done: {}", failed.join(", "))),
+    }
 }
 
 #[cfg(test)]
@@ -1458,6 +1684,8 @@ mod tests {
         m.key(Input::Down);
         m.key(Input::Down);
         assert!(matches!(m.key(Input::Enter), Flow::Stay), "loading keeps the menu on screen");
+        assert_eq!(m.gpus.as_ref().map(|g| g.model.as_str()), Some("org/b"), "Enter first asks where");
+        assert!(matches!(m.key(Input::Enter), Flow::Stay) && m.gpus.is_none(), "Enter on Auto loads");
         assert_eq!(m.job.as_ref().map(|j| j.model.as_str()), Some("org/b"));
         assert!(m.every().is_some(), "the menu refreshes while a model loads");
         m.job.as_mut().unwrap().shown = 30;
@@ -1471,6 +1699,37 @@ mod tests {
         m.key(Input::Enter);
         assert!(m.note.as_deref().is_some_and(|n| n.contains("one model loads at a time")) || m.job.as_ref().is_some_and(|j| j.model == "org/b"));
         assert!(matches!(m.key(Input::Char('q')), Flow::Quit), "q quits even while a model loads");
+    }
+
+    #[test]
+    fn the_gpu_choice_marks_allowed_gpus_grays_the_others_and_loads_on_the_marked_ones() {
+        let row = |index: u32, allowed: bool, alone: Result<(), String>| GpuRow { index, name: "H100".into(), free_gb: 70.0, allowed, alone };
+        let mut g = GpuChoice {
+            model: "org/b".into(),
+            rows: vec![row(0, false, Err("not allowed".into())), row(1, true, Ok(())), row(2, true, Err("short".into()))],
+            at: 0,
+            marked: Vec::new(),
+            plan: Ok("tp=1  ctx=4096  20.0 GB/GPU".into()),
+            view: None,
+        };
+        let t: Vec<String> = g.lines().iter().map(|l| plain(l)).collect();
+        assert!(t[0].contains("\u{25cf} Auto") && t[1].contains("GPU 0") && t[1].contains("not allowed") && !t[1].contains('\u{25cb}'), "{t:?}");
+        assert!(t[2].contains("\u{25cb} GPU 1") && t[2].ends_with("fits") && t[3].ends_with("too small alone") && t[5].starts_with("tp=1"), "{t:?}");
+        assert_eq!(g.key(Input::Down), None);
+        g.key(Input::Space);
+        assert!(g.marked.is_empty(), "a GPU that is not allowed cannot be chosen");
+        g.key(Input::Down);
+        g.key(Input::Space);
+        g.key(Input::Down);
+        g.key(Input::Space);
+        assert_eq!(g.marked, vec![1, 2], "several GPUs split one copy");
+        assert!(plain(&g.lines()[0]).contains("\u{25cb} Auto"));
+        g.at = 0;
+        g.key(Input::Space);
+        assert!(g.marked.is_empty(), "Auto clears the choice");
+        assert_eq!((g.key(Input::Enter), g.key(Input::Left)), (Some(true), Some(false)));
+        assert_eq!(gpu_flag(&[1, 3]).as_deref(), Some("--gpu=gpu1,gpu3"));
+        assert_eq!(gpu_flag(&[]), None);
     }
 
     #[test]
@@ -1499,7 +1758,7 @@ mod tests {
 
     #[test]
     fn a_load_climbs_one_percent_at_a_time_on_a_bar_no_wider() {
-        let mut j = LoadJob::new("org/m".into());
+        let mut j = LoadJob::new("org/m".into(), None);
         j.phase = Phase::Loading { instance: "i".into(), gpus: vec![3], need_mb: 1000, base_mb: 0 };
         j.frac = 0.3;
         j.ticks = 1;
@@ -1541,12 +1800,17 @@ mod tests {
 
     #[test]
     fn run_without_a_model_lists_the_installed_ones_at_the_top() {
-        let mut p = ModelPick { models: vec![("org/a".into(), true), ("org/b".into(), false)], at: 0 };
+        let mut p = ModelPick { models: vec![("org/a".into(), true), ("org/b".into(), false)], at: 0, job: None, ready: None, note: None };
         let t = text(p.render(100, 20));
         assert!(t[1].contains("Choose a model to run") && t[3].starts_with('\u{27a4}') && t[3].contains("org/a") && t[3].contains("loaded") && t[4].contains("org/b"), "{t:?}");
-        assert!(matches!(p.key(Input::Up), Flow::Stay) && p.at == 1, "up from the first wraps to the last");
-        assert!(matches!(p.key(Input::Enter), Flow::Pick(1)));
+        assert!(matches!(p.key(Input::Enter), Flow::Pick(0)), "a loaded model runs at once");
         assert!(matches!(p.key(Input::Char('q')), Flow::Quit) && matches!(p.key(Input::Left), Flow::Quit), "q and the left arrow leave without running");
+        assert!(matches!(p.key(Input::Up), Flow::Stay) && p.at == 1, "up from the first wraps to the last");
+        assert!(matches!(p.key(Input::Enter), Flow::Stay) && p.job.as_ref().is_some_and(|j| j.model == "org/b"), "one that is not loaded loads on the list");
+        p.job.as_mut().unwrap().shown = 40;
+        let t = text(p.render(100, 20));
+        assert!(t[4].contains("org/b") && t[4].contains("40%") && t.iter().any(|l| l.contains("loading...")), "{t:?}");
+        assert!(matches!(p.key(Input::Down), Flow::Stay) && p.at == 1, "the list holds still while it loads");
     }
 
     #[test]
@@ -1600,19 +1864,40 @@ mod tests {
     }
 
     #[test]
-    fn space_selects_and_indents_installed_models_cannot_be_picked() {
+    fn space_selects_models_to_install_and_installed_ones_to_uninstall() {
         let mut p = picker();
-        p.key(Input::Space);
         let line = |p: &Picker, id: &str| text(p.render(120, 30)).into_iter().find(|l| l.contains(id)).unwrap();
+        assert!(line(&p, "org/mine").contains("\u{25cf} org/mine"), "installed models have a filled dot, not indented");
+        assert!(!text(p.render(120, 30)).iter().any(|l| l.contains("install:")), "nothing chosen, no plan");
+        p.key(Input::Space);
         assert!(line(&p, "org/small").contains("\u{25cf}   org/small"), "{}", line(&p, "org/small"));
         assert!(line(&p, "org/large").contains("\u{25cb} org/large"));
         p.key(Input::Down);
         p.key(Input::Space);
-        assert!(p.status.contains("already installed") && !p.chosen[1]);
+        assert!(p.chosen[1] && p.status.is_empty());
+        assert!(line(&p, "org/mine").contains("\u{25cf}   org/mine"), "chosen for uninstall: indented");
         assert_eq!(name_style(&p.data.rows[1], false), "1", "installed names are bold");
-        assert!(line(&p, "org/mine").contains("\u{25cf} org/mine"), "installed models have a filled dot, not indented");
         assert_eq!(name_style(&p.data.rows[0], false), "");
+        let t = text(p.render(120, 30));
+        let at = t.iter().position(|l| l.trim() == "install: org/small").unwrap_or_else(|| panic!("{t:?}"));
+        assert_eq!(t[at + 1].trim(), "uninstall: org/mine");
+        assert!(t[at + 3].contains("Enter apply"), "the keys stay under the plan: {t:?}");
         assert!(matches!(p.key(Input::Enter), Flow::Pick(0)));
+        assert_eq!((p.installs(), p.removals()), (vec!["org/small".to_string()], vec!["org/mine".to_string()]));
+        p.key(Input::Space);
+        p.key(Input::Up);
+        p.key(Input::Space);
+        assert!(p.installs().is_empty() && p.removals().is_empty(), "Space again drops the choice");
+        assert!(matches!(p.key(Input::Enter), Flow::Stay) && p.status.starts_with("Select models"));
+    }
+
+    #[test]
+    fn a_custom_model_that_is_already_chosen_or_installed_is_not_installed_twice() {
+        let mut p = picker();
+        p.key(Input::Space);
+        p.custom = "org/small".into();
+        assert_eq!(p.installs(), ["org/small"]);
+        p.custom = "org/mine".into();
         assert_eq!(p.installs(), ["org/small"]);
     }
 

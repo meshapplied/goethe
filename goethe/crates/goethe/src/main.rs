@@ -306,7 +306,7 @@ enum Commands {
         #[arg(long = "allow-downgrade", help = "Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries).")]
         allow_downgrade: bool,
     },
-    #[command(display_order = 18, about = "Remove Goethe and the models it installed (folders of your own stay).")]
+    #[command(display_order = 18, about = "Remove Goethe with its models, engines and kernel packs (folders of your own stay).")]
     Uninstall {
         #[arg(long, help = "Keep the installed models in GOETHE_HOME/models.")]
         keep_models: bool,
@@ -783,6 +783,9 @@ fn main() {
     }
     goethe_core::step::set_verbose(cli.verbose);
     goethe_core::step::begin(&goethe_core::paths::goethe_home(), args.iter().skip(1).find(|a| !a.starts_with('-')).map_or("goethe", String::as_str));
+    let terminal = std::io::IsTerminal::is_terminal(&std::io::stdout()) && std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let quiet = matches!(cli.command, Commands::Install { .. } | Commands::Remove { .. } | Commands::Run { .. } | Commands::Load { json: false, dry_run: false, .. });
+    goethe_core::step::set_compact(terminal && quiet);
     let result = match cli.command {
         Commands::Up { no_boot } => do_up(!no_boot),
         Commands::Down { keep_engines: false } => shutdown::run_down(),
