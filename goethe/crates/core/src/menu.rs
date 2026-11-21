@@ -328,7 +328,6 @@ struct GpuRow {
     index: u32,
     name: String,
     free_gb: f64,
-    total_gb: f64,
     allowed: bool,
     alone: Result<(), String>,
 }
@@ -361,7 +360,7 @@ impl GpuChoice {
                 None => Err("not allowed".to_string()),
             };
             let free_mb = live.map_or(g.vram_free_mb, |l| l.free_vram_mb);
-            c.rows.push(GpuRow { index: g.index, name: g.name.clone(), free_gb: free_mb as f64 / 1024.0, total_gb: g.vram_total_mb as f64 / 1024.0, allowed: live.is_some(), alone });
+            c.rows.push(GpuRow { index: g.index, name: g.name.clone(), free_gb: free_mb as f64 / 1024.0, allowed: live.is_some(), alone });
         }
         view.gpus = allowed;
         c.view = Some(view);
@@ -420,7 +419,7 @@ impl GpuChoice {
         let dot = |on: bool| if on { sgr(&mark(), "\u{25cf}") } else { "\u{25cb}".to_string() };
         let mut out = vec![format!("{} {} Auto  {}", cursor(0), dot(self.marked.is_empty()), gray("goethe picks the GPUs"))];
         for (i, r) in self.rows.iter().enumerate() {
-            let text = format!("GPU {}  {}  {:.1} of {:.1} GB free", r.index, r.name, r.free_gb, r.total_gb);
+            let text = format!("GPU {}  {}  {:.1} GB free", r.index, r.name, r.free_gb);
             out.push(match (&r.alone, r.allowed) {
                 (_, false) => format!("{}   {}", cursor(i + 1), gray(&format!("{text}  not allowed"))),
                 (Ok(()), true) => format!("{} {} {text}  {}", cursor(i + 1), dot(self.marked.contains(&r.index)), sgr(&crate::theme::secondary(), "fits")),
@@ -1704,7 +1703,7 @@ mod tests {
 
     #[test]
     fn the_gpu_choice_marks_allowed_gpus_grays_the_others_and_loads_on_the_marked_ones() {
-        let row = |index: u32, allowed: bool, alone: Result<(), String>| GpuRow { index, name: "H100".into(), free_gb: 70.0, total_gb: 80.0, allowed, alone };
+        let row = |index: u32, allowed: bool, alone: Result<(), String>| GpuRow { index, name: "H100".into(), free_gb: 70.0, allowed, alone };
         let mut g = GpuChoice {
             model: "org/b".into(),
             rows: vec![row(0, false, Err("not allowed".into())), row(1, true, Ok(())), row(2, true, Err("short".into()))],
