@@ -370,13 +370,13 @@ impl GpuChoice {
 
     fn fit_on(&self, view: &crate::recommend::View, tp: Option<usize>) -> Result<String, String> {
         match crate::hw::place(&goethe_home(), view, &self.model, tp, None, None) {
-            Ok(Ok((_, desc))) => Ok(desc),
+            Ok(Ok((f, _))) => Ok(format!("tp={}  ctx={}  {:.1} GB/GPU", f.tp, f.ctx, f.need.total())),
             Ok(Err(why)) | Err(why) => Err(why),
         }
     }
 
     fn replan(&mut self) {
-        // The plan for Auto or for the marked GPUs, in goethe load's words.
+        // The plan goethe load would use for Auto or for the marked GPUs: tp, context and memory per GPU.
         let Some(mut view) = self.view.take() else { return };
         let all = view.gpus.clone();
         if !self.marked.is_empty() {
@@ -1709,7 +1709,7 @@ mod tests {
             rows: vec![row(0, false, Err("not allowed".into())), row(1, true, Ok(())), row(2, true, Err("short".into()))],
             at: 0,
             marked: Vec::new(),
-            plan: Ok("tp=1 on GPU 1 at ctx 4096: 20.0 GB per GPU".into()),
+            plan: Ok("tp=1  ctx=4096  20.0 GB/GPU".into()),
             view: None,
         };
         let t: Vec<String> = g.lines().iter().map(|l| plain(l)).collect();
