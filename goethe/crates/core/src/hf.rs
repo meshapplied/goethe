@@ -419,7 +419,7 @@ fn native_with_retries(model_id: &str, local_dir: &Path, revision: &str, files: 
     let have: u64 = missing.iter().map(|f| fs::metadata(partial(local_dir, &f.rfilename)).map(|m| m.len()).unwrap_or(0)).sum();
     let _ticker = (total >= 64 << 20).then(|| {
         let done = move || have + FETCHED.load(Ordering::Relaxed).saturating_sub(base);
-        crate::progress::Ticker::start("downloading", Some(total), crate::progress::every(), done, crate::progress::eprint_line)
+        crate::progress::Ticker::fetching("downloading", "Hugging Face", Some(total), crate::progress::every(), done, crate::progress::eprint_line)
     });
     for f in missing {
         let mut last = String::new();
@@ -569,7 +569,7 @@ pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: 
     let base = crate::progress::dir_bytes(local_dir);
     let watched = local_dir.to_path_buf();
     let ticker = (total > 0).then(|| {
-        crate::progress::Ticker::start(model_id, Some(total), crate::progress::every(), move || crate::progress::dir_bytes(&watched).saturating_sub(base), crate::progress::eprint_line)
+        crate::progress::Ticker::fetching(model_id, "Hugging Face", Some(total), crate::progress::every(), move || crate::progress::dir_bytes(&watched).saturating_sub(base), crate::progress::eprint_line)
     });
     let outcome = run_guarded(&mut cmd);
     drop(ticker);

@@ -312,10 +312,129 @@ enum Phase {
 pub(crate) struct LoadJob {
     pub(crate) model: String,
     ctx: Option<u64>,
+    gpus: Vec<u32>,
     phase: Phase,
     frac: f64,
     pub(crate) shown: u32,
     ticks: u32,
+}
+
+fn gpu_flag(gpus: &[u32]) -> Option<String> {
+    // goethe load's --gpu for the GPUs chosen in the menu, none for goethe's own pick.
+    (!gpus.is_empty()).then(|| format!("--gpu={}", gpus.iter().map(|g| format!("gpu{g}")).collect::<Vec<_>>().join(",")))
+}
+
+struct GpuRow {
+    index: u32,
+    name: String,
+    free_gb: f64,
+    total_gb: f64,
+    allowed: bool,
+    alone: Result<(), String>,
+}
+
+struct GpuChoice {
+    model: String,
+    rows: Vec<GpuRow>,
+    at: usize,
+    marked: Vec<u32>,
+    plan: Result<String, String>,
+    view: Option<crate::recommend::View>,
+}
+
+impl GpuChoice {
+    fn open(model: String) -> GpuChoice {
+        // Every GPU with its free memory and whether the model fits on it alone, as goethe load --dry-run would place it now.
+        let home = goethe_home();
+        let mut c = GpuChoice { model, rows: Vec::new(), at: 0, marked: Vec::new(), plan: Err(String::new()), view: None };
+        let Some(hw) = crate::placement::load_hw(&home) else {
+            c.plan = Err("no hardware profile yet: goethe doctor --hardware".to_string());
+            return c;
+        };
+        let mut view = crate::recommend::View::new(&home, hw);
+        let allowed = view.gpus.clone();
+        for g in &view.hw.gpus {
+            let live = allowed.iter().find(|a| a.index == g.index);
+            view.gpus = live.into_iter().cloned().collect();
+            let alone = match live {
+                Some(_) => c.fit_on(&view, Some(1)).map(|_| ()),
+                None => Err("not allowed".to_string()),
+            };
+            let free_mb = live.map_or(g.vram_free_mb, |l| l.free_vram_mb);
+            c.rows.push(GpuRow { index: g.index, name: g.name.clone(), free_gb: free_mb as f64 / 1024.0, total_gb: g.vram_total_mb as f64 / 1024.0, allowed: live.is_some(), alone });
+        }
+        view.gpus = allowed;
+        c.view = Some(view);
+        c.replan();
+        c
+    }
+
+    fn fit_on(&self, view: &crate::recommend::View, tp: Option<usize>) -> Result<String, String> {
+        match crate::hw::place(&goethe_home(), view, &self.model, tp, None, None) {
+            Ok(Ok((_, desc))) => Ok(desc),
+            Ok(Err(why)) | Err(why) => Err(why),
+        }
+    }
+
+    fn replan(&mut self) {
+        // The plan for Auto or for the marked GPUs, in goethe load's words.
+        let Some(mut view) = self.view.take() else { return };
+        let all = view.gpus.clone();
+        if !self.marked.is_empty() {
+            view.gpus.retain(|g| self.marked.contains(&g.index));
+        }
+        self.plan = self.fit_on(&view, (!self.marked.is_empty()).then_some(self.marked.len()));
+        view.gpus = all;
+        self.view = Some(view);
+    }
+
+    fn key(&mut self, input: Input) -> Option<bool> {
+        // Some(true) loads, Some(false) goes back to the list, None stays.
+        let n = self.rows.len() + 1;
+        match input {
+            Input::Up | Input::Char('k') => self.at = (self.at + n - 1) % n,
+            Input::Down | Input::Char('j') => self.at = (self.at + 1) % n,
+            Input::Space if self.at == 0 => {
+                self.marked.clear();
+                self.replan();
+            }
+            Input::Space if self.rows[self.at - 1].allowed => {
+                let g = self.rows[self.at - 1].index;
+                match self.marked.iter().position(|m| *m == g) {
+                    Some(i) => drop(self.marked.remove(i)),
+                    None => self.marked.push(g),
+                }
+                self.marked.sort_unstable();
+                self.replan();
+            }
+            Input::Enter => return Some(true),
+            Input::Left | Input::Esc => return Some(false),
+            _ => {}
+        }
+        None
+    }
+
+    fn lines(&self) -> Vec<String> {
+        // Auto, then each GPU (gray when not allowed), then the plan the choice gives.
+        let cursor = |i: usize| if i == self.at { sgr(&hl(), "\u{27a4}") } else { " ".to_string() };
+        let dot = |on: bool| if on { sgr(&mark(), "\u{25cf}") } else { "\u{25cb}".to_string() };
+        let mut out = vec![format!("{} {} Auto  {}", cursor(0), dot(self.marked.is_empty()), gray("goethe picks the GPUs"))];
+        for (i, r) in self.rows.iter().enumerate() {
+            let text = format!("GPU {}  {}  {:.1} of {:.1} GB free", r.index, r.name, r.free_gb, r.total_gb);
+            out.push(match (&r.alone, r.allowed) {
+                (_, false) => format!("{}   {}", cursor(i + 1), gray(&format!("{text}  not allowed"))),
+                (Ok(()), true) => format!("{} {} {text}  {}", cursor(i + 1), dot(self.marked.contains(&r.index)), sgr(&crate::theme::secondary(), "fits")),
+                (Err(_), true) => format!("{} {} {text}  {}", cursor(i + 1), dot(self.marked.contains(&r.index)), gray("too small alone")),
+            });
+        }
+        out.push(String::new());
+        out.push(match &self.plan {
+            Ok(desc) => desc.clone(),
+            Err(why) if why.is_empty() => String::new(),
+            Err(why) => paint(&format!("does not fit: {why}"), Color::Red),
+        });
+        out
+    }
 }
 
 fn goethe_cmd() -> std::process::Command {
@@ -326,7 +445,7 @@ fn goethe_cmd() -> std::process::Command {
 
 impl LoadJob {
     pub(crate) fn new(model: String, ctx: Option<u64>) -> LoadJob {
-        LoadJob { model, ctx, phase: Phase::Up(None), frac: 0.0, shown: 0, ticks: 0 }
+        LoadJob { model, ctx, gpus: Vec::new(), phase: Phase::Up(None), frac: 0.0, shown: 0, ticks: 0 }
     }
 
 
@@ -345,7 +464,7 @@ impl LoadJob {
                 Ok(Some(st)) if !st.success() => Phase::Failed("goethed did not start; goethe up shows why".to_string()),
                 _ => Phase::Up(Some(c)),
             },
-            Phase::Start => match goethe_cmd().args(["load", &self.model, "--no-wait", "--json", "--yes"]).args(self.ctx.map(|c| format!("--ctx={c}"))).output() {
+            Phase::Start => match goethe_cmd().args(["load", &self.model, "--no-wait", "--json", "--yes"]).args(self.ctx.map(|c| format!("--ctx={c}"))).args(gpu_flag(&self.gpus)).output() {
                 Ok(o) if o.status.success() => match crate::rpc::parse_load_instance_id(&String::from_utf8_lossy(&o.stdout)) {
                     Some(instance) => Phase::Loading { instance, gpus: Vec::new(), need_mb: 0, base_mb: 0 },
                     None if String::from_utf8_lossy(&o.stdout).contains("already loaded") => {
@@ -429,6 +548,7 @@ struct Menu {
     side: Option<SideState>,
     off: Vec<bool>,
     job: Option<LoadJob>,
+    gpus: Option<GpuChoice>,
     note: Option<String>,
 }
 
@@ -510,7 +630,11 @@ impl Page for Menu {
         }
         if let Some(s) = side {
             let example = if focused && s.kind == Side::Schemas { crate::api_schema::example(crate::api_schema::NAMES[s.at], &s.base, crate::api_schema::MODEL, crate::api_schema::KEY) } else { Vec::new() };
-            columns(&mut out, start, 2 + tw + GAP.len(), &side_rows(s, self.job.as_ref()), &[]);
+            let rows = match &self.gpus {
+                Some(g) => g.lines(),
+                None => side_rows(s, self.job.as_ref()),
+            };
+            columns(&mut out, start, 2 + tw + GAP.len(), &rows, &[]);
             example_below(&mut out, 2 + tw + GAP.len(), &example);
         }
         if let Some(n) = &self.note {
@@ -518,6 +642,7 @@ impl Page for Menu {
             out.extend(n.lines().map(|l| format!("  {}", paint(l, Color::Red))));
         }
         let hint = match side.filter(|s| s.focused).map(|s| s.kind) {
+            Some(Side::Models) if self.gpus.is_some() => gray("\u{2191}\u{2193} move   Space choose GPUs (several split the model)   Enter load   \u{2190} back   q quit"),
             Some(Side::Schemas) => gray("\u{2191}\u{2193} move   \u{2190} back   q quit"),
             Some(Side::Models) => gray("\u{2191}\u{2193} move   Enter load or unload   Space mark loaded models to unload together   \u{2190} back   q quit"),
             None if self.top => format!("{}{GAP}{}", gray(self.hint), themes_line()),
@@ -529,6 +654,23 @@ impl Page for Menu {
     fn key(&mut self, input: Input) -> Flow {
         if matches!(input, Input::Char('q') | Input::Interrupt) {
             return Flow::Quit;
+        }
+        if let Some(mut g) = self.gpus.take() {
+            self.note = None;
+            match g.key(input) {
+                Some(true) if !g.marked.is_empty() && g.plan.is_err() => {
+                    self.note = Some("those GPUs cannot hold it; choose others or Auto".to_string());
+                    self.gpus = Some(g);
+                }
+                Some(true) => {
+                    let mut job = LoadJob::new(g.model, None);
+                    job.gpus = g.marked;
+                    self.job = Some(job);
+                }
+                Some(false) => {}
+                None => self.gpus = Some(g),
+            }
+            return Flow::Stay;
         }
         if let Some(s) = self.side.as_mut().filter(|s| s.focused) {
             let n = s.len().max(1);
@@ -559,7 +701,7 @@ impl Page for Menu {
                     } else if let Some((id, false)) = s.models.get(s.at).cloned() {
                         match &self.job {
                             Some(j) => self.note = Some(format!("{} is loading; one model loads at a time", j.model)),
-                            None => self.job = Some(LoadJob::new(id, None)),
+                            None => self.gpus = Some(GpuChoice::open(id)),
                         }
                     }
                 }
@@ -664,6 +806,7 @@ fn main_menu() -> Menu {
         side: None,
         off: Vec::new(),
         job: None,
+        gpus: None,
         note: None,
     }
 }
@@ -684,6 +827,7 @@ fn access_menu() -> Menu {
         side: None,
         off: Vec::new(),
         job: None,
+        gpus: None,
         note: None,
     }
 }
@@ -1541,6 +1685,8 @@ mod tests {
         m.key(Input::Down);
         m.key(Input::Down);
         assert!(matches!(m.key(Input::Enter), Flow::Stay), "loading keeps the menu on screen");
+        assert_eq!(m.gpus.as_ref().map(|g| g.model.as_str()), Some("org/b"), "Enter first asks where");
+        assert!(matches!(m.key(Input::Enter), Flow::Stay) && m.gpus.is_none(), "Enter on Auto loads");
         assert_eq!(m.job.as_ref().map(|j| j.model.as_str()), Some("org/b"));
         assert!(m.every().is_some(), "the menu refreshes while a model loads");
         m.job.as_mut().unwrap().shown = 30;
@@ -1554,6 +1700,37 @@ mod tests {
         m.key(Input::Enter);
         assert!(m.note.as_deref().is_some_and(|n| n.contains("one model loads at a time")) || m.job.as_ref().is_some_and(|j| j.model == "org/b"));
         assert!(matches!(m.key(Input::Char('q')), Flow::Quit), "q quits even while a model loads");
+    }
+
+    #[test]
+    fn the_gpu_choice_marks_allowed_gpus_grays_the_others_and_loads_on_the_marked_ones() {
+        let row = |index: u32, allowed: bool, alone: Result<(), String>| GpuRow { index, name: "H100".into(), free_gb: 70.0, total_gb: 80.0, allowed, alone };
+        let mut g = GpuChoice {
+            model: "org/b".into(),
+            rows: vec![row(0, false, Err("not allowed".into())), row(1, true, Ok(())), row(2, true, Err("short".into()))],
+            at: 0,
+            marked: Vec::new(),
+            plan: Ok("tp=1 on GPU 1 at ctx 4096: 20.0 GB per GPU".into()),
+            view: None,
+        };
+        let t: Vec<String> = g.lines().iter().map(|l| plain(l)).collect();
+        assert!(t[0].contains("\u{25cf} Auto") && t[1].contains("GPU 0") && t[1].contains("not allowed") && !t[1].contains('\u{25cb}'), "{t:?}");
+        assert!(t[2].contains("\u{25cb} GPU 1") && t[2].ends_with("fits") && t[3].ends_with("too small alone") && t[5].starts_with("tp=1"), "{t:?}");
+        assert_eq!(g.key(Input::Down), None);
+        g.key(Input::Space);
+        assert!(g.marked.is_empty(), "a GPU that is not allowed cannot be chosen");
+        g.key(Input::Down);
+        g.key(Input::Space);
+        g.key(Input::Down);
+        g.key(Input::Space);
+        assert_eq!(g.marked, vec![1, 2], "several GPUs split one copy");
+        assert!(plain(&g.lines()[0]).contains("\u{25cb} Auto"));
+        g.at = 0;
+        g.key(Input::Space);
+        assert!(g.marked.is_empty(), "Auto clears the choice");
+        assert_eq!((g.key(Input::Enter), g.key(Input::Left)), (Some(true), Some(false)));
+        assert_eq!(gpu_flag(&[1, 3]).as_deref(), Some("--gpu=gpu1,gpu3"));
+        assert_eq!(gpu_flag(&[]), None);
     }
 
     #[test]

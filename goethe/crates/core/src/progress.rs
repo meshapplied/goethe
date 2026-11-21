@@ -107,15 +107,26 @@ pub struct Ticker {
 impl Ticker {
     pub fn start(label: &str, total: Option<u64>, every: Duration, done: impl Fn() -> u64 + Send + 'static, say: impl Fn(String) + Send + 'static) -> Ticker {
         // One line per interval until dropped, with the rate over the last interval.
+        Ticker::fetching(label, "", total, every, done, say)
+    }
+
+    pub fn fetching(label: &str, source: &str, total: Option<u64>, every: Duration, done: impl Fn() -> u64 + Send + 'static, say: impl Fn(String) + Send + 'static) -> Ticker {
+        // The same, and while compact and not even 1% has arrived "Fetching from <source>" stands where the bar will be.
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         ACTIVE.fetch_add(1, Ordering::Relaxed);
         let label = label.to_string();
+        let waiting = (!source.is_empty()).then(|| format!("Fetching from {source}"));
         let handle = thread::spawn(move || {
             let (mut last, mut at, began) = (done(), Instant::now(), Instant::now());
             let compact = crate::step::compact();
+            let started = move |now: u64| now > total.map_or(0, |t| t / 100);
+            let shown = |now: u64, rate: f64| match &waiting {
+                Some(w) if compact && !started(now) => w.clone(),
+                _ => line(&label, now, total, rate),
+            };
             if compact {
-                say(line(&label, last, total, 0.0));
+                say(shown(last, 0.0));
             }
             while !flag.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(20).min(every));
@@ -124,7 +135,7 @@ impl Ticker {
                 }
                 let now = done();
                 let rate = now.saturating_sub(last) as f64 / at.elapsed().as_secs_f64();
-                say(line(&label, now, total, rate));
+                say(shown(now, rate));
                 (last, at) = (now, Instant::now());
             }
             if compact {

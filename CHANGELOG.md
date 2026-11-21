@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The menu's Load/Unload asks where to load a model: Auto, or the GPUs marked with Space (several split it), each with its free memory and fit, disallowed GPUs in gray, and the plan `goethe load --dry-run` gives for the choice.
+- A download from Hugging Face says `Fetching from Hugging Face` until the files start to arrive, then shows its bar.
 - `goethe run` loads a model that is not loaded on its picker, with a bar beside it, in the first list and in the chat's `m` list, instead of leaving the screen. You can type while a reply streams; Enter sends the line after it. Leaving says nothing and returns at once: a model run loaded is unloaded in the background.
 - On a terminal, `goethe install`, `goethe remove`, `goethe load` (and the Install models page) show only the model, progress bars and the result: `Model installed: kernel: ...  ctx: ...  total maximum VRAM: ...`, `Successfully uninstalled`, or for a load the context window, concurrency and VRAM above its bar. Piped output and `--verbose` keep every line; the command log always has them.
 - The `goethe run` chat has no export or record any more; Esc then `q` quits at once. A model that was still loading when `goethe run` started is waited for and left loaded.
