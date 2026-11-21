@@ -6,9 +6,11 @@
   <img alt="NVIDIA CUDA 12.8 or newer" src="https://img.shields.io/badge/NVIDIA%20CUDA-%E2%89%A5%2012.8-76B900?logo=nvidia&logoColor=white">
   <img alt="GPU architectures sm_86 to sm_120" src="https://img.shields.io/badge/arch-sm__86%20%E2%80%93%20sm__120-76B900">
   <img alt="Written in Rust" src="https://img.shields.io/badge/language-Rust-B7410E?logo=rust&logoColor=white">
-  <img alt="Linux, macOS, and Windows via WSL" src="https://img.shields.io/badge/OS-Linux%20%7C%20macOS%20%7C%20Windows%20(WSL)-FCC624?logo=linux&logoColor=black">
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
   <a href="https://github.com/meshapplied/goethe/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/meshapplied/goethe/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <br>
+  <img alt="Linux" src="https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black">
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white">
   <br>
   <a href="https://goethe.sh/docs"><img alt="Documentation at goethe.sh/docs" src="https://img.shields.io/badge/docs-goethe.sh%2Fdocs-87D7FF?logo=readthedocs&logoColor=white"></a>
   <a href="https://discord.gg/fadnuFrm4"><img alt="Join us on Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>

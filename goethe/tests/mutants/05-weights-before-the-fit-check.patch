@@ -1,14 +1,14 @@
 diff --git a/goethe/crates/core/src/install.rs b/goethe/crates/core/src/install.rs
 --- a/goethe/crates/core/src/install.rs
 +++ b/goethe/crates/core/src/install.rs
-@@ -348,7 +348,9 @@
+@@ -362,7 +362,9 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                      let marlin = pack_marlin_gb(&cfg, &choice.offer.hf_repo, &rev, &files);
                      let cap = plan.variants.iter().position(|v| *v == files).and_then(|i| plan.variant_ids.get(i)).and_then(|id| crate::packs::variant_max_ctx(&plan.prefix, id));
                      let view = if opts.load { crate::recommend::View::new(home, hw) } else { crate::recommend::View::capacity(home, hw) };
--                    println!("{}", pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: cap }, &card_dir)?);
+-                    crate::step::say(&pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: cap }, &card_dir)?);
 +                    if let Ok(line) = pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: cap }, &card_dir) {
-+                        println!("{line}");
++                        crate::step::say(&line);
 +                    }
                  }
-                 (Err(e), _) | (_, Err(e)) => eprintln!("note: the per-GPU fit was not checked before the download: {e}"),
+                 (Err(e), _) | (_, Err(e)) => crate::step::note(&format!("note: the per-GPU fit was not checked before the download: {e}")),
              }
