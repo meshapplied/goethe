@@ -113,6 +113,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(display_order = 0, about = "Quick setup: install a model, serve it and open the API, step by step (needs a terminal).")]
+    Start,
     #[command(display_order = 1, about = "Start Goethe now and at every boot; models loaded last time come back.")]
     Up {
         #[arg(long = "no-boot", help = "Start now without turning on start at boot.")]
@@ -679,6 +681,7 @@ fn print_version() {
 const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
     ("Start and stop", &[
         ("goethe", "the menu: quick setup, install models, API keys and gateway, status"),
+        ("goethe start", "quick setup: install a model, serve it and open the API"),
         ("goethe up", "start Goethe now and at every boot"),
         ("goethe down", "stop Goethe; loaded models come back on the next up"),
         ("goethe status", "running or not, the API address, keys and served models"),
@@ -791,6 +794,7 @@ fn main() {
     let quiet = matches!(cli.command, Commands::Install { .. } | Commands::Remove { .. } | Commands::Run { .. } | Commands::Load { json: false, dry_run: false, .. });
     goethe_core::step::set_compact(terminal && quiet);
     let result = match cli.command {
+        Commands::Start => goethe_core::menu::start(),
         Commands::Up { no_boot } => do_up(!no_boot),
         Commands::Down { keep_engines: false } => shutdown::run_down(),
         Commands::Down { keep_engines: true } => goethe_core::service::stop_keeping_engines().map(|(before, kept)| {
@@ -2165,7 +2169,7 @@ mod tests {
     #[test]
     fn old_forms_are_gone() {
         for old in [
-            &["start"][..], &["serve", "--public", "5h"], &["hw", "profile"], &["key"], &["allowlist"], &["gateway"], &["domain"],
+            &["serve", "--public", "5h"][..], &["hw", "profile"], &["key"], &["allowlist"], &["gateway"], &["domain"],
             &["recommend"], &["scan"], &["config", "org/m"], &["alias"], &["configure", "api"], &["get", "api"], &["service", "status"],
             &["token-lifetime", "30d"], &["api", "manage"], &["api", "configure"], &["api", "gateway"], &["api", "allowlist"],
             &["api", "learn"], &["api", "trace"], &["models", "config", "org/m"], &["logs", "--daemon"], &["load", "--model", "org/m"],

@@ -27,7 +27,7 @@ Exit codes:
 
 ## Contents
 
-- [Start and stop](#start-and-stop): `goethe`, `up`, `status`, `down`
+- [Start and stop](#start-and-stop): `goethe`, `start`, `up`, `status`, `down`
 - [Models](#models): `install`, `models`, `models recommend`, `models scan`, `models alias`, `remove`
 - [Running models](#running-models): `load`, `unload`, `run`, `ps`, `logs`
 - [API access](#api-access): `api`, `api keys`, `api expose`, `api allow`, `api domain`, `api share`
@@ -44,13 +44,17 @@ On a terminal, plain `goethe` opens the menu on its own screen:
 | Entry | What it does |
 |---|---|
 | Quick setup | Install a model, serve it through the API and choose who can reach it, step by step |
-| Load/Unload | The installed models, loaded ones marked. Enter unloads a loaded model (Space marks several to unload together). On one that is not loaded, Enter asks where: Auto (goethe picks, as `goethe load` does) or the GPUs you mark with Space, several splitting one copy (`goethe load --gpu`); each GPU shows its free memory and whether the model fits on it alone, GPUs that are not allowed are gray, and the line under them is the plan `goethe load` would use (tp, context and GB per GPU). Enter loads, with a bar beside the model |
+| Load/Unload | The installed models, loaded ones marked. Enter unloads a loaded model (Space marks several to unload together). On one that is not loaded, Enter asks where: Auto (goethe picks, as `goethe load` does) or the GPUs you mark with Space, several splitting one copy (`goethe load --gpu`); each GPU shows its free memory and whether the model fits on it alone, GPUs that are not allowed are gray and skipped by the arrows, and the line under them is the plan `goethe load` would use (tp, context and GB per GPU). Enter loads, with a bar beside the model. Under the list, a line names `goethe gpu allow/deny gpuN` for freeing up or denying GPUs |
 | Install models | A table of the catalog models that fit this machine's GPUs, with their size and the VRAM they need, under the machine's VRAM and storage. Space selects a model to install, or an installed one (filled dot) to uninstall, whose dot then turns the theme's third color. Above the keys the screen shows what Enter will do (`install: ...`, `uninstall: ...`); Enter uninstalls first, then installs, each one in turn, and goes on when one fails. A custom Hugging Face id and a token for gated models can be typed below the table. The table comes back after, with the new state |
-| API keys and gateway | API keys (create, scope, show or delete), network exposure (local, VPN or private network, public) and the public address ([`goethe api share`](#goethe-api-share-duration)) |
+| API keys and gateway | API keys (create, scope, new secret or delete), network exposure (local, VPN or private network, public) and the public address ([`goethe api share`](#goethe-api-share-duration)) |
 | Status | Whether Goethe runs, the environment, then live tables of the GPUs (VRAM, processes, allowed or denied, memory bandwidth), CPU and memory |
 | Metrics | From the [usage log](#usage-log), over the last hour, 24 hours, 7 days, this month (from the 1st), 30 or 90 days (↑ the next, longer range, ↓ back): per model the requests, errors (client and server errors, rate limits, cancelled), prompt and generated tokens, average time to first token, average decode speed and the 95th-percentile latency, with a total row; per GPU the average and peak utilisation, memory bandwidth, average VRAM, average power against its limit, peak temperature and any throttling, with the host's CPU, RAM and free disk; and per API key the requests and tokens, by whole days. Requests for a model Goethe does not serve and requests refused by a key's rate limit have their own rows |
 
 ↑↓ move, Enter opens, ← goes back, `q` quits. On the main menu 1, 2 and 3 pick a color theme (default, sea, earth); the choice is remembered. Without a terminal, `goethe` prints the commands.
+
+### `goethe start`
+
+Quick setup on its own, the menu's first entry: install a model, serve it through the API and choose who can reach it, step by step, then back to the shell. It needs a terminal; scripts use `goethe up`, `goethe install <model> --load` and `goethe api keys create <name>`.
 
 ### `goethe up`
 

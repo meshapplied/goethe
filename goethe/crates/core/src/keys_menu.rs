@@ -808,7 +808,7 @@ fn carry_out(app: &mut App, effect: Effect, made: &mut Vec<(String, String)>) ->
                     app.secrets.insert(id, token.clone());
                 }
                 made.push((format!("Created {name}"), token));
-                format!("Created {name}. Its key is at the top right; store it now, it is not shown again.")
+                "API key created".to_string()
             })
         }
         Effect::Save { id, scope, rpm, expires } => security::key_set_models(id, scope.as_deref())

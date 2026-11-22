@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `goethe start` runs Quick setup on its own (install a model, serve it and open the API), then returns to the shell; `goethe` is still the full menu.
+- In the menu's GPU choice the arrows skip GPUs that are not allowed, and the plan line lines up under them. Under the Load/Unload list a line names `goethe gpu allow/deny gpuN`.
 - Goethe no longer stores API keys, only their hashes, and empties the raw keys older versions kept in `state.db`. A key is shown once, when it is made. `goethe api keys rotate <key id>` (or **New secret** in the key manager) gives a key a new secret and keeps its id, name, models and limits. `goethe api share --key` prints a new secret for a key it newly shares; a key already shared keeps its own.
 - The public gateway (`goethe api share`) reaches goethed over an owner-only socket instead of a loopback port (`127.0.0.2`, or a second port on macOS), so a local process can no longer pose as a public client. `goethe update` restarts goethed, which moves it to the socket.
 - The key manager no longer cuts the last characters of a full key on a 64-column terminal.

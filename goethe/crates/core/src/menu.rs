@@ -297,9 +297,12 @@ fn side_rows(side: &SideState, job: Option<&LoadJob>) -> Vec<String> {
                 };
                 format!("{} {mark} {}{state}", cursor(i), shade(i, id))
             })
+            .chain([String::new(), gray(GPU_HINT)])
             .collect(),
     }
 }
+
+const GPU_HINT: &str = "  Run: goethe gpu allow/deny gpuN to free up or deny GPUs";
 
 enum Phase {
     Up(Option<std::process::Child>),
@@ -389,10 +392,9 @@ impl GpuChoice {
 
     fn key(&mut self, input: Input) -> Option<bool> {
         // Some(true) loads, Some(false) goes back to the list, None stays.
-        let n = self.rows.len() + 1;
         match input {
-            Input::Up | Input::Char('k') => self.at = (self.at + n - 1) % n,
-            Input::Down | Input::Char('j') => self.at = (self.at + 1) % n,
+            Input::Up | Input::Char('k') => self.step(false),
+            Input::Down | Input::Char('j') => self.step(true),
             Input::Space if self.at == 0 => {
                 self.marked.clear();
                 self.replan();
@@ -413,6 +415,17 @@ impl GpuChoice {
         None
     }
 
+    fn step(&mut self, down: bool) {
+        // Move to the next entry that can be chosen: Auto or an allowed GPU; denied GPUs are skipped.
+        let n = self.rows.len() + 1;
+        for _ in 0..n {
+            self.at = if down { (self.at + 1) % n } else { (self.at + n - 1) % n };
+            if self.at == 0 || self.rows[self.at - 1].allowed {
+                return;
+            }
+        }
+    }
+
     fn lines(&self) -> Vec<String> {
         // Auto, then each GPU (gray when not allowed), then the plan the choice gives.
         let cursor = |i: usize| if i == self.at { sgr(&hl(), "\u{27a4}") } else { " ".to_string() };
@@ -428,9 +441,9 @@ impl GpuChoice {
         }
         out.push(String::new());
         out.push(match &self.plan {
-            Ok(desc) => desc.clone(),
+            Ok(desc) => format!("    {desc}"),
             Err(why) if why.is_empty() => String::new(),
-            Err(why) => paint(&format!("does not fit: {why}"), Color::Red),
+            Err(why) => format!("    {}", paint(&format!("does not fit: {why}"), Color::Red)),
         });
         out
     }
@@ -951,6 +964,24 @@ pub fn pick_model() -> Result<Option<(String, bool)>, String> {
     Ok(picked.or(page.ready).and_then(|i| page.models.get(i).map(|(id, _)| (id.clone(), started_here))))
 }
 
+pub fn start() -> Result<(), String> {
+    // goethe start: Quick setup on its own (install a model, serve it, open the API), then back to the shell.
+    if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        return Err("goethe start needs a terminal; in scripts use goethe up, goethe install MODEL --load and goethe api keys create NAME".to_string());
+    }
+    let mut tty = Tty::open()?;
+    quick_setup(&mut tty)
+}
+
+fn quick_setup(tty: &mut Tty) -> Result<(), String> {
+    tty.inside_with(crate::onboard::run, false)?;
+    match crate::onboard::take_ready() {
+        Some((_, model, key)) => drop(tty.run(&mut SchemaPage { model, key, base: crate::api_schema::base_url(&goethe_home()), at: 0 })?),
+        None => tty.wait_back()?,
+    }
+    Ok(())
+}
+
 pub fn run() -> Result<(), String> {
     // goethe: the main menu until q; each choice runs, then the menu comes back.
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
@@ -962,13 +993,7 @@ pub fn run() -> Result<(), String> {
         menu.refresh_off();
         match tty.run(&mut menu)? {
             None => return Ok(()),
-            Some(0) => {
-                tty.inside_with(crate::onboard::run, false)?;
-                match crate::onboard::take_ready() {
-                    Some((_, model, key)) => drop(tty.run(&mut SchemaPage { model, key, base: crate::api_schema::base_url(&goethe_home()), at: 0 })?),
-                    None => tty.wait_back()?,
-                }
-            }
+            Some(0) => quick_setup(&mut tty)?,
             Some(1) => {}
             Some(2) => install_page(&mut tty)?,
             Some(3) => access_page(&mut tty)?,
@@ -1714,10 +1739,16 @@ mod tests {
         };
         let t: Vec<String> = g.lines().iter().map(|l| plain(l)).collect();
         assert!(t[0].contains("\u{25cf} Auto") && t[1].contains("GPU 0") && t[1].contains("not allowed") && !t[1].contains('\u{25cb}'), "{t:?}");
-        assert!(t[2].contains("\u{25cb} GPU 1") && t[2].ends_with("fits") && t[3].ends_with("too small alone") && t[5].starts_with("tp=1"), "{t:?}");
+        assert!(t[2].contains("\u{25cb} GPU 1") && t[2].ends_with("fits") && t[3].ends_with("too small alone") && t[5].starts_with("    tp=1"), "{t:?}");
+        let col = |l: &str, w: &str| l[..l.find(w).unwrap()].chars().count();
+        assert!(col(&t[0], "Auto") == col(&t[1], "GPU") && col(&t[2], "GPU") == col(&t[5], "tp="), "the plan starts under Auto and the GPUs: {t:?}");
         assert_eq!(g.key(Input::Down), None);
-        g.key(Input::Space);
-        assert!(g.marked.is_empty(), "a GPU that is not allowed cannot be chosen");
+        assert_eq!(g.at, 2, "the denied GPU 0 is skipped");
+        g.key(Input::Up);
+        assert_eq!(g.at, 0, "and skipped on the way back up");
+        g.key(Input::Up);
+        assert_eq!(g.at, 3, "wrapping from Auto lands on the last allowed GPU");
+        g.key(Input::Down);
         g.key(Input::Down);
         g.key(Input::Space);
         g.key(Input::Down);

@@ -910,14 +910,15 @@ mod validate_tests {
     fn readme_install_ids_are_catalog_ids() {
         let readme = include_str!("../../../../README.md");
         let reg = bundled().unwrap();
-        let mut found = false;
         for line in readme.lines() {
             if let Some(rest) = line.split("goethe install ").nth(1) {
                 let id = rest.split_whitespace().next().unwrap();
-                found = true;
+                assert!(reg.models.iter().any(|m| m.id == id), "{id}");
+            }
+            if let Some(rest) = line.split("model=\"").nth(1) {
+                let id = rest.split('"').next().unwrap();
                 assert!(reg.models.iter().any(|m| m.id == id), "{id}");
             }
         }
-        assert!(found);
     }
 }
