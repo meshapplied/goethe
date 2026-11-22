@@ -23,11 +23,13 @@
 
 Goethe turns a machine into your own API, compatible with OpenAI, Anthropic and LiteLLM clients. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
 
+For Linux and MacOS systems run this command in the terminal:
+
 ```bash
 curl -fsSL https://pkg.goethe.sh/install.sh | bash
 ```
 
-On Windows 10/11 (x64), run this in an elevated PowerShell. It turns on WSL2, then runs the same installer inside Ubuntu:
+For Windows 10/11 (x64), run this in PowerShell:
 
 ```powershell
 irm https://pkg.goethe.sh/install.ps1 | iex
@@ -36,11 +38,9 @@ irm https://pkg.goethe.sh/install.ps1 | iex
 Then:
 
 ```bash
-goethe          # the interactive menu: models, API keys and gateway, status, metrics
-goethe start    # quick setup: install a model, serve it and open the API, step by step
+goethe          # launch interactive menu
+goethe start    # quick setup: install a model, serve it and open the gateway
 ```
-
-On Windows, GPU inference uses the Windows NVIDIA driver (580 or newer), never a Linux driver inside WSL. After a driver change, run `wsl --shutdown` and reopen WSL. To reach the API from Windows, run `goethe api expose local` in WSL, then `curl.exe -k https://127.0.0.1:8443/` in Windows.
 
 Anything that speaks the OpenAI, Anthropic or LiteLLM API can use it right away, all at the same address: the OpenAI and Anthropic SDKs, LiteLLM, LangChain, LlamaIndex, Open WebUI, coding assistants, or plain `curl`.
 
@@ -103,8 +103,8 @@ Supported [model families and quantization formats](docs/user-guide.md#supported
 
 ## Known limits
 
-- Gated models need the license accepted on Hugging Face and a read token (install with `--hf-token`). This includes `orcarouter/Qwen3.8-Flash-Next-Uncensored-NVFP4`.
-- Optimised kernel packs (the 27B NVFP4 model, the ternary models and others) need `goethe login` on the node. A model that has only a pack and none for your GPU is refused before anything is downloaded.
+- Gated models need the license accepted on Hugging Face and a read token (install with `--hf-token`).
+- Optimised kernel packs need `goethe login` on the node. If optimised kernels are not available for a given model, goethe defaults to SGlang, if SGlang does not support it either, it checks llama.cpp, displays model unsupported otherwise.
 - If a model's kernel pack cannot run on your GPU, install or load stops with the reason. Add `--fallback` (or set `GOETHE_ALLOW_FALLBACK=1`) to serve it with the plain runtime instead.
 
 ## Documentation
@@ -119,7 +119,6 @@ Supported [model families and quantization formats](docs/user-guide.md#supported
 |------|------------|
 | [`goethe/`](goethe/) | Goethe: the `goethe` command, the `goethed` service, the gateway, packaging and the installer |
 | [`docs/`](docs/) | User guide, command reference, and [developer documentation](docs/developer/README.md) |
-| [`nvfp4-kernels/`](nvfp4-kernels/), [`ternary-kernels/`](ternary-kernels/) | GPU kernels behind the optimised kernel packs |
 | [`lab/`](lab/), [`tests/`](tests/), [`examples/`](examples/) | `goethe-lab`, a research launcher used in development, with its tests and example cards; nothing here ships |
 | [`install.sh`](install.sh) | Builds Goethe from source; the normal install is `pkg.goethe.sh/install.sh` above |
 | [`AGENTS.md`](AGENTS.md) | Instructions for AI agents |
