@@ -518,7 +518,7 @@ enum RegistryCommands {
     Entry {
         #[arg(long = "repo", value_name = "ID", help = "Hugging Face repo id (repeatable).")]
         repo_ids: Vec<String>,
-        #[arg(long, help = "Runtime: sglang or ternary.")]
+        #[arg(long, help = "Runtime, such as sglang (the default).")]
         runtime: Option<String>,
         #[arg(long, help = "Git revision or branch.")]
         revision: Option<String>,
@@ -1005,7 +1005,6 @@ fn main() {
                 let update = goethe_core::update::run(goethe_core::update::UpdateOpts {
                     check_only: check,
                     engine,
-                    ternary: engine && goethe_core::update::ternary_installed(&goethe_home()),
                     yes,
                     allow_downgrade,
                 });
@@ -2144,7 +2143,7 @@ mod tests {
         assert!(parse(&["models", "--json", "scan"]).is_err() && parse(&["api", "--json", "keys"]).is_err());
         assert!(parse(&["learn", "on", "--model", "m"]).is_ok() && parse(&["trace", "on", "--all-keys"]).is_ok());
         assert!(matches!(parse(&["update", "engine"]).unwrap().command, Commands::Update { what: Some(_), .. }));
-        assert!(parse(&["update", "--engine"]).is_err() && parse(&["update", "ternary"]).is_err());
+        assert!(parse(&["update", "--engine"]).is_err());
         assert!(matches!(parse(&["doctor", "--hardware"]).unwrap().command, Commands::Doctor { hardware: true, .. }));
         assert!(parse(&["login", "--lifetime", "30d"]).is_ok());
     }

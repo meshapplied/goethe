@@ -150,10 +150,6 @@ fn inventory(home: &Path, models: Option<&UninstallModels>, ninfer_cache: Option
         let label = if name == "llama.cpp" { name } else { format!("engines/{name}") };
         inv.engines.push(format!("{label} ({})", size(&e.path())));
     }
-    let ternary = crate::runtime::ternary_kernels_dir(home);
-    if is_real_dir(&ternary) {
-        inv.engines.push(format!("ternary kernels ({})", size(&ternary)));
-    }
     for dir in models.map(|m| m.delete.as_slice()).unwrap_or_default() {
         let pack = dir.join(PACK_FILE);
         if fs::symlink_metadata(&pack).is_ok_and(|m| m.is_file()) {
@@ -401,7 +397,6 @@ mod tests {
         fs::write(h.join("py-env/bin/python"), "").unwrap();
         fs::create_dir_all(h.join("engines/llama.cpp")).unwrap();
         fs::write(h.join("engines/llama.cpp/llama-server"), "x").unwrap();
-        fs::create_dir_all(crate::runtime::ternary_kernels_dir(&h)).unwrap();
         fs::create_dir_all(h.join("packs/catalog")).unwrap();
         let a = h.join("models/org__a");
         fs::create_dir_all(&a).unwrap();
@@ -409,7 +404,7 @@ mod tests {
         let m = models_of(vec![a.clone()]);
         let inv = inventory(&h, Some(&m), None);
         assert!(inv.engines[0].starts_with("Python environment, goethe-engine 1.2.3, SGLang 0.5.1 (py-env,"), "{:?}", inv.engines);
-        assert!(inv.engines.iter().any(|e| e.starts_with("llama.cpp (")) && inv.engines.iter().any(|e| e.starts_with("ternary kernels")));
+        assert!(inv.engines.iter().any(|e| e.starts_with("llama.cpp (")));
         assert!(inv.packs[0].starts_with("org/a (") && inv.packs[1].starts_with("pack index and catalog cache"), "{:?}", inv.packs);
         assert_eq!(inventory(&h, None, None).packs.len(), 1, "--keep-models keeps the packs inside the models");
         assert!(remove_home_contents(&h, false, false, &[]).is_empty());

@@ -433,20 +433,20 @@ Installs the latest Goethe. Loaded models keep serving. It then checks the kerne
 | Command | Description |
 |---|---|
 | `goethe update` | Update Goethe, bundled nginx when its sha differs, already-installed engines, and kernel packs |
-| `goethe update engine` | Update only the installed engines (the ternary runtime too, when it is installed) |
+| `goethe update engine` | Update only the installed engines |
 | `goethe update rollback` | Put the previous kernel pack of every model that has one back |
 
 CLI help text stays the source of truth for flags and examples. A later pass can regenerate the command tables from clap while keeping the prose paragraphs above hand-written.
 
 | Option | Description |
 |---|---|
-| `--check` | Only show what would change: one line per component (goethe and goethed by version, nginx by version, SGLang by wheel, goethe-engine, the ternary pack), then a summary such as `2 updates available (goethe, nginx): run goethe update` or `everything is up to date`. Changes nothing |
+| `--check` | Only show what would change: one line per component (goethe and goethed by version, nginx by version, SGLang by wheel, goethe-engine), then a summary such as `2 updates available (goethe, nginx): run goethe update` or `everything is up to date`. Changes nothing |
 | `--yes` | Don't ask |
 | `--allow-downgrade` | Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries); not with `engine` |
 
 ### `goethe uninstall`
 
-Stops Goethe and its engines, then removes everything Goethe installed: the models it downloaded (also a `models` folder linked to another disk, whose own folder stays), the inference engines (the Python environment with goethe-engine and SGLang, llama.cpp, the ternary kernels), the kernel packs, and the rest of the Goethe home. The NInfer weights that `goethe install` put in `~/.cache/goethe/nvfp4` go too. Before asking, it lists the models with their total size, the engines and the kernel packs it will delete.
+Stops Goethe and its engines, then removes everything Goethe installed: the models it downloaded (also a `models` folder linked to another disk, whose own folder stays), the inference engines (the Python environment with goethe-engine and SGLang, and llama.cpp), the kernel packs, and the rest of the Goethe home. The NInfer weights that `goethe install` put in `~/.cache/goethe/nvfp4` go too. Before asking, it lists the models with their total size, the engines and the kernel packs it will delete.
 
 Folders of your own files stay: for a model registered in place only Goethe's links go, and a folder of yours inside `models` loses only Goethe's card. A trace folder in the home stays. A node linked to the console is logged out first (best effort) and its credentials go with the rest. When something cannot be deleted, the rest still goes, the command names what is left and exits non-zero.
 

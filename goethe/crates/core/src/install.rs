@@ -45,10 +45,6 @@ pub struct GoetheCard {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pack_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_model_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<toml::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pythonpath: Option<Vec<String>>,
@@ -85,8 +81,6 @@ const CARD_KEYS: &[&str] = &[
     "preferred_gpus",
     "extra_sglang_args",
     "runtime",
-    "pack_id",
-    "base_model_id",
     "env",
     "pythonpath",
     "marlin_extra_gb",
@@ -141,7 +135,6 @@ struct Target {
     entry: Option<RegistryModel>,
     managed: bool,
     source_dir: Option<PathBuf>,
-    ternary: Option<TernaryDirs>,
     pack: Option<PackChoice>,
 }
 
@@ -155,11 +148,6 @@ pub(super) enum PackDecision {
     None,
     Declined,
     Use(Box<PackChoice>),
-}
-
-pub struct TernaryDirs {
-    pub pack: PathBuf,
-    pub base: PathBuf,
 }
 
 pub fn run(opts: InstallOpts) -> Result<(), String> {
@@ -226,7 +214,7 @@ fn gated_but_installed(err: &str, installed: bool, force: bool) -> bool {
 }
 
 fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
-    // Download a Hugging Face model, or a ternary pack plus its base, into models/.
+    // Download a Hugging Face model into models/.
     if opts.model_id.starts_with(['.', '/', '~']) {
         return Err(format!("{}: no such directory", opts.model_id));
     }
@@ -258,7 +246,6 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             entry: Some(profile),
             managed: false,
             source_dir: file.parent().map(|p| p.to_path_buf()),
-            ternary: None,
             pack: None,
         });
     }
@@ -279,35 +266,6 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         no_verify: opts.no_verify,
         only: None,
     };
-    if cfg!(target_os = "macos") && entry.as_ref().is_some_and(|e| e.effective_runtime() == "ternary") {
-        return Err(format!("{} runs on NVIDIA GPUs only; on a Mac goethe serves GGUF models with llama.cpp", opts.model_id));
-    }
-    if let Some(e) = entry.as_ref().filter(|e| e.effective_runtime() == "ternary") {
-        crate::runtime::require_ternary_runtime(home)?;
-        let pack = e.pack_id.as_deref().ok_or("ternary registry entry has no pack_id")?;
-        let base = e.base_model_id.as_deref().ok_or("ternary registry entry has no base_model_id")?;
-        validate_model_id(pack)?;
-        validate_model_id(base)?;
-        let dirs = ternary_dirs(home, pack, base);
-        hf::ensure_model(home, pack, &dirs.pack, &dl)?;
-        let base_dl = DownloadOpts {
-            revision: ternary_base_revision(&dirs.pack, base),
-            force: opts.force,
-            no_verify: opts.no_verify,
-            only: None,
-        };
-        hf::ensure_model(home, base, &dirs.base, &base_dl)?;
-        build_farm(&dirs.base, &card_dir)?;
-        return Ok(Target {
-            model_id: opts.model_id.clone(),
-            card_dir,
-            entry: entry.clone(),
-            managed: true,
-            source_dir: None,
-            ternary: Some(dirs),
-            pack: None,
-        });
-    }
     let declined = match pack_decision(home, opts)? {
         PackDecision::Use(mut choice) => 'packed: {
             // Only the files the pack was built for, at its pinned revision; a pack no allowed GPU runs is refused from its manifest before anything is installed, the engine layer once, on first use.
@@ -387,8 +345,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 entry,
                 managed: true,
                 source_dir: None,
-                ternary: None,
-                pack: Some(*choice),
+                    pack: Some(*choice),
             });
         }
         PackDecision::Declined => true,
@@ -434,7 +391,6 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         entry,
         managed: true,
         source_dir: None,
-        ternary: None,
         pack,
     })
 }
@@ -607,31 +563,6 @@ fn gguf_metadata(home: &Path, dir: &Path, format: &str, files: &[String]) -> Res
     fs::remove_dir_all(&out).map_err(|e| e.to_string())
 }
 
-pub fn ternary_dirs(home: &Path, pack: &str, base: &str) -> TernaryDirs {
-    let pack_dir = model_dir(home, &format!("{pack}/pack"));
-    let base_dir = if base == pack {
-        model_dir(home, &format!("{base}/base"))
-    } else {
-        model_dir(home, base)
-    };
-    TernaryDirs {
-        pack: pack_dir,
-        base: base_dir,
-    }
-}
-
-fn ternary_base_revision(pack_dir: &Path, base: &str) -> Option<String> {
-    // Pin the base checkpoint to the revision the pack was built against.
-    let text = fs::read_to_string(pack_dir.join("ternary_config.json")).ok()?;
-    let cfg: Value = serde_json::from_str(&text).ok()?;
-    if let Some(named) = cfg.get("base_model").and_then(|v| v.as_str()) {
-        if named != base {
-            crate::step::note(&format!("warning: pack was built for base {named}, registry names {base}"));
-        }
-    }
-    cfg.get("base_revision").and_then(|v| v.as_str()).map(String::from)
-}
-
 fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     // Register a local tree in place (symlink farm) or as a copy; the card always lives under models/<id>.
     let src = fs::canonicalize(&opts.model_id).map_err(|e| format!("{}: {e}", opts.model_id))?;
@@ -686,7 +617,6 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         managed: opts.copy_local,
         pack,
         source_dir: (!opts.copy_local).then_some(src),
-        ternary: None,
     })
 }
 
@@ -1042,7 +972,7 @@ pub fn unpack_failed(home: &Path, model_id: &str, log: &str) -> Result<bool, Str
     drop_pack(&dir);
     let source_dir = read_card_table(&dir).and_then(|c| c.get("source_dir").and_then(|v| v.as_str()).map(PathBuf::from));
     let entry = fetch(&registry_url()).ok().and_then(|r| find_model(&r, model_id).cloned());
-    let t = Target { model_id: model_id.to_string(), card_dir: dir, entry, managed: source_dir.is_none(), source_dir, ternary: None, pack: None };
+    let t = Target { model_id: model_id.to_string(), card_dir: dir, entry, managed: source_dir.is_none(), source_dir, pack: None };
     let mut p = plan(home, &InstallOpts { model_id: model_id.to_string(), ..InstallOpts::default() }, &t)?;
     let engine = crate::engines::of_card(&toml::Value::Table(p.table.clone()))?;
     ensure_runtime(home, engine)?;
@@ -1155,7 +1085,6 @@ pub fn plan_in_place(home: &Path, model_id: &str, dir: &Path, entry: Option<Regi
         entry,
         managed: true,
         source_dir: None,
-        ternary: None,
         pack: None,
     };
     plan(home, &opts, &t)
@@ -1228,8 +1157,6 @@ fn plan_engine(
         preferred_gpus: opts.gpus.clone().unwrap_or_default(),
         extra_sglang_args: Vec::new(),
         runtime: Some(runtime.into()),
-        pack_id: None,
-        base_model_id: None,
         env: None,
         pythonpath: None,
         marlin_extra_gb: None,
@@ -1321,12 +1248,7 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         .or_else(|| t.entry.as_ref().and_then(|e| e.kv_cache_dtype.clone()))
         .or_else(|| checkpoint_kv_dtype(&cfg, dir))
         .unwrap_or_else(|| "auto".to_string());
-    let mut vram = vram_estimate(dir, &cfg, &facts, &extra, &kv_dtype);
-    if let (Some(_), Some(e)) = (&t.ternary, &t.entry) {
-        if e.static_vram_gb > 0.0 {
-            vram.weights_gb = e.static_vram_gb;
-        }
-    }
+    let vram = vram_estimate(dir, &cfg, &facts, &extra, &kv_dtype);
     let marlin_extra_gb = if safetensors::is_nvfp4_compressed_model(&cfg) {
         match safetensors::marlin_extra_bytes_in_dir(dir) {
             Ok(n) => Some(n as f64 / GIB),
@@ -1364,9 +1286,7 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         preferred_gpus: gpus,
         extra_sglang_args: extra.clone(),
         runtime: entry.and_then(|e| e.runtime.clone()),
-        pack_id: entry.and_then(|e| e.pack_id.clone()),
-        base_model_id: entry.and_then(|e| e.base_model_id.clone()),
-        env: merged_env(old("env"), entry, t.ternary.as_ref(), home),
+        env: merged_env(old("env"), entry),
         pythonpath: entry.and_then(|e| e.pythonpath.clone()),
         marlin_extra_gb,
         host_offload_gb: (vram.host_offload_gb > 0.0).then_some(vram.host_offload_gb),
@@ -1454,23 +1374,12 @@ pub fn commit(home: &Path, p: &Planned, verb: &str, out: &mut dyn Write) -> Resu
     writeln!(out, "{}", lines.join("\n")).map_err(|e| e.to_string())
 }
 
-fn merged_env(
-    old: Option<&toml::Value>,
-    entry: Option<&RegistryModel>,
-    ternary: Option<&TernaryDirs>,
-    home: &Path,
-) -> Option<toml::Value> {
-    // User env from the old card, then registry env, then the ternary dirs install actually used.
+fn merged_env(old: Option<&toml::Value>, entry: Option<&RegistryModel>) -> Option<toml::Value> {
+    // User env from the old card, then registry env.
     let mut table = old.and_then(|v| v.as_table()).cloned().unwrap_or_default();
     if let Some(reg) = entry.and_then(|e| e.env.as_ref()).and_then(|v| v.as_table()) {
         for (k, v) in reg {
             table.insert(k.clone(), v.clone());
-        }
-    }
-    if let Some(d) = ternary {
-        for (k, p) in [("TERNARY_PACK_DIR", &d.pack), ("TERNARY_MODEL_DIR", &d.base)] {
-            let rel = p.strip_prefix(home).map(|r| format!("$GOETHE_HOME/{}", r.display()));
-            table.insert(k.to_string(), toml::Value::String(rel.unwrap_or_else(|_| p.display().to_string())));
         }
     }
     (!table.is_empty()).then_some(toml::Value::Table(table))
@@ -2450,8 +2359,6 @@ mod tests {
             preferred_gpus: vec![],
             extra_sglang_args: vec![],
             runtime: None,
-            pack_id: None,
-            base_model_id: None,
             env: None,
             pythonpath: None,
             marlin_extra_gb: None,

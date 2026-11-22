@@ -22,7 +22,6 @@ pub const ENGINES: &[&Engine] = &[&goethe_engine::ENGINE, &ninfer::ENGINE, &sgla
 const ENVELOPE: &[&str] = &["model", "messages", "prompt", "input", "stream", "stream_options", "user"];
 
 pub fn by_id(id: &str) -> Result<&'static Engine, String> {
-    let id = if id == "ternary" { sglang::SGLANG.id } else { id };
     let ids: Vec<&str> = ENGINES.iter().map(|e| e.id).collect();
     ENGINES.iter().copied().find(|e| e.id == id).ok_or_else(|| format!("engine {id} is not one goethe runs ({})", ids.join(", ")))
 }
@@ -279,15 +278,15 @@ mod tests {
     }
 
     #[test]
-    fn env_is_cleared_and_ternary_only_for_ternary() {
-        let plain = spec_cmd("pythonpath = [\"$GOETHE_HOME/x\"]\nTERNARY_PACK_DIR = \"/p\"\n[env]\nA = \"1\"", 1);
+    fn env_is_cleared_and_only_the_card_env_is_passed() {
+        let plain = spec_cmd("pythonpath = [\"$GOETHE_HOME/x\"]\nSTRAY_KEY = \"/p\"\n[env]\nA = \"1\"", 1);
         let e = envs(&plain);
         assert_eq!(e.get("CUDA_VISIBLE_DEVICES"), Some(&Some("3,2".to_string())));
         assert_eq!(e.get(INSTANCE_ENV), Some(&Some("inst-x".to_string())));
         assert_eq!(e.get("SPT_NOENV"), Some(&Some("1".to_string())));
         assert_eq!(e.get("PYTHONPATH"), Some(&Some("/h/lib:/h/x".to_string())));
         assert_eq!(e.get("A"), Some(&Some("1".to_string())));
-        assert!(!e.contains_key("TERNARY_PACK_DIR"));
+        assert!(!e.contains_key("STRAY_KEY"), "only [env] reaches the engine");
         assert!(!e.contains_key("CARGO_MANIFEST_DIR"));
         let a = args(&plain);
         assert!(!a.iter().any(|x| x == "--api-key"), "{a:?}");
@@ -358,8 +357,6 @@ mod tests {
         assert!((by_id("goethe-engine").unwrap().overhead_gb - crate::calc::METAL_OVERHEAD_GB).abs() < 1e-9);
         assert!((by_id("ninfer").unwrap().overhead_gb - crate::calc::METAL_OVERHEAD_GB).abs() < 1e-9);
         assert!((by_id("sglang").unwrap().overhead_gb - crate::calc::BASE_OVERHEAD_GB).abs() < 1e-9);
-        assert!((by_id("ternary").unwrap().overhead_gb - crate::calc::BASE_OVERHEAD_GB).abs() < 1e-9);
-        assert_eq!(by_id("ternary").unwrap().id, "sglang", "ternary launches as sglang");
     }
 
     #[test]
@@ -384,9 +381,6 @@ mod tests {
         for id in ["sglang", "ninfer", "goethe-engine", "llama.cpp"] {
             assert_eq!(of_card(&toml::from_str(&format!("runtime = \"{id}\"")).unwrap()).unwrap().id, id);
         }
-        let ternary: toml::Value = toml::from_str("runtime = \"ternary\"").unwrap();
-        assert_eq!(of_card(&ternary).unwrap().id, "sglang");
-        assert_eq!(crate::engine_overhead::card_runtime(&ternary), "ternary");
         assert!(args(&spec_cmd("", 1)).iter().any(|a| a == "goethe_sglang_boot"));
         assert!(of_card(&toml::from_str("runtime = \"vllm\"").unwrap()).map(|e| e.id).unwrap_err().contains("not one goethe runs"));
     }

@@ -370,7 +370,7 @@ pub fn survey(home: &Path, con: &Connection, dirs: Vec<PathBuf>, m: &Machine) ->
 }
 
 fn registered_dirs(home: &Path, con: &Connection) -> BTreeMap<PathBuf, String> {
-    // Canonical dirs of installed models plus the ternary pack and base dirs they own.
+    // Canonical dirs of installed models.
     let mut out = BTreeMap::new();
     let Ok(mut stmt) = con.prepare("SELECT model_id, local_path FROM installed_models") else {
         return out;
@@ -380,11 +380,8 @@ fn registered_dirs(home: &Path, con: &Connection) -> BTreeMap<PathBuf, String> {
         .map(|it| it.flatten().collect())
         .unwrap_or_default();
     for (id, rel) in rows {
-        let dir = home.join(&rel);
-        for owned in std::iter::once(dir.clone()).chain(crate::models::ternary_dirs_of(home, &dir)) {
-            if let Ok(c) = fs::canonicalize(&owned) {
-                out.insert(c, id.clone());
-            }
+        if let Ok(c) = fs::canonicalize(home.join(&rel)) {
+            out.insert(c, id);
         }
     }
     out
