@@ -207,7 +207,7 @@ pub fn key_create(
     models: Option<&str>,
     admin: bool,
 ) -> Result<String, String> {
-    // Create a key with an independent random id; the gateway checks its SHA-256, goethe api shows the stored key.
+    // Create a key with an independent random id; only its SHA-256 and first characters are stored, so the secret is shown once, here.
     let rpm_limit = rpm.unwrap_or(120);
     if rpm_limit < 0 {
         return Err(format!("rpm must be 0 (unlimited) or positive, got {rpm_limit}"));
@@ -222,8 +222,8 @@ pub fn key_create(
     let key_id = random_hex(6);
     let raw_prefix = token[..14].to_string();
     con.execute(
-        "INSERT INTO api_keys (key_id, name, token_hash, raw_prefix, rpm_limit, expires_at, model_scope, is_admin, token)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO api_keys (key_id, name, token_hash, raw_prefix, rpm_limit, expires_at, model_scope, is_admin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             key_id,
             name,
@@ -233,7 +233,6 @@ pub fn key_create(
             expires_at,
             model_scope,
             i64::from(admin),
-            token,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -309,12 +308,39 @@ pub fn key_revoke(key_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn key_id_of(token: &str) -> Option<String> {
+    // The id of a key by its secret (ids are random, so look it up by the hash).
+    let con = db::open(&goethe_home()).ok()?;
+    con.query_row("SELECT key_id FROM api_keys WHERE token_hash = ?1", [token_hash(token)], |r| r.get(0)).ok()
+}
+
+pub fn key_rotate(key_id: &str) -> Result<String, String> {
+    rotate_secret(&goethe_home(), key_id)
+}
+
+pub fn rotate_secret(home: &Path, key_id: &str) -> Result<String, String> {
+    // A new secret for an existing key (same id, name, scope and limits); the old one stops working on the gateway's next request.
+    let con = db::open(home).map_err(|e| e.to_string())?;
+    let token = new_token();
+    let n = con
+        .execute(
+            "UPDATE api_keys SET token_hash = ?1, raw_prefix = ?2, token = NULL WHERE key_id = ?3",
+            rusqlite::params![token_hash(&token), &token[..14], key_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err(format!("key {key_id} not found"));
+    }
+    write_api_keys_best_effort(home, &con);
+    Ok(token)
+}
+
 pub fn key_list_detailed() -> Result<Vec<serde_json::Value>, String> {
     let home = goethe_home();
     let con = db::open(&home).map_err(|e| e.to_string())?;
     let mut stmt = con
         .prepare(
-            "SELECT key_id, name, rpm_limit, expires_at, model_scope, is_admin, raw_prefix, token FROM api_keys ORDER BY created_at",
+            "SELECT key_id, name, rpm_limit, expires_at, model_scope, is_admin, raw_prefix FROM api_keys ORDER BY created_at",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -327,19 +353,17 @@ pub fn key_list_detailed() -> Result<Vec<serde_json::Value>, String> {
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, i64>(5)? != 0,
                 r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(7)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for row in rows.filter_map(|r| r.ok()) {
-        let (key_id, name, rpm, expires_at, model_scope, is_admin, prefix, token) = row;
+        let (key_id, name, rpm, expires_at, model_scope, is_admin, prefix) = row;
         let (req_t, pt_t, ct_t, req_all, pt_all, ct_all) =
             crate::key_usage::totals_for_key(&con, &key_id)?;
         out.push(serde_json::json!({
             "id": key_id,
             "prefix": prefix,
-            "key": token,
             "name": name,
             "rpm": rpm,
             "expires": expires_at,

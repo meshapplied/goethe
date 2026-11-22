@@ -213,13 +213,17 @@ fn init_schema(con: &Connection) -> rusqlite::Result<()> {
 }
 
 fn ensure_columns(con: &Connection) -> rusqlite::Result<()> {
-    // Columns and tables added after schema version 1, without a version bump so an older goethe still opens the database.
+    // Columns and tables added after schema version 1, without a version bump so an older goethe still opens the database; api_keys.token held raw secrets up to 0.3.5 and is kept but emptied.
     crate::usage_log::ensure_tables(con)?;
     let has_token = || con.prepare("SELECT token FROM api_keys LIMIT 0").is_ok();
-    match has_token() {
-        true => Ok(()),
-        false => con.execute_batch("ALTER TABLE api_keys ADD COLUMN token TEXT;").or_else(|e| if has_token() { Ok(()) } else { Err(e) }),
+    if !has_token() {
+        con.execute_batch("ALTER TABLE api_keys ADD COLUMN token TEXT;").or_else(|e| if has_token() { Ok(()) } else { Err(e) })?;
     }
+    let raw: bool = con.query_row("SELECT EXISTS (SELECT 1 FROM api_keys WHERE token IS NOT NULL)", [], |r| r.get(0))?;
+    if raw {
+        con.execute("UPDATE api_keys SET token = NULL WHERE token IS NOT NULL", [])?;
+    }
+    Ok(())
 }
 
 fn user_version(con: &Connection) -> rusqlite::Result<i32> {
@@ -246,6 +250,17 @@ mod tests {
             .unwrap()
             .filter_map(|r| r.ok())
             .collect()
+    }
+
+    #[test]
+    fn raw_secrets_older_versions_kept_are_emptied_and_hashes_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let con = open(dir.path()).unwrap();
+        con.execute("INSERT INTO api_keys (key_id, name, token_hash, raw_prefix, token) VALUES ('k1', 'app', 'h1', 'p', 'goethe_sk_raw')", []).unwrap();
+        ensure_columns(&con).unwrap();
+        let row: (String, Option<String>) = con.query_row("SELECT token_hash, token FROM api_keys", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(row, ("h1".to_string(), None));
+        ensure_columns(&con).unwrap();
     }
 
     #[test]

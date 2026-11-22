@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Goethe no longer stores API keys, only their hashes, and empties the raw keys older versions kept in `state.db`. A key is shown once, when it is made. `goethe api keys rotate <key id>` (or **New secret** in the key manager) gives a key a new secret and keeps its id, name, models and limits. `goethe api share --key` prints a new secret for a key it newly shares; a key already shared keeps its own.
+- The public gateway (`goethe api share`) reaches goethed over an owner-only socket instead of a loopback port (`127.0.0.2`, or a second port on macOS), so a local process can no longer pose as a public client. `goethe update` restarts goethed, which moves it to the socket.
+- The key manager no longer cuts the last characters of a full key on a 64-column terminal.
 - The menu's Load/Unload asks where to load a model: Auto, or the GPUs marked with Space (several split it), each with its free memory and fit, disallowed GPUs in gray, and the plan for the choice (tp, context, GB per GPU).
 - A download from Hugging Face says `Fetching from Hugging Face` until the files start to arrive, then shows its bar.
 - `goethe run` loads a model that is not loaded on its picker, with a bar beside it, in the first list and in the chat's `m` list, instead of leaving the screen. You can type while a reply streams; Enter sends the line after it. Leaving says nothing and returns at once: a model run loaded is unloaded in the background.

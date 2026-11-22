@@ -38,6 +38,10 @@ Only some models, or just the key for a script:
 \t→ goethe api keys create bot --models deepseek-ai/DeepSeek-V4.1-Flash-1017
 \t→ API_KEY=$(goethe api keys create ci --raw)
 
+Goethe keeps only a hash of each key, so a key is shown once. A lost one gets a new secret (same id, name and limits; the old secret stops working):
+
+\t→ goethe api keys rotate <key-id>
+
 Revoke one:
 
 \t→ goethe api keys revoke <key-id>";
@@ -405,7 +409,7 @@ struct AllowArgs {
 
 #[derive(clap::Args)]
 struct KeyArgs {
-    #[arg(value_parser = ["create", "revoke"], help = "create NAME, or revoke KEY_ID…; nothing lists the keys (a menu on a terminal).")]
+    #[arg(value_parser = ["create", "rotate", "revoke"], help = "create NAME, rotate KEY_ID (a new secret), or revoke KEY_ID…; nothing lists the keys (a menu on a terminal).")]
     action: Option<String>,
     #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::key_ids), value_name = "NAME_OR_ID", requires = "action")]
     values: Vec<String>,
@@ -417,7 +421,7 @@ struct KeyArgs {
     models: Option<String>,
     #[arg(long, help = "With create: an admin key, for health endpoints and every model.")]
     admin: bool,
-    #[arg(long, help = "With create: print only the key, for scripts.")]
+    #[arg(long, help = "With create or rotate: print only the key, for scripts.")]
     raw: bool,
     #[arg(long, help = "List as JSON.")]
     json: bool,
@@ -1065,11 +1069,14 @@ fn main() {
 }
 
 fn do_keys(k: KeyArgs) -> Result<(), String> {
-    // goethe api keys [create NAME | revoke ID…]: nothing lists them, or opens the menu on a terminal.
+    // goethe api keys [create NAME | rotate ID | revoke ID…]: nothing lists them, or opens the menu on a terminal.
     let KeyArgs { action, values, expires, rpm, models, admin, raw, json } = k;
-    let create_only = expires.is_some() || rpm.is_some() || models.is_some() || admin || raw;
+    let create_only = expires.is_some() || rpm.is_some() || models.is_some() || admin;
     if create_only && action.as_deref() != Some("create") {
-        usage("--expires, --rpm, --models, --admin and --raw go with goethe api keys create NAME");
+        usage("--expires, --rpm, --models and --admin go with goethe api keys create NAME");
+    }
+    if raw && !matches!(action.as_deref(), Some("create" | "rotate")) {
+        usage("--raw goes with goethe api keys create NAME or rotate KEY_ID");
     }
     match action.as_deref() {
         Some("create") => {
@@ -1082,7 +1089,17 @@ fn do_keys(k: KeyArgs) -> Result<(), String> {
                 usage(e);
             }
             security::key_create(&name, true, rpm, expires.as_deref(), models.as_deref(), admin)
-                .map(|token| print!("{}", key_create_stdout(&token, &key_id_for_token(&token), &name, raw)))
+                .map(|token| print!("{}", key_secret_stdout(&token, &security::key_id_of(&token).unwrap_or_else(|| "?".into()), &name, raw, false)))
+        }
+        Some("rotate") => {
+            let id = match values.as_slice() {
+                [id] if !id.trim().is_empty() => id.clone(),
+                [] => usage("name the key by id: goethe api keys rotate <key-id>"),
+                _ => usage("one key at a time: goethe api keys rotate <key-id>"),
+            };
+            let name = security::key_list_detailed()?.iter().find(|r| r.get("id").and_then(Value::as_str) == Some(id.as_str())).and_then(|r| r.get("name").and_then(Value::as_str).map(str::to_string));
+            let Some(name) = name else { return Err(format!("key {id} not found; goethe api keys lists the ids")) };
+            security::key_rotate(&id).map(|token| print!("{}", key_secret_stdout(&token, &id, &name, raw, true)))
         }
         Some(_) if values.is_empty() => usage("name the keys to revoke by id: goethe api keys revoke <key-id>"),
         Some(_) => each(values, |id| security::key_revoke(&id).map(|()| println!("Revoked key {id}"))),
@@ -1214,18 +1231,6 @@ fn do_load(args: DoLoadArgs) -> Result<(), String> {
     install::run_load(params, args.no_wait, args.json)
 }
 
-fn key_id_for_token(token: &str) -> String {
-    // The stored key id of a token just created (ids are random, so look it up by the token hash).
-    db::open(&goethe_home())
-        .ok()
-        .and_then(|con| {
-            con.query_row("SELECT key_id FROM api_keys WHERE token_hash = ?1", [security::token_hash(token)], |r| {
-                r.get::<_, String>(0)
-            })
-            .ok()
-        })
-        .unwrap_or_else(|| "?".to_string())
-}
 
 fn rpm_text(rpm: i64) -> String {
     if rpm <= 0 {
@@ -1235,14 +1240,13 @@ fn rpm_text(rpm: i64) -> String {
     }
 }
 
-fn key_create_stdout(token: &str, id: &str, name: &str, raw: bool) -> String {
+fn key_secret_stdout(token: &str, id: &str, name: &str, raw: bool, renewed: bool) -> String {
     // --raw prints exactly the token; otherwise the token once, its name and id, and a store-it-now note.
     if raw {
         return format!("{token}\n");
     }
-    format!(
-        "API key for {name} (id {id}):\n\n\t{token}\n\ngoethe api shows it again at any time.\n"
-    )
+    let (head, old) = if renewed { ("New secret", " The old secret no longer works.") } else { ("API key", "") };
+    format!("{head} for {name} (id {id}):\n\n\t{token}\n\nStore it now: Goethe keeps only its hash and cannot show it again.{old} If it is lost, goethe api keys rotate {id} makes a new one.\n")
 }
 
 fn create_first_key() -> String {
@@ -1278,7 +1282,7 @@ fn key_list_text(rows: &[Value]) -> String {
 }
 
 fn api_keys_text(rows: &[Value]) -> String {
-    // Each key in full with its name, admin and expiry; keys made before keys were stored show their first characters.
+    // Each key's first characters with its name, admin and expiry; the secret itself is shown only when it is made.
     if rows.is_empty() {
         return create_first_key();
     }
@@ -1286,10 +1290,9 @@ fn api_keys_text(rows: &[Value]) -> String {
     let mut table = goethe_core::term::Table::new(&["NAME", "API KEY", "ADMIN", "EXPIRES"]);
     for r in rows {
         let admin = r.get("admin").and_then(Value::as_bool).unwrap_or(false);
-        let key = match (field(r, "key"), field(r, "prefix")) {
-            (k, _) if !k.is_empty() => k,
-            (_, p) if !p.is_empty() => format!("{p}... (older key, only its start is kept)"),
-            _ => "-".to_string(),
+        let key = match field(r, "prefix") {
+            p if p.is_empty() => "-".to_string(),
+            p => format!("{p}..."),
         };
         table.row(vec![
             field(r, "name"),
@@ -1844,7 +1847,7 @@ fn do_share(
                 let models = k.models.as_deref().filter(|m| !m.is_empty()).unwrap_or("every model");
                 match k.token.as_deref() {
                     Some(token) => println!("Key:  {} {token}  models: {models}", k.name),
-                    None => println!("Key:  {} (id {})  models: {models}", k.name, k.id),
+                    None => println!("Key:  {} (id {}, secret unchanged)  models: {models}", k.name, k.id),
                 }
             }
             let clients: Vec<String> = o.share.allow.clone();
@@ -2213,13 +2216,15 @@ mod tests {
     #[test]
     fn key_create_raw_is_only_the_token() {
         let token = "goethe_sk_0123456789abcdef0123456789abcdef";
-        assert_eq!(key_create_stdout(token, "a1b2c3d4e5f6", "ops", true), format!("{token}\n"));
-        let human = key_create_stdout(token, "a1b2c3d4e5f6", "ops", false);
+        assert_eq!(key_secret_stdout(token, "a1b2c3d4e5f6", "ops", true, false), format!("{token}\n"));
+        let human = key_secret_stdout(token, "a1b2c3d4e5f6", "ops", false, false);
         assert!(human.contains(token));
         assert!(human.starts_with("API key for ops (id a1b2c3d4e5f6):\n\n\t"), "{human}");
         assert_eq!(rpm_text(0), "unlimited");
         assert_eq!(rpm_text(120), "120");
-        assert!(human.contains("goethe api shows it again"));
+        assert!(human.contains("cannot show it again") && human.contains("goethe api keys rotate a1b2c3d4e5f6"), "{human}");
         assert_eq!(human.matches(token).count(), 1);
+        let renewed = key_secret_stdout(token, "a1b2c3d4e5f6", "ops", false, true);
+        assert!(renewed.starts_with("New secret for ops (id a1b2c3d4e5f6):") && renewed.contains("old secret no longer works"), "{renewed}");
     }
 }

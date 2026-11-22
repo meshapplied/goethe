@@ -38,9 +38,10 @@ A check that cannot complete refuses. Silent success is a bug. Concretely:
 
 - **Tokens.**
   - Format: `goethe_sk_` plus 128 random bits.
-  - Storage: `state.db` stores the sha256 (`token_hash`) and a short prefix for display. The `token` column also keeps the raw token so the public share can reprint it to its owner.
+  - Storage: `state.db` stores only the sha256 (`token_hash`) and a short prefix for display, so a token is shown once, when it is made. `goethe api keys rotate` (and `goethe api share` for a key it newly shares) replaces the hash with a new token's. The old `token` column, which held raw tokens up to 0.3.5, stays for older versions and is emptied when the database is opened.
   - Lookup: `GatewayCache` hashes the presented token and looks it up in memory. A miss re-reads the database, so a new key works at once.
   - Revocation: every proxied request checks the exact snapshot, which refuses a key revoked a moment ago.
+- **Public share listener.** nginx reaches the public-share mux over a Unix socket, `nginx/mux-public.sock`, mode `0600` (`0660` for the nobody group under root), so only nginx can open it and the `X-Real-IP` it sets is the client's. Local users can still use any key they hold on the private listener.
 - **Where the key comes from.** The mux reads `Authorization: Bearer`, `x-litellm-api-key`, `x-api-key` and `api-key`. Admin keys can read `/health/admin`; for anyone else it does not exist (404).
 - **Limits.**
   - Per IP in nginx: request rate and connection cap, changed with `GOETHE_GATEWAY_RATE_PER_IP` and `GOETHE_GATEWAY_CONN_PER_IP`.
@@ -90,6 +91,4 @@ These are known and not fixed yet. Fix them through normal pull requests, and re
 
 - **Engine key on argv (high on shared hosts).** goethe-engine and NInfer receive `--api-key` on the command line, so any local user can read it from `/proc/<pid>/cmdline` and call the engine port directly, past auth, scope and limits. SGLang and llama.cpp already read the key from the environment. The fix needs goethe-engine and NInfer to read `GOETHE_ENGINE_API_KEY`.
 - **Signing key exposure in CI.** The signing key is present in the release `build` job while third-party build code runs. Sign only in `merge` under the `release` environment, and pin actions by commit SHA.
-- **Raw tokens at rest.** `api_keys.token` keeps raw tokens at rest, readable by anyone who can read `state.db` (same user).
-- **Public share and X-Real-IP.** The public-share mux listener is on loopback (`127.0.0.2`, or `127.0.0.1:<mux+200>` on macOS). A local user can connect to it directly and set `X-Real-IP`, so the share's address check holds only behind nginx. Local users can use any key on the private listener anyway, so this grants nothing new.
 - **Blocking cache refresh.** `GatewayCache` refreshes under a std mutex on the async request path. Another process holding a write lock can stall a runtime worker for up to the 200 ms busy timeout.
