@@ -118,8 +118,7 @@ Supported [model families and quantization formats](docs/user-guide.md#supported
 | Path | What it is |
 |------|------------|
 | [`goethe/`](goethe/) | Goethe: the `goethe` command, the `goethed` service, the gateway, packaging and the installer |
-| [`docs/`](docs/) | User guide, command reference, and [developer documentation](docs/developer/README.md) |
-| [`lab/`](lab/), [`tests/`](tests/), [`examples/`](examples/) | `goethe-lab`, a research launcher used in development, with its tests and example cards; nothing here ships |
+| [`docs/`](docs/) | User guide, command reference |
 | [`install.sh`](install.sh) | Builds Goethe from source; the normal install is `pkg.goethe.sh/install.sh` above |
 | [`AGENTS.md`](AGENTS.md) | Instructions for AI agents |
 
