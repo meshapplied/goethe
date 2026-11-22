@@ -90,7 +90,7 @@ def _check_key_and_profile(goethe: Path, home: Path, env: dict[str, str]) -> Non
     if not re.fullmatch(r"goethe_sk_[0-9a-f]{32}\n", rr.stdout):
         raise RuntimeError(f"key create --raw stdout is not exactly the token: {rr.stdout!r}")
     rr = run_goethe([str(goethe), "api", "keys", "create", "ci2"], env=env)
-    if "goethe_sk_" not in rr.stdout or "goethe api shows it again" not in rr.stdout:
+    if "goethe_sk_" not in rr.stdout or "cannot show it again" not in rr.stdout:
         raise RuntimeError(f"key create without --raw must show the token once: {rr.stdout!r}")
     rr = run_goethe([str(goethe), "doctor", "--hardware", "--json"], env=env, timeout=120)
     state = json.loads(rr.stdout)

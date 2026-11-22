@@ -231,12 +231,13 @@ The API address, how to authenticate, your API keys and a `curl` command to try 
 
 ### `goethe api keys`
 
-Lists API keys with their limits and today's usage, or creates or revokes one. On a terminal, `goethe api keys` alone opens a full-screen key manager (see below).
+Lists API keys with their limits and today's usage, or creates, rotates or revokes one. On a terminal, `goethe api keys` alone opens a full-screen key manager (see below). Goethe stores only a hash of each key, so the key itself is shown once, when it is made: store it then. A lost key gets a new secret with `rotate`; its id, name, models and limits stay, and the old secret stops working on the next request.
 
 | Command | Description |
 |---|---|
 | `goethe api keys` | List the keys (`--json` for scripts) |
 | `goethe api keys create <name>` | Create a key |
+| `goethe api keys rotate <key id>` | A new secret for a key; the old one stops working |
 | `goethe api keys revoke <key id>...` | Revoke keys, by the id `goethe api keys` shows |
 
 | Option | Description |
@@ -245,17 +246,18 @@ Lists API keys with their limits and today's usage, or creates or revokes one. O
 | `--rpm <N>` | With `create`: requests per minute (default 120, `0`: unlimited) |
 | `--models <a,b>` | With `create`: only these models |
 | `--admin` | With `create`: admin key, for health endpoints and every model |
-| `--raw` | With `create`: print only the key, for scripts |
+| `--raw` | With `create` or `rotate`: print only the key, for scripts |
 | `--json` | List as JSON |
 
 ```bash
 goethe api keys create my-app
 goethe api keys create ops --expires 90d --rpm 300 --admin
 API_KEY=$(goethe api keys create ci --raw)
+API_KEY=$(goethe api keys rotate <key-id> --raw)
 goethe api keys revoke <key-id>
 ```
 
-The key manager is in two columns, like ranger. The left column picks what to work on: **+ Create new key**, **Done**, then your keys. The right column shows the hovered entry and is where things change. For a key it shows `API key:` with the key itself, its name and id (fixed), then what can change: the allowed models (**Every model**, or ticked models), the rate limit, the expiry, **Save changes** and **Delete key**. For **+ Create new key** it is the same form with a name, ending in **Create key**.
+The key manager is in two columns, like ranger. The left column picks what to work on: **+ Create new key**, **Done**, then your keys. The right column shows the hovered entry and is where things change. For a key it shows `API key:` with its first characters (the whole key only for one made or renewed in this session), its name and id (fixed), then what can change: the allowed models (**Every model**, or ticked models), the rate limit, the expiry, **Save changes**, **New secret** and **Delete key**. For **+ Create new key** it is the same form with a name, ending in **Create key**.
 
 | Key | In the left column | In the right column |
 |---|---|---|
@@ -263,10 +265,10 @@ The key manager is in two columns, like ranger. The left column picks what to wo
 | → (or `l`, Enter) | Open the entry on the right; on Done, leave | |
 | ← (or `h`, Esc) | | Back to the left; asks first when there are unsaved changes |
 | Space | | Tick a model or Every model |
-| Enter | | Edit a value in place (Enter keeps it, Esc cancels), save, create, or delete (press twice) |
+| Enter | | Edit a value in place (Enter keeps it, Esc cancels), save, create, or make a new secret or delete (press twice) |
 | `q` | Leave | Leave at once; unsaved changes are not saved, and a note says so |
 
-On Rate limit or Expires, the bottom line shows the values they take: a whole number of requests per minute (`0` for unlimited), and `never`, days such as `30d` or a date such as `2027-01-31`. Changes apply only when saved and reach the gateway on the next request. The screen is restored on leaving, and keys created in the session are printed then. Scripts use the commands above, since the menu needs a terminal (at least 64×12).
+On Rate limit or Expires, the bottom line shows the values they take: a whole number of requests per minute (`0` for unlimited), and `never`, days such as `30d` or a date such as `2027-01-31`. Changes apply only when saved and reach the gateway on the next request. The screen is restored on leaving, and keys created or renewed in the session are printed then. Scripts use the commands above, since the menu needs a terminal (at least 64×12).
 
 ### `goethe api expose [where]`
 
@@ -332,7 +334,7 @@ goethe api share stop --key ci                                       # stop shar
 goethe api share stop                                                # close the public gateway
 ```
 
-Every shared key uses the same public gateway, each until its own time and from its own addresses. The gateway stays open until the last key's time ends. A key whose time has ended is refused while the others keep working, and the addresses only it allowed are dropped from the gateway. Sharing a key again starts its time over (`5h` means 5 hours from now) and replaces its addresses; the other keys are not touched. Without `--key`, the keys of the last opening are shared again. Opening prints the URL, each key with the models it may use, the certificate to send along, and a `curl` command to try it. The keys stay the same, so a recipient can keep using the key you sent. Connections in progress are not interrupted. The menu's Public address page does the same with a form: the key, how long, and optional addresses. `goethe status` shows the gateway while it is open, and a node linked to the console shows the public URL and when it closes on its page.
+Every shared key uses the same public gateway, each until its own time and from its own addresses. The gateway stays open until the last key's time ends. A key whose time has ended is refused while the others keep working, and the addresses only it allowed are dropped from the gateway. Sharing a key again starts its time over (`5h` means 5 hours from now) and replaces its addresses; the other keys are not touched. Without `--key`, the keys of the last opening are shared again. Opening prints the URL, each key with the models it may use, the certificate to send along, and a `curl` command to try it. Goethe keeps only hashes of keys, so a key that is not shared yet gets a new secret, printed here: its old secret stops working, on the normal address too. A key that is already shared keeps its secret (`secret unchanged`), so a recipient can keep using the key you sent, and reopening without `--key` prints no secret. `goethe api keys rotate` makes a new one. Connections in progress are not interrupted. The menu's Public address page does the same with a form: the key, how long, and optional addresses. `goethe status` shows the gateway while it is open, and a node linked to the console shows the public URL and when it closes on its page.
 
 | Option | Description |
 |---|---|
@@ -351,7 +353,7 @@ The recipient verifies the gateway with the certificate goethe prints, `GOETHE_H
 - **Only chosen keys, each for its own time:** only shared keys work on the public address, each until its own time; every other key gets 403 there. Stopping a key, or `goethe api share stop`, applies to the next request.
 - **No admin keys:** admin keys are refused when opening and on every request. Expired keys are refused when opening, and a key that expires during the window stops working when it expires. goethe warns about a key that may use every model; a key limited with `--models` is safer to share.
 - **Model scope unchanged:** a key reaches only the models it is limited to, as on the normal address.
-- **Separate listener:** public requests reach goethe on their own internal address, so they can never be mistaken for requests from your own network, and no header can change that.
+- **Separate listener:** public requests reach goethe through their own socket, `GOETHE_HOME/nginx/mux-public.sock`, that only nginx can open, so they can never be mistaken for requests from your own network, and the client address goethe checks is the one nginx saw.
 - **API routes only:** health, readiness, admin and metrics endpoints are not served publicly.
 - **HTTPS only:** TLS 1.2 or 1.3, with its own certificate for the public listener. Plain HTTP connections are dropped.
 - **Stricter limits than the normal address:** 10 requests per second per client address (bursts of 20) and 16 connections per address, plus the same body size limit and header and body timeouts.

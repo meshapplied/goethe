@@ -8,11 +8,12 @@ use std::io::{IsTerminal, Write};
 const SCRIPT_HINT: &[&str] = &[
     "goethe api keys create my-app",
     "goethe api keys create my-app --models <model-id>",
+    "goethe api keys rotate <key-id>",
     "goethe api keys revoke <key-id>",
 ];
 const DEFAULT_RPM: i64 = 120;
 const MIN_WIDTH: usize = 64;
-const KEY_WIDTH: usize = 44;
+const KEY_WIDTH: usize = 46;
 const GAP: usize = 4;
 const MIN_HEIGHT: usize = 12;
 const LEFT_MAX: usize = 36;
@@ -24,7 +25,6 @@ pub struct KeyRow {
     pub name: String,
     pub models: Option<String>,
     pub admin: bool,
-    pub token: Option<String>,
     pub prefix: String,
     pub rpm: i64,
     pub expires: Option<String>,
@@ -39,7 +39,6 @@ fn keys() -> Result<Vec<KeyRow>, String> {
             name: field(r, "name").unwrap_or_default(),
             models: field(r, "models"),
             admin: r.get("admin").and_then(Value::as_bool).unwrap_or(false),
-            token: field(r, "key"),
             prefix: field(r, "prefix").unwrap_or_default(),
             rpm: r.get("rpm").and_then(Value::as_i64).unwrap_or(DEFAULT_RPM),
             expires: field(r, "expires"),
@@ -180,11 +179,13 @@ enum Field {
     Rpm,
     Expires,
     Apply,
+    Rotate,
     Delete,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Armed {
+    Rotate,
     Delete,
     Discard,
 }
@@ -196,6 +197,7 @@ enum Effect {
     Exit,
     Create { name: String, scope: Option<String>, rpm: i64, expires: Option<String> },
     Save { id: String, scope: Option<String>, rpm: i64, expires: Option<String> },
+    Rotate { id: String, name: String },
     Delete { id: String, name: String },
 }
 
@@ -210,6 +212,7 @@ struct App {
     editing: Option<(Field, String)>,
     armed: Option<Armed>,
     status: String,
+    secrets: std::collections::HashMap<String, String>,
 }
 
 impl App {
@@ -226,6 +229,7 @@ impl App {
             editing: None,
             armed: None,
             status: String::new(),
+            secrets: std::collections::HashMap::new(),
         }
     }
 
@@ -257,7 +261,7 @@ impl App {
         let models = (0..self.form.models.len()).map(Field::Model);
         match self.item() {
             LeftItem::Create => [Field::Name, Field::Rpm, Field::Expires, Field::Every].into_iter().chain(models).chain([Field::Apply]).collect(),
-            LeftItem::Key(_) => [Field::Rpm, Field::Expires, Field::Every].into_iter().chain(models).chain([Field::Apply, Field::Delete]).collect(),
+            LeftItem::Key(_) => [Field::Rpm, Field::Expires, Field::Every].into_iter().chain(models).chain([Field::Apply, Field::Rotate, Field::Delete]).collect(),
             LeftItem::Done => Vec::new(),
         }
     }
@@ -392,6 +396,14 @@ impl App {
             }
             Field::Name | Field::Rpm | Field::Expires => self.settle(),
             Field::Apply => return self.apply(),
+            Field::Rotate => {
+                let LeftItem::Key(i) = self.item() else { return Effect::Nothing };
+                if input == Input::Enter && armed == Some(Armed::Rotate) {
+                    return Effect::Rotate { id: self.keys[i].id.clone(), name: self.keys[i].name.clone() };
+                }
+                self.armed = Some(Armed::Rotate);
+                self.status = format!("Press Enter again for a new secret for {}. Clients using the old one will be refused.", self.keys[i].name);
+            }
             Field::Delete => {
                 let LeftItem::Key(i) = self.item() else { return Effect::Nothing };
                 if input == Input::Enter && armed == Some(Armed::Delete) {
@@ -608,6 +620,7 @@ fn field_text(app: &App, field: Field) -> (String, Style, String) {
         Field::Apply if new => ("Create key".to_string(), Style::Bold, String::new()),
         Field::Apply if app.changed() => ("Save changes".to_string(), Style::Bold, String::new()),
         Field::Apply => ("Save changes".to_string(), Style::Dim, String::new()),
+        Field::Rotate => ("New secret".to_string(), Style::Plain, String::new()),
         Field::Delete => ("Delete key".to_string(), Style::Red, String::new()),
     }
 }
@@ -625,9 +638,9 @@ fn right_lines(app: &App) -> (Vec<Line>, usize) {
         LeftItem::Key(i) => {
             let k = &app.keys[i];
             lines.push(line("API key:", Style::Bold));
-            lines.push(match &k.token {
+            lines.push(match app.secrets.get(&k.id) {
                 Some(t) => line(format!("    {t}"), Style::Plain),
-                None => line(format!("    {}... (made before keys were stored)", k.prefix), Style::Dim),
+                None => line(format!("    {}... (shown once)", k.prefix), Style::Dim),
             });
             lines.push(line(format!("    Name:        {}", k.name), Style::Dim));
             lines.push(line(format!("    ID:          {}{}", k.id, if k.admin { "  (admin)" } else { "" }), Style::Dim));
@@ -651,7 +664,7 @@ fn right_lines(app: &App) -> (Vec<Line>, usize) {
         }
         let style = if hovered { Style::Selected } else { style };
         let mut l = match field {
-            Field::Apply | Field::Delete => line(text, style),
+            Field::Apply | Field::Rotate | Field::Delete => line(text, style),
             _ => line(format!("{}   {text}", if hovered { "\u{27a4}" } else { " " }), style),
         };
         if hovered || new {
@@ -791,22 +804,33 @@ fn carry_out(app: &mut App, effect: Effect, made: &mut Vec<(String, String)>) ->
     let result = match &effect {
         Effect::Create { name, scope, rpm, expires } => {
             security::key_create(name, true, Some(*rpm), expires.as_deref(), scope.as_deref(), false).map(|token| {
-                made.push((name.clone(), token));
-                format!("Created {name}. Its key is at the top right; goethe api shows it again.")
+                if let Some(id) = security::key_id_of(&token) {
+                    app.secrets.insert(id, token.clone());
+                }
+                made.push((format!("Created {name}"), token));
+                format!("Created {name}. Its key is at the top right; store it now, it is not shown again.")
             })
         }
         Effect::Save { id, scope, rpm, expires } => security::key_set_models(id, scope.as_deref())
             .and_then(|()| security::key_set_limits(id, *rpm, expires.as_deref()))
             .map(|()| "Saved. The gateway uses it from the next request.".to_string()),
-        Effect::Delete { id, name } => security::key_revoke(id).map(|()| format!("Deleted {name}.")),
+        Effect::Rotate { id, name } => security::key_rotate(id).map(|token| {
+            app.secrets.insert(id.clone(), token.clone());
+            made.push((format!("New secret for {name}"), token));
+            format!("New secret for {name} at the top right; store it now. The old one no longer works.")
+        }),
+        Effect::Delete { id, name } => security::key_revoke(id).map(|()| {
+            app.secrets.remove(id);
+            format!("Deleted {name}.")
+        }),
         Effect::Nothing | Effect::Quit | Effect::Exit => return Ok(()),
     };
     let hover = match &effect {
         Effect::Create { name, .. } => Some(name.clone()),
-        Effect::Save { .. } => app.left.checked_sub(2).and_then(|i| app.keys.get(i)).map(|k| k.name.clone()),
+        Effect::Save { .. } | Effect::Rotate { .. } => app.left.checked_sub(2).and_then(|i| app.keys.get(i)).map(|k| k.name.clone()),
         _ => None,
     };
-    let focus_right = matches!(effect, Effect::Save { .. });
+    let focus_right = matches!(effect, Effect::Save { .. } | Effect::Rotate { .. });
     let right = app.right;
     match result {
         Ok(msg) => {
@@ -831,9 +855,9 @@ pub struct Session {
 impl Session {
     pub fn summary(&self) -> Option<String> {
         // The keys made in the session and what was left unsaved, for after the screen closes.
-        let mut lines: Vec<String> = self.created.iter().map(|(name, token)| format!("Created {name}: {token}")).collect();
+        let mut lines: Vec<String> = self.created.iter().map(|(what, token)| format!("{what}: {token}")).collect();
         if !self.created.is_empty() {
-            lines.push("goethe api shows every key again.".to_string());
+            lines.push("Store them now: Goethe keeps only their hashes and cannot show them again.".to_string());
         }
         lines.extend(self.unsaved.clone());
         (!lines.is_empty()).then(|| lines.join("\n"))
@@ -910,8 +934,7 @@ mod tests {
             name: name.into(),
             models: models.map(String::from),
             admin: false,
-            token: Some(format!("goethe_sk_{id}")),
-            prefix: String::new(),
+            prefix: format!("goethe_sk_{id}"),
             rpm: 120,
             expires: None,
         }
@@ -1028,7 +1051,10 @@ mod tests {
         let saved = press(&mut a, &[Input::Down, Input::Down, Input::Enter]);
         assert_eq!(saved, Effect::Save { id: "id-b".into(), scope: Some("m/alpha,m/beta".into()), rpm: 120, expires: None });
         press(&mut a, &[Input::Down, Input::Enter]);
-        assert!(a.status.contains("Press Enter again"));
+        assert!(a.status.contains("again for a new secret"), "{}", a.status);
+        assert_eq!(press(&mut a, &[Input::Enter]), Effect::Rotate { id: "id-b".into(), name: "chat".into() });
+        press(&mut a, &[Input::Down, Input::Enter]);
+        assert!(a.status.contains("Press Enter again to delete"));
         assert_eq!(field_text(&a, Field::Delete).1, Style::Red);
         assert_eq!(press(&mut a, &[Input::Enter]), Effect::Delete { id: "id-b".into(), name: "chat".into() });
         press(&mut a, &[Input::Enter]);
@@ -1065,7 +1091,10 @@ mod tests {
         assert_eq!(screen.len(), 24);
         assert!(screen.iter().all(|l| l.chars().count() <= 100));
         assert!(screen[2].starts_with("  + Create new key") && screen[2].contains("    API key:"), "{}", screen[2]);
-        assert!(screen[3].starts_with("  Done") && screen[3].contains("    goethe_sk_id-a"), "{}", screen[3]);
+        assert!(screen[3].starts_with("  Done") && screen[3].contains("    goethe_sk_id-a... (shown once)"), "{}", screen[3]);
+        a.secrets.insert("id-a".into(), "goethe_sk_0123456789abcdef0123456789abcdef".into());
+        let again: Vec<String> = render(&a, 100, 24).iter().map(|l| plain(l)).collect();
+        assert!(again[3].contains("    goethe_sk_0123456789abcdef0123456789abcdef") && !again[3].contains("shown once"), "a secret made in this session is shown in full: {}", again[3]);
         assert!(screen[5].starts_with("\u{27a4} dev   id-a"), "{}", screen[5]);
         let at = |t: &str| screen.iter().position(|l| l.contains(t)).unwrap_or_else(|| panic!("{t} missing: {screen:#?}"));
         assert!(at("Name:        dev") < at("ID:          id-a") && at("ID:") < at("Rate limit:") && at("Rate limit:") < at("Expiry:"));
@@ -1077,7 +1106,7 @@ mod tests {
         assert_eq!(tiny.len(), 10);
         assert!(tiny[0].contains("at least 64x12"));
         let narrow: Vec<String> = render(&a, 64, 16).iter().map(|l| plain(l)).collect();
-        assert!(narrow[3].ends_with("goethe_sk_id-a"), "the key is never cut: {}", narrow[3]);
+        assert!(narrow[3].ends_with("goethe_sk_0123456789abcdef0123456789abcdef"), "a full secret is never cut: {}", narrow[3]);
     }
 
     #[test]
@@ -1123,10 +1152,10 @@ mod tests {
     fn the_session_summary_lists_new_keys_then_what_was_dropped() {
         let none = Session { created: Vec::new(), unsaved: None, exit: false };
         assert_eq!(none.summary(), None);
-        let some = Session { created: vec![("ci".into(), "goethe_sk_x".into())], unsaved: Some("Unsaved changes to dev were not saved.".into()), exit: false };
+        let some = Session { created: vec![("Created ci".into(), "goethe_sk_x".into()), ("New secret for dev".into(), "goethe_sk_y".into())], unsaved: Some("Unsaved changes to dev were not saved.".into()), exit: false };
         assert_eq!(
             some.summary().as_deref(),
-            Some("Created ci: goethe_sk_x\ngoethe api shows every key again.\nUnsaved changes to dev were not saved.")
+            Some("Created ci: goethe_sk_x\nNew secret for dev: goethe_sk_y\nStore them now: Goethe keeps only their hashes and cannot show them again.\nUnsaved changes to dev were not saved.")
         );
     }
 
