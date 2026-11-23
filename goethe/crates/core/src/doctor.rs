@@ -603,19 +603,20 @@ fn check_state_db(home: &Path) -> Check {
 fn check_environment(home: &Path) -> Check {
     // How goethed should be kept running here: systemd units, or nohup/cron in containers.
     let env = crate::host::probe_environment(crate::nginx::public_port_u16(home));
+    let volume = match &env.persistent_volume {
+        Some(v) if home.starts_with(v) => format!("; GOETHE_HOME is on the persistent volume {v}"),
+        Some(v) => format!("; GOETHE_HOME is not on the persistent volume {v} and is lost when the container is recreated"),
+        None => String::new(),
+    };
+    if let Some(version) = crate::paths::image() {
+        return check("environment", "OK", format!("Goethe container image {version}: goethed is the container's main process{volume}"));
+    }
     match (&env.container, env.systemd_pid1) {
-        (Some(c), false) => {
-            let volume = match &env.persistent_volume {
-                Some(v) if home.starts_with(v) => format!("; GOETHE_HOME is on the persistent volume {v}"),
-                Some(v) => format!("; GOETHE_HOME is not on the persistent volume {v} and is lost when the container is recreated"),
-                None => String::new(),
-            };
-            check(
-                "environment",
-                "INFO",
-                format!("container {c} without systemd: goethe up starts goethed with nohup; add goethed to the container start command{volume}"),
-            )
-        }
+        (Some(c), false) => check(
+            "environment",
+            "INFO",
+            format!("container {c} without systemd: goethe up starts goethed with nohup; add goethed to the container start command{volume}"),
+        ),
         (Some(c), true) => check("environment", "INFO", format!("container {c} with systemd: goethe up installs a unit")),
         (None, true) => check("environment", "OK", "systemd is PID 1: goethe up installs a unit"),
         (None, false) => check("environment", "INFO", "no systemd: goethe up uses crontab @reboot"),

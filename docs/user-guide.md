@@ -8,6 +8,7 @@ Goethe turns a machine into your own API, compatible with OpenAI, Anthropic and 
 
 - [What you can use it for](#what-you-can-use-it-for)
 - [Quick install](#quick-install)
+- [Docker and cloud GPU hosts](#docker-and-cloud-gpu-hosts)
 - [API compatibility](#api-compatibility)
 - [CLI](#cli)
 - [Add models](#add-models)
@@ -64,6 +65,40 @@ goethe api                           # the address to give your apps
 ```
 
 `goethe status` tells you whether Goethe is running, with the API address, your keys and the models it serves. Check the machine with `goethe doctor`: each `WARN` or `FAIL` line names its fix. See the [hardware](#hardware-requirements) and [software](#software-requirements) requirements before you install.
+
+## Docker and cloud GPU hosts
+
+The image `ghcr.io/meshapplied/goethe` holds Goethe for Linux on x86_64 and arm64 with NVIDIA GPUs. Engines, kernel packs and models go to the `/workspace` volume the first time a model needs them, as on a machine.
+
+```bash
+docker run -d --name goethe --gpus all --network host -v goethe:/workspace \
+  -e GOETHE_API_KEY=goethe_sk_<32 hex characters> \
+  -e GOETHE_SETUP='install zai-org/GLM-5.3-Flash --load
+api expose public --allow <their-ip>/32 --yes' \
+  ghcr.io/meshapplied/goethe
+```
+
+- The host needs the NVIDIA Container Toolkit; the driver comes from the host.
+- `--network host` lets the allowlist see your clients' real addresses. On hosts that only map ports, such as RunPod (expose TCP port 8443), `goethe doctor` prints the address to use from outside.
+- Commands run with `docker exec goethe goethe status`, the menu with `docker exec -it goethe goethe`.
+- To update, pull a newer tag and recreate the container. `goethe update`, `up`, `down` and `uninstall` refuse inside it and say what to do instead.
+
+Hosts that only offer environment fields set Goethe up with these:
+
+| Variable | What it does |
+|---|---|
+| `GOETHE_SETUP` | goethe commands, one per line, run on start once per change of the text. Every line is checked first; one bad line and none run. |
+| `GOETHE_API_KEY` | an API key you choose: `goethe_sk_` and 32 or more hex characters, for example `echo goethe_sk_$(openssl rand -hex 16)`. Only its hash is kept. Its name is `default`, or `GOETHE_API_KEY_NAME`. |
+| `GOETHE_HF_TOKEN` | a Hugging Face token for gated models; only `install ... --hf-token` lines get it |
+| `GOETHE_AUTHKEY` | links the node to the Goethe console on first start (`msh_ak_...`) |
+
+Each release publishes the image signed with cosign. Check one with:
+
+```bash
+cosign verify ghcr.io/meshapplied/goethe:<version> \
+  --certificate-identity-regexp '^https://github.com/meshapplied/goethe/.github/workflows/release.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 ## API compatibility
 

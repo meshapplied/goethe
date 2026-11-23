@@ -23,6 +23,7 @@ jobs:
     outputs:
       rust: ${{ steps.flags.outputs.rust }}
       e2e: ${{ steps.flags.outputs.e2e }}
+      image: ${{ steps.flags.outputs.image }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -32,15 +33,17 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          # Path buckets: unit/clippy and heavy e2e.
-          rust=true e2e=true
+          # Path buckets: unit/clippy, heavy e2e, and the container image.
+          rust=true e2e=true image=true
           if [[ -n "${BASE}" ]]; then
-            rust=false e2e=false
+            rust=false e2e=false image=false
             while IFS= read -r f; do
               [[ -z "$f" ]] && continue
               case "$f" in
+                goethe/packaging/Dockerfile|goethe/packaging/build_image_tree.sh|goethe/tests/image_smoke.sh|goethe/crates/goethe/src/container.rs)
+                  rust=true; e2e=true; image=true ;;
                 .github/*)
-                  rust=true; e2e=true ;;
+                  rust=true; e2e=true; image=true ;;
                 goethe/tests/*|goethe/pyenv/*|goethe/cdn/*|goethe/packaging/*)
                   rust=true; e2e=true ;;
                 goethe/crates/*|goethe/Cargo.toml|goethe/Cargo.lock|goethe/rust-toolchain*)
@@ -53,8 +56,9 @@ jobs:
           {
             echo "rust=${rust}"
             echo "e2e=${e2e}"
+            echo "image=${image}"
           } >>"${GITHUB_OUTPUT}"
-          echo "rust=${rust} e2e=${e2e}"
+          echo "rust=${rust} e2e=${e2e} image=${image}"
 
   lint:
     runs-on: ubuntu-24.04
@@ -183,12 +187,26 @@ jobs:
         run: sudo apt-get install -y -qq nginx >/dev/null
       - run: bash tests/mutants/run.sh
 
+  image:
+    needs: changes
+    if: ${{ needs.changes.outputs.image == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Release-shaped x86_64 tree from this checkout (unsigned, never published)
+        run: bash goethe/packaging/build_image_tree.sh "$RUNNER_TEMP/tree"
+      - name: The image from it
+        run: docker build --platform linux/amd64 -f goethe/packaging/Dockerfile --build-arg VERSION="$(cat "$RUNNER_TEMP/tree/VERSION")" -t goethe:ci "$RUNNER_TEMP/tree"
+      - name: The image without a GPU (start, health, GOETHE_SETUP, API key, refusals, restart, stop)
+        run: bash goethe/tests/image_smoke.sh goethe:ci
+
   # The one check the main ruleset requires. It needs every other job (package-smoke runs only on main/nightly and is exempt),
   # fails when a job exists that it does not list (a new job cannot be forgotten: add it to `needs`), and accepts a skipped job
   # only when the `changes` flag that gates it is false; a failed `changes` job or any other skip fails it.
   gate:
     if: ${{ always() }}
-    needs: [changes, lint, attribution, engine-test, e2e-user]
+    needs: [changes, lint, attribution, engine-test, e2e-user, image]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -207,6 +225,7 @@ jobs:
             | select((.value.result == "skipped" and (
                 (.key == "engine-test" and $f.rust != "true")
                 or (.key == "e2e-user" and $f.e2e != "true")
+                or (.key == "image" and $f.image != "true")
               )) | not)
             | "\(.key): \(.value.result)"' <<<"$NEEDS")
           [ -z "$bad" ] || { echo "$bad"; exit 1; }
