@@ -27,7 +27,7 @@ Exit codes:
 
 ## Contents
 
-- [Start and stop](#start-and-stop): `goethe`, `up`, `status`, `down`
+- [Start and stop](#start-and-stop): `goethe`, `start`, `up`, `status`, `down`
 - [Models](#models): `install`, `models`, `models recommend`, `models scan`, `models alias`, `remove`
 - [Running models](#running-models): `load`, `unload`, `run`, `ps`, `logs`
 - [API access](#api-access): `api`, `api keys`, `api expose`, `api allow`, `api domain`, `api share`
@@ -44,12 +44,17 @@ On a terminal, plain `goethe` opens the menu on its own screen:
 | Entry | What it does |
 |---|---|
 | Quick setup | Install a model, serve it through the API and choose who can reach it, step by step |
-| Install models | A table of the catalog models that fit this machine's GPUs, with their size and the VRAM they need, under the machine's VRAM and storage. Space selects models, a custom Hugging Face id and a token for gated models can be typed below the table, and Enter installs them |
-| API keys and gateway | API keys (create, scope, show or delete), network exposure (local, VPN or private network, public) and the public address ([`goethe api share`](#goethe-api-share-duration)) |
+| Load/Unload | The installed models, loaded ones marked. Enter unloads a loaded model (Space marks several to unload together). On one that is not loaded, Enter asks where: Auto (goethe picks, as `goethe load` does) or the GPUs you mark with Space, several splitting one copy (`goethe load --gpu`); each GPU shows its free memory and whether the model fits on it alone, GPUs that are not allowed are gray and skipped by the arrows, and the line under them is the plan `goethe load` would use (tp, context and GB per GPU). Enter loads, with a bar beside the model. Under the list, a line names `goethe gpu allow/deny gpuN` for freeing up or denying GPUs |
+| Install models | A table of the catalog models that fit this machine's GPUs, with their size and the VRAM they need, under the machine's VRAM and storage. Space selects a model to install, or an installed one (filled dot) to uninstall, whose dot then turns the theme's third color. Above the keys the screen shows what Enter will do (`install: ...`, `uninstall: ...`); Enter uninstalls first, then installs, each one in turn, and goes on when one fails. A custom Hugging Face id and a token for gated models can be typed below the table. The table comes back after, with the new state |
+| API keys and gateway | API keys (create, scope, new secret or delete), network exposure (local, VPN or private network, public) and the public address ([`goethe api share`](#goethe-api-share-duration)) |
 | Status | Whether Goethe runs, the environment, then live tables of the GPUs (VRAM, processes, allowed or denied, memory bandwidth), CPU and memory |
 | Metrics | From the [usage log](#usage-log), over the last hour, 24 hours, 7 days, this month (from the 1st), 30 or 90 days (↑ the next, longer range, ↓ back): per model the requests, errors (client and server errors, rate limits, cancelled), prompt and generated tokens, average time to first token, average decode speed and the 95th-percentile latency, with a total row; per GPU the average and peak utilisation, memory bandwidth, average VRAM, average power against its limit, peak temperature and any throttling, with the host's CPU, RAM and free disk; and per API key the requests and tokens, by whole days. Requests for a model Goethe does not serve and requests refused by a key's rate limit have their own rows |
 
 ↑↓ move, Enter opens, ← goes back, `q` quits. On the main menu 1, 2 and 3 pick a color theme (default, sea, earth); the choice is remembered. Without a terminal, `goethe` prints the commands.
+
+### `goethe start`
+
+Quick setup on its own, the menu's first entry: install a model, serve it through the API and choose who can reach it, step by step, then back to the shell. It needs a terminal; scripts use `goethe up`, `goethe install <model> --load` and `goethe api keys create <name>`.
 
 ### `goethe up`
 
@@ -148,7 +153,7 @@ Unloads a model and deletes the files Goethe downloaded. For a folder you regist
 
 ### `goethe load <model> [-- <engine options>]`
 
-Loads a model and waits until it answers. Goethe picks the GPUs and sizes the memory unless you choose.
+Loads a model and waits until it answers. Goethe picks the GPUs and sizes the memory unless you choose. On a terminal it shows the context window, the concurrency and the VRAM it will hold, then a bar that fills as the model reaches VRAM; piped, or with `--verbose`, it prints the plan and a final `RUNNING:` line.
 
 | Option | Description |
 |---|---|
@@ -186,7 +191,7 @@ Stops a model. Requests in progress finish first.
 
 ### `goethe run [MODEL] [INPUT]`
 
-Tries a model by hand. Without MODEL or INPUT on a terminal, a list of the installed models opens at the top of the screen (loaded ones first, marked `loaded`): ↑↓ move, Enter runs the chosen one, `q` or ← leaves. With text it prints one reply (a text model), an embedding summary (`dims= norm= [first 4]`) or, for an audio file, its transcript. With no INPUT on a terminal it opens an ephemeral chat screen; with no terminal, or `--plain`, a plain `> ` prompt (a speech model records from the microphone). An installed model that is not loaded is loaded first, like `goethe load`, and unloaded when run ends unless `--keep`; run never installs. It talks to the model's own engine on 127.0.0.1 with its engine key, not through the gateway, and creates no API key.
+Tries a model by hand. Without MODEL or INPUT on a terminal, a list of the installed models opens at the top of the screen (loaded ones first, marked `loaded`): ↑↓ move, Enter runs the chosen one (one that is not loaded loads right there, its bar beside it), `q` or ← leaves. With text it prints one reply (a text model), an embedding summary (`dims= norm= [first 4]`) or, for an audio file, its transcript. With no INPUT on a terminal it opens an ephemeral chat screen; with no terminal, or `--plain`, a plain `> ` prompt (a speech model takes an audio file as INPUT). An installed model that is not loaded is loaded first, like `goethe load` but with a 100,000-token context (or the model's maximum when smaller; reduced when the GPU cannot fit it), and unloaded quietly in the background when run ends unless `--keep`. A model that was loaded (or loading) before run started stays loaded; run never installs. It talks to the model's own engine on 127.0.0.1 with its engine key, not through the gateway, and creates no API key.
 
 | Option | Description |
 |---|---|
@@ -194,7 +199,7 @@ Tries a model by hand. Without MODEL or INPUT on a terminal, a list of the insta
 | `--plain` | No chat screen |
 | `--thinking` | Show the model's reasoning, dimmed, with the answer (hidden by default) |
 
-Chat screen: the model on the top line, the conversation from the top row down (it follows the reply as it streams), your line and the keys at the bottom. Typing: Enter sends, Esc opens the command keys. Commands: `m` pick or load another model (starts a new conversation), `e` export, `r` record (speech models), `i` or Enter back to typing, `q` quit (Enter confirms, `q` goes back; Ctrl-C asks the same). Up and Down or `k` and `j` scroll a line, Page Up and Page Down (or Ctrl-U and Ctrl-D, also while typing) a page, `g` and `G` jump to the top and the end; the screen follows the stream again at the end or on the next send. `/audio PATH` sends an audio file to a speech model; an embedding model shows `dims=` and `norm=` for each line. Nothing is written when you close it. `e` writes `goethe-chat-<UTC time>/` here in the [trace format](traces.md) (`0700` folder, `0600` files; embeddings as `embeddings.json`), with the model's raw text, reasoning included.
+Chat screen: the model on the top line, the conversation from the top row down (it follows the reply as it streams), your line and the keys at the bottom. Each message starts with a `➤ User` or `➤ Model` line in the theme's colors. Once a reply is in, the keys line also shows this chat's generated tokens and average decode speed (tokens over the time from first to last token), with the last reply's when there is room; these chats are not in the usage log and the numbers go when it closes. Typing: Enter sends, Esc opens the command keys; you can type while a reply streams, and Enter then sends the line after it (Esc stops the reply). Commands: `m` pick another model (one that is not loaded loads on the list; Esc cancels; a new conversation starts), `i` or Enter back to typing, `q` quit at once (Ctrl-C asks first). Up and Down or `k` and `j` scroll a line, Page Up and Page Down (or Ctrl-U and Ctrl-D, also while typing) a page, `g` and `G` jump to the top and the end; the screen follows the stream again at the end or on the next send. `/audio PATH` sends an audio file to a speech model; an embedding model shows `dims=` and `norm=` for each line. Nothing is written.
 
 ### `goethe metrics`
 
@@ -230,12 +235,13 @@ The API address, how to authenticate, your API keys and a `curl` command to try 
 
 ### `goethe api keys`
 
-Lists API keys with their limits and today's usage, or creates or revokes one. On a terminal, `goethe api keys` alone opens a full-screen key manager (see below).
+Lists API keys with their limits and today's usage, or creates, rotates or revokes one. On a terminal, `goethe api keys` alone opens a full-screen key manager (see below). Goethe stores only a hash of each key, so the key itself is shown once, when it is made: store it then. A lost key gets a new secret with `rotate`; its id, name, models and limits stay, and the old secret stops working on the next request.
 
 | Command | Description |
 |---|---|
 | `goethe api keys` | List the keys (`--json` for scripts) |
 | `goethe api keys create <name>` | Create a key |
+| `goethe api keys rotate <key id>` | A new secret for a key; the old one stops working |
 | `goethe api keys revoke <key id>...` | Revoke keys, by the id `goethe api keys` shows |
 
 | Option | Description |
@@ -244,17 +250,18 @@ Lists API keys with their limits and today's usage, or creates or revokes one. O
 | `--rpm <N>` | With `create`: requests per minute (default 120, `0`: unlimited) |
 | `--models <a,b>` | With `create`: only these models |
 | `--admin` | With `create`: admin key, for health endpoints and every model |
-| `--raw` | With `create`: print only the key, for scripts |
+| `--raw` | With `create` or `rotate`: print only the key, for scripts |
 | `--json` | List as JSON |
 
 ```bash
 goethe api keys create my-app
 goethe api keys create ops --expires 90d --rpm 300 --admin
 API_KEY=$(goethe api keys create ci --raw)
+API_KEY=$(goethe api keys rotate <key-id> --raw)
 goethe api keys revoke <key-id>
 ```
 
-The key manager is in two columns, like ranger. The left column picks what to work on: **+ Create new key**, **Done**, then your keys. The right column shows the hovered entry and is where things change. For a key it shows `API key:` with the key itself, its name and id (fixed), then what can change: the allowed models (**Every model**, or ticked models), the rate limit, the expiry, **Save changes** and **Delete key**. For **+ Create new key** it is the same form with a name, ending in **Create key**.
+The key manager is in two columns, like ranger. The left column picks what to work on: **+ Create new key**, **Done**, then your keys. The right column shows the hovered entry and is where things change. For a key it shows `API key:` with its first characters (the whole key only for one made or renewed in this session), its name and id (fixed), then what can change: the allowed models (**Every model**, or ticked models), the rate limit, the expiry, **Save changes**, **New secret** and **Delete key**. For **+ Create new key** it is the same form with a name, ending in **Create key**.
 
 | Key | In the left column | In the right column |
 |---|---|---|
@@ -262,10 +269,10 @@ The key manager is in two columns, like ranger. The left column picks what to wo
 | → (or `l`, Enter) | Open the entry on the right; on Done, leave | |
 | ← (or `h`, Esc) | | Back to the left; asks first when there are unsaved changes |
 | Space | | Tick a model or Every model |
-| Enter | | Edit a value in place (Enter keeps it, Esc cancels), save, create, or delete (press twice) |
+| Enter | | Edit a value in place (Enter keeps it, Esc cancels), save, create, or make a new secret or delete (press twice) |
 | `q` | Leave | Leave at once; unsaved changes are not saved, and a note says so |
 
-On Rate limit or Expires, the bottom line shows the values they take: a whole number of requests per minute (`0` for unlimited), and `never`, days such as `30d` or a date such as `2027-01-31`. Changes apply only when saved and reach the gateway on the next request. The screen is restored on leaving, and keys created in the session are printed then. Scripts use the commands above, since the menu needs a terminal (at least 64×12).
+On Rate limit or Expires, the bottom line shows the values they take: a whole number of requests per minute (`0` for unlimited), and `never`, days such as `30d` or a date such as `2027-01-31`. Changes apply only when saved and reach the gateway on the next request. The screen is restored on leaving, and keys created or renewed in the session are printed then. Scripts use the commands above, since the menu needs a terminal (at least 64×12).
 
 ### `goethe api expose [where]`
 
@@ -331,7 +338,7 @@ goethe api share stop --key ci                                       # stop shar
 goethe api share stop                                                # close the public gateway
 ```
 
-Every shared key uses the same public gateway, each until its own time and from its own addresses. The gateway stays open until the last key's time ends. A key whose time has ended is refused while the others keep working, and the addresses only it allowed are dropped from the gateway. Sharing a key again starts its time over (`5h` means 5 hours from now) and replaces its addresses; the other keys are not touched. Without `--key`, the keys of the last opening are shared again. Opening prints the URL, each key with the models it may use, the certificate to send along, and a `curl` command to try it. The keys stay the same, so a recipient can keep using the key you sent. Connections in progress are not interrupted. The menu's Public address page does the same with a form: the key, how long, and optional addresses. `goethe status` shows the gateway while it is open, and a node linked to the console shows the public URL and when it closes on its page.
+Every shared key uses the same public gateway, each until its own time and from its own addresses. The gateway stays open until the last key's time ends. A key whose time has ended is refused while the others keep working, and the addresses only it allowed are dropped from the gateway. Sharing a key again starts its time over (`5h` means 5 hours from now) and replaces its addresses; the other keys are not touched. Without `--key`, the keys of the last opening are shared again. Opening prints the URL, each key with the models it may use, the certificate to send along, and a `curl` command to try it. Goethe keeps only hashes of keys, so a key that is not shared yet gets a new secret, printed here: its old secret stops working, on the normal address too. A key that is already shared keeps its secret (`secret unchanged`), so a recipient can keep using the key you sent, and reopening without `--key` prints no secret. `goethe api keys rotate` makes a new one. Connections in progress are not interrupted. The menu's Public address page does the same with a form: the key, how long, and optional addresses. `goethe status` shows the gateway while it is open, and a node linked to the console shows the public URL and when it closes on its page.
 
 | Option | Description |
 |---|---|
@@ -350,7 +357,7 @@ The recipient verifies the gateway with the certificate goethe prints, `GOETHE_H
 - **Only chosen keys, each for its own time:** only shared keys work on the public address, each until its own time; every other key gets 403 there. Stopping a key, or `goethe api share stop`, applies to the next request.
 - **No admin keys:** admin keys are refused when opening and on every request. Expired keys are refused when opening, and a key that expires during the window stops working when it expires. goethe warns about a key that may use every model; a key limited with `--models` is safer to share.
 - **Model scope unchanged:** a key reaches only the models it is limited to, as on the normal address.
-- **Separate listener:** public requests reach goethe on their own internal address, so they can never be mistaken for requests from your own network, and no header can change that.
+- **Separate listener:** public requests reach goethe through their own socket, `GOETHE_HOME/nginx/mux-public.sock`, that only nginx can open, so they can never be mistaken for requests from your own network, and the client address goethe checks is the one nginx saw.
 - **API routes only:** health, readiness, admin and metrics endpoints are not served publicly.
 - **HTTPS only:** TLS 1.2 or 1.3, with its own certificate for the public listener. Plain HTTP connections are dropped.
 - **Stricter limits than the normal address:** 10 requests per second per client address (bursts of 20) and 16 connections per address, plus the same body size limit and header and body timeouts.
@@ -426,20 +433,22 @@ Installs the latest Goethe. Loaded models keep serving. It then checks the kerne
 | Command | Description |
 |---|---|
 | `goethe update` | Update Goethe, bundled nginx when its sha differs, already-installed engines, and kernel packs |
-| `goethe update engine` | Update only the installed engines (the ternary runtime too, when it is installed) |
+| `goethe update engine` | Update only the installed engines |
 | `goethe update rollback` | Put the previous kernel pack of every model that has one back |
 
 CLI help text stays the source of truth for flags and examples. A later pass can regenerate the command tables from clap while keeping the prose paragraphs above hand-written.
 
 | Option | Description |
 |---|---|
-| `--check` | Only show what would change: one line per component (goethe and goethed by version and commit, nginx by version, SGLang by wheel, goethe-engine, the ternary pack), then a summary such as `2 updates available (goethe, nginx): run goethe update` or `everything is up to date`. Changes nothing |
+| `--check` | Only show what would change: one line per component (goethe and goethed by version, nginx by version, SGLang by wheel, goethe-engine), then a summary such as `2 updates available (goethe, nginx): run goethe update` or `everything is up to date`. Changes nothing |
 | `--yes` | Don't ask |
 | `--allow-downgrade` | Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries); not with `engine` |
 
 ### `goethe uninstall`
 
-Removes Goethe and the models it installed. Folders of your own that you registered stay. A node linked to the console is logged out first (best effort) and its credentials go with the rest.
+Stops Goethe and its engines, then removes everything Goethe installed: the models it downloaded (also a `models` folder linked to another disk, whose own folder stays), the inference engines (the Python environment with goethe-engine and SGLang, and llama.cpp), the kernel packs, and the rest of the Goethe home. The NInfer weights that `goethe install` put in `~/.cache/goethe/nvfp4` go too. Before asking, it lists the models with their total size, the engines and the kernel packs it will delete.
+
+Folders of your own files stay: for a model registered in place only Goethe's links go, and a folder of yours inside `models` loses only Goethe's card. A trace folder in the home stays. A node linked to the console is logged out first (best effort) and its credentials go with the rest. When something cannot be deleted, the rest still goes, the command names what is left and exits non-zero.
 
 | Option | Description |
 |---|---|
@@ -474,7 +483,7 @@ Rows are per clock minute, kept 48 hours, and are rolled into hourly rows kept 9
 
 ### `goethe login`
 
-Links this node to a workspace. Prints a link and a code, then waits until the login is approved in the browser (Ctrl-C cancels; the code expires after 15 minutes). Logging in again replaces the current link and logs the old node out. A running goethed sends its first heartbeat within a second; otherwise it starts with `goethe up`.
+Links this node to a workspace. Prints a link and a code, then waits until the login is approved in the browser (Ctrl-C cancels; the code expires after 15 minutes). Logging in again replaces the current link. Each install has its own key (`GOETHE_HOME/platform/install_key`, made on the first login, kept through `goethe logout` and `goethe update`), so logging in again to the same workspace links the same node, with its name, cluster, shares and analytics, instead of adding a new one. A node removed on the console, another workspace, or a new install (after `goethe uninstall`) gets a new node. A running goethed sends its first heartbeat within a second; otherwise it starts with `goethe up`.
 
 | Option | Description |
 |---|---|
@@ -488,4 +497,4 @@ The credentials and the heartbeat state live in `GOETHE_HOME/platform/` (directo
 
 ### `goethe logout`
 
-Removes this node from its workspace and deletes the local credentials. When the console cannot be reached, the local link is still removed and the node shows offline on the console until you remove it there.
+Ends this node's login and deletes the local credentials. The console keeps the node, offline and with its token revoked, so the next `goethe login` to that workspace links the same node again; remove it on the console to delete it and its analytics. When the console cannot be reached, the local link is still removed and the node shows offline on the console.

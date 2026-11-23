@@ -21,9 +21,6 @@ pub fn validate_registry_sglang(reg: &Registry, online: bool) -> Vec<String> {
         (Vec::new(), Vec::new(), Vec::new(), crate::scan::sglang_support(&home).archs.into_iter().collect())
     };
     for m in &reg.models {
-        if m.effective_runtime() == "ternary" {
-            continue;
-        }
         let groups = match crate::sglang_infer::parse_groups(&m.extra_sglang_args) {
             Ok(g) => g,
             Err(e) => {

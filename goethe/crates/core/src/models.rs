@@ -297,7 +297,6 @@ pub fn engine_label(runtime: Option<&str>) -> String {
         Some("goethe-engine") => "goethe kernels",
         Some("sglang") => "SGLang",
         Some("llama.cpp") => "llama.cpp",
-        Some("ternary") => "ternary",
         Some("ninfer") => "ninfer",
         Some(other) => other,
         None => "-",
@@ -497,6 +496,14 @@ pub fn fit_input(home: &Path, model_id: &str) -> Result<(ChooserInput, Option<us
     Ok((m.input, (m.default_tp > 0).then_some(m.default_tp as usize)))
 }
 
+pub fn installed_fit(home: &Path, model_id: &str) -> Option<(f64, u64, u64)> {
+    // An installed model's VRAM in total over its GPUs at its full context and concurrency, with that context and concurrency.
+    let (input, pinned) = fit_input(home, model_id).ok()?;
+    let view = View::capacity(home, crate::placement::load_hw(home)?);
+    let f = view.fit(model_id, &input, pinned).ok()?;
+    Some((f.need.total() * f.tp as f64, f.ctx, f.max_conc))
+}
+
 fn card_value(dir: &Path) -> toml::Value {
     fs::read_to_string(dir.join(install::CARD_FILE))
         .ok()
@@ -607,8 +614,20 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool, delete_traces: Option<
             ))?
         }
     };
+    let compact = crate::step::compact();
+    let progress = |done: usize, of: usize| {
+        if compact {
+            crate::progress::eprint_line(crate::progress::bar((done * 100 / of.max(1)) as u32));
+        }
+    };
+    let steps = plan.delete.len() + usize::from(instances > 0) + 1;
+    if compact {
+        println!("{}", crate::term::paint(model_id, crate::term::Color::Bold));
+        progress(0, steps);
+    }
     if instances > 0 {
         unload(model_id, force)?;
+        progress(1, steps);
     }
     let tx = con.transaction().map_err(|e| format!("state.db: {e}"))?;
     for sql in [
@@ -619,28 +638,34 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool, delete_traces: Option<
         tx.execute(sql, [model_id]).map_err(|e| format!("state.db: {e}"))?;
     }
     tx.commit().map_err(|e| format!("state.db: {e}"))?;
-    for p in &plan.delete {
+    for (i, p) in plan.delete.iter().enumerate() {
         remove_owned(&home, p)?;
-        println!("deleted {}", p.display());
+        crate::step::say(&format!("deleted {}", p.display()));
+        progress(i + 1 + usize::from(instances > 0), steps);
     }
     match &plan.source {
-        Some(src) => println!(
+        Some(src) => crate::step::say(&format!(
             "removed {model_id} from goethe; its files were not deleted. To delete them run:\n  rm -rf {}",
             shell_quote(src)
-        ),
-        None => println!("removed {model_id}"),
+        )),
+        None => crate::step::say(&format!("removed {model_id}")),
     }
     if drop_traces {
         if let Some(t) = trace::delete_model_traces(&home, model_id)? {
-            println!("deleted {} trace session(s) ({}) in {}", t.sessions, trace::human_bytes(t.bytes), t.folder.display());
+            crate::step::say(&format!("deleted {} trace session(s) ({}) in {}", t.sessions, trace::human_bytes(t.bytes), t.folder.display()));
         }
     } else if let Some(t) = &traces {
-        println!(
+        crate::step::say(&format!(
             "kept {} trace session(s) ({}) recorded with {model_id}. To delete them run:\n  rm -rf {}",
             t.sessions,
             trace::human_bytes(t.bytes),
             shell_quote(&t.folder.to_string_lossy())
-        );
+        ));
+    }
+    if compact {
+        progress(steps, steps);
+        crate::progress::end_line();
+        println!("Successfully uninstalled");
     }
     Ok(())
 }
@@ -648,8 +673,7 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool, delete_traces: Option<
 fn removal_plan(home: &Path, con: &Connection, model_id: &str, local_path: &str, managed: bool) -> Result<RemovalPlan, String> {
     // Directories this model owns, minus any another installed model still uses.
     let primary = contained_in_models(home, &home.join(local_path))?;
-    let mut candidates = vec![primary.clone()];
-    candidates.extend(ternary_dirs_of(home, &primary));
+    let candidates = vec![primary.clone()];
     let mut users: Vec<(String, Vec<PathBuf>)> = Vec::new();
     let mut stmt = con
         .prepare("SELECT model_id, local_path FROM installed_models WHERE model_id != ?1")
@@ -659,9 +683,7 @@ fn removal_plan(home: &Path, con: &Connection, model_id: &str, local_path: &str,
         .map_err(|e| e.to_string())?;
     for (id, rel) in others.flatten() {
         if let Ok(dir) = contained_in_models(home, &home.join(rel)) {
-            let mut owned = vec![dir.clone()];
-            owned.extend(ternary_dirs_of(home, &dir));
-            users.push((id, owned));
+            users.push((id, vec![dir]));
         }
     }
     let mut plan = RemovalPlan {
@@ -727,22 +749,6 @@ pub fn uninstall_plan(home: &Path) -> Result<UninstallModels, String> {
 
 pub fn delete_owned(home: &Path, p: &Path) -> Result<(), String> {
     remove_owned(home, p)
-}
-
-pub fn ternary_dirs_of(home: &Path, dir: &Path) -> Vec<PathBuf> {
-    let Ok(card) = install::read_card(dir) else {
-        return Vec::new();
-    };
-    match (card.runtime.as_deref(), card.pack_id, card.base_model_id) {
-        (Some("ternary"), Some(pack), Some(base)) => {
-            let d = install::ternary_dirs(home, &pack, &base);
-            [d.pack, d.base]
-                .into_iter()
-                .filter_map(|p| contained_in_models(home, &p).ok())
-                .collect()
-        }
-        _ => Vec::new(),
-    }
 }
 
 fn source_of(dir: &Path) -> Option<String> {
@@ -1038,25 +1044,4 @@ mod tests {
         assert_eq!((plan.delete.len(), plan.keep.len()), (0, 1), "a folder with the user's own files and no source_dir is kept");
     }
 
-    #[test]
-    fn shared_ternary_base_is_kept() {
-        let home = home_with_db();
-        let h = home.path();
-        let con = db::open(h).unwrap();
-        let dirs = install::ternary_dirs(h, "mesh/pack", "base/model");
-        fs::create_dir_all(&dirs.pack).unwrap();
-        fs::create_dir_all(&dirs.base).unwrap();
-        fs::create_dir_all(h.join("models/mesh__pack")).unwrap();
-        fs::write(
-            h.join("models/mesh__pack").join(install::CARD_FILE),
-            "model_id = \"mesh/pack\"\ncontext_length = 1\nmax_running_requests = 1\ntp_size = 0\nep_size = 1\nkv_cache_dtype = \"auto\"\npreferred_gpus = []\nextra_sglang_args = []\nruntime = \"ternary\"\npack_id = \"mesh/pack\"\nbase_model_id = \"base/model\"\n",
-        )
-        .unwrap();
-        insert(&con, "mesh/pack", "models/mesh__pack", 1);
-        insert(&con, "base/model", "models/base__model", 1);
-        let plan = removal_plan(h, &con, "mesh/pack", "models/mesh__pack", true).unwrap();
-        assert_eq!(plan.delete.len(), 2, "{:?}", plan.delete);
-        assert_eq!(plan.keep.len(), 1);
-        assert_eq!(plan.keep[0].1, "still used by base/model");
-    }
 }

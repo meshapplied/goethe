@@ -47,23 +47,23 @@ pub(super) fn offer_for(opts: &InstallOpts, deps: OfferDeps) -> Result<Option<Pa
         Ok(Some(c)) => c,
         Ok(None) => return Ok(None),
         Err(e) => {
-            eprintln!("note: the console login cannot be read ({e}), so these weights are not checked for optimised kernels");
+            crate::step::note(&format!("note: the console login cannot be read ({e}), so these weights are not checked for optimised kernels"));
             return Ok(None);
         }
     };
     let miss = |why: String| -> Result<Option<PackChoice>, String> {
-        eprintln!("note: {why}; using the plain runtime");
+        crate::step::note(&format!("note: {why}; using the plain runtime"));
         Ok(None)
     };
     let Some(index) = (deps.index)() else {
-        eprintln!("note: the kernel pack index is not reachable, so these weights are not checked for optimised kernels");
+        crate::step::note("note: the kernel pack index is not reachable, so these weights are not checked for optimised kernels");
         return Ok(None);
     };
     if crate::packs::offers_any(&index, &deps.archs).is_empty() {
         return Ok(None);
     }
     if !(deps.may_match)(&index) {
-        println!("no optimised kernel pack has the structure of these weights; using the plain runtime");
+        crate::step::say("no optimised kernel pack has the structure of these weights; using the plain runtime");
         return Ok(None);
     }
     if let Err(e) = (deps.ensure_engine)() {
@@ -72,14 +72,14 @@ pub(super) fn offer_for(opts: &InstallOpts, deps: OfferDeps) -> Result<Option<Pa
     let plan = match (deps.by_structure)(&creds) {
         Ok(Some((_, plan))) => plan,
         Ok(None) => {
-            println!("no optimised kernel pack has the structure of these weights; using the plain runtime");
+            crate::step::say("no optimised kernel pack has the structure of these weights; using the plain runtime");
             return Ok(None);
         }
         Err(e) => return miss(format!("looking for optimised kernels for these weights failed: {e}")),
     };
     let what = format!("optimised kernels available for these weights (same structure as {})", plan.entry.offer.hf_repo);
     if opts.yes || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
-        println!("{what}");
+        crate::step::say(&what);
     } else if !crate::term::ask(&format!("{what}; install them? [Y/n]"), "y").is_ok_and(|a| a.to_ascii_lowercase().starts_with('y')) {
         return Ok(None);
     }
@@ -95,7 +95,7 @@ pub(super) fn stale_skip(card: Option<&toml::Table>, force: bool, allow: bool) -
 pub(super) fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecision, String> {
     // A pack in the platform's index for this model and a local GPU: used when the node is logged in; otherwise the user may log in now. Without a login no pack is ever downloaded. A pack skipped earlier by an explicit fallback stays skipped while the fallback is on, unless --force; without the opt-in the pack is tried again and fails loudly.
     if let Some(why) = stale_skip(read_card_table(&model_dir(home, &opts.model_id)).as_ref(), opts.force, fallback_allowed(opts.fallback)) {
-        eprintln!("note: skipping the kernel pack: {why} (--force tries it again)");
+        crate::step::note(&format!("note: skipping the kernel pack: {why} (--force tries it again)"));
         return Ok(PackDecision::Declined);
     }
     let Some(index) = crate::packs::catalog(home) else { return Ok(PackDecision::None) };
@@ -104,9 +104,9 @@ pub(super) fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecis
     let Some(offer) = crate::packs::offers_for(&index, &opts.model_id, &archs, &engine).into_iter().next() else {
         let theirs = crate::packs::pack_archs(&index, &opts.model_id);
         if let Some(note) = crate::packs::engine_too_old_at(&index, &opts.model_id, &archs, &engine) {
-            eprintln!("{note}");
+            crate::step::note(&note);
         } else if !theirs.is_empty() && !theirs.iter().any(|a| archs.contains(a)) {
-            eprintln!("note: kernel packs for {} exist for {} only, not for this machine's GPUs ({})", opts.model_id, theirs.join(", "), archs.join(", "));
+            crate::step::note(&format!("note: kernel packs for {} exist for {} only, not for this machine's GPUs ({})", opts.model_id, theirs.join(", "), archs.join(", ")));
         }
         return Ok(PackDecision::None);
     };
@@ -118,7 +118,7 @@ pub(super) fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecis
         return Ok(PackDecision::Declined);
     }
     if let Err(e) = crate::platform_cli::login(None, None) {
-        eprintln!("note: {e}; continuing without the optimised kernels");
+        crate::step::note(&format!("note: {e}; continuing without the optimised kernels"));
         return Ok(PackDecision::Declined);
     }
     match linked() {
@@ -131,7 +131,7 @@ pub(super) fn ask_login(offer: &crate::packs::Offer, opts: &InstallOpts) -> Resu
     // Asked only on a terminal; elsewhere one note, and the install continues with SGLang.
     let what = format!("Optimised kernels for {} are available for this GPU ({})", opts.model_id, offer.arch);
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
-        eprintln!("note: {what} to nodes logged in to the Goethe console (goethe login); continuing without them");
+        crate::step::note(&format!("note: {what} to nodes logged in to the Goethe console (goethe login); continuing without them"));
         return Ok(false);
     }
     let a = crate::term::ask(&format!("{what}.\nLog in to the Goethe console to install them? Otherwise goethe uses SGLang. [Y/n]"), "y")?;

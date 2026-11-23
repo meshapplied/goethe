@@ -159,22 +159,21 @@ fn the_chat_screen_streams_a_reply_and_leaves_cleanly_without_writing_a_file() {
     settle(&master, &mut seen);
     let following = screen_of(&seen);
     assert!(following[1..=20].iter().any(|r| r.contains("row 70")), "following the stream shows its end: {following:?}");
-    assert!(!following.iter().any(|r| r.contains("> hello")), "the first lines scrolled off while following: {following:?}");
+    assert!(!following.iter().any(|r| r.contains("hello, this line")), "the first lines scrolled off while following: {following:?}");
     type_keys(&master, "\x1b");
     read_until(&master, &mut seen, "[q] quit");
     type_keys(&master, "g");
     read_until(&master, &mut seen, "scrolled: G follows");
     settle(&master, &mut seen);
     let top = screen_of(&seen);
-    assert!(top[1].contains("> hello") && top[2].contains("hi there"), "text flows from the top row: {top:?}");
+    let labelled = top[1] == "\u{27a4} User" && top[2].starts_with("hello") && top[3] == "\u{27a4} Model" && top[4].starts_with("hi there");
+    assert!(labelled, "text flows from the top row, each turn under its label: {top:?}");
     assert!(!top.iter().any(|r| r.contains("row 70")), "scrolled up, the end is below the window: {top:?}");
     type_keys(&master, "G");
     settle(&master, &mut seen);
     let end_again = screen_of(&seen);
     assert!(end_again[1..=20].iter().any(|r| r.contains("row 70")) && !end_again[0].contains("scrolled"), "G follows again: {end_again:?}");
     type_keys(&master, "q");
-    read_until(&master, &mut seen, "exit? Enter = exit, q = back");
-    type_keys(&master, "\r");
     let end = Instant::now() + Duration::from_secs(10);
     let status = loop {
         if let Some(s) = child.try_wait().unwrap() {

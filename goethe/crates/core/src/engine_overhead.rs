@@ -103,7 +103,7 @@ pub fn model_runtime(home: &Path, model_id: &str) -> String {
 }
 
 pub fn card_runtime(card: &toml::Value) -> String {
-    // Spelling on the card (ternary ≠ launch id sglang; learned rows key on the spelling).
+    // The runtime named on the card; learned rows key on it.
     card.get("runtime").and_then(|v| v.as_str()).unwrap_or("sglang").to_string()
 }
 
@@ -266,16 +266,14 @@ mod tests {
     }
 
     #[test]
-    fn ternary_card_spelling_stays_ternary_for_learned_rows() {
-        let tern: toml::Value = toml::from_str("runtime = \"ternary\"").unwrap();
-        let plain: toml::Value = toml::from_str("runtime = \"sglang\"").unwrap();
-        assert_eq!(card_runtime(&tern), "ternary");
-        assert_eq!(card_runtime(&plain), "sglang");
-        assert_eq!(crate::engines::of_card(&tern).unwrap().id, "sglang");
+    fn learned_rows_key_on_the_card_runtime() {
+        let gguf: toml::Value = toml::from_str("runtime = \"llama.cpp\"").unwrap();
+        assert_eq!(card_runtime(&gguf), "llama.cpp");
+        assert_eq!(card_runtime(&toml::from_str("").unwrap()), "sglang");
         let td = tempfile::tempdir().unwrap();
         let con = crate::db::open(td.path()).unwrap();
-        store_learned(&con, "m", "GPU", 1, Kind::Overhead, 2.5, "ternary").unwrap();
-        assert_eq!(read_learned(&con, "m", "GPU", 1, "ternary").overhead_gb, 2.5);
+        store_learned(&con, "m", "GPU", 1, Kind::Overhead, 2.5, "llama.cpp").unwrap();
+        assert_eq!(read_learned(&con, "m", "GPU", 1, "llama.cpp").overhead_gb, 2.5);
         assert_eq!(read_learned(&con, "m", "GPU", 1, "sglang").overhead_gb, 0.0, "sglang rows stay separate");
     }
 

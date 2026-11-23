@@ -3,7 +3,9 @@
 use crate::{db, nginx, security};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -12,16 +14,43 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const DEFAULT_PORT: u16 = 8444;
 pub const MIN_SECS: i64 = 60;
 pub const MAX_SECS: i64 = 7 * 86_400;
-pub const PUBLIC_MUX_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
+const SUN_PATH_MAX: usize = 100;
 
-pub fn public_mux_addr(mux_port: u16) -> SocketAddr {
-    // Public-gateway traffic: 127.0.0.2:mux, or on macOS (no 127.0.0.2) 127.0.0.1 at mux+200, past the engine ports.
-    if cfg!(target_os = "macos") {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), mux_port.wrapping_add(200))
-    } else {
-        SocketAddr::new(IpAddr::V4(PUBLIC_MUX_IP), mux_port)
-    }
+pub fn public_mux_socket(home: &Path) -> PathBuf {
+    // Public-gateway traffic reaches goethed only over this socket, which only nginx can open, so the X-Real-IP it sets is the client's.
+    nginx::nginx_prefix(home).join("mux-public.sock")
 }
+
+pub fn bind_public_mux(home: &Path) -> Result<UnixListener, String> {
+    // Owner-only (0600); under root, 0660 for the nobody group nginx workers run as. A stale socket from an earlier goethed is replaced.
+    let path = public_mux_socket(home);
+    if path.as_os_str().len() > SUN_PATH_MAX {
+        return Err(format!("{} is too long for a socket path; use a shorter GOETHE_HOME", path.display()));
+    }
+    fs::create_dir_all(nginx::nginx_prefix(home)).map_err(|e| e.to_string())?;
+    match fs::symlink_metadata(&path) {
+        Ok(m) if m.file_type().is_socket() => fs::remove_file(&path).map_err(|e| format!("remove {}: {e}", path.display()))?,
+        Ok(_) => return Err(format!("{} exists and is not a socket", path.display())),
+        Err(_) => {}
+    }
+    let listener = UnixListener::bind(&path).map_err(|e| format!("bind {}: {e}", path.display()))?;
+    let mode = match nginx::worker_gid() {
+        Some(gid) => {
+            if let Err(e) = std::os::unix::fs::chown(&path, None, Some(gid)) {
+                let _ = fs::remove_file(&path);
+                return Err(format!("chown {}: {e}", path.display()));
+            }
+            0o660
+        }
+        None => 0o600,
+    };
+    if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(mode)) {
+        let _ = fs::remove_file(&path);
+        return Err(format!("chmod {}: {e}", path.display()));
+    }
+    Ok(listener)
+}
+
 const DEFAULT_RATE_PER_IP: u64 = 10;
 const DEFAULT_CONN_PER_IP: u64 = 16;
 
@@ -219,26 +248,19 @@ fn decide(share: Option<&Share>, key_id: &str, is_admin: bool, now: i64, client:
     Access::Allowed
 }
 
-type KeyRow = (String, String, bool, Option<String>, Option<String>, Option<String>);
+type KeyRow = (String, String, bool, Option<String>, Option<String>);
 
 fn key_rows(home: &Path) -> Result<Vec<KeyRow>, String> {
     let con = db::open(home).map_err(|e| e.to_string())?;
     let mut stmt = con
-        .prepare("SELECT key_id, name, is_admin, expires_at, model_scope, token FROM api_keys ORDER BY created_at")
+        .prepare("SELECT key_id, name, is_admin, expires_at, model_scope FROM api_keys ORDER BY created_at")
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0, r.get(3)?, r.get(4)?, r.get(5)?)))
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0, r.get(3)?, r.get(4)?)))
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string());
     rows
-}
-
-fn strip_tokens_for_reopen(keys: &mut [SharedKey]) {
-    // Reopening remembered keys must not reprint bearer tokens (goethe api / keys create already showed them).
-    for k in keys {
-        k.token = None;
-    }
 }
 
 fn resolve_keys(home: &Path, wanted: &[String], until: i64, warnings: &mut Vec<String>) -> Result<Vec<SharedKey>, String> {
@@ -254,7 +276,7 @@ fn resolve_keys(home: &Path, wanted: &[String], until: i64, warnings: &mut Vec<S
             [] => return Err(format!("no API key named {w:?}; keys: {}", if names().is_empty() { "none (create one with goethe api keys create <name> --models <model>)".into() } else { names() })),
             _ => return Err(format!("several keys are named {w:?}; use the key id from goethe api keys")),
         };
-        let (id, name, admin, expires, models, token) = row.clone();
+        let (id, name, admin, expires, models) = row.clone();
         if admin {
             return Err(format!("{name} is an admin key; admin keys never work on the public gateway"));
         }
@@ -268,7 +290,7 @@ fn resolve_keys(home: &Path, wanted: &[String], until: i64, warnings: &mut Vec<S
             warnings.push(format!("{name} may use every model; a key limited with --models is safer to share"));
         }
         if !out.iter().any(|k| k.id == id) {
-            out.push(SharedKey { id, name, token, models, expires });
+            out.push(SharedKey { id, name, token: None, models, expires });
         }
     }
     Ok(out)
@@ -343,8 +365,7 @@ fn resolve_share_cidrs(
 }
 
 fn mux_public_listening(home: &Path) -> bool {
-    nginx::persisted_mux_port(home)
-        .is_ok_and(|p| TcpStream::connect_timeout(&public_mux_addr(p), Duration::from_millis(500)).is_ok())
+    UnixStream::connect(public_mux_socket(home)).is_ok()
 }
 
 fn wait_listening(port: u16, timeout: Duration) -> bool {
@@ -374,7 +395,7 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
     if !mux_public_listening(home) {
         return Err("goethed does not serve the public gateway yet; restart it with goethe down then goethe up".to_string());
     }
-    let _lock = nginx::gateway_lock(home)?;
+    let lock = nginx::gateway_lock(home)?;
     let previous = load(home);
     let until = now() + a.secs;
     let mut warnings = Vec::new();
@@ -387,9 +408,7 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
     };
     let reopen = a.keys.is_empty();
     let mut keys = resolve_keys(home, &wanted, until, &mut warnings)?;
-    if reopen {
-        strip_tokens_for_reopen(&mut keys);
-    }
+    let already: Vec<String> = keys.iter().filter(|k| previous.as_ref().is_some_and(|p| p.active_at(now()) && p.grant(&k.id).is_some_and(|g| g.until > now()))).map(|k| k.id.clone()).collect();
     let cli_allow = a.allow.iter().map(|c| security::canonical_cidr(c)).collect::<Result<Vec<_>, _>>()?;
     let port = a.port.or(previous.as_ref().map(|p| p.port)).unwrap_or(DEFAULT_PORT);
     let mut grants: Vec<Grant> = previous
@@ -412,7 +431,7 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
         ));
     }
     if reopen {
-        warnings.push("the key secret is not printed again; goethe api shows it".into());
+        warnings.push("the key secrets are not printed again; goethe api keys rotate <key-id> makes a new one".into());
     }
     let gateway_port = nginx::public_port_u16(home);
     let mux_port = nginx::persisted_mux_port(home)?;
@@ -446,8 +465,25 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
         let _ = nginx::apply_locked(home);
         return Err(format!("could not open the public gateway: {e}"));
     }
+    drop(lock);
+    if !reopen {
+        renew_secrets(home, &mut keys, &already, &mut warnings);
+    }
     let cert = cert_path(home);
     Ok(Opened { fingerprint: fingerprint(&cert), cert, share, keys, public_ip, warnings })
+}
+
+fn renew_secrets(home: &Path, keys: &mut [SharedKey], already: &[String], warnings: &mut Vec<String>) {
+    // Only hashes are stored, so a newly shared key gets a new secret to send; one already shared keeps the secret its client has.
+    for k in keys.iter_mut().filter(|k| !already.contains(&k.id)) {
+        match security::rotate_secret(home, &k.id) {
+            Ok(token) => k.token = Some(token),
+            Err(e) => warnings.push(format!("{}: no new secret ({e}); goethe api keys rotate {} makes one", k.name, k.id)),
+        }
+    }
+    if keys.iter().any(|k| k.token.is_some()) {
+        warnings.push("each key above has a new secret; its old one no longer works, here or on the private gateway".into());
+    }
 }
 
 pub fn stop_key(home: &Path, key: &str) -> Result<bool, String> {
@@ -585,8 +621,8 @@ fn fingerprint(crt: &Path) -> Option<String> {
     text.trim().split_once('=').map(|(_, f)| f.to_string())
 }
 
-pub fn nginx_block(home: &Path, mux_port: u16, modern_http2: bool, max_body_mb: u64) -> String {
-    // The public server for nginx while a window is open, else nothing: its own port, certificate, limits and upstream (127.0.0.2).
+pub fn nginx_block(home: &Path, modern_http2: bool, max_body_mb: u64) -> String {
+    // The public server for nginx while a window is open, else nothing: its own port, certificate, limits and upstream (the goethed public socket).
     let Some(share) = active(home) else { return String::new() };
     let dir = nginx::nginx_prefix(home);
     if !cert_path(home).is_file() && ensure_cert(home, None).is_err() {
@@ -605,7 +641,7 @@ pub fn nginx_block(home: &Path, mux_port: u16, modern_http2: bool, max_body_mb: 
         .replace("{{BURST_PER_IP}}", &(2 * share_rate(home)).to_string())
         .replace("{{CONN_PER_IP}}", &share_conn(home).to_string())
         .replace("{{MAX_BODY_MB}}", &max_body_mb.to_string())
-        .replace("{{PUBLIC_MUX}}", &public_mux_addr(mux_port).to_string())
+        .replace("{{PUBLIC_MUX}}", &nginx::quote(Path::new(&format!("unix:{}", public_mux_socket(home).display()))))
 }
 
 pub fn status_line(home: &Path) -> Option<String> {
@@ -718,7 +754,7 @@ mod tests {
         let got = resolve_keys(h, &["app".into(), "k1".into()], now() + 60, &mut w).unwrap();
         assert_eq!(got.len(), 1, "the same key twice counts once");
         assert!(w.is_empty());
-        assert!(got[0].token.as_deref() == Some("tok"));
+        assert!(got[0].token.is_none(), "no secret is read back");
         assert!(resolve_keys(h, &["root".into()], now() + 60, &mut w).err().unwrap().contains("admin"));
         assert!(resolve_keys(h, &["old".into()], now() + 60, &mut w).err().unwrap().contains("expired"));
         assert!(resolve_keys(h, &["dup".into()], now() + 60, &mut w).err().unwrap().contains("several"));
@@ -728,30 +764,33 @@ mod tests {
     }
 
     #[test]
-    fn reopen_without_named_keys_strips_bearer_tokens() {
+    fn a_newly_shared_key_gets_a_new_secret_and_one_already_shared_keeps_its_own() {
         let dir = home_with_keys();
         let h = dir.path();
+        let con = db::open(h).unwrap();
+        let stored = |id: &str| con.query_row("SELECT token_hash, token FROM api_keys WHERE key_id = ?1", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))).unwrap();
         let mut w = Vec::new();
-        let mut keys = resolve_keys(h, &["app".into()], now() + 60, &mut w).unwrap();
-        assert_eq!(keys[0].token.as_deref(), Some("tok"));
-        strip_tokens_for_reopen(&mut keys);
-        assert!(keys[0].token.is_none());
-        assert_eq!(keys[0].name, "app");
+        let mut keys = resolve_keys(h, &["app".into(), "wide".into()], now() + 60, &mut w).unwrap();
+        renew_secrets(h, &mut keys, &["k4".to_string()], &mut w);
+        let token = keys[0].token.clone().expect("app is newly shared");
+        assert_eq!(stored("k1"), (security::token_hash(&token), None), "only the new secret's hash is stored");
+        assert!(keys[1].token.is_none() && stored("k4").0 == "k4", "wide was already shared, so its client keeps working");
+        assert!(w.iter().any(|x| x.contains("old one no longer works")), "{w:?}");
     }
 
     #[test]
     fn no_block_is_rendered_without_an_open_window() {
         let dir = home_with_keys();
         let h = dir.path();
-        assert_eq!(nginx_block(h, 30000, true, 64), "");
+        assert_eq!(nginx_block(h, true, 64), "");
         store(h, &share(true, now() - 1)).unwrap();
-        assert_eq!(nginx_block(h, 30000, true, 64), "", "expired");
+        assert_eq!(nginx_block(h, true, 64), "", "expired");
         store(h, &share(false, now() + 600)).unwrap();
-        assert_eq!(nginx_block(h, 30000, true, 64), "", "shut down");
+        assert_eq!(nginx_block(h, true, 64), "", "shut down");
         store(h, &Share { allow: vec!["203.0.113.7/32".into()], ..share(true, now() + 600) }).unwrap();
-        let block = nginx_block(h, 30000, true, 64);
+        let block = nginx_block(h, true, 64);
         assert!(block.contains("listen 0.0.0.0:8444 ssl"), "{block}");
-        assert!(block.contains(&public_mux_addr(30000).to_string()), "{block}");
+        assert!(block.contains(&format!("server \"unix:{}\";", public_mux_socket(h).display())), "{block}");
         assert!(block.contains("allow 203.0.113.7/32;\n    deny all;"));
         assert!(block.contains("public.crt"));
     }
@@ -761,7 +800,7 @@ mod tests {
         let dir = home_with_keys();
         let h = dir.path();
         store(h, &Share { allow: vec![], ..share(true, now() + 600) }).unwrap();
-        let block = nginx_block(h, 30000, true, 64);
+        let block = nginx_block(h, true, 64);
         assert!(block.contains("deny all;"), "{block}");
         assert!(!block.contains("allow "), "empty allowlist must not admit the world: {block}");
     }
@@ -771,7 +810,7 @@ mod tests {
         let dir = home_with_keys();
         let h = dir.path();
         store(h, &Share { allow: vec!["198.51.100.7/32; include /etc/passwd".into(), "198.51.100.8".into()], ..share(true, now() + 600) }).unwrap();
-        let block = nginx_block(h, 30000, true, 64);
+        let block = nginx_block(h, true, 64);
         assert!(!block.contains("include") && block.contains("allow 198.51.100.8/32;\n    deny all;"), "{block}");
     }
 
@@ -829,7 +868,7 @@ mod tests {
         let dir = home_with_keys();
         let h = dir.path();
         store(h, &Share { allow: vec!["0.0.0.0/0".into()], ..share(true, now() + 600) }).unwrap();
-        let block = nginx_block(h, 30000, true, 64);
+        let block = nginx_block(h, true, 64);
         assert!(block.contains("allow 0.0.0.0/0;\n    deny all;"), "{block}");
         assert!(block.contains(&format!("rate={DEFAULT_RATE_PER_IP}r/s")), "{block}");
         assert!(block.contains(&format!("limit_conn goethe_pub_conn {DEFAULT_CONN_PER_IP}")), "{block}");
@@ -847,7 +886,7 @@ mod tests {
         assert_eq!(share_rate(h), 25);
         assert_eq!(share_conn(h), 40);
         store(h, &Share { allow: vec!["203.0.113.7/32".into()], ..share(true, now() + 600) }).unwrap();
-        let block = nginx_block(h, 30000, true, 64);
+        let block = nginx_block(h, true, 64);
         assert!(block.contains("rate=25r/s"), "{block}");
         assert!(block.contains("burst=50"), "{block}");
         assert!(block.contains("limit_conn goethe_pub_conn 40"), "{block}");

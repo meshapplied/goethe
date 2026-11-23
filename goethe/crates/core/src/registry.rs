@@ -59,10 +59,6 @@ pub struct RegistryModel {
     #[serde(default)]
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pack_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_model_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pythonpath: Option<Vec<String>>,
@@ -87,20 +83,6 @@ pub struct RegistryModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modalities: Option<Vec<String>>,
 }
-
-const TERNARY_PROFILES: &[&str] = &[
-    "flash_next",
-    "flash-next",
-    "qwen4_exp",
-    "qwen38",
-    "qwen",
-    "deepseek_v41",
-    "deepseek",
-    "ds",
-    "bonsai",
-    "bonsai-27b",
-    "ternary-bonsai",
-];
 
 fn default_arch() -> String {
     "dense".to_string()
@@ -360,14 +342,14 @@ fn validate_entry(m: &RegistryModel, errors: &mut Vec<String>) {
     }
     let legacy = m.kv_bytes_per_token.is_some() && m.default_ctx.is_some();
     if m.num_attention_heads.is_none() {
-        if m.effective_runtime() == "ternary" || legacy {
+        if legacy {
             eprintln!("warning: {}: missing num_attention_heads (legacy entry)", m.id);
         } else {
             errors.push(format!("{}: num_attention_heads required", m.id));
         }
     }
     if m.num_kv_heads.is_none() {
-        if m.effective_runtime() == "ternary" || legacy {
+        if legacy {
             eprintln!("warning: {}: missing num_kv_heads (legacy entry)", m.id);
         } else {
             errors.push(format!("{}: num_kv_heads required", m.id));
@@ -377,11 +359,8 @@ fn validate_entry(m: &RegistryModel, errors: &mut Vec<String>) {
         errors.push(format!("{}: architecture must be dense or moe", m.id));
     }
     let rt = m.effective_runtime();
-    if rt != "sglang" && rt != "ternary" && rt != "llama.cpp" {
-        errors.push(format!("{}: runtime must be sglang, ternary or llama.cpp", m.id));
-    }
-    if rt == "ternary" {
-        validate_ternary(m, errors);
+    if rt != "sglang" && rt != "llama.cpp" {
+        errors.push(format!("{}: runtime must be sglang or llama.cpp", m.id));
     }
     if let Some(msg) = sglang_infer::reserved_flag_error(&m.extra_sglang_args) {
         errors.push(format!("{}: {msg}", m.id));
@@ -410,31 +389,6 @@ fn validate_entry(m: &RegistryModel, errors: &mut Vec<String>) {
         if !sm.contains('.') {
             eprintln!("warning: {}: supported_sm entry {sm} should look like 8.6 or 12.0", m.id);
         }
-    }
-}
-
-fn validate_ternary(m: &RegistryModel, errors: &mut Vec<String>) {
-    // Ternary entries must name both checkpoints, a known profile, and the dirs install creates.
-    let (Some(pack), Some(base)) = (m.pack_id.as_deref(), m.base_model_id.as_deref()) else {
-        errors.push(format!("{}: ternary requires pack_id and base_model_id", m.id));
-        return;
-    };
-    let dirs = crate::install::ternary_dirs(Path::new("$GOETHE_HOME"), pack, base);
-    let env = m.env.as_ref().and_then(|v| v.as_table());
-    let get = |k: &str| env.and_then(|t| t.get(k)).and_then(|v| v.as_str()).unwrap_or("");
-    for (key, want) in [("TERNARY_PACK_DIR", &dirs.pack), ("TERNARY_MODEL_DIR", &dirs.base)] {
-        let want = want.display().to_string();
-        if get(key) != want {
-            errors.push(format!("{}: env {key} must be {want} (got {:?})", m.id, get(key)));
-        }
-    }
-    if !TERNARY_PROFILES.contains(&get("TERNARY_PROFILE")) {
-        errors.push(format!(
-            "{}: env TERNARY_PROFILE {:?} is not one of {}",
-            m.id,
-            get("TERNARY_PROFILE"),
-            TERNARY_PROFILES.join(", ")
-        ));
     }
 }
 
@@ -507,7 +461,7 @@ fn warn_unknown_fields(text: &str) {
         "version", "models", "id", "architecture", "static_vram_gb", "kv_bytes_per_token",
         "kv_elems_per_token", "min_total_vram_gb", "supported_sm", "default_ctx", "max_ctx",
         "default_max_conc", "default_tp", "num_attention_heads", "num_kv_heads", "attention",
-        "kv_cache_dtype", "memory", "extra_sglang_args", "runtime", "pack_id", "base_model_id", "env",
+        "kv_cache_dtype", "memory", "extra_sglang_args", "runtime", "env",
         "pythonpath", "revision", "gated", "manual_download", "download_gb", "description", "family",
         "license", "released", "modalities",
     ];
@@ -779,8 +733,6 @@ pub fn infer_one_entry(
         memory: Some(memory),
         extra_sglang_args: extra,
         runtime: Some(runtime.unwrap_or("sglang").to_string()),
-        pack_id: None,
-        base_model_id: None,
         env: None,
         pythonpath: None,
         revision: Some(sha),
@@ -800,25 +752,6 @@ pub fn infer_one_entry(
 #[cfg(test)]
 mod validate_tests {
     use super::*;
-
-    #[test]
-    fn legacy_ternary_entry_validates() {
-        let json = r#"{"version":1,"models":[{"id":"goethe/x","runtime":"ternary","architecture":"moe",
-            "pack_id":"o/p","base_model_id":"o/b","static_vram_gb":1.0,"kv_bytes_per_token":512,
-            "supported_sm":["12.0"],"default_ctx":4096,"default_max_conc":4,"default_tp":2,
-            "kv_cache_dtype":"fp8_e4m3","env":{"TERNARY_PACK_DIR":"$GOETHE_HOME/models/o__p__pack",
-            "TERNARY_MODEL_DIR":"$GOETHE_HOME/models/o__b","TERNARY_PROFILE":"flash_next"}}]}"#;
-        let reg = parse_registry(json).unwrap();
-        let mut errors = Vec::new();
-        validate_entry(&reg.models[0], &mut errors);
-        assert!(errors.is_empty(), "{errors:?}");
-        let mut bad = reg.models[0].clone();
-        bad.env = Some(toml::Value::Table(toml::from_str("TERNARY_PACK_DIR = \"x\"\nTERNARY_PROFILE = \"moe\"").unwrap()));
-        bad.extra_sglang_args = vec!["--tool-call-parser".into()];
-        let mut errors = Vec::new();
-        validate_entry(&bad, &mut errors);
-        assert_eq!(errors.len(), 4, "{errors:?}");
-    }
 
     #[test]
     fn reserved_flags_are_refused() {
@@ -852,8 +785,6 @@ mod validate_tests {
             memory: None,
             extra_sglang_args: vec![],
             runtime: Some("sglang".into()),
-            pack_id: None,
-            base_model_id: None,
             env: None,
             pythonpath: None,
             revision: None,
@@ -910,14 +841,15 @@ mod validate_tests {
     fn readme_install_ids_are_catalog_ids() {
         let readme = include_str!("../../../../README.md");
         let reg = bundled().unwrap();
-        let mut found = false;
         for line in readme.lines() {
             if let Some(rest) = line.split("goethe install ").nth(1) {
                 let id = rest.split_whitespace().next().unwrap();
-                found = true;
+                assert!(reg.models.iter().any(|m| m.id == id), "{id}");
+            }
+            if let Some(rest) = line.split("model=\"").nth(1) {
+                let id = rest.split('"').next().unwrap();
                 assert!(reg.models.iter().any(|m| m.id == id), "{id}");
             }
         }
-        assert!(found);
     }
 }

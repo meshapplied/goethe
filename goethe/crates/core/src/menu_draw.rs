@@ -11,7 +11,7 @@ pub(super) const LOGO: [&str; 4] = [
     "| (_ || (_) || _|   | |  | __ | | _| ",
     " \\___| \\___/ |___|  |_|  |_||_| |___|",
 ];
-pub(super) const SITE: &str = "https://goethe.sh/";
+pub(super) const SITE: &str = "goethe.sh";
 pub(super) const GAP: &str = "   ";
 pub(super) fn hl() -> String {
     // The theme's main color, bold: the highlighted entry, the cursor and the logo.
@@ -21,6 +21,11 @@ pub(super) fn hl() -> String {
 pub(super) fn mark() -> String {
     // The theme's secondary color: selection dots and text carets.
     format!("1;{}", crate::theme::secondary())
+}
+
+pub(super) fn drop_mark() -> String {
+    // The theme's third color: an installed model chosen to be uninstalled.
+    format!("1;{}", crate::theme::third())
 }
 
 pub(super) fn sgr(code: &str, text: &str) -> String {
@@ -85,7 +90,7 @@ pub(super) fn brand() -> Vec<String> {
     // The small GOETHE inscription in the theme's main color, the site below it in the third.
     let mut out = vec![String::new()];
     out.extend(LOGO.iter().map(|l| format!("  {}", sgr(&crate::theme::main(), l))));
-    out.push(format!("  {}", sgr(&crate::theme::third(), SITE)));
+    out.push(format!("  Website: {}", sgr(&crate::theme::third(), SITE)));
     out.push(String::new());
     out
 }

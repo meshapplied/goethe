@@ -4,11 +4,14 @@
 
 <p align="center">
   <img alt="NVIDIA CUDA 12.8 or newer" src="https://img.shields.io/badge/NVIDIA%20CUDA-%E2%89%A5%2012.8-76B900?logo=nvidia&logoColor=white">
-  <img alt="GPU architectures sm_86 to sm_120" src="https://img.shields.io/badge/arch-sm__86%20%E2%80%93%20sm__120-76B900">
+  <img alt="GPU architectures sm_80 to sm_121" src="https://img.shields.io/badge/arch-sm__80%20%E2%80%93%20sm__121-76B900">
   <img alt="Written in Rust" src="https://img.shields.io/badge/language-Rust-B7410E?logo=rust&logoColor=white">
-  <img alt="Linux x86_64 and aarch64" src="https://img.shields.io/badge/OS-Linux%20x86__64%20%2F%20aarch64-FCC624?logo=linux&logoColor=black">
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
   <a href="https://github.com/meshapplied/goethe/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/meshapplied/goethe/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <br>
+  <img alt="Linux" src="https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black">
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white">
+  <img alt="Windows via WSL" src="https://img.shields.io/badge/Windows%20(WSL)-0078D4?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0wIDBoMTEuNHYxMS40SDB6TTEyLjYgMEgyNHYxMS40SDEyLjZ6TTAgMTIuNmgxMS40VjI0SDB6TTEyLjYgMTIuNkgyNFYyNEgxMi42eiIvPjwvc3ZnPg==">
   <br>
   <a href="https://goethe.sh/docs"><img alt="Documentation at goethe.sh/docs" src="https://img.shields.io/badge/docs-goethe.sh%2Fdocs-87D7FF?logo=readthedocs&logoColor=white"></a>
   <a href="https://discord.gg/fadnuFrm4"><img alt="Join us on Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
@@ -18,40 +21,39 @@
 
 <p align="center">If Goethe is useful to you, a ⭐ on <a href="https://github.com/meshapplied/goethe">GitHub</a> helps others find it.</p>
 
-Goethe turns a Linux machine into your own API, compatible with OpenAI, Anthropic and LiteLLM clients. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
+Goethe turns a machine into your own API, compatible with OpenAI, Anthropic and LiteLLM clients. Install it, add a model, and point your apps, your team or your other machines at one address. Your prompts, your data and your models stay on hardware you control.
+
+For Linux and MacOS systems run this command in the terminal:
 
 ```bash
 curl -fsSL https://pkg.goethe.sh/install.sh | bash
-goethe
 ```
 
-On Windows 10/11 (x64), elevated PowerShell (enables WSL2, then runs the same `install.sh` inside Ubuntu):
+For Windows 10/11 (x64), run this in PowerShell:
 
 ```powershell
 irm https://pkg.goethe.sh/install.ps1 | iex
 ```
 
-`goethe` on its own starts Goethe and, the first time, walks you through three steps: install a model, serve it through the API, and configure who can reach it. If you prefer plain commands, these do the same:
+On a Linux GPU server or cloud GPU host with Docker ([setup without a terminal](docs/user-guide.md#docker-and-cloud-gpu-hosts)):
 
 ```bash
-# 1. Start Goethe and load a model
-goethe up
-goethe install nvidia/Llama-3.1-8B-Instruct-NVFP4 --load
-
-# 2. Share it
-goethe api expose vpn                # or local, or public: this machine only, your VPN (recommended), or a public address
-goethe api keys create my-laptop         # one key per app or person
-goethe api                           # the address to give your apps
+docker run -d --name goethe --gpus all --network host -v goethe:/workspace ghcr.io/meshapplied/goethe
 ```
 
-On a 32 GB Blackwell GPU, `goethe models recommend` lists `meshapplied/Qwen3.8-27B-NVFP4-NInfer` first.
+Then:
+
+```bash
+goethe          # launch interactive menu
+goethe start    # quick setup: install a model, serve it and open the gateway
+```
 
 Anything that speaks the OpenAI, Anthropic or LiteLLM API can use it right away, all at the same address: the OpenAI and Anthropic SDKs, LiteLLM, LangChain, LlamaIndex, Open WebUI, coding assistants, or plain `curl`.
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="https://<your-goethe-address>:8443/v1", api_key="goethe_sk_...")
+client = OpenAI(base_url="https://<your-goethe-address>:8443/v1", api_key="goethe_sk_...")  # from goethe api keys create, shown once
 reply = client.chat.completions.create(
     model="nvidia/Llama-3.1-8B-Instruct-NVFP4",
     messages=[{"role": "user", "content": "Hello!"}],
@@ -62,8 +64,9 @@ print(reply.choices[0].message.content)
 ## Why Goethe
 
 - **Easy to serve.** Every model you load is served at the same URL; a request picks its model by name.
-- **Fast.** Use the custom kernel attachments to accelerate and optimise model capability.
-- **Private by default.** Nothing reaches the API until you allow it. Rate-limit, expire, scope or revoke keys at any time.
+- **Fast.** Optimised kernel packs speed up supported models on supported GPUs, with the plain runtime for everything else.
+- **Private by default.** Nothing reaches the API until you allow it. Keys are stored only as hashes; rate-limit, expire, scope, renew or revoke them at any time.
+- **Measured.** `goethe metrics` shows requests, tokens, time to first token, decode speed and GPU use per model and key, kept on the machine.
 - **Fits your network.** This machine only, a VPN, or a public IP. `goethe api expose` sets it.
 - **Many models, many GPUs.** Run several models side by side, split large models across GPUs, and keep other GPU software running next to Goethe.
 - **Always on.** Loaded models come back after a reboot or a crash.
@@ -76,7 +79,7 @@ print(reply.choices[0].message.content)
 | Cloud GPU virtual machines | AWS, Google Cloud, Azure, Oracle Cloud, Lambda, CoreWeave, Paperspace |
 | GPU containers | RunPod, Vast.ai, and Docker with the NVIDIA Container Toolkit |
 
-Linux on x86_64 or ARM64 (glibc 2.30 or newer, for example Ubuntu 20.04+ or Debian 11+). Goethe recognises the cloud provider or container it runs in and shows the address to use from outside.
+Linux on x86_64 or ARM64 (glibc 2.30 or newer, for example Ubuntu 20.04+ or Debian 11+), macOS on Apple Silicon (macOS 14+), or Windows 10/11 via WSL2. Goethe recognises the cloud provider or container it runs in and shows the address to use from outside.
 
 ## GPU and CUDA compatibility
 
@@ -106,27 +109,24 @@ Supported [model families and quantization formats](docs/user-guide.md#supported
 
 ## Known limits
 
-- Gated models need the license accepted on Hugging Face and a read token (install with `--hf-token`). This includes `orcarouter/Qwen3.8-Flash-Next-Uncensored-NVFP4`.
-- Optimised kernel packs (the 27B NVFP4 model, the ternary models and others) need `goethe login` on the node. A model that has only a pack and none for your GPU is refused before anything is downloaded.
+- Gated models need the license accepted on Hugging Face and a read token (install with `--hf-token`).
+- Optimised kernel packs need `goethe login` on the node. If optimised kernels are not available for a given model, goethe defaults to SGlang, if SGlang does not support it either, it checks llama.cpp, displays model unsupported otherwise.
 - If a model's kernel pack cannot run on your GPU, install or load stops with the reason. Add `--fallback` (or set `GOETHE_ALLOW_FALLBACK=1`) to serve it with the plain runtime instead.
 
 ## Documentation
 
 - **[User guide](docs/user-guide.md):** install, add models, share the API, and troubleshooting.
 - **[Command reference](docs/cli.md):** every `goethe` command and option.
-- **[Our models](docs/research-models.md):** the models we publish, and how fast they run.
 - **Full documentation:** [goethe.sh/docs](https://goethe.sh/docs).
 
 ## Repository layout
 
 | Path | What it is |
 |------|------------|
-| [`goethe/`](goethe/) | Goethe: the `goethe` command, the background service, the gateway and the installer |
-| [`lab/`](lab/) | `goethe-lab`: fit/registry helpers used in development and tests |
-| [`nvfp4-kernels/`](nvfp4-kernels/), [`ternary-kernels/`](ternary-kernels/) | GPU kernels behind our models |
-| [`docs/`](docs/) | User guide, command reference and model notes |
-
-Our models on [Hugging Face](https://huggingface.co/meshapplied) and at [goethe.sh/models](https://goethe.sh/models).
+| [`goethe/`](goethe/) | Goethe: the `goethe` command, the `goethed` service, the gateway, packaging and the installer |
+| [`docs/`](docs/) | User guide, command reference |
+| [`install.sh`](install.sh) | Builds Goethe from source; the normal install is `pkg.goethe.sh/install.sh` above |
+| [`AGENTS.md`](AGENTS.md) | Instructions for AI agents |
 
 ## License
 

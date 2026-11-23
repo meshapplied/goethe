@@ -1,7 +1,7 @@
-// SGLang launch: Goethe-owned flags, card extras; ternary cards are the same command plus TERNARY_* env.
+// SGLang launch: Goethe-owned flags and card extras.
 
 use super::{
-    arch_env, card_env, compiler_env, default_cuda_home, engine_key_env, engine_path, expand_home, kept_env, placement_env,
+    arch_env, card_env, compiler_env, default_cuda_home, engine_key_env, engine_path, kept_env, placement_env,
     resolve_python, EngineSpec,
 };
 use crate::sglang_infer::RESERVED_FLAGS;
@@ -12,11 +12,7 @@ pub const SGLANG: super::Engine = super::Engine {
     overhead_gb: crate::calc::BASE_OVERHEAD_GB,
     layer: Some(crate::pyenv::Layer::Sglang),
     params: None,
-    command: |spec| {
-        let mut cmd = sglang_command(spec);
-        apply_ternary(spec, &mut cmd)?;
-        Ok(cmd)
-    },
+    command: |spec| Ok(sglang_command(spec)),
 };
 
 const QUIET_PATHS: &[&str] = &["/health", "/v1/models", "/get_model_info"];
@@ -151,28 +147,10 @@ fn sglang_command(spec: &EngineSpec) -> Command {
     cmd
 }
 
-fn apply_ternary(spec: &EngineSpec, cmd: &mut Command) -> Result<(), String> {
-    if spec.card.get("runtime").and_then(|v| v.as_str()) != Some("ternary") {
-        return Ok(());
-    }
-    crate::runtime::require_ternary_runtime(spec.home)?;
-    for (k, v) in spec.card.as_table().into_iter().flatten() {
-        if let (true, Some(s)) = (k.starts_with("TERNARY_"), v.as_str()) {
-            cmd.env(k, expand_home(s, spec.home));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::test_spec;
     use super::{check_extra_args, graph_args};
-    use std::ffi::OsStr;
-
-    fn arg_vec(cmd: &std::process::Command) -> Vec<String> {
-        cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
-    }
 
     #[test]
     fn graphs_are_captured_up_to_the_concurrency_unless_the_user_says_otherwise() {
@@ -187,55 +165,6 @@ mod tests {
         for theirs in ["--cuda-graph-max-bs-decode=16", "--cuda-graph-bs-prefill", "--cuda-graph-config", "--disable-cuda-graph"] {
             assert!(graph_args(4, &[theirs.to_string()]).is_empty(), "{theirs}");
         }
-    }
-
-    #[test]
-    fn ternary_gets_its_kernel_env_once_installed() {
-        let home = tempfile::tempdir().unwrap();
-        let card: toml::Value = toml::from_str("runtime = \"ternary\"\nTERNARY_PACK_DIR = \"$GOETHE_HOME/p\"").unwrap();
-        let spec = test_spec(home.path(), &card, &[0]);
-        assert!(super::super::command(&spec).unwrap_err().contains("ternary runtime not installed"));
-        std::fs::create_dir_all(crate::runtime::ternary_kernels_dir(home.path())).unwrap();
-        let cmd = super::super::command(&spec).unwrap();
-        let want = format!("{}/p", home.path().display());
-        assert!(cmd.get_envs().any(|(k, v)| k == "TERNARY_PACK_DIR" && v.is_some_and(|v| v.to_string_lossy() == want)));
-        assert_eq!(super::super::of_card(&card).unwrap().id, "sglang");
-        assert_eq!(crate::engine_overhead::card_runtime(&card), "ternary");
-    }
-
-    #[test]
-    fn plain_sglang_does_not_require_ternary_kernels() {
-        let home = tempfile::tempdir().unwrap();
-        let card: toml::Value = toml::from_str("runtime = \"sglang\"\nTERNARY_PACK_DIR = \"/should-not-apply\"").unwrap();
-        let cmd = super::super::command(&test_spec(home.path(), &card, &[0])).unwrap();
-        assert!(!cmd.get_envs().any(|(k, _)| k == OsStr::new("TERNARY_PACK_DIR")));
-    }
-
-    #[test]
-    fn ternary_argv_matches_plain_sglang_only_env_differs() {
-        let home = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(crate::runtime::ternary_kernels_dir(home.path())).unwrap();
-        let plain: toml::Value = toml::from_str("runtime = \"sglang\"").unwrap();
-        let tern: toml::Value =
-            toml::from_str("runtime = \"ternary\"\nTERNARY_PACK_DIR = \"$GOETHE_HOME/p\"\nTERNARY_MODEL_DIR = \"$GOETHE_HOME/b\"").unwrap();
-        let a = super::super::command(&test_spec(home.path(), &plain, &[0])).unwrap();
-        let b = super::super::command(&test_spec(home.path(), &tern, &[0])).unwrap();
-        assert_eq!(arg_vec(&a), arg_vec(&b), "fold must not change the SGLang argv");
-        assert_eq!(a.get_program(), b.get_program());
-        let mut tern_envs: Vec<_> = b
-            .get_envs()
-            .filter(|(k, _)| k.to_string_lossy().starts_with("TERNARY_"))
-            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
-            .collect();
-        tern_envs.sort();
-        assert_eq!(
-            tern_envs,
-            [
-                ("TERNARY_MODEL_DIR".into(), Some(format!("{}/b", home.path().display()))),
-                ("TERNARY_PACK_DIR".into(), Some(format!("{}/p", home.path().display()))),
-            ]
-        );
-        assert!(!a.get_envs().any(|(k, _)| k.to_string_lossy().starts_with("TERNARY_")));
     }
 
     #[test]

@@ -1,0 +1,2078 @@
+{
+  "path": "goethe",
+  "about": "Goethe: serve models through OpenAI and Anthropic compatible gateways",
+  "args": [
+    {
+      "id": "verbose",
+      "kind": "flag",
+      "long": "verbose",
+      "short": "v",
+      "required": false,
+      "multiple": false,
+      "help": "Show the output of every underlying process (also GOETHE_VERBOSE=1); it is always kept in <home>/logs."
+    }
+  ],
+  "commands": [
+    {
+      "path": "goethe start",
+      "about": "Quick setup: install a model, serve it and open the API, step by step (needs a terminal).",
+      "does": {
+        "risk": "change",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": true
+      },
+      "examples": [
+        "goethe start"
+      ]
+    },
+    {
+      "path": "goethe up",
+      "about": "Start Goethe now and at every boot; models loaded last time come back.",
+      "does": {
+        "risk": "change",
+        "needs": [],
+        "gives": [
+          "daemon"
+        ],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe up"
+      ],
+      "args": [
+        {
+          "id": "no_boot",
+          "kind": "flag",
+          "long": "no-boot",
+          "required": false,
+          "multiple": false,
+          "help": "Start now without turning on start at boot."
+        }
+      ]
+    },
+    {
+      "path": "goethe down",
+      "about": "Stop Goethe and its models, and stop starting at boot (models come back on the next up).",
+      "does": {
+        "risk": "destructive",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe down"
+      ],
+      "args": [
+        {
+          "id": "keep_engines",
+          "kind": "flag",
+          "long": "keep-engines",
+          "required": false,
+          "multiple": false,
+          "help": "Leave loaded engines serving; the next goethed adopts them."
+        }
+      ]
+    },
+    {
+      "path": "goethe status",
+      "about": "Whether Goethe runs, the API address, its keys and the models it serves.",
+      "does": {
+        "risk": "read",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe status"
+      ]
+    },
+    {
+      "path": "goethe metrics",
+      "about": "Requests, tokens, speed and GPU use per model and API key over a chosen range, from the local usage log.",
+      "does": {
+        "risk": "read",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe metrics"
+      ]
+    },
+    {
+      "path": "goethe ps",
+      "about": "Running models in detail: GPUs, port, memory, requests and speed.",
+      "does": {
+        "risk": "read",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe ps"
+      ],
+      "args": [
+        {
+          "id": "json",
+          "kind": "flag",
+          "long": "json",
+          "required": false,
+          "multiple": false,
+          "help": "JSON rows with instance_id, slot_key, status, restarts."
+        }
+      ]
+    },
+    {
+      "path": "goethe install",
+      "about": "Download a model from Hugging Face or local path; --load serves it too.",
+      "does": {
+        "risk": "download",
+        "needs": [
+          "daemon"
+        ],
+        "gives": [
+          "installed"
+        ],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe install org/name --load -- --chunked-prefill-size 4096",
+        "goethe install MODEL --load"
+      ],
+      "args": [
+        {
+          "id": "model",
+          "kind": "positional",
+          "value_name": "MODEL",
+          "value": "model",
+          "required": true,
+          "multiple": true,
+          "help": "Hugging Face id (org/name), a local folder, or words from a catalog model's name; a :QUANT suffix (org/name:Q8_0) picks that GGUF file or kernel pack variant."
+        },
+        {
+          "id": "load",
+          "kind": "flag",
+          "long": "load",
+          "required": false,
+          "multiple": false,
+          "help": "Load the model once it is installed."
+        },
+        {
+          "id": "gpu",
+          "kind": "flag",
+          "long": "gpu",
+          "value_name": "GPU",
+          "value": "gpu",
+          "required": false,
+          "multiple": true,
+          "help": "Default GPUs, as goethe gpu lists them: --gpu gpu2 gpu3."
+        },
+        {
+          "id": "ctx",
+          "kind": "flag",
+          "long": "ctx",
+          "value_name": "CTX",
+          "value": "number",
+          "required": false,
+          "multiple": false,
+          "help": "Default context length."
+        },
+        {
+          "id": "max_conc",
+          "kind": "flag",
+          "long": "max-conc",
+          "value_name": "MAX_CONC",
+          "value": "number",
+          "required": false,
+          "multiple": false,
+          "help": "Default max concurrent requests."
+        },
+        {
+          "id": "no_wait",
+          "kind": "flag",
+          "long": "no-wait",
+          "required": false,
+          "multiple": false,
+          "help": "With --load, return once the engine starts instead of waiting until it answers."
+        },
+        {
+          "id": "force",
+          "kind": "flag",
+          "long": "force",
+          "required": false,
+          "multiple": false,
+          "help": "Download again (Hub), or replace an install of another kind, and rebuild the model's settings from defaults."
+        },
+        {
+          "id": "trust_remote_code",
+          "kind": "flag",
+          "long": "trust-remote-code",
+          "required": false,
+          "multiple": false,
+          "help": "Let SGLang run Python code shipped with the model (config.json auto_map)."
+        },
+        {
+          "id": "yes",
+          "kind": "flag",
+          "long": "yes",
+          "required": false,
+          "multiple": false,
+          "help": "Do not ask: download without confirming, and with --load use GPUs that are busy or hold processes goethe did not start."
+        },
+        {
+          "id": "hf_token",
+          "kind": "flag",
+          "long": "hf-token",
+          "required": false,
+          "multiple": false,
+          "help": "Ask for a Hugging Face token (gated or private models); it is used for this download only."
+        },
+        {
+          "id": "name",
+          "kind": "flag",
+          "long": "name",
+          "value_name": "NAME",
+          "value": "text",
+          "required": false,
+          "multiple": false,
+          "help": "Model id to register a local folder under."
+        },
+        {
+          "id": "copy",
+          "kind": "flag",
+          "long": "copy",
+          "required": false,
+          "multiple": false,
+          "help": "Copy a local folder instead of linking to it."
+        },
+        {
+          "id": "fallback",
+          "kind": "flag",
+          "long": "fallback",
+          "required": false,
+          "multiple": false,
+          "help": "If the model's kernel pack cannot run here, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also GOETHE_ALLOW_FALLBACK=1."
+        },
+        {
+          "id": "extra",
+          "kind": "trailing",
+          "value_name": "EXTRA",
+          "required": false,
+          "multiple": true,
+          "help": "Extra engine flags, only after --."
+        }
+      ]
+    },
+    {
+      "path": "goethe remove",
+      "about": "Unload and delete an installed model (a folder of your own is only unregistered).",
+      "does": {
+        "risk": "destructive",
+        "needs": [],
+        "gives": [],
+        "confirms": true,
+        "terminal": false
+      },
+      "examples": [
+        "goethe remove MODEL"
+      ],
+      "args": [
+        {
+          "id": "model",
+          "kind": "positional",
+          "value_name": "MODEL",
+          "value": "installed_model",
+          "required": true,
+          "multiple": true,
+          "help": "Installed models to remove: ids, aliases or words from a name, one argument each."
+        },
+        {
+          "id": "yes",
+          "kind": "flag",
+          "long": "yes",
+          "required": false,
+          "multiple": false,
+          "help": "Do not ask; also unloads the model if it is loaded."
+        },
+        {
+          "id": "force",
+          "kind": "flag",
+          "long": "force",
+          "required": false,
+          "multiple": false,
+          "help": "When unloading first, skip draining in-flight requests."
+        },
+        {
+          "id": "traces",
+          "kind": "flag",
+          "long": "traces",
+          "value_name": "keep|delete",
+          "value": "choice",
+          "required": false,
+          "multiple": false,
+          "possible_values": [
+            "keep",
+            "delete"
+          ],
+          "help": "What happens to the traces recorded with the model (asked on a terminal; keep with --yes)."
+        }
+      ]
+    },
+    {
+      "path": "goethe load",
+      "about": "Serve an installed model on the GPUs and wait until it answers.",
+      "does": {
+        "risk": "change",
+        "needs": [
+          "daemon",
+          "installed"
+        ],
+        "gives": [
+          "loaded"
+        ],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe load deepseek-ai/DeepSeek-V4.1-Flash-1017 --ctx 32768 -- --chunked-prefill-size 4096",
+        "goethe load MODEL --gpu gpu2 gpu3",
+        "goethe load MODEL --ctx 32768 --save",
+        "goethe load MODEL --dry-run"
+      ],
+      "args": [
+        {
+          "id": "model",
+          "kind": "positional",
+          "value_name": "MODEL",
+          "value": "installed_model",
+          "required": true,
+          "multiple": true,
+          "help": "Installed model: id, alias or words from its name, such as qwen 27b."
+        },
+        {
+          "id": "gpu",
+          "kind": "flag",
+          "long": "gpu",
+          "value_name": "GPU",
+          "value": "gpu",
+          "required": false,
+          "multiple": true,
+          "help": "GPUs to load on, as goethe gpu lists them: --gpu gpu3, or --gpu gpu2 gpu3 to split the model across both."
+        },
+        {
+          "id": "tp",
+          "kind": "flag",
+          "long": "tp",
+          "value_name": "N",
+          "value": "number",
+          "required": false,
+          "multiple": false,
+          "help": "Split the model across N GPUs that goethe picks (with --gpu, the number of GPUs given is used)."
+        },
+        {
+          "id": "ctx",
+          "kind": "flag",
+          "long": "ctx",
+          "value_name": "CTX",
+          "value": "number",
+          "required": false,
+          "multiple": false,
+          "help": "Context length for this load."
+        },
+        {
+          "id": "max_conc",
+          "kind": "flag",
+          "long": "max-conc",
+          "value_name": "MAX_CONC",
+          "value": "number",
+          "required": false,
+          "multiple": false,
+          "help": "Max concurrent requests."
+        },
+        {
+          "id": "ep",
+          "kind": "flag",
+          "long": "ep",
+          "value_name": "EP",
+          "value": "number",
+          "required": false,
+          "multiple": false,
+          "help": "Expert parallel size (SGLang --ep-size)."
+        },
+        {
+          "id": "save",
+          "kind": "flag",
+          "long": "save",
+          "required": false,
+          "multiple": false,
+          "help": "Keep --gpu, --ctx, --max-conc and the flags after -- as the model's defaults."
+        },
+        {
+          "id": "dry_run",
+          "kind": "flag",
+          "long": "dry-run",
+          "required": false,
+          "multiple": false,
+          "help": "Show where the model would be placed now, and load nothing."
+        },
+        {
+          "id": "yes",
+          "kind": "flag",
+          "long": "yes",
+          "required": false,
+          "multiple": false,
+          "help": "Do not ask: use GPUs that are busy or hold processes goethe did not start."
+        },
+        {
+          "id": "replica",
+          "kind": "flag",
+          "long": "replica",
+          "required": false,
+          "multiple": false,
+          "help": "Start another instance even when the model is already loaded."
+        },
+        {
+          "id": "fallback",
+          "kind": "flag",
+          "long": "fallback",
+          "required": false,
+          "multiple": false,
+          "help": "If the model's kernel pack fails to open, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also GOETHE_ALLOW_FALLBACK=1."
+        },
+        {
+          "id": "no_wait",
+          "kind": "flag",
+          "long": "no-wait",
+          "required": false,
+          "multiple": false,
+          "help": "Return once the engine starts instead of waiting until it answers."
+        },
+        {
+          "id": "json",
+          "kind": "flag",
+          "long": "json",
+          "required": false,
+          "multiple": false,
+          "help": "Print the instance as JSON instead of status lines."
+        },
+        {
+          "id": "extra",
+          "kind": "trailing",
+          "value_name": "EXTRA",
+          "required": false,
+          "multiple": true,
+          "help": "Extra engine flags, only after --."
+        }
+      ]
+    },
+    {
+      "path": "goethe unload",
+      "about": "Stop serving a model.",
+      "does": {
+        "risk": "change",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe unload MODEL"
+      ],
+      "args": [
+        {
+          "id": "model",
+          "kind": "positional",
+          "value_name": "MODEL",
+          "value": "installed_model",
+          "required": false,
+          "multiple": true,
+          "help": "Models to unload (every instance): ids, aliases or words from a name, one argument each."
+        },
+        {
+          "id": "all",
+          "kind": "flag",
+          "long": "all",
+          "required": false,
+          "multiple": false,
+          "help": "Unload every loaded model."
+        },
+        {
+          "id": "force",
+          "kind": "flag",
+          "long": "force",
+          "required": false,
+          "multiple": false,
+          "help": "Skip connection draining and tear down immediately."
+        }
+      ]
+    },
+    {
+      "path": "goethe run",
+      "about": "Try a model by hand: a chat screen on a terminal without INPUT, else one reply, an embedding summary or an audio file's transcript. Loads an installed model that is not loaded and unloads it again.",
+      "does": {
+        "risk": "change",
+        "needs": [
+          "daemon",
+          "installed"
+        ],
+        "gives": [],
+        "confirms": false,
+        "terminal": true
+      },
+      "examples": [
+        "goethe run MODEL"
+      ],
+      "args": [
+        {
+          "id": "args",
+          "kind": "positional",
+          "value_name": "MODEL",
+          "value": "model_input",
+          "required": false,
+          "multiple": true,
+          "help": "[MODEL] [INPUT]: without either, on a terminal, a list of the installed models opens to pick from; with INPUT alone, MODEL may be left out when one model is loaded."
+        },
+        {
+          "id": "keep",
+          "kind": "flag",
+          "long": "keep",
+          "required": false,
+          "multiple": false,
+          "help": "Leave a model loaded that this command loaded (it is unloaded when run ends otherwise)."
+        },
+        {
+          "id": "plain",
+          "kind": "flag",
+          "long": "plain",
+          "required": false,
+          "multiple": false,
+          "help": "No chat screen: the plain prompt, as when input or output is not a terminal."
+        },
+        {
+          "id": "thinking",
+          "kind": "flag",
+          "long": "thinking",
+          "required": false,
+          "multiple": false,
+          "help": "Show the model's reasoning (dimmed) with the answer."
+        }
+      ]
+    },
+    {
+      "path": "goethe models",
+      "about": "Installed and catalog models; also recommend, scan and alias.",
+      "aliases": [
+        "list"
+      ],
+      "does": {
+        "risk": "read",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe models"
+      ],
+      "args": [
+        {
+          "id": "json",
+          "kind": "flag",
+          "long": "json",
+          "required": false,
+          "multiple": false,
+          "help": "Emit JSON."
+        },
+        {
+          "id": "installed",
+          "kind": "flag",
+          "long": "installed",
+          "required": false,
+          "multiple": false,
+          "help": "Only installed models."
+        },
+        {
+          "id": "available",
+          "kind": "flag",
+          "long": "available",
+          "required": false,
+          "multiple": false,
+          "help": "Only catalog models."
+        },
+        {
+          "id": "all",
+          "kind": "flag",
+          "long": "all",
+          "required": false,
+          "multiple": false,
+          "help": "Every line; the default stops after 40."
+        }
+      ],
+      "commands": [
+        {
+          "path": "goethe models recommend",
+          "about": "Catalog models that fit the free VRAM of the allowed GPUs.",
+          "does": {
+            "risk": "read",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "examples": [
+            "goethe models recommend"
+          ],
+          "args": [
+            {
+              "id": "json",
+              "kind": "flag",
+              "long": "json",
+              "required": false,
+              "multiple": false,
+              "help": "Emit JSON instead of a table."
+            }
+          ]
+        },
+        {
+          "path": "goethe models scan",
+          "about": "Register model folders you downloaded yourself and moved into GOETHE_HOME/models.",
+          "does": {
+            "risk": "change",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "examples": [
+            "goethe models scan FOLDER"
+          ],
+          "args": [
+            {
+              "id": "dir",
+              "kind": "positional",
+              "value_name": "FOLDER",
+              "value": "folder",
+              "required": false,
+              "multiple": false,
+              "help": "One folder inside GOETHE_HOME/models (default: all of them)."
+            },
+            {
+              "id": "yes",
+              "kind": "flag",
+              "long": "yes",
+              "required": false,
+              "multiple": false,
+              "help": "Add every supported model without asking."
+            },
+            {
+              "id": "json",
+              "kind": "flag",
+              "long": "json",
+              "required": false,
+              "multiple": false,
+              "help": "Emit JSON rows (dir, model_id, status, reason, notes)."
+            }
+          ]
+        },
+        {
+          "path": "goethe models alias",
+          "about": "Short model names for clients: list them, set one, or remove some.",
+          "does": {
+            "risk": "read",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "commands": [
+            {
+              "path": "goethe models alias set",
+              "about": "Give an installed model a short name for clients.",
+              "does": {
+                "risk": "change",
+                "needs": [],
+                "gives": [],
+                "confirms": false,
+                "terminal": false
+              },
+              "examples": [
+                "goethe models alias set fast MODEL"
+              ],
+              "args": [
+                {
+                  "id": "alias",
+                  "kind": "positional",
+                  "value_name": "ALIAS",
+                  "value": "new_alias",
+                  "required": true,
+                  "multiple": false,
+                  "help": "The short name, such as fast."
+                },
+                {
+                  "id": "model",
+                  "kind": "positional",
+                  "value_name": "MODEL",
+                  "value": "installed_model",
+                  "required": true,
+                  "multiple": false,
+                  "help": "Installed model: id, alias or words from its name."
+                }
+              ]
+            },
+            {
+              "path": "goethe models alias remove",
+              "about": "Remove short model names.",
+              "does": {
+                "risk": "destructive",
+                "needs": [],
+                "gives": [],
+                "confirms": false,
+                "terminal": false
+              },
+              "args": [
+                {
+                  "id": "aliases",
+                  "kind": "positional",
+                  "value_name": "ALIAS",
+                  "value": "alias",
+                  "required": true,
+                  "multiple": true,
+                  "help": "Short names to remove, as goethe models alias lists them."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "goethe logs",
+      "about": "Logs of a model, of goethed or of the gateway.",
+      "does": {
+        "risk": "read",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe logs MODEL -f"
+      ],
+      "args": [
+        {
+          "id": "target",
+          "kind": "positional",
+          "value_name": "TARGET",
+          "value": "log_target",
+          "required": true,
+          "multiple": true,
+          "help": "A model (id, alias or words from its name), an instance id, goethed, or gateway."
+        },
+        {
+          "id": "follow",
+          "kind": "flag",
+          "long": "follow",
+          "short": "f",
+          "required": false,
+          "multiple": false,
+          "help": "Follow log output."
+        },
+        {
+          "id": "lines",
+          "kind": "flag",
+          "long": "lines",
+          "short": "n",
+          "value_name": "LINES",
+          "value": "number",
+          "required": false,
+          "multiple": false,
+          "default": "100",
+          "help": "Number of lines to print."
+        }
+      ]
+    },
+    {
+      "path": "goethe api",
+      "about": "The API address and how to connect; also keys, expose, allow, domain and share.",
+      "does": {
+        "risk": "read",
+        "needs": [
+          "key",
+          "loaded"
+        ],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe api"
+      ],
+      "args": [
+        {
+          "id": "json",
+          "kind": "flag",
+          "long": "json",
+          "required": false,
+          "multiple": false,
+          "help": "JSON with api, goethed_running, keys and models."
+        }
+      ],
+      "commands": [
+        {
+          "path": "goethe api keys",
+          "about": "List API keys, create or revoke one; on a terminal without arguments, a menu.",
+          "does": {
+            "risk": "read",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "examples": [
+            "goethe api keys"
+          ],
+          "args": [
+            {
+              "id": "json",
+              "kind": "flag",
+              "long": "json",
+              "required": false,
+              "multiple": false,
+              "help": "List as JSON."
+            }
+          ],
+          "commands": [
+            {
+              "path": "goethe api keys create",
+              "about": "Create an API key.",
+              "does": {
+                "risk": "change",
+                "needs": [],
+                "gives": [
+                  "key"
+                ],
+                "confirms": false,
+                "terminal": false
+              },
+              "examples": [
+                "goethe api keys create my-app",
+                "goethe api keys create ops --expires 90d --rpm 300 --admin",
+                "goethe api keys create bot --models deepseek-ai/DeepSeek-V4.1-Flash-1017"
+              ],
+              "args": [
+                {
+                  "id": "name",
+                  "kind": "positional",
+                  "value_name": "KEY_NAME",
+                  "value": "key_name",
+                  "required": true,
+                  "multiple": false,
+                  "help": "A name for the key, such as my-app."
+                },
+                {
+                  "id": "expires",
+                  "kind": "flag",
+                  "long": "expires",
+                  "value_name": "WHEN",
+                  "value": "when",
+                  "required": false,
+                  "multiple": false,
+                  "help": "Expiry, days from now like 30d, or a date like 2026-12-31."
+                },
+                {
+                  "id": "rpm",
+                  "kind": "flag",
+                  "long": "rpm",
+                  "value_name": "N",
+                  "value": "number",
+                  "required": false,
+                  "multiple": false,
+                  "help": "Requests per minute (default 120, 0 = unlimited)."
+                },
+                {
+                  "id": "models",
+                  "kind": "flag",
+                  "long": "models",
+                  "value_name": "IDS",
+                  "value": "installed_model",
+                  "required": false,
+                  "multiple": false,
+                  "help": "Only these models, comma-separated."
+                },
+                {
+                  "id": "admin",
+                  "kind": "flag",
+                  "long": "admin",
+                  "required": false,
+                  "multiple": false,
+                  "help": "An admin key, for health endpoints and every model."
+                },
+                {
+                  "id": "raw",
+                  "kind": "flag",
+                  "long": "raw",
+                  "required": false,
+                  "multiple": false,
+                  "help": "Print only the key, for scripts."
+                }
+              ]
+            },
+            {
+              "path": "goethe api keys rotate",
+              "about": "Rotate an API key: a new secret, and the old one stops working.",
+              "does": {
+                "risk": "change",
+                "needs": [],
+                "gives": [],
+                "confirms": false,
+                "terminal": false
+              },
+              "examples": [
+                "goethe api keys rotate <key-id>"
+              ],
+              "args": [
+                {
+                  "id": "id",
+                  "kind": "positional",
+                  "value_name": "KEY_ID",
+                  "value": "key_id",
+                  "required": true,
+                  "multiple": false,
+                  "help": "The key's id, as goethe api keys lists it."
+                },
+                {
+                  "id": "raw",
+                  "kind": "flag",
+                  "long": "raw",
+                  "required": false,
+                  "multiple": false,
+                  "help": "Print only the new key, for scripts."
+                }
+              ]
+            },
+            {
+              "path": "goethe api keys revoke",
+              "about": "Revoke an API key, or several, by id.",
+              "does": {
+                "risk": "destructive",
+                "needs": [],
+                "gives": [],
+                "confirms": false,
+                "terminal": false
+              },
+              "examples": [
+                "goethe api keys revoke <key-id>"
+              ],
+              "args": [
+                {
+                  "id": "ids",
+                  "kind": "positional",
+                  "value_name": "KEY_ID",
+                  "value": "key_id",
+                  "required": true,
+                  "multiple": true,
+                  "help": "Key ids, as goethe api keys lists them."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "path": "goethe api expose",
+          "about": "Who can reach the API: local, vpn, public, or one address or interface.",
+          "does": {
+            "risk": "network",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "examples": [
+            "goethe api expose"
+          ],
+          "args": [
+            {
+              "id": "target",
+              "kind": "positional",
+              "value_name": "WHERE",
+              "value": "expose_target",
+              "required": false,
+              "multiple": false,
+              "help": "An address (127.0.0.1, an IP of this host) or an interface such as wg0 to listen on."
+            },
+            {
+              "id": "json",
+              "kind": "flag",
+              "long": "json",
+              "required": false,
+              "multiple": false,
+              "help": "With no WHERE: the status as JSON."
+            }
+          ],
+          "commands": [
+            {
+              "path": "goethe api expose local",
+              "about": "This machine only.",
+              "does": {
+                "risk": "network",
+                "needs": [],
+                "gives": [],
+                "confirms": true,
+                "terminal": false
+              },
+              "examples": [
+                "goethe api expose local"
+              ],
+              "args": [
+                {
+                  "id": "yes",
+                  "kind": "flag",
+                  "long": "yes",
+                  "required": false,
+                  "multiple": false,
+                  "help": "Apply without questions."
+                }
+              ]
+            },
+            {
+              "path": "goethe api expose vpn",
+              "about": "A VPN or private network.",
+              "does": {
+                "risk": "network",
+                "needs": [],
+                "gives": [],
+                "confirms": true,
+                "terminal": false
+              },
+              "examples": [
+                "goethe api expose vpn --interface wg0"
+              ],
+              "args": [
+                {
+                  "id": "interface",
+                  "kind": "flag",
+                  "long": "interface",
+                  "value_name": "NAME",
+                  "value": "interface",
+                  "required": false,
+                  "multiple": false,
+                  "help": "The network interface to serve, e.g. wg0; the gateway follows its address."
+                },
+                {
+                  "id": "allow",
+                  "kind": "flag",
+                  "long": "allow",
+                  "value_name": "CIDR",
+                  "value": "cidr",
+                  "required": false,
+                  "multiple": true,
+                  "help": "Client ranges to allow (default: the ranges the network reaches)."
+                },
+                {
+                  "id": "yes",
+                  "kind": "flag",
+                  "long": "yes",
+                  "required": false,
+                  "multiple": false,
+                  "help": "Apply without questions."
+                }
+              ]
+            },
+            {
+              "path": "goethe api expose public",
+              "about": "A public network, for allowlisted clients only.",
+              "does": {
+                "risk": "network",
+                "needs": [],
+                "gives": [],
+                "confirms": true,
+                "terminal": false
+              },
+              "examples": [
+                "goethe api expose public --allow 203.0.113.7/32 --yes"
+              ],
+              "args": [
+                {
+                  "id": "allow",
+                  "kind": "flag",
+                  "long": "allow",
+                  "value_name": "CIDR",
+                  "value": "cidr",
+                  "required": false,
+                  "multiple": true,
+                  "asked": "always",
+                  "help": "Client ranges to allow: their public addresses, such as 203.0.113.7/32."
+                },
+                {
+                  "id": "yes",
+                  "kind": "flag",
+                  "long": "yes",
+                  "required": false,
+                  "multiple": false,
+                  "help": "Apply without questions; needs --allow <their-ip>/32."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "path": "goethe api allow",
+          "about": "The client addresses allowed to reach the API; add or remove some.",
+          "does": {
+            "risk": "read",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "commands": [
+            {
+              "path": "goethe api allow add",
+              "about": "Allow client addresses or ranges.",
+              "does": {
+                "risk": "network",
+                "needs": [],
+                "gives": [],
+                "confirms": false,
+                "terminal": false
+              },
+              "examples": [
+                "goethe api allow add 203.0.113.7/32"
+              ],
+              "args": [
+                {
+                  "id": "cidrs",
+                  "kind": "positional",
+                  "value_name": "CIDR",
+                  "value": "cidr",
+                  "required": true,
+                  "multiple": true,
+                  "help": "Client addresses or ranges, such as 203.0.113.7/32."
+                },
+                {
+                  "id": "note",
+                  "kind": "flag",
+                  "long": "note",
+                  "value_name": "TEXT",
+                  "value": "text",
+                  "required": false,
+                  "multiple": false,
+                  "help": "A note stored with the new entries."
+                }
+              ]
+            },
+            {
+              "path": "goethe api allow remove",
+              "about": "Stop allowing client addresses or ranges.",
+              "does": {
+                "risk": "network",
+                "needs": [],
+                "gives": [],
+                "confirms": false,
+                "terminal": false
+              },
+              "args": [
+                {
+                  "id": "cidrs",
+                  "kind": "positional",
+                  "value_name": "CIDR",
+                  "value": "cidr",
+                  "required": true,
+                  "multiple": true,
+                  "help": "Client addresses or ranges, such as 203.0.113.7/32."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "path": "goethe api domain",
+          "about": "How to reach the API by a domain name; check DOMAIN tests that it works.",
+          "does": {
+            "risk": "read",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "commands": [
+            {
+              "path": "goethe api domain check",
+              "about": "Whether the domain points at the API and the gateway answers there.",
+              "does": {
+                "risk": "read",
+                "needs": [],
+                "gives": [],
+                "confirms": false,
+                "terminal": false
+              },
+              "examples": [
+                "goethe api domain check DOMAIN"
+              ],
+              "args": [
+                {
+                  "id": "domain",
+                  "kind": "positional",
+                  "value_name": "DOMAIN",
+                  "value": "domain",
+                  "required": true,
+                  "multiple": false,
+                  "help": "The domain name to check, such as api.example.com."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "path": "goethe api share",
+          "about": "Open the API on a public address for a while, for chosen API keys; stop closes it.",
+          "does": {
+            "risk": "network",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "examples": [
+            "goethe api share 5h --key my-app --allow <their-ip>/32",
+            "goethe api share 5h --key my-app --dangerously-allow-all-inbound",
+            "goethe api share"
+          ],
+          "args": [
+            {
+              "id": "duration",
+              "kind": "positional",
+              "value_name": "DURATION",
+              "value": "duration",
+              "required": false,
+              "multiple": false,
+              "help": "How long to stay open (30m, 5h, 1d; at most 7d), or nothing for the status."
+            },
+            {
+              "id": "key",
+              "kind": "flag",
+              "long": "key",
+              "value_name": "NAME_OR_ID",
+              "value": "key",
+              "required": false,
+              "multiple": true,
+              "asked": {
+                "with": "duration"
+              },
+              "help": "API keys to share (not admin keys), each until DURATION."
+            },
+            {
+              "id": "allow",
+              "kind": "flag",
+              "long": "allow",
+              "value_name": "CIDR",
+              "value": "cidr",
+              "required": false,
+              "multiple": true,
+              "asked": {
+                "with": "duration"
+              },
+              "help": "Who may connect (required to open a share): their addresses or ranges, such as --allow 203.0.113.7 198.51.100.0/24; reopening the same keys keeps their last ones."
+            },
+            {
+              "id": "dangerously_allow_all_inbound",
+              "kind": "flag",
+              "long": "dangerously-allow-all-inbound",
+              "required": false,
+              "multiple": false,
+              "widens": true,
+              "help": "Open the public gateway to every address (0.0.0.0/0) on purpose, instead of --allow. Rate limits still apply."
+            },
+            {
+              "id": "port",
+              "kind": "flag",
+              "long": "port",
+              "value_name": "PORT",
+              "value": "number",
+              "required": false,
+              "multiple": false,
+              "help": "The public port (default 8444, or the last one used)."
+            }
+          ],
+          "commands": [
+            {
+              "path": "goethe api share stop",
+              "about": "Close the public address now, or stop sharing some keys.",
+              "does": {
+                "risk": "network",
+                "needs": [],
+                "gives": [],
+                "confirms": false,
+                "terminal": false
+              },
+              "examples": [
+                "goethe api share stop"
+              ],
+              "args": [
+                {
+                  "id": "key",
+                  "kind": "flag",
+                  "long": "key",
+                  "value_name": "NAME_OR_ID",
+                  "value": "key",
+                  "required": false,
+                  "multiple": true,
+                  "help": "Stop sharing only these API keys; the others stay shared."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "goethe learn",
+      "about": "Let sessions keep what context compaction would drop: on or off, for every model or for some.",
+      "does": {
+        "risk": "read",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "args": [
+        {
+          "id": "json",
+          "kind": "flag",
+          "long": "json",
+          "required": false,
+          "multiple": false,
+          "help": "Emit JSON."
+        }
+      ],
+      "commands": [
+        {
+          "path": "goethe learn on",
+          "about": "Let sessions keep what compaction would drop.",
+          "does": {
+            "risk": "change",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "examples": [
+            "goethe learn on",
+            "goethe learn on --model my-model"
+          ],
+          "args": [
+            {
+              "id": "model",
+              "kind": "flag",
+              "long": "model",
+              "value_name": "MODEL",
+              "value": "model_or_all",
+              "required": false,
+              "multiple": true,
+              "help": "Only these models (id or alias); all, or leaving it out, means every model."
+            },
+            {
+              "id": "json",
+              "kind": "flag",
+              "long": "json",
+              "required": false,
+              "multiple": false,
+              "help": "Emit JSON."
+            }
+          ]
+        },
+        {
+          "path": "goethe learn off",
+          "about": "Stop keeping what compaction would drop.",
+          "does": {
+            "risk": "change",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "examples": [
+            "goethe learn off",
+            "goethe learn off --model my-model"
+          ],
+          "args": [
+            {
+              "id": "model",
+              "kind": "flag",
+              "long": "model",
+              "value_name": "MODEL",
+              "value": "model_or_all",
+              "required": false,
+              "multiple": true,
+              "help": "Only these models (id or alias); all, or leaving it out, means every model."
+            },
+            {
+              "id": "json",
+              "kind": "flag",
+              "long": "json",
+              "required": false,
+              "multiple": false,
+              "help": "Emit JSON."
+            }
+          ]
+        },
+        {
+          "path": "goethe learn status",
+          "about": "Which models keep what compaction would drop.",
+          "does": {
+            "risk": "read",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "args": [
+            {
+              "id": "json",
+              "kind": "flag",
+              "long": "json",
+              "required": false,
+              "multiple": false,
+              "help": "Emit JSON."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "goethe trace",
+      "about": "Record requests and replies as training traces: on or off, per API key, and the size.",
+      "does": {
+        "risk": "change",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe trace --max-gb 100"
+      ],
+      "args": [
+        {
+          "id": "dir",
+          "kind": "flag",
+          "long": "dir",
+          "value_name": "PATH",
+          "value": "folder",
+          "required": false,
+          "multiple": false,
+          "help": "Folder for the traces (default ~/.goethe/traces)."
+        },
+        {
+          "id": "max_gb",
+          "kind": "flag",
+          "long": "max-gb",
+          "value_name": "GB",
+          "value": "number",
+          "required": false,
+          "multiple": false,
+          "help": "Size limit: recording turns off when the folder reaches it (default 20)."
+        },
+        {
+          "id": "json",
+          "kind": "flag",
+          "long": "json",
+          "required": false,
+          "multiple": false,
+          "help": "Emit JSON."
+        }
+      ],
+      "commands": [
+        {
+          "path": "goethe trace on",
+          "about": "Record requests and replies as training traces.",
+          "does": {
+            "risk": "change",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "examples": [
+            "goethe trace on",
+            "goethe trace on --key my-app",
+            "goethe trace on --all-keys",
+            "goethe trace on --dir /data/traces --max-gb 200"
+          ],
+          "args": [
+            {
+              "id": "key",
+              "kind": "flag",
+              "long": "key",
+              "value_name": "KEY",
+              "value": "key",
+              "required": false,
+              "multiple": true,
+              "help": "Add these API keys (name or id)."
+            },
+            {
+              "id": "all_keys",
+              "kind": "flag",
+              "long": "all-keys",
+              "required": false,
+              "multiple": false,
+              "help": "Record every API key, clearing the chosen keys and exceptions."
+            },
+            {
+              "id": "dir",
+              "kind": "flag",
+              "long": "dir",
+              "value_name": "PATH",
+              "value": "folder",
+              "required": false,
+              "multiple": false,
+              "help": "Folder for the traces (default ~/.goethe/traces)."
+            },
+            {
+              "id": "max_gb",
+              "kind": "flag",
+              "long": "max-gb",
+              "value_name": "GB",
+              "value": "number",
+              "required": false,
+              "multiple": false,
+              "help": "Size limit: recording turns off when the folder reaches it (default 20)."
+            },
+            {
+              "id": "json",
+              "kind": "flag",
+              "long": "json",
+              "required": false,
+              "multiple": false,
+              "help": "Emit JSON."
+            }
+          ]
+        },
+        {
+          "path": "goethe trace off",
+          "about": "Stop recording; with --key, leave those keys out and keep recording the others.",
+          "does": {
+            "risk": "change",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "examples": [
+            "goethe trace off --key ci"
+          ],
+          "args": [
+            {
+              "id": "key",
+              "kind": "flag",
+              "long": "key",
+              "value_name": "KEY",
+              "value": "key",
+              "required": false,
+              "multiple": true,
+              "help": "Leave these API keys (name or id) out, and keep recording the others."
+            },
+            {
+              "id": "dir",
+              "kind": "flag",
+              "long": "dir",
+              "value_name": "PATH",
+              "value": "folder",
+              "required": false,
+              "multiple": false,
+              "help": "Folder for the traces (default ~/.goethe/traces)."
+            },
+            {
+              "id": "max_gb",
+              "kind": "flag",
+              "long": "max-gb",
+              "value_name": "GB",
+              "value": "number",
+              "required": false,
+              "multiple": false,
+              "help": "Size limit: recording turns off when the folder reaches it (default 20)."
+            },
+            {
+              "id": "json",
+              "kind": "flag",
+              "long": "json",
+              "required": false,
+              "multiple": false,
+              "help": "Emit JSON."
+            }
+          ]
+        },
+        {
+          "path": "goethe trace status",
+          "about": "What is recorded and how much space it takes.",
+          "does": {
+            "risk": "read",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "args": [
+            {
+              "id": "dir",
+              "kind": "flag",
+              "long": "dir",
+              "value_name": "PATH",
+              "value": "folder",
+              "required": false,
+              "multiple": false,
+              "help": "Folder for the traces (default ~/.goethe/traces)."
+            },
+            {
+              "id": "max_gb",
+              "kind": "flag",
+              "long": "max-gb",
+              "value_name": "GB",
+              "value": "number",
+              "required": false,
+              "multiple": false,
+              "help": "Size limit: recording turns off when the folder reaches it (default 20)."
+            },
+            {
+              "id": "json",
+              "kind": "flag",
+              "long": "json",
+              "required": false,
+              "multiple": false,
+              "help": "Emit JSON."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "goethe gpu",
+      "about": "GPUs with memory, processes and bandwidth, live; allow or deny one.",
+      "does": {
+        "risk": "read",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe gpu"
+      ],
+      "args": [
+        {
+          "id": "json",
+          "kind": "flag",
+          "long": "json",
+          "required": false,
+          "multiple": false,
+          "help": "Emit JSON."
+        }
+      ],
+      "commands": [
+        {
+          "path": "goethe gpu allow",
+          "about": "Let new models use these GPUs again.",
+          "does": {
+            "risk": "change",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "args": [
+            {
+              "id": "gpus",
+              "kind": "positional",
+              "value_name": "GPU",
+              "value": "gpu",
+              "required": true,
+              "multiple": true,
+              "help": "GPUs as goethe gpu lists them, for example gpu0 gpu1."
+            }
+          ]
+        },
+        {
+          "path": "goethe gpu deny",
+          "about": "Keep new models off these GPUs; running ones stay.",
+          "does": {
+            "risk": "change",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "examples": [
+            "goethe gpu deny gpu2"
+          ],
+          "args": [
+            {
+              "id": "gpus",
+              "kind": "positional",
+              "value_name": "GPU",
+              "value": "gpu",
+              "required": true,
+              "multiple": true,
+              "help": "GPUs as goethe gpu lists them, for example gpu0 gpu1."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "goethe doctor",
+      "about": "Check the machine and the setup, with a fix for each problem.",
+      "does": {
+        "risk": "read",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe doctor",
+        "goethe doctor --hardware"
+      ],
+      "args": [
+        {
+          "id": "public",
+          "kind": "flag",
+          "long": "public",
+          "required": false,
+          "multiple": false,
+          "help": "Also check that the API is reachable from the internet."
+        },
+        {
+          "id": "hardware",
+          "kind": "flag",
+          "long": "hardware",
+          "required": false,
+          "multiple": false,
+          "help": "Print the hardware profile instead: GPUs and links, CPU, RAM, disk, OS, container and cloud."
+        },
+        {
+          "id": "fix",
+          "kind": "flag",
+          "long": "fix",
+          "required": false,
+          "multiple": false,
+          "help": "Fix what doctor finds on this machine (NVIDIA driver, CUDA forward compatibility, a C++ compiler), asking before each change."
+        },
+        {
+          "id": "yes",
+          "kind": "flag",
+          "long": "yes",
+          "required": false,
+          "multiple": false,
+          "help": "With --fix, make every change without asking."
+        },
+        {
+          "id": "json",
+          "kind": "flag",
+          "long": "json",
+          "required": false,
+          "multiple": false,
+          "help": "Emit JSON."
+        }
+      ]
+    },
+    {
+      "path": "goethe update",
+      "about": "Install a signed update of Goethe, its engines or kernel packs; rollback puts the previous kernel packs back.",
+      "does": {
+        "risk": "download",
+        "needs": [],
+        "gives": [],
+        "confirms": true,
+        "terminal": false
+      },
+      "examples": [
+        "goethe update"
+      ],
+      "args": [
+        {
+          "id": "check",
+          "kind": "flag",
+          "long": "check",
+          "required": false,
+          "multiple": false,
+          "help": "Print available versions only."
+        },
+        {
+          "id": "yes",
+          "kind": "flag",
+          "long": "yes",
+          "required": false,
+          "multiple": false,
+          "help": "Skip confirmation."
+        },
+        {
+          "id": "allow_downgrade",
+          "kind": "flag",
+          "long": "allow-downgrade",
+          "required": false,
+          "multiple": false,
+          "help": "Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries)."
+        }
+      ],
+      "commands": [
+        {
+          "path": "goethe update engine",
+          "about": "Update the installed engines only.",
+          "does": {
+            "risk": "download",
+            "needs": [],
+            "gives": [],
+            "confirms": true,
+            "terminal": false
+          },
+          "args": [
+            {
+              "id": "check",
+              "kind": "flag",
+              "long": "check",
+              "required": false,
+              "multiple": false,
+              "help": "Print available versions only."
+            },
+            {
+              "id": "yes",
+              "kind": "flag",
+              "long": "yes",
+              "required": false,
+              "multiple": false,
+              "help": "Skip confirmation."
+            }
+          ]
+        },
+        {
+          "path": "goethe update rollback",
+          "about": "Put back the previous kernel pack of every model that has one.",
+          "does": {
+            "risk": "change",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          }
+        }
+      ]
+    },
+    {
+      "path": "goethe uninstall",
+      "about": "Remove Goethe with its models, engines and kernel packs (folders of your own stay).",
+      "does": {
+        "risk": "destructive",
+        "needs": [],
+        "gives": [],
+        "confirms": true,
+        "terminal": false
+      },
+      "examples": [
+        "goethe uninstall"
+      ],
+      "args": [
+        {
+          "id": "keep_models",
+          "kind": "flag",
+          "long": "keep-models",
+          "required": false,
+          "multiple": false,
+          "help": "Keep the installed models in GOETHE_HOME/models."
+        },
+        {
+          "id": "yes",
+          "kind": "flag",
+          "long": "yes",
+          "required": false,
+          "multiple": false,
+          "help": "Skip confirmation."
+        }
+      ]
+    },
+    {
+      "path": "goethe login",
+      "about": "Link this node to the Goethe console (optional): a browser login, or --authkey for headless machines.",
+      "does": {
+        "risk": "change",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe login"
+      ],
+      "args": [
+        {
+          "id": "platform_url",
+          "kind": "flag",
+          "long": "platform-url",
+          "value_name": "URL",
+          "value": "url",
+          "required": false,
+          "multiple": false,
+          "help": "Platform to link to (default: the GOETHE_PLATFORM_URL setting, else https://goethe.sh)."
+        },
+        {
+          "id": "authkey",
+          "kind": "flag",
+          "long": "authkey",
+          "value_name": "KEY",
+          "value": "auth_key",
+          "required": false,
+          "multiple": false,
+          "help": "Link without a browser using an auth key (msh_ak_...); - reads it from stdin."
+        },
+        {
+          "id": "lifetime",
+          "kind": "flag",
+          "long": "lifetime",
+          "value_name": "WHEN",
+          "value": "when",
+          "required": false,
+          "multiple": false,
+          "help": "How long the login lasts: never, or 12h, 30d, 4w; on a linked node it only changes that."
+        }
+      ]
+    },
+    {
+      "path": "goethe logout",
+      "about": "Unlink this node from the Goethe console and remove its local credentials.",
+      "does": {
+        "risk": "destructive",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "examples": [
+        "goethe logout"
+      ]
+    },
+    {
+      "path": "goethe completion",
+      "about": "Tab completion for bash, zsh and fish: models, keys, GPUs and interfaces complete too.",
+      "does": {
+        "risk": "read",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "args": [
+        {
+          "id": "shell",
+          "kind": "flag",
+          "long": "shell",
+          "value_name": "SHELL",
+          "value": "choice",
+          "required": false,
+          "multiple": false,
+          "possible_values": [
+            "bash",
+            "zsh",
+            "fish"
+          ],
+          "help": "The shell (default: yours, from $SHELL)."
+        }
+      ],
+      "commands": [
+        {
+          "path": "goethe completion install",
+          "about": "Install tab completion for your shell.",
+          "does": {
+            "risk": "change",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "examples": [
+            "goethe completion install"
+          ],
+          "args": [
+            {
+              "id": "shell",
+              "kind": "flag",
+              "long": "shell",
+              "value_name": "SHELL",
+              "value": "choice",
+              "required": false,
+              "multiple": false,
+              "possible_values": [
+                "bash",
+                "zsh",
+                "fish"
+              ],
+              "help": "The shell (default: yours, from $SHELL)."
+            }
+          ]
+        },
+        {
+          "path": "goethe completion remove",
+          "about": "Remove tab completion from your shell.",
+          "does": {
+            "risk": "change",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "args": [
+            {
+              "id": "shell",
+              "kind": "flag",
+              "long": "shell",
+              "value_name": "SHELL",
+              "value": "choice",
+              "required": false,
+              "multiple": false,
+              "possible_values": [
+                "bash",
+                "zsh",
+                "fish"
+              ],
+              "help": "The shell (default: yours, from $SHELL)."
+            }
+          ]
+        },
+        {
+          "path": "goethe completion status",
+          "about": "Whether tab completion is on, for each shell.",
+          "does": {
+            "risk": "read",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "args": [
+            {
+              "id": "shell",
+              "kind": "flag",
+              "long": "shell",
+              "value_name": "SHELL",
+              "value": "choice",
+              "required": false,
+              "multiple": false,
+              "possible_values": [
+                "bash",
+                "zsh",
+                "fish"
+              ],
+              "help": "The shell (default: yours, from $SHELL)."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

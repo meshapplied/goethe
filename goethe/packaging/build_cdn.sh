@@ -13,14 +13,12 @@ declare -A UV_SHA256=(
   [x86_64]="eadd9d27c134ab5ac1ffd4473b97a741407f3ea238288f03121fc4deddf90220"
   [aarch64]="9041c73c99fdc5892cf128140beb354eca9231d502068cc36e6cb53a8e59ad14"
 )
-WITH_TERNARY=0
 RELEASE=0
 RELEASE_PUB="${GOETHE_RELEASE_PUB:-${ROOT}/packaging/release_pub.pem}"
 ARCHES="x86_64,aarch64"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --with-ternary) WITH_TERNARY=1 ;;
     --release) RELEASE=1 ;;
     --arch)
       ARCHES="${2:?--arch needs a value}"
@@ -136,7 +134,7 @@ if [[ ! -d "${FORK}/python" ]]; then
   exit 1
 fi
 rm -rf "${DIST}"
-mkdir -p "${DIST}/wheels" "${DIST}/pyenv" "${DIST}/v1" "${DIST}/goethe"
+mkdir -p "${DIST}/wheels" "${DIST}/pyenv" "${DIST}/v1" "${DIST}/goethe" "${DIST}/ask"
 for a in "${ARCH_LIST[@]}"; do
   mkdir -p "${DIST}/bin/linux-${a}"
 done
@@ -162,15 +160,6 @@ rm -f "${DIST}/wheels/.gitignore"
 (cd "${DIST}/wheels" && ls -t sglang-*.whl | head -n1 >LATEST)
 check_sglang_snapshot "${DIST}/wheels/$(cat "${DIST}/wheels/LATEST")"
 
-if [[ "${WITH_TERNARY}" -eq 1 ]]; then
-  if [[ ! -d "${REPO}/ternary-kernels" ]]; then
-    echo "missing ${REPO}/ternary-kernels for --with-ternary" >&2
-    exit 1
-  fi
-  tar -C "${REPO}" --exclude='*.egg-info' --exclude='.pytest_cache' --exclude='__pycache__' -cf - ternary-kernels \
-    | zstd -19 -T0 -o "${DIST}/goethe/ternary-kernels.tar.zst"
-fi
-
 for a in "${ARCH_LIST[@]}"; do
   tarball="${BUILD_TMP}/uv-${a}.tar.gz"
   curl -fsSL -o "${tarball}" \
@@ -185,6 +174,10 @@ for a in "${ARCH_LIST[@]}"; do
     "${ROOT}/packaging/build_nginx_linux.sh"
   fi
 done
+
+python3 -I "${ROOT}/packaging/build_ask_model.py" \
+  --cache "${GOETHE_ASK_CACHE:-${ROOT}/.cache/ask-model}" \
+  --out "${DIST}/ask/ask-model-v1.bin"
 
 cp "${ROOT}/../LICENSE" "${ROOT}/../NOTICE" "${DIST}/"
 cp "${ROOT}/cdn/v1/registry.json" "${DIST}/v1/registry.json"

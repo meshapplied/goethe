@@ -110,6 +110,7 @@ const CHECKS: &[(&str, CheckFn)] = &[
     ("nvidia_driver", |_| check_nvidia_driver()),
     ("compiler", |_| check_compiler()),
     ("ffmpeg", |_| check_ffmpeg()),
+    ("ask_model", check_ask_model),
 ];
 
 const MAC_CHECKS: &[(&str, CheckFn)] = &[
@@ -128,6 +129,7 @@ const MAC_CHECKS: &[(&str, CheckFn)] = &[
     ("tls", check_tls),
     ("huggingface", check_hf),
     ("registry", check_registry),
+    ("ask_model", check_ask_model),
 ];
 
 pub fn mac_hardware_note(chip: &str, arm64: bool, version: &str, limit_mb: u64, free_mb: u64, total_mb: u64) -> (&'static str, String) {
@@ -508,6 +510,22 @@ fn check_nginx(home: &Path) -> Check {
     }
 }
 
+fn check_ask_model(home: &Path) -> Check {
+    // The Ask embedding table: missing is only INFO, because Ask still works by matching words; a file this goethe cannot read is WARN.
+    let path = home.join(crate::update::ASK_MODEL_REL);
+    if !path.is_file() {
+        return check("ask_model", "INFO", "not installed; Ask matches words only until you run goethe update");
+    }
+    match std::fs::read(&path) {
+        Ok(bytes) if bytes.len() >= 24 && &bytes[0..4] == b"GASK" && bytes[4..8] == 1u32.to_le_bytes() => {
+            let mib = bytes.len() as f64 / (1024.0 * 1024.0);
+            check("ask_model", "OK", format!("{} ({mib:.2} MiB)", path.display()))
+        }
+        Ok(_) => check("ask_model", "WARN", format!("{} has an invalid header; run goethe update", path.display())),
+        Err(e) => check("ask_model", "WARN", format!("{}: {e}", path.display())),
+    }
+}
+
 fn check_goethe_home(home: &Path) -> Check {
     if is_writable(home) {
         Check {
@@ -585,19 +603,20 @@ fn check_state_db(home: &Path) -> Check {
 fn check_environment(home: &Path) -> Check {
     // How goethed should be kept running here: systemd units, or nohup/cron in containers.
     let env = crate::host::probe_environment(crate::nginx::public_port_u16(home));
+    let volume = match &env.persistent_volume {
+        Some(v) if home.starts_with(v) => format!("; GOETHE_HOME is on the persistent volume {v}"),
+        Some(v) => format!("; GOETHE_HOME is not on the persistent volume {v} and is lost when the container is recreated"),
+        None => String::new(),
+    };
+    if let Some(version) = crate::paths::image() {
+        return check("environment", "OK", format!("Goethe container image {version}: goethed is the container's main process{volume}"));
+    }
     match (&env.container, env.systemd_pid1) {
-        (Some(c), false) => {
-            let volume = match &env.persistent_volume {
-                Some(v) if home.starts_with(v) => format!("; GOETHE_HOME is on the persistent volume {v}"),
-                Some(v) => format!("; GOETHE_HOME is not on the persistent volume {v} and is lost when the container is recreated"),
-                None => String::new(),
-            };
-            check(
-                "environment",
-                "INFO",
-                format!("container {c} without systemd: goethe up starts goethed with nohup; add goethed to the container start command{volume}"),
-            )
-        }
+        (Some(c), false) => check(
+            "environment",
+            "INFO",
+            format!("container {c} without systemd: goethe up starts goethed with nohup; add goethed to the container start command{volume}"),
+        ),
         (Some(c), true) => check("environment", "INFO", format!("container {c} with systemd: goethe up installs a unit")),
         (None, true) => check("environment", "OK", "systemd is PID 1: goethe up installs a unit"),
         (None, false) => check("environment", "INFO", "no systemd: goethe up uses crontab @reboot"),
@@ -992,5 +1011,19 @@ mod tests {
         assert_eq!(pyenv_versions(env), ("3.12.3".to_string(), Some("0.5.3+goethe".to_string())));
         assert!(sglang_from_python(Path::new("/bin/echo")).is_some_and(|v| v.starts_with("-c import")));
         assert_eq!(sglang_from_python(Path::new("/bin/false")), None);
+    }
+
+    #[test]
+    fn ask_model_check_reports_info_ok_and_warn() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(check_ask_model(home.path()).status, "INFO");
+        let p = home.path().join(crate::update::ASK_MODEL_REL);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, b"bad").unwrap();
+        assert_eq!(check_ask_model(home.path()).status, "WARN");
+        fs::write(&p, [b"GASK".as_slice(), &2u32.to_le_bytes(), &[0u8; 32]].concat()).unwrap();
+        assert_eq!(check_ask_model(home.path()).status, "WARN", "another format version");
+        fs::write(&p, [b"GASK".as_slice(), &1u32.to_le_bytes(), &[0u8; 32]].concat()).unwrap();
+        assert_eq!(check_ask_model(home.path()).status, "OK");
     }
 }

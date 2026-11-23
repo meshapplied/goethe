@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UnixListener};
 
 type MuxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 pub type Upstream = Client<HttpConnector, Full<Bytes>>;
@@ -79,12 +79,11 @@ pub fn spawn_mux() -> Result<tokio::task::JoinHandle<()>, String> {
     })?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let listener = TcpListener::from_std(listener).map_err(|e| e.to_string())?;
-    let public_addr = public_share::public_mux_addr(port);
-    let public = std::net::TcpListener::bind(public_addr)
-        .and_then(|l| l.set_nonblocking(true).map(|()| l))
-        .map_err(|e| eprintln!("goethe mux: public gateway listener on {public_addr} unavailable ({e})"))
-        .ok()
-        .and_then(|l| TcpListener::from_std(l).ok());
+    let public = public_share::bind_public_mux(&home)
+        .and_then(|l| l.set_nonblocking(true).map(|()| l).map_err(|e| e.to_string()))
+        .and_then(|l| UnixListener::from_std(l).map_err(|e| e.to_string()))
+        .map_err(|e| eprintln!("goethe mux: public gateway listener unavailable ({e})"))
+        .ok();
     let max_body = nginx::persist_max_body_mb(&home) as usize * 1024 * 1024;
     nginx::persist_gateway_limits(&home);
     let mux = MUX.get_or_init(|| Mux {
@@ -102,9 +101,9 @@ pub fn spawn_mux() -> Result<tokio::task::JoinHandle<()>, String> {
     Ok(tokio::spawn(async move {
         match public {
             Some(public) => {
-                tokio::join!(serve(mux, listener, false), serve(mux, public, true));
+                tokio::join!(serve(mux, listener), serve_public(mux, public));
             }
-            None => serve(mux, listener, false).await,
+            None => serve(mux, listener).await,
         }
     }))
 }
@@ -132,27 +131,39 @@ fn upstream_client() -> Upstream {
         .build(http)
 }
 
-async fn serve(m: MuxRef, listener: TcpListener, public: bool) {
-    // Accept forever (public: the listener behind goethe api share); transient accept errors back off 50 ms instead of ending the mux.
+async fn serve(m: MuxRef, listener: TcpListener) {
+    // Accept forever; transient accept errors back off 50 ms instead of ending the mux.
     loop {
-        let stream = match listener.accept().await {
-            Ok((stream, _)) => stream,
-            Err(e) => {
-                eprintln!("goethe mux: accept failed: {e}");
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                continue;
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let _ = stream.set_nodelay(true);
+                tokio::spawn(connection(m, stream, false));
             }
-        };
-        let _ = stream.set_nodelay(true);
-        tokio::spawn(async move {
-            let svc = service_fn(move |req| async move { Ok::<_, Infallible>(handle(m, req, public).await) });
-            let _ = http1::Builder::new()
-                .timer(TokioTimer::new())
-                .header_read_timeout(HEADER_READ_TIMEOUT)
-                .serve_connection(TokioIo::new(stream), svc)
-                .await;
-        });
+            Err(e) => accept_failed(e).await,
+        }
     }
+}
+
+async fn serve_public(m: MuxRef, listener: UnixListener) {
+    // The listener behind goethe api share: only nginx can open its socket.
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                tokio::spawn(connection(m, stream, true));
+            }
+            Err(e) => accept_failed(e).await,
+        }
+    }
+}
+
+async fn accept_failed(e: std::io::Error) {
+    eprintln!("goethe mux: accept failed: {e}");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+async fn connection<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static>(m: MuxRef, stream: S, public: bool) {
+    let svc = service_fn(move |req| async move { Ok::<_, Infallible>(handle(m, req, public).await) });
+    let _ = http1::Builder::new().timer(TokioTimer::new()).header_read_timeout(HEADER_READ_TIMEOUT).serve_connection(TokioIo::new(stream), svc).await;
 }
 
 async fn handle(m: MuxRef, req: Request<Incoming>, public: bool) -> Response<MuxBody> {

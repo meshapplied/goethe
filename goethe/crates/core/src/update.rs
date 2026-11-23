@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+pub const ASK_MODEL_REL: &str = "ask/ask-model-v1.bin";
+
 pub struct UpdateOpts {
     pub check_only: bool,
     pub engine: bool,
-    pub ternary: bool,
     pub yes: bool,
     pub allow_downgrade: bool,
 }
@@ -61,21 +62,18 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
         println!("{note}");
     }
     let want_engines = (opts.engine || pyenv::engine_installed(home).is_some() || pyenv::has(home, Layer::Sglang)) && !cfg!(target_os = "macos");
-    let want_ternary = opts.ternary || (want_engines && ternary_installed(home));
     let (sglang, engine) = if want_engines { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
-    let ternary = if want_ternary { ternary_delta(home, &sums) } else { None };
-    let local_commit = option_env!("GOETHE_GIT_COMMIT").unwrap_or("unknown");
     let buildinfo = fetch_verified(pkg, &sums, "BUILDINFO", tmp).ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
-    let remote_commit = buildinfo_commit(&buildinfo, local_commit.trim_end_matches("-dirty").len());
     let nginx = nginx_delta(home, &sums, &arch, buildinfo_value(&buildinfo, "nginx_version"));
-    let published = published_label(&remote_ver, remote_commit.as_deref(), local_commit, bins && order == Ordering::Equal);
-    let installed = if bins { build_label(&local_ver, Some(local_commit)) } else { published.clone() };
+    let ask_model = ask_model_delta(home, &sums);
+    let published = published_label(&remote_ver, bins && order == Ordering::Equal);
+    let installed = if bins { local_ver.clone() } else { published.clone() };
     let parts = [
         ("goethe", kept.is_none().then(|| Delta::of(&installed, &published, bins))),
         ("nginx", nginx),
+        ("ask model", ask_model),
         ("SGLang", sglang),
         ("goethe-engine", engine),
-        ("ternary pack", ternary),
     ];
     let pending: Vec<(&str, Delta)> = parts.into_iter().filter_map(|(what, d)| d.map(|d| (what, d))).collect();
     for (what, d) in &pending {
@@ -98,10 +96,12 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
         let rel = format!("bin/{}/nginx", platform_dir(&arch));
         staged.push(stage(pkg, &sums, &rel, tmp, &home.join("nginx-root/usr/sbin/nginx"))?);
     }
+    if differs("ask model") {
+        staged.push(stage(pkg, &sums, ASK_MODEL_REL, tmp, &home.join(ASK_MODEL_REL))?);
+    }
     if differs("SGLang") {
         pyenv::sglang_wheel(home, pkg, &sums, tmp)?;
     }
-    let ternary = if differs("ternary pack") { stage_ternary(pkg, &sums, tmp)? } else { None };
     let was_running = crate::service::goethed_running();
     swap_all(&staged)?;
     if bins {
@@ -114,11 +114,6 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
                 pyenv::install_from(home, pkg, &sums, tmp, layer).map_err(|e| format!("{e}; goethe update engine retries"))?;
             }
         }
-    }
-    if let Some(t) = ternary {
-        unpack_ternary(home, &t)?;
-        let sha = lookup_sum(&sums, TERNARY_REL)?;
-        fs::write(home.join(TERNARY_RECORD), format!("{sha}\n")).map_err(|e| e.to_string())?;
     }
     let mut engine_ok = !(bins && pyenv::engine_installed(home).is_some() && differs("goethe-engine"));
     if bins && pyenv::engine_installed(home).is_some() && differs("goethe-engine") {
@@ -145,11 +140,11 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
 }
 
 fn binaries_due(order: Ordering, opts: &UpdateOpts, local: &str, remote: &str, differ: impl FnOnce() -> Result<bool, String>) -> Result<(bool, Option<String>), String> {
-    // Whether goethe and goethed are replaced, and the note when they are kept. The version guard is theirs alone: a published goethe older than this build is kept, and only --allow-downgrade without engine/ternary installs it; engines and packs go on whatever the binaries do.
+    // Whether goethe and goethed are replaced, and the note when they are kept. The version guard is theirs alone: a published goethe older than this build is kept, and only --allow-downgrade without engine installs it; engines and packs go on whatever the binaries do.
     match order {
         Ordering::Equal => Ok((differ()?, None)),
         Ordering::Greater => Ok((true, None)),
-        Ordering::Less if opts.allow_downgrade && !opts.engine && !opts.ternary => Ok((true, None)),
+        Ordering::Less if opts.allow_downgrade && !opts.engine => Ok((true, None)),
         Ordering::Less => Ok((false, Some(format!("goethe {local} is newer than the published {remote}; keeping it")))),
     }
 }
@@ -176,6 +171,16 @@ fn nginx_delta(home: &Path, sums: &Path, arch: &str, published_version: Option<&
     Some(Delta { installed: Some(installed), published, differs: have.as_deref() != Some(want.as_str()) })
 }
 
+fn ask_model_delta(home: &Path, sums: &Path) -> Option<Delta> {
+    // Compare the installed ask embedding table against the signed package, or skip when not shipped.
+    let want = lookup_sum(sums, ASK_MODEL_REL).ok()?;
+    let dest = home.join(ASK_MODEL_REL);
+    let have = sha256_file(&dest).ok();
+    let short = |s: &str| s.chars().take(12).collect::<String>();
+    let installed = have.as_deref().map(short).unwrap_or_else(|| "missing".to_string());
+    Some(Delta { installed: Some(installed), published: short(&want), differs: have.as_deref() != Some(want.as_str()) })
+}
+
 fn nginx_labels(have_sha: Option<&str>, have_version: Option<&str>, want_sha: &str, want_version: Option<&str>) -> (String, String) {
     // Versions when both are known ("1.30.6" -> "1.30.7", or "another build" of the same version), else 12-character hashes.
     let short = |s: &str| s.chars().take(12).collect::<String>();
@@ -194,12 +199,6 @@ fn buildinfo_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     text.lines().find_map(|l| l.trim().strip_prefix(key)?.strip_prefix('=').map(str::trim)).filter(|v| !v.is_empty())
 }
 
-fn buildinfo_commit(text: &str, len: usize) -> Option<String> {
-    // engine_commit from BUILDINFO, shortened like the local commit, with -dirty for a dirty tree.
-    let commit: String = buildinfo_value(text, "engine_commit")?.chars().take(len.max(7)).collect();
-    Some(if buildinfo_value(text, "engine_dirty") == Some("1") { format!("{commit}-dirty") } else { commit })
-}
-
 fn check_summary(pending: &[(&str, Delta)]) -> String {
     // The last line of goethe update --check: what would change, or that nothing would.
     let due: Vec<&str> = pending.iter().filter(|(_, d)| d.differs).map(|(w, _)| *w).collect();
@@ -210,29 +209,9 @@ fn check_summary(pending: &[(&str, Delta)]) -> String {
     }
 }
 
-fn build_label(version: &str, commit: Option<&str>) -> String {
-    match commit.filter(|c| !c.is_empty() && *c != "unknown") {
-        Some(c) => format!("{version} (commit {c})"),
-        None => version.to_string(),
-    }
-}
-
-fn published_label(version: &str, commit: Option<&str>, local_commit: &str, rebuilt: bool) -> String {
-    // The published build's label; another build of the installed version says so, even at the same commit.
-    match commit {
-        Some(c) if rebuilt && c == local_commit => format!("{version} (commit {c}, another build)"),
-        Some(c) => build_label(version, Some(c)),
-        None if rebuilt => format!("{version} (another build)"),
-        None => version.to_string(),
-    }
-}
-
-const TERNARY_REL: &str = "goethe/ternary-kernels.tar.zst";
-const TERNARY_RECORD: &str = "goethe/ternary-kernels.sha256";
-
-pub fn ternary_installed(home: &Path) -> bool {
-    // Whether the ternary runtime was ever installed here, so goethe update engine refreshes it too.
-    home.join(TERNARY_RECORD).exists()
+fn published_label(version: &str, rebuilt: bool) -> String {
+    // The published build's label; another build of the installed version says so.
+    if rebuilt { format!("{version} (another build)") } else { version.to_string() }
 }
 
 struct Delta {
@@ -297,18 +276,6 @@ fn engine_compare(recorded: Option<String>, file_sha: Option<&str>, published: &
     Delta { installed, published: published.to_string(), differs }
 }
 
-fn ternary_delta(home: &Path, sums: &Path) -> Option<Delta> {
-    // Published pack sha against the sha recorded when the pack was installed; None when no pack is published.
-    let published = lookup_sum(sums, TERNARY_REL).ok()?;
-    let recorded = fs::read_to_string(home.join(TERNARY_RECORD)).ok().map(|s| s.trim().to_string());
-    let short = |s: &str| s.chars().take(12).collect::<String>();
-    Some(Delta {
-        installed: recorded.as_deref().map(short),
-        differs: recorded.as_deref() != Some(published.as_str()),
-        published: short(&published),
-    })
-}
-
 pub fn pkg_base_url() -> String {
     crate::paths::setting("GOETHE_PKG_URL")
         .unwrap_or_else(|| "https://pkg.goethe.sh".to_string())
@@ -346,7 +313,7 @@ pub fn newer_published() -> Option<String> {
 }
 
 fn local_version() -> String {
-    crate::runtime::goethe_version().to_string()
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
@@ -486,7 +453,8 @@ pub(crate) fn swap_all(staged: &[Staged]) -> Result<(), String> {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
             fs::copy(&s.part, &staged_dest).map_err(|e| format!("{}: {e}", staged_dest.display()))?;
-            fs::set_permissions(&staged_dest, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            let mode = if s.rel == ASK_MODEL_REL { 0o644 } else { 0o755 };
+            fs::set_permissions(&staged_dest, std::os::unix::fs::PermissionsExt::from_mode(mode))
                 .map_err(|e| e.to_string())?;
             if s.dest.exists() {
                 fs::rename(&s.dest, s.dest.with_extension("prev")).map_err(|e| e.to_string())?;
@@ -521,44 +489,6 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
         h.update(&buf[..n]);
     }
     Ok(format!("{:x}", h.finalize()))
-}
-
-fn stage_ternary(base: &str, sums: &Path, tmp: &Path) -> Result<Option<PathBuf>, String> {
-    if lookup_sum(sums, TERNARY_REL).is_err() {
-        return Ok(None);
-    }
-    fetch_verified(base, sums, TERNARY_REL, tmp).map(Some)
-}
-
-fn unpack_ternary(home: &Path, archive: &Path) -> Result<(), String> {
-    // Decompress and extract the ternary runtime under GOETHE_HOME/goethe.
-    let dest_dir = home.join("goethe");
-    fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
-    let tar = dest_dir.join("ternary-kernels.tar");
-    let ok = Command::new("zstd")
-        .args(["-d", "-f", "-q"])
-        .arg(archive)
-        .arg("-o")
-        .arg(&tar)
-        .status()
-        .map_err(|e| format!("zstd: {e}"))?
-        .success();
-    if !ok {
-        return Err("zstd decompress failed".to_string());
-    }
-    let ok = Command::new("tar")
-        .arg("-xf")
-        .arg(&tar)
-        .arg("-C")
-        .arg(&dest_dir)
-        .status()
-        .map_err(|e| e.to_string())?
-        .success();
-    let _ = fs::remove_file(&tar);
-    if !ok {
-        return Err("tar extract failed".to_string());
-    }
-    Ok(())
 }
 
 fn restart_goethed(home: &Path) -> Result<(), String> {
@@ -686,23 +616,22 @@ mod tests {
         assert!(fetch_pkg_file_max(&url, "f", &dest, 1 << 20, Duration::from_secs(1)).is_err(), "3 s of silence");
     }
 
-    fn opts(engine: bool, ternary: bool, allow_downgrade: bool) -> UpdateOpts {
-        UpdateOpts { check_only: false, engine, ternary, yes: true, allow_downgrade }
+    fn opts(engine: bool, allow_downgrade: bool) -> UpdateOpts {
+        UpdateOpts { check_only: false, engine, yes: true, allow_downgrade }
     }
 
     #[test]
     fn a_build_ahead_of_the_published_release_keeps_its_binaries_and_still_updates_what_was_asked() {
         let due = |o: &UpdateOpts, order| binaries_due(order, o, "0.3.3", "0.3.2", || panic!("only an equal version compares the binaries")).map(|(bins, note)| (bins, note.is_some()));
-        assert_eq!(due(&opts(false, false, false), Ordering::Less), Ok((false, true)), "no flags: the note, nothing replaced, no error");
-        assert_eq!(due(&opts(true, false, false), Ordering::Less), Ok((false, true)), "update engine: the binaries stay, the engine layer is still looked at");
-        assert_eq!(due(&opts(false, true, false), Ordering::Less), Ok((false, true)), "ternary likewise");
-        assert_eq!(due(&opts(true, false, true), Ordering::Less), Ok((false, true)), "--allow-downgrade never turns update engine into a binary downgrade");
-        assert_eq!(due(&opts(false, false, true), Ordering::Less), Ok((true, false)), "--allow-downgrade alone installs the older published binaries");
-        assert_eq!(due(&opts(true, false, false), Ordering::Greater), Ok((true, false)), "an older build still updates");
-        let note = binaries_due(Ordering::Less, &opts(false, false, false), "0.3.3", "0.3.2", || Ok(false)).unwrap().1.unwrap();
+        assert_eq!(due(&opts(false, false), Ordering::Less), Ok((false, true)), "no flags: the note, nothing replaced, no error");
+        assert_eq!(due(&opts(true, false), Ordering::Less), Ok((false, true)), "update engine: the binaries stay, the engine layer is still looked at");
+        assert_eq!(due(&opts(true, true), Ordering::Less), Ok((false, true)), "--allow-downgrade never turns update engine into a binary downgrade");
+        assert_eq!(due(&opts(false, true), Ordering::Less), Ok((true, false)), "--allow-downgrade alone installs the older published binaries");
+        assert_eq!(due(&opts(true, false), Ordering::Greater), Ok((true, false)), "an older build still updates");
+        let note = binaries_due(Ordering::Less, &opts(false, false), "0.3.3", "0.3.2", || Ok(false)).unwrap().1.unwrap();
         assert_eq!(note, "goethe 0.3.3 is newer than the published 0.3.2; keeping it");
-        assert_eq!(binaries_due(Ordering::Equal, &opts(true, false, false), "0.3.3", "0.3.3", || Ok(true)), Ok((true, None)), "another build at the same version");
-        assert_eq!(binaries_due(Ordering::Equal, &opts(false, false, false), "0.3.3", "0.3.3", || Ok(false)), Ok((false, None)));
+        assert_eq!(binaries_due(Ordering::Equal, &opts(true, false), "0.3.3", "0.3.3", || Ok(true)), Ok((true, None)), "another build at the same version");
+        assert_eq!(binaries_due(Ordering::Equal, &opts(false, false), "0.3.3", "0.3.3", || Ok(false)), Ok((false, None)));
     }
 
     #[test]
@@ -795,18 +724,10 @@ mod tests {
         fs::write(home.join("bin/goethed"), b"older daemon").unwrap();
         assert!(binaries_differ(home, &sums, "x86_64").unwrap());
         assert!(binaries_differ(home, &sums, "aarch64").is_err(), "no signed entry for that arch");
-        let info = "built_at=x\nengine_commit=0123456789abcdef0123\nengine_dirty=0\n";
-        assert_eq!(buildinfo_commit(info, 7).as_deref(), Some("0123456"));
-        assert_eq!(buildinfo_commit(&info.replace("dirty=0", "dirty=1"), 9).as_deref(), Some("012345678-dirty"));
-        assert_eq!(buildinfo_commit("release=1\n", 7), None);
-        assert_eq!(build_label("0.1.0", Some("abc1234")), "0.1.0 (commit abc1234)");
-        assert_eq!(build_label("0.1.0", Some("unknown")), "0.1.0");
-        assert_eq!(published_label("0.1.0", Some("abc1234"), "abc1234", true), "0.1.0 (commit abc1234, another build)");
-        assert_eq!(published_label("0.1.0", Some("def5678"), "abc1234", true), "0.1.0 (commit def5678)");
-        assert_eq!(published_label("0.1.0", None, "abc1234", true), "0.1.0 (another build)");
-        assert_eq!(published_label("0.2.0", None, "abc1234", false), "0.2.0");
-        let d = Delta::of("0.1.0 (commit abc1234)", "0.1.0 (commit def5678)", true);
-        assert_eq!(d.line("goethe"), "update available: goethe 0.1.0 (commit abc1234) -> 0.1.0 (commit def5678)");
+        assert_eq!(published_label("0.1.0", true), "0.1.0 (another build)");
+        assert_eq!(published_label("0.2.0", false), "0.2.0");
+        let d = Delta::of("0.1.0", &published_label("0.1.0", true), true);
+        assert_eq!(d.line("goethe"), "update available: goethe 0.1.0 -> 0.1.0 (another build)");
     }
 
     #[test]
@@ -821,17 +742,6 @@ mod tests {
         assert!(none.differs);
         assert_eq!(none.line("engine"), "update available: engine not recorded -> sglang-1.whl");
         assert_eq!(Delta::of("0.1.0", "0.1.0", false).line("goethe"), "goethe 0.1.0 is up to date");
-        let dir = tempfile::tempdir().unwrap();
-        let sums = dir.path().join("SHA256SUMS");
-        fs::write(&sums, format!("{}  {TERNARY_REL}\n", "c".repeat(64))).unwrap();
-        assert!(ternary_delta(dir.path(), &sums).unwrap().differs);
-        fs::create_dir_all(dir.path().join("goethe")).unwrap();
-        fs::write(dir.path().join(TERNARY_RECORD), format!("{}\n", "c".repeat(64))).unwrap();
-        let same = ternary_delta(dir.path(), &sums).unwrap();
-        assert!(!same.differs);
-        assert_eq!(same.line("ternary pack"), "ternary pack cccccccccccc is up to date");
-        fs::write(&sums, "").unwrap();
-        assert!(ternary_delta(dir.path(), &sums).is_none());
     }
 
     #[test]
@@ -853,5 +763,25 @@ mod tests {
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(sha256_file(&t.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn ask_model_delta_and_atomic_swap_use_non_exec_mode() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("home");
+        let cdn = t.path().join("cdn");
+        fs::create_dir_all(cdn.join("ask")).unwrap();
+        let blob = b"GASK\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        fs::write(cdn.join(ASK_MODEL_REL), blob).unwrap();
+        let sha = sha256_file(&cdn.join(ASK_MODEL_REL)).unwrap();
+        let sums = t.path().join("SHA256SUMS");
+        fs::write(&sums, format!("{sha}  {ASK_MODEL_REL}\n")).unwrap();
+        let d = ask_model_delta(&home, &sums).unwrap();
+        assert!(d.differs);
+        let staged = stage(&format!("file://{}", cdn.display()), &sums, ASK_MODEL_REL, t.path(), &home.join(ASK_MODEL_REL)).unwrap();
+        swap_all(&[staged]).unwrap();
+        let mode = std::os::unix::fs::PermissionsExt::mode(&fs::metadata(home.join(ASK_MODEL_REL)).unwrap().permissions()) & 0o777;
+        assert_eq!(mode, 0o644);
+        assert!(!ask_model_delta(&home, &sums).unwrap().differs);
     }
 }

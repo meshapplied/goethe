@@ -88,17 +88,21 @@ fn signal_worker(read_end: i32, models: &Mutex<Vec<String>>, unload: &dyn Fn(&st
             return;
         }
     }
-    eprintln!("\ninterrupted; unloading what this run loaded");
     let list = std::mem::take(&mut *lock(models));
     list.iter().for_each(|m| unload(m));
     leave(128 + byte as i32);
 }
 
 fn unload_model(model: &str) {
-    match crate::rpc::call("unload", json!({"model_id": model, "all": false, "force": false})) {
-        Ok(_) => eprintln!("unloaded {model}"),
-        Err(e) => eprintln!("could not unload {model}: {e}"),
-    }
+    unload_quietly(model);
+}
+
+pub(crate) fn unload_quietly(model: &str) {
+    // Hand the unload to a detached goethe unload: run leaves at once and says nothing, the model drains and goes in the background.
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().unwrap_or_else(|_| "goethe".into());
+    let null = std::process::Stdio::null;
+    let _ = std::process::Command::new(exe).args(["unload", model]).stdin(null()).stdout(null()).stderr(null()).process_group(0).spawn();
 }
 
 pub fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, String> {
@@ -110,12 +114,37 @@ pub fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, Str
     }
 }
 
+pub const RUN_CTX: u64 = 100_000;
+
+pub(crate) fn wait_routed(home: &std::path::Path, model: &str) -> std::sync::Arc<crate::gateway_cache::Snapshot> {
+    // The gateway view once the model serves, or after 15 minutes (target then says it is not loaded).
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(900);
+    loop {
+        let snap = GatewayCache::open(home).exact();
+        let up = snap.routes(model).iter().any(|r| !r.draining);
+        if up || std::time::Instant::now() > end || !crate::menu::installed_and_loaded(home).iter().any(|(m, on)| m == model && *on) {
+            return snap;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+pub(crate) fn run_ctx(home: &std::path::Path, model: &str) -> Option<u64> {
+    // The context run loads a model with: RUN_CTX, or the model's maximum when that is smaller; None (the load default) when unknown.
+    let con = crate::db::open(home).ok()?;
+    let max: i64 = con.query_row("SELECT COALESCE(max_ctx, default_ctx) FROM installed_models WHERE model_id = ?1", [model], |r| r.get(0)).ok()?;
+    run_ctx_for(max)
+}
+
+fn run_ctx_for(max: i64) -> Option<u64> {
+    (max > 0).then(|| RUN_CTX.min(max as u64))
+}
+
 pub(crate) struct Target {
     pub(crate) model: String,
     pub(crate) kind: String,
     pub(crate) runtime: String,
     pub(crate) llama: bool,
-    pub(crate) instance: String,
     pub(crate) api: Api,
 }
 
@@ -128,7 +157,7 @@ pub(crate) fn target(model: &str) -> Result<Target, String> {
     let (card_kind, llama) = card_task(&crate::paths::model_dir(&home, model));
     let kind = kind_of(&api.call("GET", "/models", None)?, model, card_kind);
     let runtime = crate::engine_overhead::model_runtime(&home, model);
-    Ok(Target { model: model.to_string(), kind, runtime, llama, instance: r.instance_id.clone(), api })
+    Ok(Target { model: model.to_string(), kind, runtime, llama, api })
 }
 
 fn interactive(input: &Option<String>, plain: bool) -> bool {
@@ -146,21 +175,36 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
         args[0] = first;
     }
     let installed = crate::models::installed_ids(&home);
+    let mut picked_load = false;
     if args.is_empty() && interactive(&None, opts.plain) {
         match crate::menu::pick_model()? {
-            Some(m) => args.push(m),
+            Some((m, loaded_here)) => {
+                picked_load = loaded_here;
+                args.push(m);
+            }
             None => return Ok(()),
         }
     }
     let (model, input) = route(&args, &snap.serving_models(), &installed.iter().map(String::as_str).collect::<Vec<_>>())?;
     let mut loaded = Loaded::new(opts.keep);
-    if load_need(snap.routes(&model).iter().any(|r| !r.draining), installed.contains(&model), &model)? {
+    if picked_load {
         loaded.add(&model);
-        if let Err(e) = crate::install::run_load(json!({"model_id": model, "gpus": null, "ctx": null, "max_conc": null, "tp": null, "force": false, "yes": false, "extra_sglang_args": [], "async_finish": true}), false, false) {
-            loaded.forget(&model);
-            return Err(e);
+        snap = wait_routed(&home, &model);
+    }
+    if load_need(snap.routes(&model).iter().any(|r| !r.draining), installed.contains(&model), &model)? {
+        let live = crate::menu::installed_and_loaded(&home).iter().any(|(m, on)| *m == model && *on);
+        if live {
+            eprintln!("{model} is still loading; waiting for it (it stays loaded after this run)");
+        } else {
+            loaded.add(&model);
+            let ctx = run_ctx(&home, &model);
+            let params = json!({"model_id": model, "gpus": null, "ctx": ctx, "max_conc": null, "tp": null, "force": false, "yes": false, "extra_sglang_args": [], "async_finish": true});
+            if let Err(e) = crate::install::run_load(params, false, false) {
+                loaded.forget(&model);
+                return Err(e);
+            }
         }
-        snap = GatewayCache::open(&home).exact();
+        snap = wait_routed(&home, &model);
     }
     drop(snap);
     let t = target(&model)?;
@@ -174,14 +218,7 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
     match (t.kind.as_str(), input) {
         ("embedding", Some(text)) => api.embed(&model, &text).map(|e| println!("{}", embed_line(&e))),
         ("speech", Some(path)) => api.transcribe(&model, std::path::Path::new(&path), llama).map(|text| println!("{}", for_stdout(&text))),
-        ("speech", None) => {
-            let wav = record()?;
-            let done = api.transcribe(&model, &wav, llama);
-            let _ = std::fs::remove_file(&wav);
-            let _ = wav.parent().map(std::fs::remove_dir);
-            done.map(|text| println!("{}", for_stdout(&text)))
-        }
-        (_, Some(text)) => api.chat(&model, &[json!({"role": "user", "content": text})], &mut |_| true).map(|reply| println!("{}", shown(&reply, opts.thinking))),
+        (_, Some(text)) => api.chat(&model, &[json!({"role": "user", "content": text})], &mut |_| true).map(|(reply, _)| println!("{}", shown(&reply, opts.thinking))),
         (_, None) => {
             let mut msgs = Vec::new();
             loop {
@@ -193,7 +230,7 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
                 }
                 msgs.push(json!({"role": "user", "content": line.trim_end()}));
                 match api.chat(&model, &msgs, &mut |_| true) {
-                    Ok(reply) => {
+                    Ok((reply, _)) => {
                         println!("{}", shown(&reply, opts.thinking));
                         msgs.push(json!({"role": "assistant", "content": reply}));
                     }
@@ -234,13 +271,13 @@ pub fn route(args: &[String], loaded: &[&str], installed: &[&str]) -> Result<(St
 }
 
 pub fn mismatch(model: &str, kind: &str, input: Option<&str>) -> Option<String> {
-    // Text goes to text and embedding models, an audio file on disk to speech models; no INPUT is a chat or a recording; else one named line.
+    // Text goes to text and embedding models, an audio file on disk to speech models; no INPUT is a chat (a speech model needs its file); else one named line.
     let audio = input.is_some_and(|i| {
         let p = std::path::Path::new(i);
         p.is_file() && p.extension().is_some_and(|x| ["wav", "flac", "mp3", "ogg", "m4a"].iter().any(|e| x.eq_ignore_ascii_case(e)))
     });
     let (ok, a, want) = match kind {
-        "speech" => (input.is_none() || audio, "a speech", "an audio file"),
+        "speech" => (audio, "a speech", "an audio file"),
         "embedding" => (input.is_some() && !audio, "an embedding", "text"),
         _ => (!audio, "a text", "text"),
     };
@@ -311,21 +348,24 @@ impl Api {
         Ok(reply(req.send_bytes(&body))?["text"].as_str().unwrap_or_default().to_string())
     }
 
-    pub(crate) fn chat(&self, model: &str, msgs: &[Value], sink: &mut dyn FnMut(&str) -> bool) -> Result<String, String> {
-        // Streams the reply piece by piece into the sink (which says false to stop) and returns it whole.
-        let body = json!({"model": model, "messages": msgs, "stream": true}).to_string();
+    pub(crate) fn chat(&self, model: &str, msgs: &[Value], sink: &mut dyn FnMut(&str) -> bool) -> Result<(String, u64), String> {
+        // Streams the reply piece by piece into the sink (which says false to stop); returns it whole with its completion tokens (the usage chunk, else the content chunks).
+        let body = json!({"model": model, "messages": msgs, "stream": true, "stream_options": {"include_usage": true}}).to_string();
         let r = self.req("POST", "/chat/completions").set("Content-Type", "application/json").send_string(&body).map_err(fail)?;
-        let mut out = String::new();
+        let (mut out, mut chunks, mut usage) = (String::new(), 0, None);
         for line in BufReader::new(r.into_reader()).lines() {
             let line = line.map_err(|e| e.to_string())?;
             let Some(data) = line.strip_prefix("data:").map(str::trim).filter(|d| *d != "[DONE]") else { continue };
-            let piece = serde_json::from_str::<Value>(data).ok().and_then(|v| v["choices"][0]["delta"]["content"].as_str().map(String::from)).unwrap_or_default();
-            out.push_str(&piece);
-            if !sink(&piece) {
+            let v = serde_json::from_str::<Value>(data).unwrap_or_default();
+            usage = v["usage"]["completion_tokens"].as_u64().or(usage);
+            let piece = v["choices"][0]["delta"]["content"].as_str().unwrap_or_default();
+            chunks += u64::from(!piece.is_empty());
+            out.push_str(piece);
+            if !sink(piece) {
                 break;
             }
         }
-        Ok(out)
+        Ok((out, usage.unwrap_or(chunks)))
     }
 }
 
@@ -346,27 +386,6 @@ fn base64(bytes: &[u8]) -> String {
         }
     }
     out
-}
-
-pub(crate) fn record() -> Result<std::path::PathBuf, String> {
-    // 16 kHz mono PCM16 WAV from the first recorder on PATH, to a temp file, until Enter or Ctrl-D (SIGINT: the recorder closes the WAV).
-    let wav = crate::paths::private_temp_dir("goethe-run")?.join("in.wav");
-    let f = wav.to_string_lossy().into_owned();
-    let f = f.as_str();
-    let recorders: [(&str, &[&str]); 3] = [
-        ("arecord", &["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", f]),
-        ("parecord", &["--rate=16000", "--channels=1", "--format=s16le", "--file-format=wav", f]),
-        ("ffmpeg", &["-loglevel", "error", "-y", "-f", "pulse", "-i", "default", "-ar", "16000", "-ac", "1", f]),
-    ];
-    let mut child = recorders
-        .iter()
-        .find_map(|(bin, args)| std::process::Command::new(bin).args(*args).stdin(std::process::Stdio::null()).spawn().ok())
-        .ok_or("no audio recorder found: install alsa-utils (arecord)")?;
-    println!("recording: press Enter to stop");
-    let _ = std::io::stdin().read_line(&mut String::new());
-    unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
-    let _ = child.wait();
-    Ok(wav)
 }
 
 fn reply(r: Result<ureq::Response, ureq::Error>) -> Result<Value, String> {
@@ -431,7 +450,7 @@ mod tests {
         assert_eq!(mismatch("m", "embedding", None).unwrap(), "m is an embedding model: give it text");
         assert_eq!(mismatch("m", "speech", Some(wav)), None);
         assert_eq!(mismatch("m", "speech", Some("missing.wav")).unwrap(), "m is a speech model: give it an audio file");
-        assert_eq!(mismatch("m", "speech", None), None, "no INPUT records from the microphone");
+        assert!(mismatch("m", "speech", None).is_some(), "a speech model needs its audio file");
     }
 
     #[test]
@@ -504,6 +523,13 @@ mod tests {
         assert_eq!(load_need(true, true, "org/m"), Ok(false), "serving: left alone");
         assert_eq!(load_need(false, true, "org/m"), Ok(true), "installed, not loaded: run loads it");
         assert_eq!(load_need(false, false, "org/m").unwrap_err(), "org/m is not installed: goethe install org/m");
+    }
+
+    #[test]
+    fn run_loads_with_a_100k_context_or_the_model_maximum_when_smaller() {
+        assert_eq!(run_ctx_for(262_144), Some(100_000));
+        assert_eq!(run_ctx_for(32_768), Some(32_768));
+        assert_eq!(run_ctx_for(0), None);
     }
 
     #[test]

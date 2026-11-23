@@ -471,7 +471,7 @@ fn render_gateway_on(home: &Path, bin: &Path, bind: IpAddr) -> Result<String, St
         String::new()
     };
     const TMPL: &str = include_str!("../../../nginx/goethe_gateway.conf.tmpl");
-    let public = crate::public_share::nginx_block(home, mux_port, modern_http2, max_body_mb(home));
+    let public = crate::public_share::nginx_block(home, modern_http2, max_body_mb(home));
     Ok(TMPL
         .replace("{{LISTEN}}", &listen)
         .replace("{{HTTP2_LISTEN}}", http2)
@@ -592,6 +592,16 @@ fn nobody_group() -> Option<String> {
     }
     let gr = unsafe { libc::getgrgid((*pw).pw_gid) };
     (!gr.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr((*gr).gr_name) }.to_string_lossy().into_owned())
+}
+
+pub(crate) fn worker_gid() -> Option<u32> {
+    // The group a root master's workers run as (see worker_user_line); None when goethe is not root.
+    if unsafe { libc::geteuid() } != 0 {
+        return None;
+    }
+    let user = std::ffi::CString::new("nobody").ok()?;
+    let pw = unsafe { libc::getpwnam(user.as_ptr()) };
+    (!pw.is_null()).then(|| unsafe { (*pw).pw_gid })
 }
 
 fn worker_user_line(root: bool, group: Option<&str>) -> String {

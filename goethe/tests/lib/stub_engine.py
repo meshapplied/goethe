@@ -401,7 +401,6 @@ def main(argv: list[str] | None = None) -> int:
         "parsed": vars(args),
         "env": {
             **{k: os.environ[k] for k in RECORDED_ENV if k in os.environ},
-            **{k: v for k, v in os.environ.items() if k.startswith("TERNARY_")},
         },
         "env_keys": sorted(os.environ),
         "knobs": knobs,

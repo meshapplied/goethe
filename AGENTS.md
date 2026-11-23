@@ -4,7 +4,6 @@ Index for coding agents in this repo. Read what you need; do not invent architec
 
 ## Map
 - Product path: `goethe/` (Rust `goethe` / `goethed`, CDN install, gateway, packs).
-- Lab path: `lab/` (Python). Do not treat it as the shipped CLI unless asked.
 - Local doctrine: `PROJECT.md` (gitignored, never commit). Read it when present; never paste it into commits/PRs/issues.
 - Parent tree rules: `../AGENTS.md` when working under `meshapplied/`.
 

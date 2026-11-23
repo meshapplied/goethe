@@ -1,7 +1,11 @@
 // goethe CLI entrypoint for hardware, install, config, and load commands.
 
+mod ask;
 mod complete;
+mod container;
+mod spec;
 use clap::{CommandFactory, Parser, Subcommand};
+use spec::{ArgMeta, CmdMeta, Fact::{Daemon, Installed, Key, Loaded}};
 use goethe_core::alias;
 use goethe_core::config::{self, ConfigOpts};
 use goethe_core::db;
@@ -37,6 +41,10 @@ Only some models, or just the key for a script:
 
 \t→ goethe api keys create bot --models deepseek-ai/DeepSeek-V4.1-Flash-1017
 \t→ API_KEY=$(goethe api keys create ci --raw)
+
+Goethe keeps only a hash of each key, so a key is shown once. A lost one gets a new secret (same id, name and limits; the old secret stops working):
+
+\t→ goethe api keys rotate <key-id>
 
 Revoke one:
 
@@ -109,36 +117,38 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(display_order = 1, about = "Start Goethe now and at every boot; models loaded last time come back.")]
+    #[command(add = CmdMeta::change().terminal(), display_order = 0, about = "Quick setup: install a model, serve it and open the API, step by step (needs a terminal).")]
+    Start,
+    #[command(add = CmdMeta::change().gives(&[Daemon]), display_order = 1, about = "Start Goethe now and at every boot; models loaded last time come back.")]
     Up {
         #[arg(long = "no-boot", help = "Start now without turning on start at boot.")]
         no_boot: bool,
     },
-    #[command(display_order = 2, about = "Stop Goethe and its models, and stop starting at boot (models come back on the next up).")]
+    #[command(add = CmdMeta::destructive(), display_order = 2, about = "Stop Goethe and its models, and stop starting at boot (models come back on the next up).")]
     Down {
         #[arg(long = "keep-engines", help = "Leave loaded engines serving; the next goethed adopts them.")]
         keep_engines: bool,
     },
-    #[command(display_order = 3, about = "Whether Goethe runs, the API address, its keys and the models it serves.")]
+    #[command(add = CmdMeta::read(), display_order = 3, about = "Whether Goethe runs, the API address, its keys and the models it serves.")]
     Status,
-    #[command(display_order = 3, about = "Requests, tokens, speed and GPU use per model and API key over a chosen range, from the local usage log.")]
+    #[command(add = CmdMeta::read(), display_order = 3, about = "Requests, tokens, speed and GPU use per model and API key over a chosen range, from the local usage log.")]
     Metrics,
-    #[command(display_order = 4, about = "Running models in detail: GPUs, port, memory, requests and speed.")]
+    #[command(add = CmdMeta::read(), display_order = 4, about = "Running models in detail: GPUs, port, memory, requests and speed.")]
     Ps {
         #[arg(long, help = "JSON rows with instance_id, slot_key, status, restarts.")]
         json: bool,
     },
-    #[command(
+    #[command(add = CmdMeta::download().needs(&[Daemon]).gives(&[Installed]),
         display_order = 5,
-        about = "Download a model from Hugging Face, or add a local folder; --load serves it too.",
+        about = "Download a model from Hugging Face or local path; --load serves it too.",
         after_help = "Extra engine flags go after --, and are stored as the model's defaults:\n\n\t→ goethe install org/name --load -- --chunked-prefill-size 4096"
     )]
     Install {
-        #[arg(value_name = "MODEL", num_args = 1.., required = true, help = "Hugging Face id (org/name), a local folder, or words from a catalog model's name; a :QUANT suffix (org/name:Q8_0) picks that GGUF file or kernel pack variant.")]
+        #[arg(add = ArgMeta::of(spec::Value::Model), value_name = "MODEL", num_args = 1.., required = true, help = "Hugging Face id (org/name), a local folder, or words from a catalog model's name; a :QUANT suffix (org/name:Q8_0) picks that GGUF file or kernel pack variant.")]
         model: Vec<String>,
         #[arg(long, help = "Load the model once it is installed.")]
         load: bool,
-        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::gpus), long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "Default GPUs, as goethe gpu lists them: --gpu gpu2 gpu3.")]
+        #[arg(add = ArgMeta::of(spec::Value::Gpu), long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "Default GPUs, as goethe gpu lists them: --gpu gpu2 gpu3.")]
         gpu: Vec<u32>,
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=CTX_MAX), help = "Default context length.")]
         ctx: Option<u64>,
@@ -154,7 +164,7 @@ enum Commands {
         yes: bool,
         #[arg(long = "hf-token", help = "Ask for a Hugging Face token (gated or private models); it is used for this download only.")]
         hf_token: bool,
-        #[arg(long, help = "Model id to register a local folder under.")]
+        #[arg(add = ArgMeta::of(spec::Value::Text), long, help = "Model id to register a local folder under.")]
         name: Option<String>,
         #[arg(long, help = "Copy a local folder instead of linking to it.")]
         copy: bool,
@@ -163,9 +173,9 @@ enum Commands {
         #[arg(last = true, help = "Extra engine flags, only after --.")]
         extra: Vec<String>,
     },
-    #[command(display_order = 6, about = "Unload and delete an installed model (a folder of your own is only unregistered).")]
+    #[command(add = CmdMeta::destructive().confirms(), display_order = 6, about = "Unload and delete an installed model (a folder of your own is only unregistered).")]
     Remove {
-        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", required = true, help = "Installed models to remove: ids, aliases or words from a name, one argument each.")]
+        #[arg(add = ArgMeta::of(spec::Value::InstalledModel), value_name = "MODEL", required = true, help = "Installed models to remove: ids, aliases or words from a name, one argument each.")]
         model: Vec<String>,
         #[arg(long, help = "Do not ask; also unloads the model if it is loaded.")]
         yes: bool,
@@ -174,7 +184,7 @@ enum Commands {
         #[arg(long, value_name = "keep|delete", value_parser = ["keep", "delete"], help = "What happens to the traces recorded with the model (asked on a terminal; keep with --yes).")]
         traces: Option<String>,
     },
-    #[command(
+    #[command(add = CmdMeta::change().needs(&[Daemon, Installed]).gives(&[Loaded]),
         display_order = 7,
         about = "Serve an installed model on the GPUs and wait until it answers.",
         after_help = "Extra engine flags go after --, for example:\n\n\t→ goethe load deepseek-ai/DeepSeek-V4.1-Flash-1017 --ctx 32768 -- --chunked-prefill-size 4096\n\n\
@@ -182,9 +192,9 @@ enum Commands {
                       --dry-run shows where the model would go without loading it; with --save it only stores the defaults."
     )]
     Load {
-        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", num_args = 1.., required = true, help = "Installed model: id, alias or words from its name, such as qwen 27b.")]
+        #[arg(add = ArgMeta::of(spec::Value::InstalledModel), value_name = "MODEL", num_args = 1.., required = true, help = "Installed model: id, alias or words from its name, such as qwen 27b.")]
         model: Vec<String>,
-        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::gpus), long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "GPUs to load on, as goethe gpu lists them: --gpu gpu3, or --gpu gpu2 gpu3 to split the model across both.")]
+        #[arg(add = ArgMeta::of(spec::Value::Gpu), long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "GPUs to load on, as goethe gpu lists them: --gpu gpu3, or --gpu gpu2 gpu3 to split the model across both.")]
         gpu: Vec<u32>,
         #[arg(long, value_name = "N", conflicts_with = "gpu", help = "Split the model across N GPUs that goethe picks (with --gpu, the number of GPUs given is used).")]
         tp: Option<u64>,
@@ -211,18 +221,18 @@ enum Commands {
         #[arg(last = true, help = "Extra engine flags, only after --.")]
         extra: Vec<String>,
     },
-    #[command(display_order = 8, about = "Stop serving a model.")]
+    #[command(add = CmdMeta::change(), display_order = 8, about = "Stop serving a model.")]
     Unload {
-        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", conflicts_with = "all", required_unless_present = "all", help = "Models to unload (every instance): ids, aliases or words from a name, one argument each.")]
+        #[arg(add = ArgMeta::of(spec::Value::InstalledModel), value_name = "MODEL", conflicts_with = "all", required_unless_present = "all", help = "Models to unload (every instance): ids, aliases or words from a name, one argument each.")]
         model: Vec<String>,
         #[arg(long, help = "Unload every loaded model.")]
         all: bool,
         #[arg(long, help = "Skip connection draining and tear down immediately.")]
         force: bool,
     },
-    #[command(display_order = 9, about = "Try a model by hand: a chat screen on a terminal without INPUT, else one reply, an embedding summary or an audio file's transcript. Loads an installed model that is not loaded and unloads it again.")]
+    #[command(add = CmdMeta::change().needs(&[Daemon, Installed]).terminal(), display_order = 9, about = "Try a model by hand: a chat screen on a terminal without INPUT, else one reply, an embedding summary or an audio file's transcript. Loads an installed model that is not loaded and unloads it again.")]
     Run {
-        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models), value_name = "MODEL", num_args = 0..=2, help = "[MODEL] [INPUT]: without either, on a terminal, a list of the installed models opens to pick from; with INPUT alone, MODEL may be left out when one model is loaded.")]
+        #[arg(add = ArgMeta::of(spec::Value::ModelInput), value_name = "MODEL", num_args = 0..=2, help = "[MODEL] [INPUT]: without either, on a terminal, a list of the installed models opens to pick from; with INPUT alone, MODEL may be left out when one model is loaded.")]
         args: Vec<String>,
         #[arg(long, help = "Leave a model loaded that this command loaded (it is unloaded when run ends otherwise).")]
         keep: bool,
@@ -231,7 +241,7 @@ enum Commands {
         #[arg(long, help = "Show the model's reasoning (dimmed) with the answer.")]
         thinking: bool,
     },
-    #[command(display_order = 10,
+    #[command(add = CmdMeta::read(), display_order = 10,
         about = "Installed and catalog models; also recommend, scan and alias.",
         visible_alias = "list",
         args_conflicts_with_subcommands = true
@@ -248,16 +258,16 @@ enum Commands {
         #[arg(long, help = "Every line; the default stops after 40.")]
         all: bool,
     },
-    #[command(display_order = 11, about = "Logs of a model, of goethed or of the gateway.")]
+    #[command(add = CmdMeta::read(), display_order = 11, about = "Logs of a model, of goethed or of the gateway.")]
     Logs {
-        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::log_targets), value_name = "TARGET", num_args = 1.., required = true, help = "A model (id, alias or words from its name), an instance id, goethed, or gateway.")]
+        #[arg(add = ArgMeta::of(spec::Value::LogTarget), value_name = "TARGET", num_args = 1.., required = true, help = "A model (id, alias or words from its name), an instance id, goethed, or gateway.")]
         target: Vec<String>,
         #[arg(short = 'f', long, help = "Follow log output.")]
         follow: bool,
         #[arg(short = 'n', long, default_value = "100", help = "Number of lines to print.")]
         lines: usize,
     },
-    #[command(display_order = 12,
+    #[command(add = CmdMeta::read().needs(&[Key, Loaded]), display_order = 12,
         about = "The API address and how to connect; also keys, expose, allow, domain and share.",
         args_conflicts_with_subcommands = true
     )]
@@ -267,20 +277,18 @@ enum Commands {
         #[command(subcommand)]
         cmd: Option<ApiCommands>,
     },
-    #[command(display_order = 13, about = "Let sessions keep what context compaction would drop: on or off, for every model or for some.", after_help = LEARN_HELP)]
+    #[command(add = CmdMeta::read(), display_order = 13, about = "Let sessions keep what context compaction would drop: on or off, for every model or for some.", after_help = LEARN_HELP)]
     Learn(LearnArgs),
-    #[command(display_order = 14, about = "Record requests and replies as training traces: on or off, per API key, and the size.", after_help = TRACE_HELP)]
+    #[command(add = CmdMeta::change(), display_order = 14, about = "Record requests and replies as training traces: on or off, per API key, and the size.", after_help = TRACE_HELP)]
     Trace(TraceArgs),
-    #[command(display_order = 15, about = "GPUs with memory, processes and bandwidth, live; allow or deny one.")]
+    #[command(add = CmdMeta::read(), args_conflicts_with_subcommands = true, display_order = 15, about = "GPUs with memory, processes and bandwidth, live; allow or deny one.")]
     Gpu {
-        #[arg(value_parser = ["allow", "deny"], help = "allow or deny, followed by GPUs (goethe gpu deny gpu2): deny keeps new models off them, running ones stay.")]
-        action: Option<String>,
-        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::gpus), value_name = "GPU", requires = "action", value_parser = parse_gpu_name, help = "GPUs as goethe gpu lists them, for example gpu0 gpu1.")]
-        gpus: Vec<u32>,
         #[arg(long, help = "Emit JSON.")]
         json: bool,
+        #[command(subcommand)]
+        cmd: Option<GpuCommands>,
     },
-    #[command(display_order = 16, about = "Check the machine and the setup, with a fix for each problem.")]
+    #[command(add = CmdMeta::read(), display_order = 16, about = "Check the machine and the setup, with a fix for each problem.")]
     Doctor {
         #[arg(long, help = "Also check that the API is reachable from the internet.")]
         public: bool,
@@ -295,34 +303,30 @@ enum Commands {
         #[arg(long, help = "Emit JSON.")]
         json: bool,
     },
-    #[command(display_order = 17, about = "Install a signed update of Goethe, its engines or kernel packs; rollback puts the previous kernel packs back.")]
+    #[command(args_conflicts_with_subcommands = true, add = CmdMeta::download().confirms(), display_order = 17, about = "Install a signed update of Goethe, its engines or kernel packs; rollback puts the previous kernel packs back.")]
     Update {
-        #[arg(value_parser = ["engine", "rollback"], help = "engine updates the installed engines only; rollback puts back the previous kernel pack of every model that has one.")]
-        what: Option<String>,
-        #[arg(long, help = "Print available versions only.")]
-        check: bool,
-        #[arg(long, help = "Skip confirmation.")]
-        yes: bool,
-        #[arg(long = "allow-downgrade", help = "Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries).")]
-        allow_downgrade: bool,
+        #[command(flatten)]
+        flags: UpdateFlags,
+        #[command(subcommand)]
+        cmd: Option<UpdateCommands>,
     },
-    #[command(display_order = 18, about = "Remove Goethe and the models it installed (folders of your own stay).")]
+    #[command(add = CmdMeta::destructive().confirms(), display_order = 18, about = "Remove Goethe with its models, engines and kernel packs (folders of your own stay).")]
     Uninstall {
         #[arg(long, help = "Keep the installed models in GOETHE_HOME/models.")]
         keep_models: bool,
         #[arg(long, help = "Skip confirmation.")]
         yes: bool,
     },
-    #[command(display_order = 19, about = "Link this node to the Goethe console (optional): a browser login, or --authkey for headless machines.")]
+    #[command(add = CmdMeta::change(), display_order = 19, about = "Link this node to the Goethe console (optional): a browser login, or --authkey for headless machines.")]
     Login {
-        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::platform_urls), long = "platform-url", value_name = "URL", help = "Platform to link to (default: the GOETHE_PLATFORM_URL setting, else https://goethe.sh).")]
+        #[arg(add = ArgMeta::of(spec::Value::Url), long = "platform-url", value_name = "URL", help = "Platform to link to (default: the GOETHE_PLATFORM_URL setting, else https://goethe.sh).")]
         platform_url: Option<String>,
-        #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::authkey_stdin), long, value_name = "KEY", help = "Link without a browser using an auth key (msh_ak_...); - reads it from stdin.")]
+        #[arg(add = ArgMeta::of(spec::Value::AuthKey), long, value_name = "KEY", help = "Link without a browser using an auth key (msh_ak_...); - reads it from stdin.")]
         authkey: Option<String>,
-        #[arg(long, value_name = "WHEN", help = "How long the login lasts: never, or 12h, 30d, 4w; on a linked node it only changes that.")]
+        #[arg(add = ArgMeta::of(spec::Value::When), long, value_name = "WHEN", help = "How long the login lasts: never, or 12h, 30d, 4w; on a linked node it only changes that.")]
         lifetime: Option<String>,
     },
-    #[command(display_order = 20, about = "Unlink this node from the Goethe console and remove its local credentials.")]
+    #[command(add = CmdMeta::destructive(), display_order = 20, about = "Unlink this node from the Goethe console and remove its local credentials.")]
     Logout,
     #[command(hide = true, about = "Finish an install: run by install.sh once it verified this goethe; safe to run again to repair or upgrade.")]
     Setup {
@@ -337,12 +341,17 @@ enum Commands {
         #[arg(long = "no-link", help = "Do not link goethe and goethed onto PATH.")]
         no_link: bool,
     },
-    #[command(display_order = 21, about = "Tab completion for bash, zsh and fish: models, keys, GPUs and interfaces complete too.")]
+    #[command(hide = true, about = "Start of the container image: prepares /workspace, applies GOETHE_API_KEY, GOETHE_AUTHKEY and GOETHE_SETUP, and runs goethed.")]
+    Container {
+        #[arg(long, help = "Exit 0 when goethed runs (the image's health check).")]
+        check: bool,
+    },
+    #[command(add = CmdMeta::read(), display_order = 21, about = "Tab completion for bash, zsh and fish: models, keys, GPUs and interfaces complete too.")]
     Completion {
-        #[arg(value_parser = ["install", "remove", "status"], help = "install, remove, or status (the default).")]
-        action: Option<String>,
-        #[arg(long, value_parser = ["bash", "zsh", "fish"], help = "The shell (default: yours, from $SHELL).")]
+        #[arg(long, global = true, value_parser = ["bash", "zsh", "fish"], help = "The shell (default: yours, from $SHELL).")]
         shell: Option<String>,
+        #[command(subcommand)]
+        cmd: Option<CompletionCommands>,
     },
     #[command(hide = true, about = "Catalog maintenance: validate, generate or merge registry entries.")]
     Registry {
@@ -353,146 +362,305 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ApiCommands {
-    #[command(about = "List API keys, create or revoke one; on a terminal without arguments, a menu.", after_help = KEY_HELP)]
+    #[command(add = CmdMeta::read(), about = "List API keys, create or revoke one; on a terminal without arguments, a menu.", after_help = KEY_HELP)]
     Keys(KeyArgs),
-    #[command(about = "Who can reach the API: local, vpn, public, or one address or interface.", after_help = EXPOSE_HELP)]
+    #[command(add = CmdMeta::network(), about = "Who can reach the API: local, vpn, public, or one address or interface.", after_help = EXPOSE_HELP)]
     Expose(ExposeArgs),
-    #[command(about = "The client addresses allowed to reach the API; add or remove some.")]
+    #[command(add = CmdMeta::read(), about = "The client addresses allowed to reach the API; add or remove some.")]
     Allow(AllowArgs),
-    #[command(about = "How to reach the API by a domain name; check DOMAIN tests that it works.")]
+    #[command(add = CmdMeta::read(), about = "How to reach the API by a domain name; check DOMAIN tests that it works.")]
     Domain(DomainArgs),
-    #[command(about = "Open the API on a public address for a while, for chosen API keys; stop closes it.", after_help = SHARE_HELP)]
+    #[command(add = CmdMeta::network(), about = "Open the API on a public address for a while, for chosen API keys; stop closes it.", after_help = SHARE_HELP)]
     Share(ShareArgs),
 }
 
 #[derive(Subcommand)]
 enum ModelsCommands {
-    #[command(about = "Catalog models that fit the free VRAM of the allowed GPUs.")]
+    #[command(add = CmdMeta::read(), about = "Catalog models that fit the free VRAM of the allowed GPUs.")]
     Recommend {
         #[arg(long, help = "Emit JSON instead of a table.")]
         json: bool,
     },
-    #[command(about = "Register model folders you downloaded yourself and moved into GOETHE_HOME/models.")]
+    #[command(add = CmdMeta::change(), about = "Register model folders you downloaded yourself and moved into GOETHE_HOME/models.")]
     Scan {
-        #[arg(value_name = "FOLDER", help = "One folder inside GOETHE_HOME/models (default: all of them).")]
+        #[arg(add = ArgMeta::of(spec::Value::Folder), value_name = "FOLDER", help = "One folder inside GOETHE_HOME/models (default: all of them).")]
         dir: Option<String>,
         #[arg(long, help = "Add every supported model without asking.")]
         yes: bool,
         #[arg(long, help = "Emit JSON rows (dir, model_id, status, reason, notes).")]
         json: bool,
     },
-    #[command(about = "Short model names for clients: list them, set one, or remove some.")]
+    #[command(add = CmdMeta::read(), about = "Short model names for clients: list them, set one, or remove some.")]
     Alias(AliasArgs),
+}
+
+#[derive(Subcommand)]
+enum GpuCommands {
+    #[command(add = CmdMeta::change(), about = "Let new models use these GPUs again.")]
+    Allow {
+        #[arg(add = ArgMeta::of(spec::Value::Gpu), value_name = "GPU", required = true, value_parser = parse_gpu_name, help = "GPUs as goethe gpu lists them, for example gpu0 gpu1.")]
+        gpus: Vec<u32>,
+    },
+    #[command(add = CmdMeta::change(), about = "Keep new models off these GPUs; running ones stay.")]
+    Deny {
+        #[arg(add = ArgMeta::of(spec::Value::Gpu), value_name = "GPU", required = true, value_parser = parse_gpu_name, help = "GPUs as goethe gpu lists them, for example gpu0 gpu1.")]
+        gpus: Vec<u32>,
+    },
+}
+
+#[derive(clap::Args)]
+struct UpdateFlags {
+    #[arg(long, help = "Print available versions only.")]
+    check: bool,
+    #[arg(long, help = "Skip confirmation.")]
+    yes: bool,
+    #[arg(long = "allow-downgrade", help = "Install the published goethe and goethed even if older than this build (a build ahead of the release otherwise keeps its binaries).")]
+    allow_downgrade: bool,
+}
+
+#[derive(Subcommand)]
+enum UpdateCommands {
+    #[command(add = CmdMeta::download().confirms(), about = "Update the installed engines only.")]
+    Engine {
+        #[arg(long, help = "Print available versions only.")]
+        check: bool,
+        #[arg(long, help = "Skip confirmation.")]
+        yes: bool,
+    },
+    #[command(add = CmdMeta::change(), about = "Put back the previous kernel pack of every model that has one.")]
+    Rollback,
+}
+
+#[derive(Subcommand)]
+enum CompletionCommands {
+    #[command(add = CmdMeta::change(), about = "Install tab completion for your shell.")]
+    Install,
+    #[command(add = CmdMeta::change(), about = "Remove tab completion from your shell.")]
+    Remove,
+    #[command(add = CmdMeta::read(), about = "Whether tab completion is on, for each shell.")]
+    Status,
 }
 
 #[derive(clap::Args)]
 struct DomainArgs {
-    #[arg(value_parser = ["check"], help = "check, followed by the domain: whether it points at the API and the gateway answers there.")]
-    action: Option<String>,
-    #[arg(value_name = "DOMAIN", requires = "action")]
-    domain: Option<String>,
+    #[command(subcommand)]
+    cmd: Option<DomainCommands>,
+}
+
+#[derive(Subcommand)]
+enum DomainCommands {
+    #[command(add = CmdMeta::read(), about = "Whether the domain points at the API and the gateway answers there.")]
+    Check {
+        #[arg(add = ArgMeta::of(spec::Value::Domain), value_name = "DOMAIN", help = "The domain name to check, such as api.example.com.")]
+        domain: String,
+    },
 }
 
 #[derive(clap::Args)]
 struct AllowArgs {
-    #[arg(value_parser = ["add", "remove"], help = "add or remove, followed by client addresses or ranges such as 203.0.113.7/32.")]
-    action: Option<String>,
-    #[arg(value_name = "CIDR", requires = "action")]
-    cidrs: Vec<String>,
-    #[arg(long, value_name = "TEXT", help = "With add: a note stored with the new entries.")]
-    note: Option<String>,
+    #[command(subcommand)]
+    cmd: Option<AllowCommands>,
+}
+
+#[derive(Subcommand)]
+enum AllowCommands {
+    #[command(add = CmdMeta::network(), about = "Allow client addresses or ranges.")]
+    Add {
+        #[arg(add = ArgMeta::of(spec::Value::Cidr), value_name = "CIDR", required = true, help = "Client addresses or ranges, such as 203.0.113.7/32.")]
+        cidrs: Vec<String>,
+        #[arg(add = ArgMeta::of(spec::Value::Text), long, value_name = "TEXT", help = "A note stored with the new entries.")]
+        note: Option<String>,
+    },
+    #[command(add = CmdMeta::network(), about = "Stop allowing client addresses or ranges.")]
+    Remove {
+        #[arg(add = ArgMeta::of(spec::Value::Cidr), value_name = "CIDR", required = true, help = "Client addresses or ranges, such as 203.0.113.7/32.")]
+        cidrs: Vec<String>,
+    },
 }
 
 #[derive(clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
 struct KeyArgs {
-    #[arg(value_parser = ["create", "revoke"], help = "create NAME, or revoke KEY_ID…; nothing lists the keys (a menu on a terminal).")]
-    action: Option<String>,
-    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::key_ids), value_name = "NAME_OR_ID", requires = "action")]
-    values: Vec<String>,
-    #[arg(long, value_name = "WHEN", help = "With create: expiry, days from now like 30d, or a date like 2026-12-31.")]
-    expires: Option<String>,
-    #[arg(long, value_name = "N", help = "With create: requests per minute (default 120, 0 = unlimited).")]
-    rpm: Option<i64>,
-    #[arg(long, value_name = "IDS", help = "With create: only these models, comma-separated.")]
-    models: Option<String>,
-    #[arg(long, help = "With create: an admin key, for health endpoints and every model.")]
-    admin: bool,
-    #[arg(long, help = "With create: print only the key, for scripts.")]
-    raw: bool,
     #[arg(long, help = "List as JSON.")]
     json: bool,
+    #[command(subcommand)]
+    cmd: Option<KeyCommands>,
+}
+
+#[derive(Subcommand)]
+enum KeyCommands {
+    #[command(add = CmdMeta::change().gives(&[Key]), about = "Create an API key.")]
+    Create {
+        #[arg(add = ArgMeta::of(spec::Value::KeyName), value_name = "KEY_NAME", help = "A name for the key, such as my-app.")]
+        name: String,
+        #[arg(add = ArgMeta::of(spec::Value::When), long, value_name = "WHEN", help = "Expiry, days from now like 30d, or a date like 2026-12-31.")]
+        expires: Option<String>,
+        #[arg(long, value_name = "N", help = "Requests per minute (default 120, 0 = unlimited).")]
+        rpm: Option<i64>,
+        #[arg(add = ArgMeta::of(spec::Value::InstalledModel), long, value_name = "IDS", help = "Only these models, comma-separated.")]
+        models: Option<String>,
+        #[arg(long, help = "An admin key, for health endpoints and every model.")]
+        admin: bool,
+        #[arg(long, help = "Print only the key, for scripts.")]
+        raw: bool,
+    },
+    #[command(add = CmdMeta::change(), about = "Rotate an API key: a new secret, and the old one stops working.")]
+    Rotate {
+        #[arg(add = ArgMeta::of(spec::Value::KeyId), value_name = "KEY_ID", help = "The key's id, as goethe api keys lists it.")]
+        id: String,
+        #[arg(long, help = "Print only the new key, for scripts.")]
+        raw: bool,
+    },
+    #[command(add = CmdMeta::destructive(), about = "Revoke an API key, or several, by id.")]
+    Revoke {
+        #[arg(add = ArgMeta::of(spec::Value::KeyId), value_name = "KEY_ID", required = true, help = "Key ids, as goethe api keys lists them.")]
+        ids: Vec<String>,
+    },
 }
 
 #[derive(clap::Args)]
 struct AliasArgs {
-    #[arg(value_parser = ["set", "remove"], help = "set ALIAS MODEL, or remove ALIAS…; nothing lists the aliases.")]
-    action: Option<String>,
-    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::aliases), value_name = "ALIAS", requires = "action")]
-    values: Vec<String>,
+    #[command(subcommand)]
+    cmd: Option<AliasCommands>,
+}
+
+#[derive(Subcommand)]
+enum AliasCommands {
+    #[command(add = CmdMeta::change(), about = "Give an installed model a short name for clients.")]
+    Set {
+        #[arg(add = ArgMeta::of(spec::Value::NewAlias), value_name = "ALIAS", help = "The short name, such as fast.")]
+        alias: String,
+        #[arg(add = ArgMeta::of(spec::Value::InstalledModel), value_name = "MODEL", help = "Installed model: id, alias or words from its name.")]
+        model: String,
+    },
+    #[command(add = CmdMeta::destructive(), about = "Remove short model names.")]
+    Remove {
+        #[arg(add = ArgMeta::of(spec::Value::Alias), value_name = "ALIAS", required = true, help = "Short names to remove, as goethe models alias lists them.")]
+        aliases: Vec<String>,
+    },
 }
 
 #[derive(clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
 struct LearnArgs {
-    #[arg(value_parser = ["on", "off", "status"], help = "on, off, or status (the default).")]
-    action: Option<String>,
-    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::models_or_all), long, num_args = 1.., value_name = "MODEL", help = "Only these models (id or alias); all, or leaving it out, means every model.")]
-    model: Vec<String>,
-    #[arg(long, hide = true, value_name = "SESSION", conflicts_with_all = ["action", "model"])]
+    #[arg(long, hide = true, value_name = "SESSION")]
     print: Option<String>,
-    #[arg(long, help = "Emit JSON.")]
+    #[arg(long, global = true, help = "Emit JSON.")]
     json: bool,
+    #[command(subcommand)]
+    cmd: Option<LearnCommands>,
+}
+
+#[derive(clap::Args)]
+struct LearnScope {
+    #[arg(add = ArgMeta::of(spec::Value::ModelOrAll), long, num_args = 1.., value_name = "MODEL", help = "Only these models (id or alias); all, or leaving it out, means every model.")]
+    model: Vec<String>,
+}
+
+#[derive(Subcommand)]
+enum LearnCommands {
+    #[command(add = CmdMeta::change(), about = "Let sessions keep what compaction would drop.")]
+    On(LearnScope),
+    #[command(add = CmdMeta::change(), about = "Stop keeping what compaction would drop.")]
+    Off(LearnScope),
+    #[command(add = CmdMeta::read(), about = "Which models keep what compaction would drop.")]
+    Status,
 }
 
 #[derive(clap::Args)]
 struct TraceArgs {
-    #[arg(value_parser = ["on", "off", "status"], help = "on, off, or status (the default).")]
-    action: Option<String>,
-    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::key_names), long, num_args = 1.., value_name = "KEY", help = "Add these API keys (name or id) with on, or leave them out with off.")]
-    key: Vec<String>,
-    #[arg(long = "all-keys", conflicts_with = "key", help = "With on: record every API key, clearing the chosen keys and exceptions.")]
-    all_keys: bool,
-    #[arg(long, value_name = "PATH", help = "Folder for the traces (default ~/.goethe/traces).")]
+    #[arg(add = ArgMeta::of(spec::Value::Folder), long, global = true, value_name = "PATH", help = "Folder for the traces (default ~/.goethe/traces).")]
     dir: Option<String>,
-    #[arg(long = "max-gb", value_name = "GB", help = "Size limit: recording turns off when the folder reaches it (default 20).")]
+    #[arg(long = "max-gb", global = true, value_name = "GB", help = "Size limit: recording turns off when the folder reaches it (default 20).")]
     max_gb: Option<f64>,
-    #[arg(long, help = "Emit JSON.")]
+    #[arg(long, global = true, help = "Emit JSON.")]
     json: bool,
+    #[command(subcommand)]
+    cmd: Option<TraceCommands>,
+}
+
+#[derive(Subcommand)]
+enum TraceCommands {
+    #[command(add = CmdMeta::change(), about = "Record requests and replies as training traces.")]
+    On {
+        #[arg(add = ArgMeta::of(spec::Value::Key), long, num_args = 1.., value_name = "KEY", help = "Add these API keys (name or id).")]
+        key: Vec<String>,
+        #[arg(long = "all-keys", conflicts_with = "key", help = "Record every API key, clearing the chosen keys and exceptions.")]
+        all_keys: bool,
+    },
+    #[command(add = CmdMeta::change(), about = "Stop recording; with --key, leave those keys out and keep recording the others.")]
+    Off {
+        #[arg(add = ArgMeta::of(spec::Value::Key), long, num_args = 1.., value_name = "KEY", help = "Leave these API keys (name or id) out, and keep recording the others.")]
+        key: Vec<String>,
+    },
+    #[command(add = CmdMeta::read(), about = "What is recorded and how much space it takes.")]
+    Status,
 }
 
 #[derive(clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
 struct ExposeArgs {
-    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::expose_targets), value_name = "WHERE", help = "local, vpn or public; or an address (127.0.0.1, an IP of this host) or an interface such as wg0 to listen on.")]
+    #[arg(add = ArgMeta::of(spec::Value::ExposeTarget), value_name = "WHERE", help = "An address (127.0.0.1, an IP of this host) or an interface such as wg0 to listen on.")]
     target: Option<String>,
-    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::interfaces), long, value_name = "NAME", conflicts_with = "ip", help = "With vpn: the network interface to serve, e.g. wg0; the gateway follows its address.")]
-    interface: Option<String>,
-    #[arg(long, value_name = "IP", hide = true, help = "Advanced: with vpn, a fixed address of this machine to listen on, instead of following an interface.")]
-    ip: Option<std::net::IpAddr>,
-    #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "With vpn or public: client ranges to allow (required for public; default for vpn: the ranges the network reaches).")]
-    allow: Vec<String>,
-    #[arg(long, help = "Apply without questions. Public still needs --allow <their-ip>/32 (or --dangerously-allow-all-inbound).")]
-    yes: bool,
-    #[arg(
-        long,
-        hide = true,
-        help = "Advanced / public only: allow every client address (0.0.0.0/0). Needs --yes. Not with --allow."
-    )]
-    dangerously_allow_all_inbound: bool,
     #[arg(long, help = "With no WHERE: the status as JSON.")]
     json: bool,
+    #[command(subcommand)]
+    cmd: Option<ExposeCommands>,
+}
+
+#[derive(Subcommand)]
+enum ExposeCommands {
+    #[command(add = CmdMeta::network().confirms(), about = "This machine only.")]
+    Local {
+        #[arg(long, help = "Apply without questions.")]
+        yes: bool,
+    },
+    #[command(add = CmdMeta::network().confirms(), about = "A VPN or private network.")]
+    Vpn {
+        #[arg(add = ArgMeta::of(spec::Value::Interface), long, value_name = "NAME", conflicts_with = "ip", help = "The network interface to serve, e.g. wg0; the gateway follows its address.")]
+        interface: Option<String>,
+        #[arg(long, value_name = "IP", hide = true, help = "Advanced: a fixed address of this machine to listen on, instead of following an interface.")]
+        ip: Option<std::net::IpAddr>,
+        #[arg(add = ArgMeta::of(spec::Value::Cidr), long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Client ranges to allow (default: the ranges the network reaches).")]
+        allow: Vec<String>,
+        #[arg(long, help = "Apply without questions.")]
+        yes: bool,
+    },
+    #[command(add = CmdMeta::network().confirms(), about = "A public network, for allowlisted clients only.")]
+    Public {
+        #[arg(add = ArgMeta::of(spec::Value::Cidr).asked(), long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Client ranges to allow: their public addresses, such as 203.0.113.7/32.")]
+        allow: Vec<String>,
+        #[arg(long, help = "Apply without questions; needs --allow <their-ip>/32.")]
+        yes: bool,
+        #[arg(add = spec::Widens, long, hide = true, help = "Advanced: allow every client address (0.0.0.0/0). Needs --yes. Not with --allow.")]
+        dangerously_allow_all_inbound: bool,
+    },
 }
 
 #[derive(clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
 struct ShareArgs {
-    #[arg(value_name = "DURATION", help = "How long to stay open (30m, 5h, 1d; at most 7d), stop to close now, or nothing for the status.")]
+    #[arg(add = ArgMeta::of(spec::Value::Duration), value_name = "DURATION", help = "How long to stay open (30m, 5h, 1d; at most 7d), or nothing for the status.")]
     duration: Option<String>,
-    #[arg(add = clap_complete::engine::ArgValueCandidates::new(complete::key_names), long, value_name = "NAME_OR_ID", num_args = 1.., value_delimiter = ',', help = "API keys to share (not admin keys), each until DURATION; with stop, the keys to stop sharing.")]
+    #[arg(add = ArgMeta::of(spec::Value::Key).asked_with("duration"), long, value_name = "NAME_OR_ID", num_args = 1.., value_delimiter = ',', help = "API keys to share (not admin keys), each until DURATION.")]
     key: Vec<String>,
-    #[arg(long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Who may connect (required to open a share): their addresses or ranges, such as --allow 203.0.113.7 198.51.100.0/24; reopening the same keys keeps their last ones.")]
+    #[arg(add = ArgMeta::of(spec::Value::Cidr).asked_with("duration"), long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Who may connect (required to open a share): their addresses or ranges, such as --allow 203.0.113.7 198.51.100.0/24; reopening the same keys keeps their last ones.")]
     allow: Vec<String>,
-    #[arg(long, help = "Open the public gateway to every address (0.0.0.0/0) on purpose, instead of --allow. Rate limits still apply.")]
+    #[arg(add = spec::Widens, long, help = "Open the public gateway to every address (0.0.0.0/0) on purpose, instead of --allow. Rate limits still apply.")]
     dangerously_allow_all_inbound: bool,
     #[arg(long, help = "The public port (default 8444, or the last one used).")]
     port: Option<u16>,
+    #[command(subcommand)]
+    cmd: Option<ShareCommands>,
+}
+
+#[derive(Subcommand)]
+enum ShareCommands {
+    #[command(add = CmdMeta::network(), aliases = ["shutdown", "close", "off"], about = "Close the public address now, or stop sharing some keys.")]
+    Stop {
+        #[arg(add = ArgMeta::of(spec::Value::Key), long, value_name = "NAME_OR_ID", num_args = 1.., value_delimiter = ',', help = "Stop sharing only these API keys; the others stay shared.")]
+        key: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -512,7 +680,7 @@ enum RegistryCommands {
     Entry {
         #[arg(long = "repo", value_name = "ID", help = "Hugging Face repo id (repeatable).")]
         repo_ids: Vec<String>,
-        #[arg(long, help = "Runtime: sglang or ternary.")]
+        #[arg(long, help = "Runtime, such as sglang (the default).")]
         runtime: Option<String>,
         #[arg(long, help = "Git revision or branch.")]
         revision: Option<String>,
@@ -675,6 +843,7 @@ fn print_version() {
 const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
     ("Start and stop", &[
         ("goethe", "the menu: quick setup, install models, API keys and gateway, status"),
+        ("goethe start", "quick setup: install a model, serve it and open the API"),
         ("goethe up", "start Goethe now and at every boot"),
         ("goethe down", "stop Goethe; loaded models come back on the next up"),
         ("goethe status", "running or not, the API address, keys and served models"),
@@ -720,6 +889,8 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("goethe login", "link this node to the Goethe console (optional)"),
         ("goethe logout", "unlink it and remove its local credentials"),
         ("goethe completion install", "tab completion for your shell"),
+        ("goethe ask REQUEST", "turn a request in plain English into Goethe commands (also Ask on the main menu)"),
+        ("goethe ?", "same as goethe ask"),
     ]),
 ];
 
@@ -740,9 +911,16 @@ fn top_help(model: &str) -> String {
     out
 }
 
+fn ask_cli_validate(argv: &[String]) -> Result<(), clap::Error> {
+    // Ask checks every command it plans by parsing it exactly as goethe would.
+    Cli::try_parse_from(argv).map(|_| ())
+}
+
 fn home_screen() -> Result<(), String> {
-    // goethe alone on a terminal: the main menu.
-    goethe_core::menu::run()
+    // goethe alone on a terminal: the main menu, with the same Ask as goethe ask.
+    goethe_core::menu::run(goethe_core::menu::MenuHooks {
+        ask: ask::menu_driver(Cli::command(), ask_cli_validate),
+    })
 }
 
 fn opt_gpus(gpu: Vec<u32>) -> Option<Vec<u32>> {
@@ -755,7 +933,7 @@ fn extras_given(args: &[String]) -> bool {
 }
 
 fn main() {
-    clap_complete::CompleteEnv::with_factory(Cli::command).bin("goethe").complete();
+    clap_complete::CompleteEnv::with_factory(|| spec::with_completers(Cli::command())).bin("goethe").complete();
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 2 && (args[1] == "--version" || args[1] == "-V") {
         print_version();
@@ -776,6 +954,13 @@ fn main() {
         print!("{}", top_help(&goethe_core::onboard::suggested(true)));
         return;
     }
+    if args.len() >= 2 && matches!(args[1].as_str(), "ask" | "?") {
+        let code = ask::run(&args, Cli::command(), ask_cli_validate);
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return;
+    }
     let cli = Cli::command().try_get_matches_from(&args).and_then(|m| <Cli as clap::FromArgMatches>::from_arg_matches(&m)).unwrap_or_else(|e| e.exit());
     if cli.version {
         print_version();
@@ -783,7 +968,15 @@ fn main() {
     }
     goethe_core::step::set_verbose(cli.verbose);
     goethe_core::step::begin(&goethe_core::paths::goethe_home(), args.iter().skip(1).find(|a| !a.starts_with('-')).map_or("goethe", String::as_str));
+    let terminal = std::io::IsTerminal::is_terminal(&std::io::stdout()) && std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let quiet = matches!(cli.command, Commands::Install { .. } | Commands::Remove { .. } | Commands::Run { .. } | Commands::Load { json: false, dry_run: false, .. });
+    goethe_core::step::set_compact(terminal && quiet);
+    if let Some(why) = image_refusal(&cli.command, goethe_core::paths::image().as_deref()) {
+        fail(why.to_string());
+    }
     let result = match cli.command {
+        Commands::Container { check } => std::process::exit(container::run(check)),
+        Commands::Start => goethe_core::menu::start(),
         Commands::Up { no_boot } => do_up(!no_boot),
         Commands::Down { keep_engines: false } => shutdown::run_down(),
         Commands::Down { keep_engines: true } => goethe_core::service::stop_keeping_engines().map(|(before, kept)| {
@@ -938,10 +1131,11 @@ fn main() {
         Commands::Api { cmd: Some(ApiCommands::Keys(k)), .. } => do_keys(k),
         Commands::Api { cmd: Some(ApiCommands::Expose(e)), .. } => do_expose(e),
         Commands::Api { cmd: Some(ApiCommands::Allow(a)), .. } => do_allow(a),
-        Commands::Api { cmd: Some(ApiCommands::Domain(DomainArgs { domain, .. })), .. } => match domain {
-            Some(domain) => goethe_core::domain::check(&domain).map(|text| print!("{text}")),
+        Commands::Api { cmd: Some(ApiCommands::Domain(DomainArgs { cmd })), .. } => match cmd {
+            Some(DomainCommands::Check { domain }) => goethe_core::domain::check(&domain).map(|text| print!("{text}")),
             None => goethe_core::domain::explain().map(|text| print!("{text}")),
         },
+        Commands::Api { cmd: Some(ApiCommands::Share(ShareArgs { cmd: Some(ShareCommands::Stop { key }), .. })), .. } => do_share("stop", &key, &[], false, None),
         Commands::Api {
             cmd: Some(ApiCommands::Share(ShareArgs {
                 duration,
@@ -949,6 +1143,7 @@ fn main() {
                 allow,
                 dangerously_allow_all_inbound,
                 port,
+                cmd: None,
             })),
             ..
         } => do_share(
@@ -958,19 +1153,26 @@ fn main() {
             dangerously_allow_all_inbound,
             port,
         ),
-        Commands::Learn(LearnArgs { action, model, print, json }) => do_learn(action.as_deref(), &model, print.as_deref(), json),
-        Commands::Trace(TraceArgs {
-            action,
-            key,
-            all_keys,
-            dir,
-            max_gb,
-            json,
-        }) => do_trace(action.as_deref(), &key, all_keys, dir.as_deref(), max_gb, json),
-        Commands::Gpu { action, gpus, json } => match action.as_deref() {
-            Some("allow") if !gpus.is_empty() => each(gpus, do_gpu_allow),
-            Some("deny") if !gpus.is_empty() => each(gpus, do_gpu_deny),
-            Some(a) => usage(format!("name the GPUs to {a}, for example goethe gpu {a} gpu2")),
+        Commands::Learn(LearnArgs { print, json, cmd }) => {
+            let (action, model) = match cmd {
+                Some(LearnCommands::On(s)) => (Some("on"), s.model),
+                Some(LearnCommands::Off(s)) => (Some("off"), s.model),
+                Some(LearnCommands::Status) | None => (None, Vec::new()),
+            };
+            do_learn(action, &model, print.as_deref(), json)
+        }
+        Commands::Trace(TraceArgs { dir, max_gb, json, cmd }) => {
+            let (action, key, all_keys) = match cmd {
+                Some(TraceCommands::On { key, all_keys }) => (Some("on"), key, all_keys),
+                Some(TraceCommands::Off { key }) => (Some("off"), key, false),
+                Some(TraceCommands::Status) if dir.is_some() || max_gb.is_some() => usage("goethe trace status only shows; change the folder or the size with goethe trace --dir PATH or --max-gb GB"),
+                Some(TraceCommands::Status) | None => (None, Vec::new(), false),
+            };
+            do_trace(action, &key, all_keys, dir.as_deref(), max_gb, json)
+        }
+        Commands::Gpu { json, cmd } => match cmd {
+            Some(GpuCommands::Allow { gpus }) => each(gpus, do_gpu_allow),
+            Some(GpuCommands::Deny { gpus }) => each(gpus, do_gpu_deny),
             None => do_gpu_list(json),
         },
         Commands::Doctor { snapshot: true, .. } => {
@@ -982,19 +1184,17 @@ fn main() {
             true => hw::run_profile(json),
             false => goethe_core::doctor::run(json, public),
         },
-        Commands::Update {
-            what,
-            check,
-            yes,
-            allow_downgrade,
-        } => match what.as_deref() {
-            Some("rollback") => goethe_core::pack_update::run_rollback(),
+        Commands::Update { flags, cmd } => match cmd {
+            Some(UpdateCommands::Rollback) => goethe_core::pack_update::run_rollback(),
             _ => {
-                let engine = what.is_some();
+                let engine = cmd.is_some();
+                let UpdateFlags { check, yes, allow_downgrade } = match cmd {
+                    Some(UpdateCommands::Engine { check, yes }) => UpdateFlags { check, yes, allow_downgrade: false },
+                    _ => flags,
+                };
                 let update = goethe_core::update::run(goethe_core::update::UpdateOpts {
                     check_only: check,
                     engine,
-                    ternary: engine && goethe_core::update::ternary_installed(&goethe_home()),
                     yes,
                     allow_downgrade,
                 });
@@ -1022,7 +1222,14 @@ fn main() {
             platform_url,
             no_link,
         }),
-        Commands::Completion { action, shell } => complete::run(action.as_deref(), shell.as_deref()),
+        Commands::Completion { shell, cmd } => {
+            let action = cmd.map(|c| match c {
+                CompletionCommands::Install => "install",
+                CompletionCommands::Remove => "remove",
+                CompletionCommands::Status => "status",
+            });
+            complete::run(action, shell.as_deref())
+        }
         Commands::Registry { cmd } => match cmd {
             RegistryCommands::Validate {
                 source,
@@ -1062,32 +1269,29 @@ fn main() {
 }
 
 fn do_keys(k: KeyArgs) -> Result<(), String> {
-    // goethe api keys [create NAME | revoke ID…]: nothing lists them, or opens the menu on a terminal.
-    let KeyArgs { action, values, expires, rpm, models, admin, raw, json } = k;
-    let create_only = expires.is_some() || rpm.is_some() || models.is_some() || admin || raw;
-    if create_only && action.as_deref() != Some("create") {
-        usage("--expires, --rpm, --models, --admin and --raw go with goethe api keys create NAME");
-    }
-    match action.as_deref() {
-        Some("create") => {
-            let name = match values.as_slice() {
-                [n] if !n.trim().is_empty() => n.clone(),
-                [] => usage("name the key: goethe api keys create my-app"),
-                _ => usage("one key name at a time: goethe api keys create my-app"),
-            };
+    // goethe api keys create NAME | rotate ID | revoke ID…: nothing lists them, or opens the menu on a terminal.
+    match k.cmd {
+        Some(KeyCommands::Create { name, expires, rpm, models, admin, raw }) => {
+            if name.trim().is_empty() {
+                usage("name the key: goethe api keys create my-app");
+            }
             if let Some(Err(e)) = models.as_deref().map(security::model_scope_list) {
                 usage(e);
             }
             security::key_create(&name, true, rpm, expires.as_deref(), models.as_deref(), admin)
-                .map(|token| print!("{}", key_create_stdout(&token, &key_id_for_token(&token), &name, raw)))
+                .map(|token| print!("{}", key_secret_stdout(&token, &security::key_id_of(&token).unwrap_or_else(|| "?".into()), &name, raw, false)))
         }
-        Some(_) if values.is_empty() => usage("name the keys to revoke by id: goethe api keys revoke <key-id>"),
-        Some(_) => each(values, |id| security::key_revoke(&id).map(|()| println!("Revoked key {id}"))),
-        None if !json && std::io::IsTerminal::is_terminal(&std::io::stdin()) && std::io::IsTerminal::is_terminal(&std::io::stdout()) => {
+        Some(KeyCommands::Rotate { id, raw }) => {
+            let name = security::key_list_detailed()?.iter().find(|r| r.get("id").and_then(Value::as_str) == Some(id.as_str())).and_then(|r| r.get("name").and_then(Value::as_str).map(str::to_string));
+            let Some(name) = name else { return Err(format!("key {id} not found; goethe api keys lists the ids")) };
+            security::key_rotate(&id).map(|token| print!("{}", key_secret_stdout(&token, &id, &name, raw, true)))
+        }
+        Some(KeyCommands::Revoke { ids }) => each(ids, |id| security::key_revoke(&id).map(|()| println!("Revoked key {id}"))),
+        None if !k.json && std::io::IsTerminal::is_terminal(&std::io::stdin()) && std::io::IsTerminal::is_terminal(&std::io::stdout()) => {
             goethe_core::keys_menu::run()
         }
         None => security::key_list_detailed().map(|rows| {
-            if json {
+            if k.json {
                 println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".into()));
             } else {
                 print!("{}", key_list_text(&rows));
@@ -1097,30 +1301,24 @@ fn do_keys(k: KeyArgs) -> Result<(), String> {
 }
 
 fn do_alias(a: AliasArgs) -> Result<(), String> {
-    // goethe models alias [set ALIAS MODEL | remove ALIAS…]: nothing lists them.
-    match (a.action.as_deref(), a.values.as_slice()) {
-        (Some("set"), [alias, model]) => {
-            let model = installed_id(model, true);
-            alias::set(alias, &model).map(|()| println!("Alias {alias} now points to {model}"))
+    // goethe models alias set ALIAS MODEL | remove ALIAS…: nothing lists them.
+    match a.cmd {
+        Some(AliasCommands::Set { alias, model }) => {
+            let model = installed_id(&model, true);
+            alias::set(&alias, &model).map(|()| println!("Alias {alias} now points to {model}"))
         }
-        (Some("set"), _) => usage("goethe models alias set <alias> <model>"),
-        (Some(_), []) => usage("name the aliases to remove: goethe models alias remove <alias>"),
-        (Some(_), _) => each(a.values, |x| alias::remove(&x).map(|()| println!("Removed alias {x}"))),
-        (None, _) => alias::list().map(|rows| print!("{}", alias_text(&rows))),
+        Some(AliasCommands::Remove { aliases }) => each(aliases, |x| alias::remove(&x).map(|()| println!("Removed alias {x}"))),
+        None => alias::list().map(|rows| print!("{}", alias_text(&rows))),
     }
 }
 
 fn do_allow(a: AllowArgs) -> Result<(), String> {
-    // goethe api allow [add|remove CIDR…]: nothing lists the allowed clients.
-    if a.note.is_some() && a.action.as_deref() != Some("add") {
-        usage("--note goes with goethe api allow add");
-    }
-    match a.action.as_deref() {
-        Some(act) if a.cidrs.is_empty() => usage(format!("name the addresses to {act}, for example goethe api allow {act} 203.0.113.7/32")),
-        Some("add") => each(a.cidrs, |cidr| {
-            security::allowlist_add(&cidr, a.note.as_deref()).map(|()| println!("Allowed {}", security::canonical_cidr(&cidr).unwrap_or(cidr)))
+    // goethe api allow add|remove CIDR…: nothing lists the allowed clients.
+    match a.cmd {
+        Some(AllowCommands::Add { cidrs, note }) => each(cidrs, |cidr| {
+            security::allowlist_add(&cidr, note.as_deref()).map(|()| println!("Allowed {}", security::canonical_cidr(&cidr).unwrap_or(cidr)))
         }),
-        Some(_) => each(a.cidrs, |cidr| {
+        Some(AllowCommands::Remove { cidrs }) => each(cidrs, |cidr| {
             security::allowlist_remove(&cidr).map(|()| println!("Removed {}", security::canonical_cidr(&cidr).unwrap_or(cidr)))
         }),
         None => security::allowlist_list().map(|rows| print!("{}", allowlist_text(&rows))),
@@ -1128,28 +1326,18 @@ fn do_allow(a: AllowArgs) -> Result<(), String> {
 }
 
 fn do_expose(e: ExposeArgs) -> Result<(), String> {
-    // goethe api expose: the status; local|vpn|public runs the access setup; an address or interface is listened on directly.
-    let ExposeArgs { target, interface, ip, allow, yes, dangerously_allow_all_inbound, json } = e;
-    let mode_only = interface.is_some() || ip.is_some() || !allow.is_empty() || yes || dangerously_allow_all_inbound;
-    match target.as_deref() {
-        None if mode_only => usage("give local, vpn or public with --interface, --ip, --allow or --yes"),
-        None => do_gateway_status(json),
-        Some(m @ ("local" | "vpn" | "public")) => {
-            let mode = goethe_core::configure::Mode::parse(m).unwrap_or_else(|e| usage(e));
-            if dangerously_allow_all_inbound && mode != goethe_core::configure::Mode::Public {
-                usage("--dangerously-allow-all-inbound is only for public");
-            }
-            goethe_core::configure::run_api(goethe_core::configure::ApiOpts {
-                mode: Some(mode),
-                vpn_ip: ip,
-                interface,
-                allow,
-                yes,
-                dangerously_allow_all_inbound,
-            })
+    // goethe api expose: the status; local, vpn or public runs the access setup; an address or interface is listened on directly.
+    use goethe_core::configure::{run_api, ApiOpts, Mode};
+    let ExposeArgs { target, json, cmd } = e;
+    let base = |mode| ApiOpts { mode: Some(mode), vpn_ip: None, interface: None, allow: Vec::new(), yes: false, dangerously_allow_all_inbound: false };
+    match (cmd, target) {
+        (Some(ExposeCommands::Local { yes }), _) => run_api(ApiOpts { yes, ..base(Mode::Local) }),
+        (Some(ExposeCommands::Vpn { interface, ip, allow, yes }), _) => run_api(ApiOpts { vpn_ip: ip, interface, allow, yes, ..base(Mode::Vpn) }),
+        (Some(ExposeCommands::Public { allow, yes, dangerously_allow_all_inbound }), _) => {
+            run_api(ApiOpts { allow, yes, dangerously_allow_all_inbound, ..base(Mode::Public) })
         }
-        Some(_) if mode_only => usage("--interface, --ip, --allow and --yes go with local, vpn or public"),
-        Some(addr) => do_gateway_bind(addr),
+        (None, Some(addr)) => do_gateway_bind(&addr),
+        (None, None) => do_gateway_status(json),
     }
 }
 
@@ -1211,18 +1399,6 @@ fn do_load(args: DoLoadArgs) -> Result<(), String> {
     install::run_load(params, args.no_wait, args.json)
 }
 
-fn key_id_for_token(token: &str) -> String {
-    // The stored key id of a token just created (ids are random, so look it up by the token hash).
-    db::open(&goethe_home())
-        .ok()
-        .and_then(|con| {
-            con.query_row("SELECT key_id FROM api_keys WHERE token_hash = ?1", [security::token_hash(token)], |r| {
-                r.get::<_, String>(0)
-            })
-            .ok()
-        })
-        .unwrap_or_else(|| "?".to_string())
-}
 
 fn rpm_text(rpm: i64) -> String {
     if rpm <= 0 {
@@ -1232,14 +1408,13 @@ fn rpm_text(rpm: i64) -> String {
     }
 }
 
-fn key_create_stdout(token: &str, id: &str, name: &str, raw: bool) -> String {
+fn key_secret_stdout(token: &str, id: &str, name: &str, raw: bool, renewed: bool) -> String {
     // --raw prints exactly the token; otherwise the token once, its name and id, and a store-it-now note.
     if raw {
         return format!("{token}\n");
     }
-    format!(
-        "API key for {name} (id {id}):\n\n\t{token}\n\ngoethe api shows it again at any time.\n"
-    )
+    let (head, old) = if renewed { ("New secret", " The old secret no longer works.") } else { ("API key", "") };
+    format!("{head} for {name} (id {id}):\n\n\t{token}\n\nStore it now: Goethe keeps only its hash and cannot show it again.{old} If it is lost, goethe api keys rotate {id} makes a new one.\n")
 }
 
 fn create_first_key() -> String {
@@ -1275,7 +1450,7 @@ fn key_list_text(rows: &[Value]) -> String {
 }
 
 fn api_keys_text(rows: &[Value]) -> String {
-    // Each key in full with its name, admin and expiry; keys made before keys were stored show their first characters.
+    // Each key's first characters with its name, admin and expiry; the secret itself is shown only when it is made.
     if rows.is_empty() {
         return create_first_key();
     }
@@ -1283,10 +1458,9 @@ fn api_keys_text(rows: &[Value]) -> String {
     let mut table = goethe_core::term::Table::new(&["NAME", "API KEY", "ADMIN", "EXPIRES"]);
     for r in rows {
         let admin = r.get("admin").and_then(Value::as_bool).unwrap_or(false);
-        let key = match (field(r, "key"), field(r, "prefix")) {
-            (k, _) if !k.is_empty() => k,
-            (_, p) if !p.is_empty() => format!("{p}... (older key, only its start is kept)"),
-            _ => "-".to_string(),
+        let key = match field(r, "prefix") {
+            p if p.is_empty() => "-".to_string(),
+            p => format!("{p}..."),
         };
         table.row(vec![
             field(r, "name"),
@@ -1331,18 +1505,14 @@ fn do_learn(action: Option<&str>, models: &[String], print: Option<&str>, json: 
         println!("{}", learn::print_session(&home, session, json)?);
         return Ok(());
     }
-    match action {
-        Some(a @ ("on" | "off")) => {
-            let small = learn::set(&home, a == "on", models)?;
-            for (id, ctx) in &small {
-                eprintln!("Warning: {id} has a context of {ctx} tokens. Under {} tokens, learning can cause more compactions and use more input tokens (docs/learn.md).", learn::SMALL_CONTEXT);
-            }
-            if a == "on" && !json {
-                eprintln!("Notes hold text from your sessions; only your user can read the folder. Updates are extra model calls, which no API key is charged for.");
-            }
+    if let Some(a @ ("on" | "off")) = action {
+        let small = learn::set(&home, a == "on", models)?;
+        for (id, ctx) in &small {
+            eprintln!("Warning: {id} has a context of {ctx} tokens. Under {} tokens, learning can cause more compactions and use more input tokens (docs/learn.md).", learn::SMALL_CONTEXT);
         }
-        _ if !models.is_empty() => usage("--model goes with on or off"),
-        _ => {}
+        if a == "on" && !json {
+            eprintln!("Notes hold text from your sessions; only your user can read the folder. Updates are extra model calls, which no API key is charged for.");
+        }
     }
     let st = learn::status(&home)?;
     if json {
@@ -1371,14 +1541,12 @@ fn do_trace(action: Option<&str>, keys: &[String], all_keys: bool, dir: Option<&
     let home = goethe_home();
     ensure_layout(&home).map_err(|e| format!("layout: {e}"))?;
     match action {
-        Some("off") if all_keys => usage("--all-keys goes with on"),
         Some(a @ ("on" | "off")) => {
             trace::set(&home, Some(a == "on"), keys, all_keys, dir, max_gb)?;
             if a == "on" && !json {
                 eprintln!("Traces hold whole prompts and replies, including anything secret clients send; only your user can read the folder.");
             }
         }
-        _ if !keys.is_empty() || all_keys => usage("--key and --all-keys go with on or off"),
         _ if dir.is_some() || max_gb.is_some() => trace::set(&home, None, keys, false, dir, max_gb)?,
         _ => {}
     }
@@ -1783,10 +1951,7 @@ fn do_share(
     use goethe_core::public_share as share;
     let home = goethe_home();
     match public {
-        "stop" | "shutdown" | "close" | "off" => {
-            if !allow.is_empty() || port.is_some() {
-                usage("goethe api share stop takes only --key");
-            }
+        "stop" => {
             if !keys.is_empty() {
                 for k in keys {
                     match share::stop_key(&home, k)? {
@@ -1841,7 +2006,7 @@ fn do_share(
                 let models = k.models.as_deref().filter(|m| !m.is_empty()).unwrap_or("every model");
                 match k.token.as_deref() {
                     Some(token) => println!("Key:  {} {token}  models: {models}", k.name),
-                    None => println!("Key:  {} (id {})  models: {models}", k.name, k.id),
+                    None => println!("Key:  {} (id {}, secret unchanged)  models: {models}", k.name, k.id),
                 }
             }
             let clients: Vec<String> = o.share.allow.clone();
@@ -2038,6 +2203,19 @@ fn do_registry_add(
 }
 
 
+fn image_refusal(cmd: &Commands, image: Option<&str>) -> Option<&'static str> {
+    // In the container image these would replace or stop what the image provides; each says what to do instead.
+    image?;
+    match cmd {
+        Commands::Update { .. } => Some("this goethe comes with its container image: pull a newer ghcr.io/meshapplied/goethe tag and recreate the container"),
+        Commands::Uninstall { .. } => Some("this goethe runs in a container: remove the container and its /workspace volume instead"),
+        Commands::Up { .. } | Commands::Down { .. } => Some("goethed is this container's main process: start or stop the container instead"),
+        Commands::Setup { .. } => Some("the container image sets itself up when it starts"),
+        Commands::Completion { cmd: Some(CompletionCommands::Install), .. } => Some("tab completion is not installed in the container; run goethe commands with docker exec"),
+        _ => None,
+    }
+}
+
 fn fail(msg: String) -> ! {
     eprintln!("{msg}");
     std::process::exit(1);
@@ -2103,40 +2281,81 @@ mod tests {
         assert!(alias_text(&[]).ends_with("\t→ goethe models alias set <alias> <model>\n"));
     }
 
+    #[test]
+    fn in_the_container_image_commands_that_replace_or_stop_it_refuse() {
+        // update, uninstall, up, down, setup and completion install would fight the image; everything else runs as on a machine.
+        for refused in [&["update"][..], &["update", "engine"], &["uninstall"], &["up"], &["down"], &["setup"], &["completion", "install"]] {
+            let cli = parse(refused).unwrap();
+            assert!(image_refusal(&cli.command, Some("0.3.5")).is_some(), "{refused:?}");
+            assert!(image_refusal(&cli.command, None).is_none(), "{refused:?} runs on a machine");
+        }
+        for allowed in [&["status"][..], &["install", "org/m"], &["api", "keys", "create", "app"], &["completion", "status"], &["container", "--check"]] {
+            assert!(image_refusal(&parse(allowed).unwrap().command, Some("0.3.5")).is_none(), "{allowed:?}");
+        }
+    }
+
     fn parse(v: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("goethe").chain(v.iter().copied()))
     }
 
     #[test]
-    fn actions_are_words_and_flags_only_change_how() {
+    fn actions_are_subcommands_and_flags_only_change_how() {
+        // Each action is a subcommand with the values it needs; flags only change how it runs.
         use clap::CommandFactory;
         Cli::command().debug_assert();
         assert!(matches!(parse(&["api", "keys", "create", "ops", "--expires", "30d", "--admin"]).unwrap().command,
-            Commands::Api { cmd: Some(ApiCommands::Keys(KeyArgs { action: Some(_), admin: true, .. })), .. }));
-        let Commands::Api { cmd: Some(ApiCommands::Keys(k)), .. } = parse(&["api", "keys", "revoke", "a1", "b2"]).unwrap().command else { panic!() };
-        assert_eq!((k.action.as_deref(), k.values), (Some("revoke"), vec!["a1".to_string(), "b2".to_string()]));
+            Commands::Api { cmd: Some(ApiCommands::Keys(KeyArgs { cmd: Some(KeyCommands::Create { admin: true, .. }), .. })), .. }));
+        let Commands::Api { cmd: Some(ApiCommands::Keys(KeyArgs { cmd: Some(KeyCommands::Revoke { ids }), .. })), .. } = parse(&["api", "keys", "revoke", "a1", "b2"]).unwrap().command else { panic!() };
+        assert_eq!(ids, ["a1", "b2"]);
         assert!(parse(&["api", "keys", "a1"]).is_err(), "a value needs its action");
-        let Commands::Gpu { action, gpus, .. } = parse(&["gpu", "deny", "gpu0", "gpu1"]).unwrap().command else { panic!() };
-        assert_eq!((action.as_deref(), gpus), (Some("deny"), vec![0, 1]));
+        let Commands::Gpu { cmd: Some(GpuCommands::Deny { gpus }), .. } = parse(&["gpu", "deny", "gpu0", "gpu1"]).unwrap().command else { panic!() };
+        assert_eq!(gpus, [0, 1]);
         assert!(parse(&["gpu", "gpu2"]).is_err() && parse(&["gpu", "--allow", "gpu2"]).is_err());
         assert!(parse(&["api", "allow", "add", "10.0.0.1/32", "10.0.0.2/32", "--note", "office"]).is_ok());
         assert!(parse(&["api", "domain", "check", "api.example.com"]).is_ok() && parse(&["api", "domain", "add", "x.y"]).is_err());
         assert!(parse(&["api", "expose", "vpn", "--interface", "wg0"]).is_ok() && parse(&["api", "expose", "wg0"]).is_ok());
         assert!(matches!(parse(&["api", "share", "5h", "--key", "a,b"]).unwrap().command,
-            Commands::Api { cmd: Some(ApiCommands::Share(ShareArgs { duration: Some(_), .. })), .. }));
+            Commands::Api { cmd: Some(ApiCommands::Share(ShareArgs { duration: Some(_), cmd: None, .. })), .. }));
         let Commands::Api { cmd: Some(ApiCommands::Share(s)), .. } =
             parse(&["api", "share", "5h", "--key", "my-app", "--dangerously-allow-all-inbound"]).unwrap().command
         else {
             panic!()
         };
         assert!(s.dangerously_allow_all_inbound && s.allow.is_empty());
+        for stop in ["stop", "shutdown", "close", "off"] {
+            assert!(matches!(parse(&["api", "share", stop, "--key", "a"]).unwrap().command,
+                Commands::Api { cmd: Some(ApiCommands::Share(ShareArgs { cmd: Some(ShareCommands::Stop { .. }), .. })), .. }), "{stop}");
+        }
         assert!(parse(&["models", "alias", "set", "fast", "org/m"]).is_ok() && parse(&["models", "scan", "mydir"]).is_ok());
         assert!(parse(&["models", "--json", "scan"]).is_err() && parse(&["api", "--json", "keys"]).is_err());
-        assert!(parse(&["learn", "on", "--model", "m"]).is_ok() && parse(&["trace", "on", "--all-keys"]).is_ok());
-        assert!(matches!(parse(&["update", "engine"]).unwrap().command, Commands::Update { what: Some(_), .. }));
+        assert!(parse(&["learn", "on", "--model", "m"]).is_ok() && parse(&["learn", "on", "--json"]).is_ok() && parse(&["learn", "--json"]).is_ok());
+        assert!(parse(&["trace", "on", "--all-keys"]).is_ok() && parse(&["trace", "--max-gb", "100"]).is_ok() && parse(&["trace", "on", "--dir", "/d"]).is_ok());
+        assert!(matches!(parse(&["update", "engine", "--yes"]).unwrap().command, Commands::Update { cmd: Some(UpdateCommands::Engine { .. }), .. }));
         assert!(parse(&["update", "--engine"]).is_err() && parse(&["update", "ternary"]).is_err());
+        assert!(matches!(parse(&["completion", "install", "--shell", "zsh"]).unwrap().command, Commands::Completion { shell: Some(_), cmd: Some(CompletionCommands::Install) }));
         assert!(matches!(parse(&["doctor", "--hardware"]).unwrap().command, Commands::Doctor { hardware: true, .. }));
         assert!(parse(&["login", "--lifetime", "30d"]).is_ok());
+    }
+
+    #[test]
+    fn an_action_without_the_value_it_needs_is_refused_by_clap() {
+        // These used to reach a runtime check, or (domain check) ran something else.
+        for missing in [
+            &["api", "keys", "create"][..], &["api", "keys", "revoke"], &["api", "allow", "add"], &["api", "allow", "remove"],
+            &["api", "domain", "check"], &["gpu", "allow"], &["gpu", "deny"], &["models", "alias", "set", "fast"], &["models", "alias", "remove"],
+        ] {
+            let err = parse(missing).err().unwrap_or_else(|| panic!("{missing:?} parsed"));
+            assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument, "{missing:?}");
+        }
+        for wrong in [
+            &["api", "keys", "create", "a", "b"][..], &["api", "keys", "--rpm", "5"], &["api", "allow", "remove", "1.2.3.4", "--note", "x"],
+            &["learn", "--model", "m"], &["learn", "status", "--model", "m"], &["trace", "off", "--all-keys"], &["trace", "--key", "a"],
+            &["update", "rollback", "--check"], &["update", "--check", "rollback"], &["update", "engine", "--allow-downgrade"], &["update", "--yes", "engine"],
+            &["gpu", "--json", "deny", "gpu2"], &["api", "keys", "--json", "create", "x"],
+            &["api", "share", "stop", "--allow", "1.2.3.4"], &["api", "expose", "local", "--interface", "wg0"],
+        ] {
+            assert!(parse(wrong).is_err(), "{wrong:?} should be refused");
+        }
     }
 
     #[test]
@@ -2148,6 +2367,9 @@ mod tests {
         }
         for (_, rows) in HELP_SECTIONS {
             for (cmd, _) in *rows {
+                if matches!(cmd.split_whitespace().nth(1), Some("ask" | "?")) {
+                    continue;
+                }
                 let words: Vec<&str> = cmd.split_whitespace().skip(1).map(|w| match w { "MODEL" => "org/m", "FOLDER" => "f", "KEY_ID" => "a1", "DOMAIN" => "a.example.com", w => w }).collect();
                 if !words.is_empty() {
                     assert!(parse(&words).is_ok(), "{cmd} does not parse");
@@ -2159,7 +2381,7 @@ mod tests {
     #[test]
     fn old_forms_are_gone() {
         for old in [
-            &["start"][..], &["serve", "--public", "5h"], &["hw", "profile"], &["key"], &["allowlist"], &["gateway"], &["domain"],
+            &["serve", "--public", "5h"][..], &["hw", "profile"], &["key"], &["allowlist"], &["gateway"], &["domain"],
             &["recommend"], &["scan"], &["config", "org/m"], &["alias"], &["configure", "api"], &["get", "api"], &["service", "status"],
             &["token-lifetime", "30d"], &["api", "manage"], &["api", "configure"], &["api", "gateway"], &["api", "allowlist"],
             &["api", "learn"], &["api", "trace"], &["models", "config", "org/m"], &["logs", "--daemon"], &["load", "--model", "org/m"],
@@ -2210,13 +2432,15 @@ mod tests {
     #[test]
     fn key_create_raw_is_only_the_token() {
         let token = "goethe_sk_0123456789abcdef0123456789abcdef";
-        assert_eq!(key_create_stdout(token, "a1b2c3d4e5f6", "ops", true), format!("{token}\n"));
-        let human = key_create_stdout(token, "a1b2c3d4e5f6", "ops", false);
+        assert_eq!(key_secret_stdout(token, "a1b2c3d4e5f6", "ops", true, false), format!("{token}\n"));
+        let human = key_secret_stdout(token, "a1b2c3d4e5f6", "ops", false, false);
         assert!(human.contains(token));
         assert!(human.starts_with("API key for ops (id a1b2c3d4e5f6):\n\n\t"), "{human}");
         assert_eq!(rpm_text(0), "unlimited");
         assert_eq!(rpm_text(120), "120");
-        assert!(human.contains("goethe api shows it again"));
+        assert!(human.contains("cannot show it again") && human.contains("goethe api keys rotate a1b2c3d4e5f6"), "{human}");
         assert_eq!(human.matches(token).count(), 1);
+        let renewed = key_secret_stdout(token, "a1b2c3d4e5f6", "ops", false, true);
+        assert!(renewed.starts_with("New secret for ops (id a1b2c3d4e5f6):") && renewed.contains("old secret no longer works"), "{renewed}");
     }
 }

@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- Goethe also comes as a container image, `ghcr.io/meshapplied/goethe`, for Linux on x86_64 and arm64 with NVIDIA GPUs. goethed is the container's main process and everything lives on the `/workspace` volume. On hosts without a terminal, `GOETHE_SETUP` (goethe commands, one per line), `GOETHE_API_KEY`, `GOETHE_HF_TOKEN` and `GOETHE_AUTHKEY` set it up. Every release publishes it, signed with cosign.
+- A linked node reports its public IP address (and public interface addresses) to the console only while the API is open to it: `goethe api expose public`, a gateway on a public address, or an active `goethe api share`.
+- The ternary runtime is gone: the two ternary models leave the catalog, and `goethe update` no longer looks for a ternary pack. The runtime was never published, so they could not be installed.
+- `goethe start` runs Quick setup on its own (install a model, serve it and open the API), then returns to the shell; `goethe` is still the full menu.
+- In the menu's GPU choice the arrows skip GPUs that are not allowed, and the plan line lines up under them. Under the Load/Unload list a line names `goethe gpu allow/deny gpuN`.
+- Goethe no longer stores API keys, only their hashes, and empties the raw keys older versions kept in `state.db`. A key is shown once, when it is made. `goethe api keys rotate <key id>` (or **New secret** in the key manager) gives a key a new secret and keeps its id, name, models and limits. `goethe api share --key` prints a new secret for a key it newly shares; a key already shared keeps its own.
+- The public gateway (`goethe api share`) reaches goethed over an owner-only socket instead of a loopback port (`127.0.0.2`, or a second port on macOS), so a local process can no longer pose as a public client. `goethe update` restarts goethed, which moves it to the socket.
+- The key manager no longer cuts the last characters of a full key on a 64-column terminal.
+- The menu's Load/Unload asks where to load a model: Auto, or the GPUs marked with Space (several split it), each with its free memory and fit, disallowed GPUs in gray, and the plan for the choice (tp, context, GB per GPU).
+- A download from Hugging Face says `Fetching from Hugging Face` until the files start to arrive, then shows its bar.
+- `goethe run` loads a model that is not loaded on its picker, with a bar beside it, in the first list and in the chat's `m` list, instead of leaving the screen. You can type while a reply streams; Enter sends the line after it. Leaving says nothing and returns at once: a model run loaded is unloaded in the background.
+- On a terminal, `goethe install`, `goethe remove`, `goethe load` (and the Install models page) show only the model, progress bars and the result: `Model installed: kernel: ...  ctx: ...  total maximum VRAM: ...`, `Successfully uninstalled`, or for a load the context window, concurrency and VRAM above its bar. Piped output and `--verbose` keep every line; the command log always has them.
+- The `goethe run` chat has no export or record any more; Esc then `q` quits at once. A model that was still loading when `goethe run` started is waited for and left loaded.
+- The Install models page also uninstalls: Space marks installed models (their dot turns the theme's third color) together with models to install, the screen shows what Enter will install and uninstall, and Enter does both in one go, then shows the table again.
+- `goethe login` after `goethe logout` (or a second login) links the same console node again, by a key each install keeps in `GOETHE_HOME/platform/install_key`; `goethe logout` keeps the node on the console, offline, with its settings and analytics. Needs the matching console update.
+- `goethe update` no longer prints commit hashes, only versions.
+- `goethe uninstall` lists the models (with their total size), inference engines and kernel packs it will delete before asking, also deletes the NInfer weights `goethe install` downloaded to `~/.cache/goethe/nvfp4`, removes only Goethe's card from a folder of your own files, and when something cannot be deleted still removes the rest, names what is left and exits non-zero.
+- `goethe run` loads a model that is not loaded yet with a 100,000-token context, or the model's maximum when that is smaller (it is still reduced when the GPU cannot fit it).
+- The `goethe run` chat screen labels each message `➤ User` or `➤ Model` in the theme's colors and shows the chat's generated tokens and decode speed on the keys line (not saved, not in the usage log).
+
 ## 0.3.5 (2026-11-20)
 
 - `goethe update --check` names nginx by version (from the package's BUILDINFO, which now records it), marks a rebuild of the same wheel or version as "another build", and ends with a summary of what would change.

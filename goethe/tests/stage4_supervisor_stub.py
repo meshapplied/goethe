@@ -235,23 +235,14 @@ def main() -> None:
             _hw_fixture(home, gpu, free_gb=90.0)
             model_a = home / "models" / "org__model_a"
             model_b = home / "models" / "org__model_b"
-            model_t = home / "models" / "org__ternary_t"
             model_auto = home / "models" / "org__auto"
             write_card(model_a, "a", ctx, max_conc)
             write_card(model_b, "b", 4096, 4, extra='kv_cache_dtype="fp8_e4m3"')
             seed_installed_model(home, "a", "models/org__model_a", static_w, kv_bytes, ctx, max_conc, 1)
             seed_installed_model(home, "b", "models/org__model_b", static_w, kv_bytes, ctx, max_conc, 1)
-            (home / "goethe" / "ternary-kernels").mkdir(parents=True)
-            write_card(
-                model_t, "t", 512, 2,
-                extra=f'runtime="ternary"\npack_id="p"\nbase_model_id="b"\n'
-                f'pythonpath=["{home}/goethe/ternary-kernels"]\n'
-                f'TERNARY_PACK_DIR="{home}/models/pack"\nTERNARY_MODEL_DIR="{home}/models/base"',
-            )
-            seed_installed_model(home, "t", "models/org__ternary_t", 5.0, 512, 512, 2, 1)
             sup = Sup(home, goethe)
             try:
-                _scenarios(sup, gpu, model_a, model_b, model_t, model_auto, static_w, kv_bytes, ctx, max_conc)
+                _scenarios(sup, gpu, model_a, model_b, model_auto, static_w, kv_bytes, ctx, max_conc)
             finally:
                 sup.md.stop()
             assert_no_stub_engines(home)
@@ -267,7 +258,7 @@ def main() -> None:
 
 
 def _scenarios(
-    sup: Sup, gpu: int, model_a: Path, model_b: Path, model_t: Path, model_auto: Path,
+    sup: Sup, gpu: int, model_a: Path, model_b: Path, model_auto: Path,
     static_w: float, kv_bytes: int, ctx: int, max_conc: int,
 ) -> None:
     """Run the supervisor scenarios in order against one goethed."""
@@ -378,12 +369,6 @@ def _scenarios(
     write_card(model_a, "a", ctx, max_conc)
     write_card(model_b, "b", 4096, 4, extra='kv_cache_dtype="fp8_e4m3"')
     _clear_stub_files(model_a, model_b)
-    sup.load("t", str(gpu))
-    tenv = stub_launch(model_t)["env"]
-    check("TERNARY_PACK_DIR" in tenv or "TERNARY_MODEL_DIR" in tenv, "ternary card env")
-    check("ternary-kernels" in tenv.get("PYTHONPATH", ""), "ternary PYTHONPATH")
-    check("GOETHE_KERNEL_DIR" not in tenv, "ternary no kernel dir")
-    sup.goethe_ok("unload", "t")
     sup.load("a", str(gpu), "--", "--chunked-prefill-size", "4096")
     argv = stub_launch(model_a)["argv"]
     check("--chunked-prefill-size" in argv and argv[argv.index("--chunked-prefill-size") + 1] == "4096",
@@ -418,8 +403,7 @@ def _scenarios(
     check(wait_until(lambda: sup.restarts_at_least("a", 1), timeout=120.0), "watchdog restart count after SIGKILL")
     sup.goethe_ok("unload", "a")
     stub_s = stub_launch(model_a)
-    check("TERNARY_PACK_DIR" not in stub_s["env"], "sglang no ternary env")
-    check("ternary-kernels" not in stub_s["env"].get("PYTHONPATH", ""), "sglang no ternary pythonpath")
+    check("GOETHE_KERNEL_DIR" not in stub_s["env"], "sglang no kernel dir")
     health_timeout = os.environ.get("GOETHE_HEALTH_POLL_TIMEOUT_SEC")
     if health_timeout and health_timeout.isdigit():
         write_card(model_b, "b", 4096, 4, env={"STUB_START_DELAY": str(float(health_timeout) + 2.0)})

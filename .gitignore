@@ -25,6 +25,12 @@ docs/gpu-checks.md
 
 # Developer docs (local only, never committed)
 docs/dev/
+/docs/developer/
+
+# The research lab (goethe-lab, its tests and example cards, the NVFP4 and ternary kernels), kept local
+/lab/
+/nvfp4-kernels/
+/ternary-kernels/
 
 # Local agent doctrine + skills (never commit / never leak)
 /PROJECT.md

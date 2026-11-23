@@ -45,10 +45,6 @@ pub struct GoetheCard {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pack_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_model_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<toml::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pythonpath: Option<Vec<String>>,
@@ -85,8 +81,6 @@ const CARD_KEYS: &[&str] = &[
     "preferred_gpus",
     "extra_sglang_args",
     "runtime",
-    "pack_id",
-    "base_model_id",
     "env",
     "pythonpath",
     "marlin_extra_gb",
@@ -141,7 +135,6 @@ struct Target {
     entry: Option<RegistryModel>,
     managed: bool,
     source_dir: Option<PathBuf>,
-    ternary: Option<TernaryDirs>,
     pack: Option<PackChoice>,
 }
 
@@ -155,11 +148,6 @@ pub(super) enum PackDecision {
     None,
     Declined,
     Use(Box<PackChoice>),
-}
-
-pub struct TernaryDirs {
-    pub pack: PathBuf,
-    pub base: PathBuf,
 }
 
 pub fn run(opts: InstallOpts) -> Result<(), String> {
@@ -200,7 +188,7 @@ fn install_model(home: &Path, opts: &InstallOpts) -> Result<String, String> {
         match install_hub(home, opts) {
             Ok(t) => t,
             Err(e) if gated_but_installed(&e, is_installed(home, &opts.model_id), opts.force) => {
-                println!("{} is already installed; --force downloads it again", opts.model_id);
+                crate::step::say(&format!("{} is already installed; --force downloads it again", opts.model_id));
                 return Ok(opts.model_id.clone());
             }
             Err(e) => return Err(e),
@@ -226,7 +214,7 @@ fn gated_but_installed(err: &str, installed: bool, force: bool) -> bool {
 }
 
 fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
-    // Download a Hugging Face model, or a ternary pack plus its base, into models/.
+    // Download a Hugging Face model into models/.
     if opts.model_id.starts_with(['.', '/', '~']) {
         return Err(format!("{}: no such directory", opts.model_id));
     }
@@ -258,7 +246,6 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             entry: Some(profile),
             managed: false,
             source_dir: file.parent().map(|p| p.to_path_buf()),
-            ternary: None,
             pack: None,
         });
     }
@@ -279,35 +266,6 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         no_verify: opts.no_verify,
         only: None,
     };
-    if cfg!(target_os = "macos") && entry.as_ref().is_some_and(|e| e.effective_runtime() == "ternary") {
-        return Err(format!("{} runs on NVIDIA GPUs only; on a Mac goethe serves GGUF models with llama.cpp", opts.model_id));
-    }
-    if let Some(e) = entry.as_ref().filter(|e| e.effective_runtime() == "ternary") {
-        crate::runtime::require_ternary_runtime(home)?;
-        let pack = e.pack_id.as_deref().ok_or("ternary registry entry has no pack_id")?;
-        let base = e.base_model_id.as_deref().ok_or("ternary registry entry has no base_model_id")?;
-        validate_model_id(pack)?;
-        validate_model_id(base)?;
-        let dirs = ternary_dirs(home, pack, base);
-        hf::ensure_model(home, pack, &dirs.pack, &dl)?;
-        let base_dl = DownloadOpts {
-            revision: ternary_base_revision(&dirs.pack, base),
-            force: opts.force,
-            no_verify: opts.no_verify,
-            only: None,
-        };
-        hf::ensure_model(home, base, &dirs.base, &base_dl)?;
-        build_farm(&dirs.base, &card_dir)?;
-        return Ok(Target {
-            model_id: opts.model_id.clone(),
-            card_dir,
-            entry: entry.clone(),
-            managed: true,
-            source_dir: None,
-            ternary: Some(dirs),
-            pack: None,
-        });
-    }
     let declined = match pack_decision(home, opts)? {
         PackDecision::Use(mut choice) => 'packed: {
             // Only the files the pack was built for, at its pinned revision; a pack no allowed GPU runs is refused from its manifest before anything is installed, the engine layer once, on first use.
@@ -362,9 +320,9 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                     let marlin = pack_marlin_gb(&cfg, &choice.offer.hf_repo, &rev, &files);
                     let cap = plan.variants.iter().position(|v| *v == files).and_then(|i| plan.variant_ids.get(i)).and_then(|id| crate::packs::variant_max_ctx(&plan.prefix, id));
                     let view = if opts.load { crate::recommend::View::new(home, hw) } else { crate::recommend::View::capacity(home, hw) };
-                    println!("{}", pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: cap }, &card_dir)?);
+                    crate::step::say(&pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: cap }, &card_dir)?);
                 }
-                (Err(e), _) | (_, Err(e)) => eprintln!("note: the per-GPU fit was not checked before the download: {e}"),
+                (Err(e), _) | (_, Err(e)) => crate::step::note(&format!("note: the per-GPU fit was not checked before the download: {e}")),
             }
             confirm(opts, &format!("{} ({}, {:.1} GB) with optimised kernels for {}{spec}", opts.model_id, choice.offer.format, bytes(&files) as f64 / GIB, choice.offer.arch))?;
             let pack_dl = DownloadOpts { revision: Some(rev), force: opts.force, no_verify: opts.no_verify, only: Some(files.clone()) };
@@ -376,7 +334,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 let only = Some(d.files.iter().map(|f| f.0.clone()).collect());
                 let dl = DownloadOpts { revision: d.revision, force: opts.force, no_verify: opts.no_verify, only };
                 if let Err(e) = hf::ensure_model(home, &d.repo, &card_dir.join("drafter"), &dl) {
-                    eprintln!("note: speculative decoding off: {e}");
+                    crate::step::note(&format!("note: speculative decoding off: {e}"));
                 }
             }
             gguf_metadata(home, &card_dir, &choice.offer.format, &files)?;
@@ -387,8 +345,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 entry,
                 managed: true,
                 source_dir: None,
-                ternary: None,
-                pack: Some(*choice),
+                    pack: Some(*choice),
             });
         }
         PackDecision::Declined => true,
@@ -402,13 +359,13 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         Choice::Sglang => None,
         Choice::Gguf(files) => Some(files),
         Choice::Build { repo, why } => {
-            println!("{}: {why}; installing its GGUF build {repo} with llama.cpp", opts.model_id);
+            crate::step::say(&format!("{}: {why}; installing its GGUF build {repo} with llama.cpp", opts.model_id));
             return install_hub(home, &InstallOpts { model_id: repo, ..opts.clone() });
         }
     };
     if gguf.is_none() && !cfg!(target_os = "macos") {
         if let crate::host_compiler::Verdict::Unusable(why) = crate::host_compiler::verdict(crate::host_compiler::find().as_ref(), &crate::nvidia_driver::probe().distro) {
-            eprintln!("note: SGLang builds GPU kernels when this model first loads: {why}");
+            crate::step::note(&format!("note: SGLang builds GPU kernels when this model first loads: {why}"));
         }
     }
     if !hf::offline_mode() {
@@ -434,7 +391,6 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         entry,
         managed: true,
         source_dir: None,
-        ternary: None,
         pack,
     })
 }
@@ -449,7 +405,7 @@ fn readable<T>(choice: Option<T>, meta: impl FnOnce(&T) -> Result<(), String>, a
     match (meta(&c), allow) {
         (Ok(()), _) => Ok(Some(c)),
         (Err(e), true) => {
-            eprintln!("note: the optimised kernels were not used, serving with the plain runtime: {e}");
+            crate::step::note(&format!("note: the optimised kernels were not used, serving with the plain runtime: {e}"));
             Ok(None)
         }
         (Err(e), false) => Err(format!("the optimised kernels for these weights cannot be used: {e}; {FALLBACK_HINT}")),
@@ -489,7 +445,10 @@ fn config_for_pack(home: &Path, opts: &InstallOpts, dir: &Path, c: &PackChoice, 
 fn confirm(opts: &InstallOpts, plan: &str) -> Result<(), String> {
     // One line before any download: what, how big, which engine; a terminal confirms it unless --yes.
     if opts.yes || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
-        println!("{plan}");
+        match crate::step::compact() {
+            true => println!("{}", crate::term::paint(&opts.model_id, crate::term::Color::Bold)),
+            false => println!("{plan}"),
+        }
         return Ok(());
     }
     match crate::term::ask(&format!("{plan}: download? [Y/n]"), "y")?.to_ascii_lowercase().starts_with('y') {
@@ -604,31 +563,6 @@ fn gguf_metadata(home: &Path, dir: &Path, format: &str, files: &[String]) -> Res
     fs::remove_dir_all(&out).map_err(|e| e.to_string())
 }
 
-pub fn ternary_dirs(home: &Path, pack: &str, base: &str) -> TernaryDirs {
-    let pack_dir = model_dir(home, &format!("{pack}/pack"));
-    let base_dir = if base == pack {
-        model_dir(home, &format!("{base}/base"))
-    } else {
-        model_dir(home, base)
-    };
-    TernaryDirs {
-        pack: pack_dir,
-        base: base_dir,
-    }
-}
-
-fn ternary_base_revision(pack_dir: &Path, base: &str) -> Option<String> {
-    // Pin the base checkpoint to the revision the pack was built against.
-    let text = fs::read_to_string(pack_dir.join("ternary_config.json")).ok()?;
-    let cfg: Value = serde_json::from_str(&text).ok()?;
-    if let Some(named) = cfg.get("base_model").and_then(|v| v.as_str()) {
-        if named != base {
-            eprintln!("warning: pack was built for base {named}, registry names {base}");
-        }
-    }
-    cfg.get("base_revision").and_then(|v| v.as_str()).map(String::from)
-}
-
 fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     // Register a local tree in place (symlink farm) or as a copy; the card always lives under models/<id>.
     let src = fs::canonicalize(&opts.model_id).map_err(|e| format!("{}: {e}", opts.model_id))?;
@@ -683,7 +617,6 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         managed: opts.copy_local,
         pack,
         source_dir: (!opts.copy_local).then_some(src),
-        ternary: None,
     })
 }
 
@@ -831,7 +764,7 @@ pub fn vram_estimate(dir: &Path, cfg: &Value, facts: &model_facts::ModelFacts, e
         && !sgl::has_flag(extra, "--no-ple-offload-embedding");
     let ple_gb = if ple_offload {
         safetensors::tensor_bytes_in_dir(dir, &safetensors::is_ple_embedding).unwrap_or_else(|e| {
-            eprintln!("warning: offloaded embedding size unknown: {e}");
+            crate::step::note(&format!("warning: offloaded embedding size unknown: {e}"));
             0
         }) as f64
             / GIB
@@ -897,7 +830,7 @@ fn register(home: &Path, opts: &InstallOpts, mut t: Target) -> Result<(), String
         }
         t.pack = None;
         planned = plan(home, opts, &t)?;
-        println!("{why}; using {}", crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?.id);
+        crate::step::say(&format!("{why}; using {}", crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?.id));
     }
     ensure_runtime(home, crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?)?;
     commit(home, &planned, "installed", &mut std::io::stdout())
@@ -1039,12 +972,12 @@ pub fn unpack_failed(home: &Path, model_id: &str, log: &str) -> Result<bool, Str
     drop_pack(&dir);
     let source_dir = read_card_table(&dir).and_then(|c| c.get("source_dir").and_then(|v| v.as_str()).map(PathBuf::from));
     let entry = fetch(&registry_url()).ok().and_then(|r| find_model(&r, model_id).cloned());
-    let t = Target { model_id: model_id.to_string(), card_dir: dir, entry, managed: source_dir.is_none(), source_dir, ternary: None, pack: None };
+    let t = Target { model_id: model_id.to_string(), card_dir: dir, entry, managed: source_dir.is_none(), source_dir, pack: None };
     let mut p = plan(home, &InstallOpts { model_id: model_id.to_string(), ..InstallOpts::default() }, &t)?;
     let engine = crate::engines::of_card(&toml::Value::Table(p.table.clone()))?;
     ensure_runtime(home, engine)?;
     p.table.insert(PACK_SKIPPED.into(), toml::Value::String(why.clone()));
-    println!("{why}; using {}", engine.id);
+    crate::step::say(&format!("{why}; using {}", engine.id));
     commit(home, &p, "installed", &mut std::io::sink())?;
     Ok(true)
 }
@@ -1107,7 +1040,7 @@ fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) 
     let variant = crate::packs::finish(home, &p.dir, &c.offer.arch, plan, &broker, &run);
     drop(beat);
     let variant = variant?;
-    println!("{}", crate::step::row("kernels", &format!("{} verified{}", c.offer.arch, crate::step::took(started.elapsed()))));
+    crate::step::say(&crate::step::row("kernels", &format!("{} verified{}", c.offer.arch, crate::step::took(started.elapsed()))));
     pack_card(home, p, &c.offer.arch, &variant, cli_ctx)
 }
 
@@ -1152,7 +1085,6 @@ pub fn plan_in_place(home: &Path, model_id: &str, dir: &Path, entry: Option<Regi
         entry,
         managed: true,
         source_dir: None,
-        ternary: None,
         pack: None,
     };
     plan(home, &opts, &t)
@@ -1225,8 +1157,6 @@ fn plan_engine(
         preferred_gpus: opts.gpus.clone().unwrap_or_default(),
         extra_sglang_args: Vec::new(),
         runtime: Some(runtime.into()),
-        pack_id: None,
-        base_model_id: None,
         env: None,
         pythonpath: None,
         marlin_extra_gb: None,
@@ -1318,17 +1248,12 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         .or_else(|| t.entry.as_ref().and_then(|e| e.kv_cache_dtype.clone()))
         .or_else(|| checkpoint_kv_dtype(&cfg, dir))
         .unwrap_or_else(|| "auto".to_string());
-    let mut vram = vram_estimate(dir, &cfg, &facts, &extra, &kv_dtype);
-    if let (Some(_), Some(e)) = (&t.ternary, &t.entry) {
-        if e.static_vram_gb > 0.0 {
-            vram.weights_gb = e.static_vram_gb;
-        }
-    }
+    let vram = vram_estimate(dir, &cfg, &facts, &extra, &kv_dtype);
     let marlin_extra_gb = if safetensors::is_nvfp4_compressed_model(&cfg) {
         match safetensors::marlin_extra_bytes_in_dir(dir) {
             Ok(n) => Some(n as f64 / GIB),
             Err(e) => {
-                eprintln!("warning: marlin_extra_gb scan skipped: {e}");
+                crate::step::note(&format!("warning: marlin_extra_gb scan skipped: {e}"));
                 None
             }
         }
@@ -1361,9 +1286,7 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         preferred_gpus: gpus,
         extra_sglang_args: extra.clone(),
         runtime: entry.and_then(|e| e.runtime.clone()),
-        pack_id: entry.and_then(|e| e.pack_id.clone()),
-        base_model_id: entry.and_then(|e| e.base_model_id.clone()),
-        env: merged_env(old("env"), entry, t.ternary.as_ref(), home),
+        env: merged_env(old("env"), entry),
         pythonpath: entry.and_then(|e| e.pythonpath.clone()),
         marlin_extra_gb,
         host_offload_gb: (vram.host_offload_gb > 0.0).then_some(vram.host_offload_gb),
@@ -1423,9 +1346,17 @@ pub fn commit(home: &Path, p: &Planned, verb: &str, out: &mut dyn Write) -> Resu
     )
     .map_err(|e| format!("state.db: {e}"))?;
     if let Some(note) = drop_shadowing_alias(&con, &p.model_id)? {
-        eprintln!("warning: {note}");
+        crate::step::note(&format!("warning: {note}"));
     }
     let runtime = crate::engines::of_card(&toml::Value::Table(p.table.clone())).map_or("sglang", |e| e.id);
+    if crate::step::compact() && verb == "installed" {
+        let kernel = crate::models::engine_label(Some(runtime));
+        let line = match crate::models::installed_fit(home, &p.model_id) {
+            Some((gb, ctx, _)) => format!("Model installed: kernel: {kernel}  ctx: {ctx}  total maximum VRAM: {gb:.1} GB"),
+            None => format!("Model installed: kernel: {kernel}  ctx: {}", p.ctx),
+        };
+        return writeln!(out, "{line}").map_err(|e| e.to_string());
+    }
     let per_request = crate::progress::size((p.vram.kv_bytes_per_token as f64 * p.ctx as f64 + p.vram.state_gb / 4.0 * GIB) as u64);
     let quant = p.quant.as_deref().map_or(String::new(), |q| format!("  {q}"));
     let said = if verb == "installed" { String::new() } else { format!("{verb} ") };
@@ -1443,23 +1374,12 @@ pub fn commit(home: &Path, p: &Planned, verb: &str, out: &mut dyn Write) -> Resu
     writeln!(out, "{}", lines.join("\n")).map_err(|e| e.to_string())
 }
 
-fn merged_env(
-    old: Option<&toml::Value>,
-    entry: Option<&RegistryModel>,
-    ternary: Option<&TernaryDirs>,
-    home: &Path,
-) -> Option<toml::Value> {
-    // User env from the old card, then registry env, then the ternary dirs install actually used.
+fn merged_env(old: Option<&toml::Value>, entry: Option<&RegistryModel>) -> Option<toml::Value> {
+    // User env from the old card, then registry env.
     let mut table = old.and_then(|v| v.as_table()).cloned().unwrap_or_default();
     if let Some(reg) = entry.and_then(|e| e.env.as_ref()).and_then(|v| v.as_table()) {
         for (k, v) in reg {
             table.insert(k.clone(), v.clone());
-        }
-    }
-    if let Some(d) = ternary {
-        for (k, p) in [("TERNARY_PACK_DIR", &d.pack), ("TERNARY_MODEL_DIR", &d.base)] {
-            let rel = p.strip_prefix(home).map(|r| format!("$GOETHE_HOME/{}", r.display()));
-            table.insert(k.to_string(), toml::Value::String(rel.unwrap_or_else(|_| p.display().to_string())));
         }
     }
     (!table.is_empty()).then_some(toml::Value::Table(table))
@@ -1602,7 +1522,7 @@ pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), Stri
         if json_out {
             eprintln!("{message}");
         } else {
-            println!("{message}");
+            crate::step::say(&message);
         }
     }
     let iid = reply
@@ -1633,7 +1553,8 @@ pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), Stri
         println!("{out}");
     } else {
         let secs = (!no_wait).then(|| started.elapsed().as_secs_f64());
-        println!("{}", load_status_line(&model_id, &iid, row.as_ref(), &reply.result, secs));
+        let line = load_status_line(&model_id, &iid, row.as_ref(), &reply.result, secs);
+        if no_wait { println!("{line}") } else { crate::step::say(&line) }
     }
     Ok(())
 }
@@ -2438,8 +2359,6 @@ mod tests {
             preferred_gpus: vec![],
             extra_sglang_args: vec![],
             runtime: None,
-            pack_id: None,
-            base_model_id: None,
             env: None,
             pythonpath: None,
             marlin_extra_gb: None,

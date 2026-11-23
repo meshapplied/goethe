@@ -42,7 +42,7 @@ pub fn ninfer_head(digest: &str) -> Result<NinferHead, String> {
 
 pub fn ninfer_reject() -> String {
     format!(
-        "{NINFER_FILE} must be {NINFER_BYTES} bytes and sha256 {NINFER_SHA256} or {NINFER_PATCHED_SHA256}; run nvfp4-kernels/fetch_model.sh"
+        "{NINFER_FILE} must be {NINFER_BYTES} bytes and sha256 {NINFER_SHA256} or {NINFER_PATCHED_SHA256}; download it from {NINFER_URL} into the model folder"
     )
 }
 
@@ -76,7 +76,7 @@ pub fn verify_ninfer_file(path: &Path) -> Result<(), String> {
     check_ninfer_with(path, sha256_file)
 }
 
-fn ninfer_cache_file() -> Result<PathBuf, String> {
+pub fn ninfer_cache_file() -> Result<PathBuf, String> {
     let root = if let Some(h) = std::env::var_os("NVFP4_HOME") {
         PathBuf::from(h)
     } else {
@@ -249,11 +249,11 @@ fn ninfer_bin() -> Result<PathBuf, String> {
             return Ok(p);
         }
     }
-    Err("ninfer-serve not found; set NINFER_SERVE or run nvfp4-kernels/install.sh".into())
+    Err("ninfer-serve not found; set NINFER_SERVE to a ninfer-serve build".into())
 }
 
 fn ninfer_command(spec: &EngineSpec) -> Result<Command, String> {
-    // ponytail: one argv, the default profile from nvfp4-kernels/serve.sh. Card ctx and concurrency still apply.
+    // One argv with NInfer's default serving profile; the card's ctx and concurrency still apply.
     let bin = ninfer_bin()?;
     let model = spec.model_path.join(NINFER_FILE);
     if !model.is_file() {

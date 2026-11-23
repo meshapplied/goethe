@@ -23,8 +23,7 @@ jobs:
     outputs:
       rust: ${{ steps.flags.outputs.rust }}
       e2e: ${{ steps.flags.outputs.e2e }}
-      python: ${{ steps.flags.outputs.python }}
-      patches: ${{ steps.flags.outputs.patches }}
+      image: ${{ steps.flags.outputs.image }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -34,51 +33,32 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          # Path buckets: unit/clippy, heavy e2e, python package, out-of-tree kernel patches.
-          rust=true e2e=true python=true patches=true
+          # Path buckets: unit/clippy, heavy e2e, and the container image.
+          rust=true e2e=true image=true
           if [[ -n "${BASE}" ]]; then
-            rust=false e2e=false python=false patches=false
+            rust=false e2e=false image=false
             while IFS= read -r f; do
               [[ -z "$f" ]] && continue
               case "$f" in
+                goethe/packaging/Dockerfile|goethe/packaging/build_image_tree.sh|goethe/tests/image_smoke.sh|goethe/crates/goethe/src/container.rs)
+                  rust=true; e2e=true; image=true ;;
                 .github/*)
-                  rust=true; e2e=true; python=true; patches=true ;;
+                  rust=true; e2e=true; image=true ;;
                 goethe/tests/*|goethe/pyenv/*|goethe/cdn/*|goethe/packaging/*)
                   rust=true; e2e=true ;;
                 goethe/crates/*|goethe/Cargo.toml|goethe/Cargo.lock|goethe/rust-toolchain*)
                   rust=true ;;
-                nvfp4-kernels/*)
-                  patches=true ;;
                 goethe/*)
                   rust=true ;;
-                lab/*|tests/*|pyproject*|requirements*)
-                  python=true ;;
               esac
             done <<<"$(git diff --name-only "${BASE}" HEAD)"
           fi
           {
             echo "rust=${rust}"
             echo "e2e=${e2e}"
-            echo "python=${python}"
-            echo "patches=${patches}"
+            echo "image=${image}"
           } >>"${GITHUB_OUTPUT}"
-          echo "rust=${rust} e2e=${e2e} python=${python} patches=${patches}"
-
-  python:
-    needs: changes
-    if: ${{ needs.changes.outputs.python == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.11", "3.13"]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with:
-          python-version: ${{ matrix.python }}
-      - run: python -m unittest discover -s tests -t .
+          echo "rust=${rust} e2e=${e2e} image=${image}"
 
   lint:
     runs-on: ubuntu-24.04
@@ -86,8 +66,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
-      - run: uvx ruff@0.17.0 check lab tests
-      - run: shellcheck -S warning install.sh goethe/tests/accept.sh nvfp4-kernels/*.sh nvfp4-kernels/bench/*.sh
+      - run: shellcheck -S warning install.sh goethe/tests/accept.sh
       - name: Style lint (headers, function comments, no dashes or emojis, leak guard, pinned ruff with the repo rules)
         working-directory: goethe
         run: python3 tests/lint_style.py
@@ -134,21 +113,6 @@ jobs:
             exit 1
           fi
           echo "no AI co-author lines in ${BASE:0:7}..${HEAD:0:7}"
-
-  ninfer-patch:
-    needs: changes
-    if: ${{ needs.changes.outputs.patches == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: patch applies to the pinned NInfer commit
-        run: |
-          . nvfp4-kernels/NINFER_PIN
-          git clone --quiet --filter=blob:none --no-checkout "$NINFER_REPO" ninfer
-          git -C ninfer checkout --quiet "$NINFER_REV"
-          git -C ninfer apply --check "$GITHUB_WORKSPACE/nvfp4-kernels/patches/ninfer-dn-sched.patch"
-          git -C ninfer apply --check "$GITHUB_WORKSPACE/nvfp4-kernels/patches/openai-tool-name-128.patch"
 
   engine-test:
     needs: changes
@@ -223,12 +187,26 @@ jobs:
         run: sudo apt-get install -y -qq nginx >/dev/null
       - run: bash tests/mutants/run.sh
 
+  image:
+    needs: changes
+    if: ${{ needs.changes.outputs.image == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Release-shaped x86_64 tree from this checkout (unsigned, never published)
+        run: bash goethe/packaging/build_image_tree.sh "$RUNNER_TEMP/tree"
+      - name: The image from it
+        run: docker build --platform linux/amd64 -f goethe/packaging/Dockerfile --build-arg VERSION="$(cat "$RUNNER_TEMP/tree/VERSION")" -t goethe:ci "$RUNNER_TEMP/tree"
+      - name: The image without a GPU (start, health, GOETHE_SETUP, API key, refusals, restart, stop)
+        run: bash goethe/tests/image_smoke.sh goethe:ci
+
   # The one check the main ruleset requires. It needs every other job (package-smoke runs only on main/nightly and is exempt),
   # fails when a job exists that it does not list (a new job cannot be forgotten: add it to `needs`), and accepts a skipped job
   # only when the `changes` flag that gates it is false; a failed `changes` job or any other skip fails it.
   gate:
     if: ${{ always() }}
-    needs: [changes, python, lint, attribution, ninfer-patch, engine-test, e2e-user]
+    needs: [changes, lint, attribution, engine-test, e2e-user, image]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -245,10 +223,9 @@ jobs:
             | to_entries[]
             | select(.value.result != "success")
             | select((.value.result == "skipped" and (
-                (.key == "python" and $f.python != "true")
-                or (.key == "ninfer-patch" and $f.patches != "true")
-                or (.key == "engine-test" and $f.rust != "true")
+                (.key == "engine-test" and $f.rust != "true")
                 or (.key == "e2e-user" and $f.e2e != "true")
+                or (.key == "image" and $f.image != "true")
               )) | not)
             | "\(.key): \(.value.result)"' <<<"$NEEDS")
           [ -z "$bad" ] || { echo "$bad"; exit 1; }

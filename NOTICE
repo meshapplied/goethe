@@ -20,6 +20,7 @@ Goethe includes or uses the third-party software below, each under its own licen
   pycountry                        GNU LGPL 2.1
   easydict                         GNU LGPL 3.0
   certifi, tqdm, orjson            Mozilla Public License 2.0
+  minishlab/potion-base-8M         MIT License
 
 Other Python packages and Rust crates included in Goethe are under permissive
 licenses (MIT, BSD, Apache 2.0, ISC and similar); each keeps its own license file.

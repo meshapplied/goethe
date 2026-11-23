@@ -207,7 +207,7 @@ pub fn key_create(
     models: Option<&str>,
     admin: bool,
 ) -> Result<String, String> {
-    // Create a key with an independent random id; the gateway checks its SHA-256, goethe api shows the stored key.
+    // Create a key with an independent random id; only its SHA-256 and first characters are stored, so the secret is shown once, here.
     let rpm_limit = rpm.unwrap_or(120);
     if rpm_limit < 0 {
         return Err(format!("rpm must be 0 (unlimited) or positive, got {rpm_limit}"));
@@ -222,8 +222,8 @@ pub fn key_create(
     let key_id = random_hex(6);
     let raw_prefix = token[..14].to_string();
     con.execute(
-        "INSERT INTO api_keys (key_id, name, token_hash, raw_prefix, rpm_limit, expires_at, model_scope, is_admin, token)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO api_keys (key_id, name, token_hash, raw_prefix, rpm_limit, expires_at, model_scope, is_admin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             key_id,
             name,
@@ -233,7 +233,6 @@ pub fn key_create(
             expires_at,
             model_scope,
             i64::from(admin),
-            token,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -309,12 +308,67 @@ pub fn key_revoke(key_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn key_id_of(token: &str) -> Option<String> {
+    // The id of a key by its secret (ids are random, so look it up by the hash).
+    let con = db::open(&goethe_home()).ok()?;
+    con.query_row("SELECT key_id FROM api_keys WHERE token_hash = ?1", [token_hash(token)], |r| r.get(0)).ok()
+}
+
+pub fn key_rotate(key_id: &str) -> Result<String, String> {
+    rotate_secret(&goethe_home(), key_id)
+}
+
+pub fn rotate_secret(home: &Path, key_id: &str) -> Result<String, String> {
+    // A new secret for an existing key (same id, name, scope and limits); the old one stops working on the gateway's next request.
+    let con = db::open(home).map_err(|e| e.to_string())?;
+    let token = new_token();
+    let n = con
+        .execute(
+            "UPDATE api_keys SET token_hash = ?1, raw_prefix = ?2, token = NULL WHERE key_id = ?3",
+            rusqlite::params![token_hash(&token), &token[..14], key_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err(format!("key {key_id} not found"));
+    }
+    write_api_keys_best_effort(home, &con);
+    Ok(token)
+}
+
+pub fn import_key(home: &Path, name: &str, secret: &str) -> Result<bool, String> {
+    // A key whose secret the user chose (the container's GOETHE_API_KEY): only its hash is kept; the same secret again changes nothing, a new one replaces the secret of that name's key. True when something changed.
+    key_name_check(name)?;
+    if !secret.strip_prefix("goethe_sk_").is_some_and(|h| h.len() >= 32 && h.chars().all(|c| c.is_ascii_hexdigit())) {
+        return Err("an API key is goethe_sk_ followed by at least 32 hex characters, for example: echo goethe_sk_$(openssl rand -hex 16)".to_string());
+    }
+    let con = db::open(home).map_err(|e| e.to_string())?;
+    let hash = token_hash(secret);
+    let have: Option<(String, String)> = con
+        .query_row("SELECT key_id, token_hash FROM api_keys WHERE name = ?1 ORDER BY created_at LIMIT 1", [name], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match have {
+        Some((_, h)) if h == hash => return Ok(false),
+        Some((key_id, _)) => con.execute(
+            "UPDATE api_keys SET token_hash = ?1, raw_prefix = ?2, token = NULL WHERE key_id = ?3",
+            rusqlite::params![hash, &secret[..14], key_id],
+        ),
+        None => con.execute(
+            "INSERT INTO api_keys (key_id, name, token_hash, raw_prefix, rpm_limit, expires_at, model_scope, is_admin) VALUES (?1, ?2, ?3, ?4, 120, NULL, NULL, 0)",
+            rusqlite::params![random_hex(6), name, hash, &secret[..14]],
+        ),
+    }
+    .map_err(|e| e.to_string())?;
+    write_api_keys_best_effort(home, &con);
+    Ok(true)
+}
+
 pub fn key_list_detailed() -> Result<Vec<serde_json::Value>, String> {
     let home = goethe_home();
     let con = db::open(&home).map_err(|e| e.to_string())?;
     let mut stmt = con
         .prepare(
-            "SELECT key_id, name, rpm_limit, expires_at, model_scope, is_admin, raw_prefix, token FROM api_keys ORDER BY created_at",
+            "SELECT key_id, name, rpm_limit, expires_at, model_scope, is_admin, raw_prefix FROM api_keys ORDER BY created_at",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -327,19 +381,17 @@ pub fn key_list_detailed() -> Result<Vec<serde_json::Value>, String> {
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, i64>(5)? != 0,
                 r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                r.get::<_, Option<String>>(7)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for row in rows.filter_map(|r| r.ok()) {
-        let (key_id, name, rpm, expires_at, model_scope, is_admin, prefix, token) = row;
+        let (key_id, name, rpm, expires_at, model_scope, is_admin, prefix) = row;
         let (req_t, pt_t, ct_t, req_all, pt_all, ct_all) =
             crate::key_usage::totals_for_key(&con, &key_id)?;
         out.push(serde_json::json!({
             "id": key_id,
             "prefix": prefix,
-            "key": token,
             "name": name,
             "rpm": rpm,
             "expires": expires_at,
@@ -387,7 +439,7 @@ fn new_token() -> String {
     format!("goethe_sk_{}", random_hex(16))
 }
 
-fn random_hex(n: usize) -> String {
+pub(crate) fn random_hex(n: usize) -> String {
     // n bytes from /dev/urandom as lowercase hex.
     let mut buf = vec![0u8; n];
     let mut f = fs::File::open("/dev/urandom").expect("urandom");
@@ -407,6 +459,27 @@ pub fn token_hash(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_imported_key_keeps_only_its_hash_and_changes_only_with_a_new_secret() {
+        // The container's GOETHE_API_KEY: registered once, unchanged on restart, replaced (same id) when the secret changes; junk is refused.
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (format!("goethe_sk_{}", "a1".repeat(16)), format!("goethe_sk_{}", "b2".repeat(16)));
+        assert!(import_key(dir.path(), "default", &a).unwrap());
+        assert!(!import_key(dir.path(), "default", &a).unwrap(), "the same secret changes nothing");
+        let con = db::open(dir.path()).unwrap();
+        let row = |con: &Connection| con.query_row("SELECT key_id, token_hash FROM api_keys WHERE name = 'default'", [], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap();
+        let (id, hash) = row(&con);
+        assert_eq!(hash, token_hash(&a));
+        assert!(import_key(dir.path(), "default", &b).unwrap());
+        assert_eq!(row(&con), (id, token_hash(&b)), "a new secret replaces the old one under the same key");
+        let stored: String = con.query_row("SELECT group_concat(coalesce(token, '') || raw_prefix) FROM api_keys", [], |r| r.get(0)).unwrap();
+        assert!(!stored.contains(&b[14..]), "the secret itself is not stored");
+        for bad in ["goethe_sk_short", "sk_0123456789abcdef0123456789abcdef", &format!("goethe_sk_{}", "z".repeat(32))] {
+            assert!(import_key(dir.path(), "default", bad).is_err(), "{bad}");
+        }
+        assert!(import_key(dir.path(), "", &a).is_err());
+    }
 
     #[test]
     fn key_names_are_readable() {

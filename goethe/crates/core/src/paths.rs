@@ -9,6 +9,11 @@ use std::sync::OnceLock;
 pub const HOME_MARKER: &str = ".goethe-home";
 const ENV_FILE_KEYS: [&str; 3] = ["GOETHE_PKG_URL", "GOETHE_REGISTRY_URL", "GOETHE_PKG_TOKEN"];
 
+pub fn image() -> Option<String> {
+    // The release this goethe was installed with when it runs in the container image (GOETHE_IMAGE is set there, nowhere else).
+    std::env::var("GOETHE_IMAGE").ok().filter(|v| !v.is_empty())
+}
+
 pub fn goethe_home() -> PathBuf {
     // GOETHE_HOME, else the home this binary is installed in, else the default probe (once per process).
     if let Ok(v) = std::env::var("GOETHE_HOME") {
