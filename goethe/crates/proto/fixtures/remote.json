@@ -1,0 +1,1 @@
+{"policy":{"change":true,"network":false,"keys":false,"update":false,"destructive":false,"trust":false},"trust":[{"key_id":"cred-1","public_key":"BBKv0P4kp3XhXgzVgcdR9cUWbdaoLskd3UOUf9KYbKcMeqDm9ZCLvq8v5BCF5TfCZf7ZbWkOt5wLXPnpzcUrAhU","user_id":"user_2abc","cap":"trust","added_by":"user_2abc","added_ms":1795000000000}]}
