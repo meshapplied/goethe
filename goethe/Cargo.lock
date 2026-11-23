@@ -438,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "goethe"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "clap",
  "clap_complete",
@@ -451,7 +451,7 @@ dependencies = [
 
 [[package]]
 name = "goethe-core"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "chrono",
  "flate2",
@@ -468,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "goethed"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "goethe-core",
  "http-body-util",
