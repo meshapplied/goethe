@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+pub const ASK_MODEL_REL: &str = "ask/ask-model-v1.bin";
+
 pub struct UpdateOpts {
     pub check_only: bool,
     pub engine: bool,
@@ -63,11 +65,13 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     let (sglang, engine) = if want_engines { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
     let buildinfo = fetch_verified(pkg, &sums, "BUILDINFO", tmp).ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
     let nginx = nginx_delta(home, &sums, &arch, buildinfo_value(&buildinfo, "nginx_version"));
+    let ask_model = ask_model_delta(home, &sums);
     let published = published_label(&remote_ver, bins && order == Ordering::Equal);
     let installed = if bins { local_ver.clone() } else { published.clone() };
     let parts = [
         ("goethe", kept.is_none().then(|| Delta::of(&installed, &published, bins))),
         ("nginx", nginx),
+        ("ask model", ask_model),
         ("SGLang", sglang),
         ("goethe-engine", engine),
     ];
@@ -91,6 +95,9 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     if differs("nginx") {
         let rel = format!("bin/{}/nginx", platform_dir(&arch));
         staged.push(stage(pkg, &sums, &rel, tmp, &home.join("nginx-root/usr/sbin/nginx"))?);
+    }
+    if differs("ask model") {
+        staged.push(stage(pkg, &sums, ASK_MODEL_REL, tmp, &home.join(ASK_MODEL_REL))?);
     }
     if differs("SGLang") {
         pyenv::sglang_wheel(home, pkg, &sums, tmp)?;
@@ -162,6 +169,16 @@ fn nginx_delta(home: &Path, sums: &Path, arch: &str, published_version: Option<&
     let version = crate::nginx::nginx_version(&dest).map(|(a, b, c)| format!("{a}.{b}.{c}"));
     let (installed, published) = nginx_labels(have.as_deref(), version.as_deref(), &want, published_version);
     Some(Delta { installed: Some(installed), published, differs: have.as_deref() != Some(want.as_str()) })
+}
+
+fn ask_model_delta(home: &Path, sums: &Path) -> Option<Delta> {
+    // Compare the installed ask embedding table against the signed package, or skip when not shipped.
+    let want = lookup_sum(sums, ASK_MODEL_REL).ok()?;
+    let dest = home.join(ASK_MODEL_REL);
+    let have = sha256_file(&dest).ok();
+    let short = |s: &str| s.chars().take(12).collect::<String>();
+    let installed = have.as_deref().map(short).unwrap_or_else(|| "missing".to_string());
+    Some(Delta { installed: Some(installed), published: short(&want), differs: have.as_deref() != Some(want.as_str()) })
 }
 
 fn nginx_labels(have_sha: Option<&str>, have_version: Option<&str>, want_sha: &str, want_version: Option<&str>) -> (String, String) {
@@ -436,7 +453,8 @@ pub(crate) fn swap_all(staged: &[Staged]) -> Result<(), String> {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
             fs::copy(&s.part, &staged_dest).map_err(|e| format!("{}: {e}", staged_dest.display()))?;
-            fs::set_permissions(&staged_dest, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            let mode = if s.rel == ASK_MODEL_REL { 0o644 } else { 0o755 };
+            fs::set_permissions(&staged_dest, std::os::unix::fs::PermissionsExt::from_mode(mode))
                 .map_err(|e| e.to_string())?;
             if s.dest.exists() {
                 fs::rename(&s.dest, s.dest.with_extension("prev")).map_err(|e| e.to_string())?;
@@ -745,5 +763,25 @@ mod tests {
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(sha256_file(&t.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn ask_model_delta_and_atomic_swap_use_non_exec_mode() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("home");
+        let cdn = t.path().join("cdn");
+        fs::create_dir_all(cdn.join("ask")).unwrap();
+        let blob = b"GASK\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        fs::write(cdn.join(ASK_MODEL_REL), blob).unwrap();
+        let sha = sha256_file(&cdn.join(ASK_MODEL_REL)).unwrap();
+        let sums = t.path().join("SHA256SUMS");
+        fs::write(&sums, format!("{sha}  {ASK_MODEL_REL}\n")).unwrap();
+        let d = ask_model_delta(&home, &sums).unwrap();
+        assert!(d.differs);
+        let staged = stage(&format!("file://{}", cdn.display()), &sums, ASK_MODEL_REL, t.path(), &home.join(ASK_MODEL_REL)).unwrap();
+        swap_all(&[staged]).unwrap();
+        let mode = std::os::unix::fs::PermissionsExt::mode(&fs::metadata(home.join(ASK_MODEL_REL)).unwrap().permissions()) & 0o777;
+        assert_eq!(mode, 0o644);
+        assert!(!ask_model_delta(&home, &sums).unwrap().differs);
     }
 }

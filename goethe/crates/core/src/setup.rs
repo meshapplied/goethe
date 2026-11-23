@@ -316,7 +316,13 @@ fn run_in(home: &Path, o: &Opts, from: &str, tmp: &Path, macos: bool) -> Result<
     } else if !crate::nginx::nginx_bin(home).is_file() {
         return Err(format!("this package has no nginx for {plat} and none is installed; install nginx (or set NGINX_BIN) and run the installer again"));
     }
-    let upgrading = home.join("bin/goethe").is_file() && staged.iter().any(|s| !s.rel.ends_with("/nginx"));
+    let ask = crate::update::ASK_MODEL_REL;
+    if crate::update::lookup_sum(&sums, ask).is_ok() {
+        staged.extend(stage_bin(from, &sums, ask, tmp, &home.join(ask), None)?);
+    } else {
+        println!("This package has no Ask model; Ask matches words only until goethe update finds one.");
+    }
+    let upgrading = home.join("bin/goethe").is_file() && staged.iter().any(|s| !s.rel.ends_with("/nginx") && s.rel != ask);
     let running = upgrading && crate::service::goethed_running();
     let engines = if running { crate::service::live_engine_pids() } else { Vec::new() };
     let note = if running { Some(stop_old(home)?) } else { None };

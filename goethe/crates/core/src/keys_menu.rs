@@ -76,6 +76,58 @@ pub(crate) enum Input {
     Char(char),
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct LineEdit {
+    text: Vec<char>,
+    at: usize,
+}
+
+impl LineEdit {
+    pub(crate) fn of(s: &str) -> LineEdit {
+        let text: Vec<char> = s.chars().collect();
+        LineEdit { at: text.len(), text }
+    }
+
+    pub(crate) fn get(&self) -> String {
+        self.text.iter().collect()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    pub(crate) fn key(&mut self, input: Input) {
+        match input {
+            Input::Char(c) => {
+                self.text.insert(self.at, c);
+                self.at += 1;
+            }
+            Input::Space => {
+                self.text.insert(self.at, ' ');
+                self.at += 1;
+            }
+            Input::Backspace if self.at > 0 => {
+                self.at -= 1;
+                self.text.remove(self.at);
+            }
+            Input::Left => self.at = self.at.saturating_sub(1),
+            Input::Right => self.at = (self.at + 1).min(self.text.len()),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn draw(&self, focused: bool) -> String {
+        // The caret is the character under the cursor in reverse video, as in the chat screen.
+        if !focused {
+            return self.get();
+        }
+        let before: String = self.text[..self.at].iter().collect();
+        let after: String = self.text.iter().skip(self.at + 1).collect();
+        let under = self.text.get(self.at).copied().unwrap_or(' ');
+        format!("{before}\x1b[7m{under}\x1b[0m{after}")
+    }
+}
+
 pub(crate) fn parse_input(bytes: &[u8]) -> Vec<Input> {
     // Arrows (CSI or SS3), Page Up and Down (also Ctrl-U and Ctrl-D), Enter, Space, Backspace, Ctrl-C, a lone Esc, and typed characters; other escape sequences are skipped.
     let chars: Vec<char> = String::from_utf8_lossy(bytes).chars().collect();

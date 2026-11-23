@@ -134,7 +134,7 @@ if [[ ! -d "${FORK}/python" ]]; then
   exit 1
 fi
 rm -rf "${DIST}"
-mkdir -p "${DIST}/wheels" "${DIST}/pyenv" "${DIST}/v1" "${DIST}/goethe"
+mkdir -p "${DIST}/wheels" "${DIST}/pyenv" "${DIST}/v1" "${DIST}/goethe" "${DIST}/ask"
 for a in "${ARCH_LIST[@]}"; do
   mkdir -p "${DIST}/bin/linux-${a}"
 done
@@ -174,6 +174,10 @@ for a in "${ARCH_LIST[@]}"; do
     "${ROOT}/packaging/build_nginx_linux.sh"
   fi
 done
+
+python3 -I "${ROOT}/packaging/build_ask_model.py" \
+  --cache "${GOETHE_ASK_CACHE:-${ROOT}/.cache/ask-model}" \
+  --out "${DIST}/ask/ask-model-v1.bin"
 
 cp "${ROOT}/../LICENSE" "${ROOT}/../NOTICE" "${DIST}/"
 cp "${ROOT}/cdn/v1/registry.json" "${DIST}/v1/registry.json"

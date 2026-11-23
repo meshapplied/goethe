@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent)
 SKIP_DIRS = {
     "target", "target-portable", "dist", "build", "__pycache__", ".git", "node_modules", "experimental", ".work",
+    ".cache",
 }
 SRC = {".py", ".rs", ".cu", ".cuh", ".cpp", ".h", ".sh", ".toml", ".conf", ".sql", ".tmpl", ".service"}
 BAD_CHARS = re.compile(
