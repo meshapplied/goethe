@@ -1,7 +1,7 @@
 // One request (one or more parts) to an ordered list of clap commands: rank each part, read the live state, ask for what is missing, validate.
 
 use super::embed::{ScoredIntent, ShortlistBackend};
-use super::parse::{find_hf_or_path, without_wish, find_shell_metachar, is_obvious_ood, split_parts, split_words};
+use super::parse::{find_hf_or_path, find_shell_metachar, is_obvious_ood, split_parts, split_words, without_wish};
 use super::schema::{CliCatalog, IntentCard, Kind, Risk};
 use super::slots::{extract_slots, slot_candidates, World};
 use crate::spec::{Asked, Fact};

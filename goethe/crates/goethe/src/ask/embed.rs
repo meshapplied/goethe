@@ -365,7 +365,7 @@ pub(super) fn names(card: &super::schema::IntentCard) -> Vec<String> {
 pub(super) fn says(token: &str, name: &str) -> bool {
     // The word itself or a plain inflection of it (unloads, unloading, removed), never a longer word that merely contains it.
     let stem = name.strip_suffix('e').unwrap_or(name);
-    token == name || (token.starts_with(stem) && token.len() <= name.len() + 3 && matches!(&token[stem.len()..], "s" | "es" | "d" | "ed" | "ing" | "al"))
+    token == name || token.strip_prefix(stem).is_some_and(|end| matches!(end, "s" | "es" | "d" | "ed" | "ing"))
 }
 
 impl HybridRetriever {
@@ -380,24 +380,21 @@ impl HybridRetriever {
 
     fn tie_contradictions(&self, q_toks: &[String], out: &mut [ScoredIntent]) {
         // A part that says two unrelated state-changing words ("load/unload") is not a request for the louder one: they tie, so the plan asks.
-        let told: Vec<(usize, Vec<usize>)> = (0..out.len())
-            .filter(|&i| out[i].score > 0.0)
-            .filter_map(|i| {
-                let w = self.witness[i].as_ref()?;
-                let at: Vec<usize> = (0..q_toks.len()).filter(|&k| w.iter().any(|n| says(&q_toks[k], n))).collect();
-                Some((i, at))
-            })
-            .collect();
-        let related = |a: &str, b: &str| a.starts_with(&format!("{b}.")) || b.starts_with(&format!("{a}."));
-        let Some(&(top, ref top_at)) = told.iter().max_by(|x, y| out[x.0].score.total_cmp(&out[y.0].score)) else {
+        let Some(top) = (0..out.len()).filter(|&i| self.witness[i].is_some()).max_by(|&a, &b| out[a].score.total_cmp(&out[b].score)).filter(|&i| out[i].score > 0.0) else {
             return;
         };
+        let said: Vec<usize> = (0..q_toks.len()).filter(|&k| self.witness[top].iter().flatten().any(|n| says(&q_toks[k], n))).collect();
+        let related = |a: &str, b: &str| a.starts_with(&format!("{b}.")) || b.starts_with(&format!("{a}."));
         let top_score = out[top].score;
-        let rivals: Vec<usize> = told.iter().filter(|(i, _)| *i != top && self.leaf_at(*i, q_toks).iter().all(|k| !top_at.contains(k)) && !self.leaf_at(*i, q_toks).is_empty() && !related(&self.ids[*i], &self.ids[top])).map(|t| t.0).collect();
-        if !rivals.is_empty() {
-            for i in rivals {
-                out[i].score = top_score;
-            }
+        let rivals: Vec<usize> = (0..out.len())
+            .filter(|&i| i != top && out[i].score > 0.0 && self.witness[i].is_some() && !related(&self.ids[i], &self.ids[top]))
+            .filter(|&i| {
+                let own = self.leaf_at(i, q_toks);
+                !own.is_empty() && own.iter().all(|k| !said.contains(k))
+            })
+            .collect();
+        for i in rivals {
+            out[i].score = top_score;
         }
     }
 }

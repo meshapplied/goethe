@@ -64,7 +64,7 @@ pub struct CmdMeta {
     pub gives: &'static [Fact],
     pub confirms: bool,
     pub terminal: bool,
-    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    #[serde(skip)]
     pub says: &'static [&'static str],
 }
 

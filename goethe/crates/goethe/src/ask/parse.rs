@@ -85,9 +85,14 @@ pub fn split_parts(s: &str) -> Vec<String> {
 pub fn without_wish(s: &str) -> String {
     // "I want you to", "can you please": a wish before the verb says nothing about the command and drowns the verb.
     const WISH: [&str; 14] = ["i", "i'd", "want", "would", "like", "need", "you", "to", "can", "could", "will", "please", "pls", "kindly"];
-    let rest = s.trim_start();
-    let cut = rest.split_whitespace().take_while(|w| WISH.contains(&w.trim_end_matches(',').to_ascii_lowercase().as_str())).last();
-    cut.map_or_else(|| s.to_string(), |w| rest[w.as_ptr() as usize - rest.as_ptr() as usize + w.len()..].trim_start().to_string())
+    let mut rest = s.trim_start();
+    while let Some((word, tail)) = rest.split_once(char::is_whitespace) {
+        if !WISH.contains(&word.trim_end_matches(',').to_ascii_lowercase().as_str()) {
+            break;
+        }
+        rest = tail.trim_start();
+    }
+    if rest.is_empty() { s.to_string() } else { rest.to_string() }
 }
 
 pub fn split_words(s: &str) -> Vec<String> {
