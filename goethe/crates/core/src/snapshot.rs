@@ -154,8 +154,11 @@ impl Collector {
         let root = crate::host::sysroot();
         let read = |rel: &str| std::fs::read_to_string(root.join(rel)).unwrap_or_default();
         let con = crate::db::open(home).ok();
-        let addresses = addresses();
-        let public_ip = public_ip(&addresses, reported_public_ip);
+        let gateway_running = crate::nginx::format_gateway_line(home).is_some();
+        let found = addresses();
+        let open = public_open(&crate::nginx::public_bind(home), gateway_running, crate::public_share::active(home).is_some(), &found);
+        let public_ip = if open { public_ip(&found, reported_public_ip) } else { None };
+        let addresses = if open { found } else { found.into_iter().filter(|a| a.scope != "public").collect() };
         let models = match &con {
             Some(c) => Models { installed: self.installed(c, home), loaded: loaded(c) },
             None => Models { installed: Vec::new(), loaded: Vec::new() },
@@ -173,7 +176,7 @@ impl Collector {
                 environment: environment(&root),
                 daemon: Daemon {
                     started_at: self.daemon_started_at.clone(),
-                    gateway_running: crate::nginx::format_gateway_line(home).is_some(),
+                    gateway_running,
                 },
             },
             network: Network { gateway: gateway(home, &addresses, public_ip.as_deref()), addresses, public_ip },
@@ -207,6 +210,11 @@ impl Collector {
             })
             .collect()
     }
+}
+
+pub fn public_open(bind: &str, gateway_running: bool, sharing: bool, addresses: &[Address]) -> bool {
+    // The public address is reported only while clients can reach it: a public share, or the gateway on every interface or on a public address.
+    sharing || (gateway_running && (matches!(bind, "0.0.0.0" | "::") || addresses.iter().any(|a| a.ip == bind && a.scope == "public")))
 }
 
 pub fn public_ip(addresses: &[Address], reported: Option<&str>) -> Option<String> {
@@ -700,6 +708,22 @@ mod tests {
         for k in all_keys(&v) {
             assert!(!["token", "key", "api_key", "engine_key", "token_hash", "path", "local_path", "env", "pid", "args"].contains(&k.as_str()), "field {k}");
         }
+    }
+
+    #[test]
+    fn the_public_address_is_reported_only_while_the_gateway_is_open_to_it() {
+        let a = |ip: &str, scope: &str| Address { ip: ip.into(), interface: "x".into(), scope: scope.into(), tunnel: false };
+        let addrs = vec![a("127.0.0.1", "loopback"), a("203.0.113.5", "public"), a("100.64.1.9", "vpn")];
+        assert!(!public_open("127.0.0.1", true, false, &addrs), "local");
+        assert!(!public_open("100.64.1.9", true, false, &addrs), "vpn");
+        assert!(!public_open("0.0.0.0", false, false, &addrs), "gateway stopped");
+        assert!(public_open("0.0.0.0", true, false, &addrs), "every interface");
+        assert!(public_open("203.0.113.5", true, false, &addrs), "a public address");
+        assert!(public_open("127.0.0.1", false, true, &addrs), "a public share");
+        let (_dir, home) = seeded_home();
+        let snap = Collector::new(String::new()).build(&home, "interval", Some("198.51.100.9"));
+        assert_eq!(snap.network.public_ip, None);
+        assert!(snap.network.addresses.iter().all(|a| a.scope != "public"));
     }
 
     #[test]
