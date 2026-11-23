@@ -163,7 +163,8 @@ def test_scope(models: list[str], failures: list[str]) -> None:
     )
     check(bad.returncode != 0 and not learn_status()["on"], "an unknown model is refused", failures)
     usage = goethe("learn", "--help")
-    check("--print" not in usage and "--model" in usage, "--print stays out of the CLI help", failures)
+    on_usage = goethe("learn", "on", "--help")
+    check("--print" not in usage and "--model" in on_usage, "--print stays out of the CLI help", failures)
     missing = trace_e2e.subprocess.run(["goethe", "learn", "--print", "no-such"], capture_output=True, text=True)
     check(
         missing.returncode != 0 and "no learned notes" in missing.stderr,
