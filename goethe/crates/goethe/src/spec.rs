@@ -64,13 +64,15 @@ pub struct CmdMeta {
     pub gives: &'static [Fact],
     pub confirms: bool,
     pub terminal: bool,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub says: &'static [&'static str],
 }
 
 impl CommandExt for CmdMeta {}
 
 impl CmdMeta {
     const fn of(risk: Risk) -> Self {
-        CmdMeta { risk, needs: &[], gives: &[], confirms: false, terminal: false }
+        CmdMeta { risk, needs: &[], gives: &[], confirms: false, terminal: false, says: &[] }
     }
 
     pub const fn read() -> Self {
@@ -99,6 +101,11 @@ impl CmdMeta {
 
     pub const fn gives(self, gives: &'static [Fact]) -> Self {
         CmdMeta { gives, ..self }
+    }
+
+    pub const fn says(self, says: &'static [&'static str]) -> Self {
+        // Other words a person uses for this command; Ask needs one of them (or the name) before it plans a command that changes something.
+        CmdMeta { says, ..self }
     }
 
     pub const fn confirms(self) -> Self {

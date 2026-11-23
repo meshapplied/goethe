@@ -200,6 +200,7 @@ pub struct HybridRetriever {
     idf: HashMap<String, f32>,
     model: Option<StaticModel>,
     card_vecs: Vec<Vec<f32>>,
+    witness: Vec<Option<Vec<String>>>,
     mode: RetrievalMode,
 }
 
@@ -254,7 +255,8 @@ impl HybridRetriever {
             Some(m) => catalog.intents.iter().map(|c| m.embed(&c.embed_text)).collect(),
             None => Vec::new(),
         };
-        HybridRetriever { ids, cmd_tokens, exact_phrases, doc_tf, doc_len, avg_len, idf, model, card_vecs, mode }
+        let witness = catalog.intents.iter().map(|c| gated(c).then(|| names(c))).collect();
+        HybridRetriever { ids, cmd_tokens, exact_phrases, doc_tf, doc_len, avg_len, idf, model, card_vecs, witness, mode }
     }
 
     fn bm25_score(&self, q_lower: &str, q_toks: &[String], idx: usize) -> f32 {
@@ -339,14 +341,65 @@ impl ShortlistBackend for HybridRetriever {
                     }
                     RetrievalMode::Hybrid => lex,
                 };
-                ScoredIntent { id: self.ids[i].clone(), score }
+                let said = self.witness[i].as_ref().is_none_or(|w| w.iter().any(|n| if n.contains(' ') { contains_phrase(&q_lower, n) } else { q_toks.iter().any(|t| says(t, n)) }));
+                ScoredIntent { id: self.ids[i].clone(), score: if said { score } else { 0.0 } }
             })
             .collect();
+        self.tie_contradictions(&q_toks, &mut out);
         out.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
         out.truncate(top_k);
         out
     }
 
+}
+
+pub(super) fn gated(card: &super::schema::IntentCard) -> bool {
+    // Anything that changes something is never a guess: the request must say the command's own word or one of its aliases, because a vector puts "load" beside "unload".
+    card.risk != super::schema::Risk::ReadOnly
+}
+
+pub(super) fn names(card: &super::schema::IntentCard) -> Vec<String> {
+    card.id.rsplit('.').next().into_iter().map(str::to_string).chain(card.aliases.iter().map(|a| a.to_ascii_lowercase())).chain(card.does.says.iter().map(|w| w.to_string())).collect()
+}
+
+pub(super) fn says(token: &str, name: &str) -> bool {
+    // The word itself or a plain inflection of it (unloads, unloading, removed), never a longer word that merely contains it.
+    let stem = name.strip_suffix('e').unwrap_or(name);
+    token == name || (token.starts_with(stem) && token.len() <= name.len() + 3 && matches!(&token[stem.len()..], "s" | "es" | "d" | "ed" | "ing" | "al"))
+}
+
+impl HybridRetriever {
+    fn leaf_at(&self, i: usize, q_toks: &[String]) -> Vec<usize> {
+        // Where the query says the command's own name exactly, when only that command has it ("on" and "remove" name several, so they never make a rival).
+        let leaf = self.ids[i].rsplit('.').next().unwrap_or("");
+        if self.ids.iter().filter(|id| id.rsplit('.').next() == Some(leaf)).count() > 1 {
+            return Vec::new();
+        }
+        (0..q_toks.len()).filter(|&k| q_toks[k] == leaf).collect()
+    }
+
+    fn tie_contradictions(&self, q_toks: &[String], out: &mut [ScoredIntent]) {
+        // A part that says two unrelated state-changing words ("load/unload") is not a request for the louder one: they tie, so the plan asks.
+        let told: Vec<(usize, Vec<usize>)> = (0..out.len())
+            .filter(|&i| out[i].score > 0.0)
+            .filter_map(|i| {
+                let w = self.witness[i].as_ref()?;
+                let at: Vec<usize> = (0..q_toks.len()).filter(|&k| w.iter().any(|n| says(&q_toks[k], n))).collect();
+                Some((i, at))
+            })
+            .collect();
+        let related = |a: &str, b: &str| a.starts_with(&format!("{b}.")) || b.starts_with(&format!("{a}."));
+        let Some(&(top, ref top_at)) = told.iter().max_by(|x, y| out[x.0].score.total_cmp(&out[y.0].score)) else {
+            return;
+        };
+        let top_score = out[top].score;
+        let rivals: Vec<usize> = told.iter().filter(|(i, _)| *i != top && self.leaf_at(*i, q_toks).iter().all(|k| !top_at.contains(k)) && !self.leaf_at(*i, q_toks).is_empty() && !related(&self.ids[*i], &self.ids[top])).map(|t| t.0).collect();
+        if !rivals.is_empty() {
+            for i in rivals {
+                out[i].score = top_score;
+            }
+        }
+    }
 }
 
 fn rank_order(scores: &[f32]) -> Vec<usize> {

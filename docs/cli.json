@@ -37,7 +37,12 @@
           "daemon"
         ],
         "confirms": false,
-        "terminal": false
+        "terminal": false,
+        "says": [
+          "start",
+          "boot",
+          "launch"
+        ]
       },
       "examples": [
         "goethe up"
@@ -61,7 +66,15 @@
         "needs": [],
         "gives": [],
         "confirms": false,
-        "terminal": false
+        "terminal": false,
+        "says": [
+          "shut down",
+          "shutdown",
+          "stop",
+          "halt",
+          "kill",
+          "off"
+        ]
       },
       "examples": [
         "goethe down"
@@ -141,7 +154,12 @@
           "installed"
         ],
         "confirms": false,
-        "terminal": false
+        "terminal": false,
+        "says": [
+          "download",
+          "fetch",
+          "pull"
+        ]
       },
       "examples": [
         "goethe install org/name --load -- --chunked-prefill-size 4096",
@@ -279,7 +297,14 @@
         "needs": [],
         "gives": [],
         "confirms": true,
-        "terminal": false
+        "terminal": false,
+        "says": [
+          "delete",
+          "erase",
+          "purge",
+          "wipe",
+          "uninstall"
+        ]
       },
       "examples": [
         "goethe remove MODEL"
@@ -339,7 +364,11 @@
           "loaded"
         ],
         "confirms": false,
-        "terminal": false
+        "terminal": false,
+        "says": [
+          "serve",
+          "mount"
+        ]
       },
       "examples": [
         "goethe load deepseek-ai/DeepSeek-V4.1-Flash-1017 --ctx 32768 -- --chunked-prefill-size 4096",
@@ -481,7 +510,14 @@
         "needs": [],
         "gives": [],
         "confirms": false,
-        "terminal": false
+        "terminal": false,
+        "says": [
+          "stop",
+          "evict",
+          "free",
+          "release",
+          "eject"
+        ]
       },
       "examples": [
         "goethe unload MODEL"
@@ -525,7 +561,11 @@
         ],
         "gives": [],
         "confirms": false,
-        "terminal": true
+        "terminal": true,
+        "says": [
+          "try",
+          "chat"
+        ]
       },
       "examples": [
         "goethe run MODEL"
@@ -649,7 +689,10 @@
             "needs": [],
             "gives": [],
             "confirms": false,
-            "terminal": false
+            "terminal": false,
+            "says": [
+              "register"
+            ]
           },
           "examples": [
             "goethe models scan FOLDER"
@@ -701,7 +744,11 @@
                 "needs": [],
                 "gives": [],
                 "confirms": false,
-                "terminal": false
+                "terminal": false,
+                "says": [
+                  "point",
+                  "alias"
+                ]
               },
               "examples": [
                 "goethe models alias set fast MODEL"
@@ -735,7 +782,11 @@
                 "needs": [],
                 "gives": [],
                 "confirms": false,
-                "terminal": false
+                "terminal": false,
+                "says": [
+                  "delete",
+                  "drop"
+                ]
               },
               "args": [
                 {
@@ -860,7 +911,12 @@
                   "key"
                 ],
                 "confirms": false,
-                "terminal": false
+                "terminal": false,
+                "says": [
+                  "make",
+                  "new",
+                  "generate"
+                ]
               },
               "examples": [
                 "goethe api keys create my-app",
@@ -966,7 +1022,12 @@
                 "needs": [],
                 "gives": [],
                 "confirms": false,
-                "terminal": false
+                "terminal": false,
+                "says": [
+                  "delete",
+                  "disable",
+                  "invalidate"
+                ]
               },
               "examples": [
                 "goethe api keys revoke <key-id>"
@@ -1026,7 +1087,11 @@
                 "needs": [],
                 "gives": [],
                 "confirms": true,
-                "terminal": false
+                "terminal": false,
+                "says": [
+                  "locally",
+                  "private"
+                ]
               },
               "examples": [
                 "goethe api expose local"
@@ -1094,7 +1159,10 @@
                 "needs": [],
                 "gives": [],
                 "confirms": true,
-                "terminal": false
+                "terminal": false,
+                "says": [
+                  "publicly"
+                ]
               },
               "examples": [
                 "goethe api expose public --allow 203.0.113.7/32 --yes"
@@ -1142,7 +1210,10 @@
                 "needs": [],
                 "gives": [],
                 "confirms": false,
-                "terminal": false
+                "terminal": false,
+                "says": [
+                  "allow"
+                ]
               },
               "examples": [
                 "goethe api allow add 203.0.113.7/32"
@@ -1177,7 +1248,12 @@
                 "needs": [],
                 "gives": [],
                 "confirms": false,
-                "terminal": false
+                "terminal": false,
+                "says": [
+                  "delete",
+                  "revoke",
+                  "drop"
+                ]
               },
               "args": [
                 {
@@ -1239,7 +1315,10 @@
             "needs": [],
             "gives": [],
             "confirms": false,
-            "terminal": false
+            "terminal": false,
+            "says": [
+              "open"
+            ]
           },
           "examples": [
             "goethe api share 5h --key my-app --allow <their-ip>/32",
@@ -1311,7 +1390,15 @@
                 "needs": [],
                 "gives": [],
                 "confirms": false,
-                "terminal": false
+                "terminal": false,
+                "says": [
+                  "shutdown",
+                  "close",
+                  "off",
+                  "end",
+                  "cancel",
+                  "revoke"
+                ]
               },
               "examples": [
                 "goethe api share stop"
@@ -1397,7 +1484,11 @@
             "needs": [],
             "gives": [],
             "confirms": false,
-            "terminal": false
+            "terminal": false,
+            "says": [
+              "disable",
+              "stop"
+            ]
           },
           "examples": [
             "goethe learn off",
@@ -1455,7 +1546,10 @@
         "needs": [],
         "gives": [],
         "confirms": false,
-        "terminal": false
+        "terminal": false,
+        "says": [
+          "record"
+        ]
       },
       "examples": [
         "goethe trace --max-gb 100"
@@ -1499,7 +1593,10 @@
             "needs": [],
             "gives": [],
             "confirms": false,
-            "terminal": false
+            "terminal": false,
+            "says": [
+              "record"
+            ]
           },
           "examples": [
             "goethe trace on",
@@ -1564,7 +1661,11 @@
             "needs": [],
             "gives": [],
             "confirms": false,
-            "terminal": false
+            "terminal": false,
+            "says": [
+              "disable",
+              "stop"
+            ]
           },
           "examples": [
             "goethe trace off --key ci"
@@ -1707,7 +1808,13 @@
             "needs": [],
             "gives": [],
             "confirms": false,
-            "terminal": false
+            "terminal": false,
+            "says": [
+              "exclude",
+              "block",
+              "forbid",
+              "off"
+            ]
           },
           "examples": [
             "goethe gpu deny gpu2"
@@ -1734,7 +1841,12 @@
         "needs": [],
         "gives": [],
         "confirms": false,
-        "terminal": false
+        "terminal": false,
+        "says": [
+          "diagnose",
+          "diagnostics",
+          "health"
+        ]
       },
       "examples": [
         "goethe doctor",
@@ -1860,7 +1972,12 @@
             "needs": [],
             "gives": [],
             "confirms": false,
-            "terminal": false
+            "terminal": false,
+            "says": [
+              "roll back",
+              "revert",
+              "undo"
+            ]
           }
         }
       ]
@@ -1873,7 +1990,13 @@
         "needs": [],
         "gives": [],
         "confirms": true,
-        "terminal": false
+        "terminal": false,
+        "says": [
+          "remove",
+          "delete",
+          "purge",
+          "wipe"
+        ]
       },
       "examples": [
         "goethe uninstall"
@@ -1905,7 +2028,14 @@
         "needs": [],
         "gives": [],
         "confirms": false,
-        "terminal": false
+        "terminal": false,
+        "says": [
+          "log in",
+          "sign in",
+          "signin",
+          "link",
+          "connect"
+        ]
       },
       "examples": [
         "goethe login"
@@ -1951,7 +2081,14 @@
         "needs": [],
         "gives": [],
         "confirms": false,
-        "terminal": false
+        "terminal": false,
+        "says": [
+          "log out",
+          "sign out",
+          "signout",
+          "unlink",
+          "disconnect"
+        ]
       },
       "examples": [
         "goethe logout"
@@ -2024,7 +2161,11 @@
             "needs": [],
             "gives": [],
             "confirms": false,
-            "terminal": false
+            "terminal": false,
+            "says": [
+              "delete",
+              "uninstall"
+            ]
           },
           "args": [
             {

@@ -82,6 +82,14 @@ pub fn split_parts(s: &str) -> Vec<String> {
     parts.into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()
 }
 
+pub fn without_wish(s: &str) -> String {
+    // "I want you to", "can you please": a wish before the verb says nothing about the command and drowns the verb.
+    const WISH: [&str; 14] = ["i", "i'd", "want", "would", "like", "need", "you", "to", "can", "could", "will", "please", "pls", "kindly"];
+    let rest = s.trim_start();
+    let cut = rest.split_whitespace().take_while(|w| WISH.contains(&w.trim_end_matches(',').to_ascii_lowercase().as_str())).last();
+    cut.map_or_else(|| s.to_string(), |w| rest[w.as_ptr() as usize - rest.as_ptr() as usize + w.len()..].trim_start().to_string())
+}
+
 pub fn split_words(s: &str) -> Vec<String> {
     // Shell-like quote-preserving word splitter without running a shell.
     let mut out = Vec::new();
@@ -261,6 +269,7 @@ pub fn find_named_token(text: &str, tokens: &[String], cues: &[&str]) -> Option<
         if cues.contains(&l.as_str()) && i + 1 < tokens.len() {
             let next = tokens[i + 1].trim_matches(|c: char| matches!(c, ',' | '.'));
             if !next.starts_with('-')
+                && !cues.contains(&next.to_ascii_lowercase().as_str())
                 && !matches!(
                     next.to_ascii_lowercase().as_str(),
                     "key" | "api" | "a" | "an" | "new" | "my" | "the" | "for" | "with" | "alias" | "model"
