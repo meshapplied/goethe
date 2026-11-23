@@ -261,8 +261,7 @@ mod tests {
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0].path, "/api/device/heartbeat");
         let second: serde_json::Value = serde_json::from_str(&seen[1].body).unwrap();
-        let reported = second["network"]["public_ip"].as_str().map(str::to_string);
-        assert!(reported.is_some(), "the reply's address is reported from the next heartbeat on");
+        assert!(second["network"]["public_ip"].is_null(), "the reply's address stays off the snapshot while nothing is open publicly");
         assert_eq!(platform::load_state(dir.path(), &key()).public_ip.as_deref(), Some("198.51.100.9"), "a reply without public_ip keeps the last one");
         assert_eq!(seen[0].authorization.as_deref(), Some(format!("Bearer {TOKEN}").as_str()));
         assert!(!seen[0].body.contains(TOKEN));

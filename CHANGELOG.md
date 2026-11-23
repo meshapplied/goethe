@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A linked node reports its public IP address (and public interface addresses) to the console only while the API is open to it: `goethe api expose public`, a gateway on a public address, or an active `goethe api share`.
 - The ternary runtime is gone: the two ternary models leave the catalog, and `goethe update` no longer looks for a ternary pack. The runtime was never published, so they could not be installed.
 - `goethe start` runs Quick setup on its own (install a model, serve it and open the API), then returns to the shell; `goethe` is still the full menu.
 - In the menu's GPU choice the arrows skip GPUs that are not allowed, and the plan line lines up under them. Under the Load/Unload list a line names `goethe gpu allow/deny gpuN`.
