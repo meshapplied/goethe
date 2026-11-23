@@ -98,7 +98,7 @@ struct AskFlags {
 }
 
 pub fn run(args: &[String], root: Command, validate: fn(&[String]) -> Result<(), clap::Error>) -> i32 {
-    // Thin CLI: parse ask flags, then the Ask screen or the plain shell path.
+    // goethe ask: its options, then the Ask screen on a terminal or plain output otherwise.
     let parsed = match parse_args(args) {
         Ok(p) => p,
         Err(e) => {
@@ -392,7 +392,7 @@ fn progress_line(argvs: &[Vec<String>], log: &Mutex<RunLog>) -> String {
 }
 
 fn question(missing: &planner::MissingSlot) -> String {
-    // "KEY NAME" or "--allow" reads "Key name:" or "Allow:".
+    // "KEY_NAME" or "--allow" reads "Key name:" or "Allow:".
     format!("{}:", schema::capitalize(&missing.label.trim_start_matches('-').replace(['_', '-'], " ").to_ascii_lowercase()))
 }
 

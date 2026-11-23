@@ -105,7 +105,7 @@ impl CliCatalog {
                 })
             })
             .collect();
-        json!({ "schema_hash": self.schema_hash, "count": self.intents.len(), "intents": intents })
+        json!({ "schema_hash": self.schema_hash, "count": self.intents.len(), "commands": intents })
     }
 }
 

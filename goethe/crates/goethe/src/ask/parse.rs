@@ -26,7 +26,7 @@ pub fn find_shell_metachar(s: &str) -> Option<&'static str> {
 }
 
 pub fn is_obvious_ood(query: &str) -> bool {
-    // Injection and foreign-shell pre-gate only; trivia/chat relies on TAU_OOD abstain.
+    // Prompt injection and other tools' commands are refused here; small talk is refused later, when no command ranks high enough.
     let l = query.to_ascii_lowercase();
     const REJECT: &[&str] = &[
         "ignore previous",

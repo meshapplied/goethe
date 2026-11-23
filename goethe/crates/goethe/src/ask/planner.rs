@@ -360,27 +360,27 @@ impl PlanState {
     }
 
     pub fn to_json(&self, catalog: &CliCatalog, world: &World) -> Value {
-        // Stable machine-readable plan representation for --json mode and automated evals.
+        // The plan, or what it still needs, for --json.
         match self.next_decision(catalog, world) {
-            PendingDecision::Abstain { reason } => json!({"status": "abstain", "reason": reason, "steps": []}),
+            PendingDecision::Abstain { reason } => json!({"status": "refused", "reason": reason, "steps": []}),
             PendingDecision::Invalid { message } => json!({"status": "clarify", "kind": "invalid", "message": message}),
             PendingDecision::PickIntent { clause, options } => json!({
-                "status": "clarify", "kind": "intent", "clause": clause,
+                "status": "clarify", "kind": "command", "part": clause,
                 "candidates": options.iter().map(|o| json!({
                     "id": o.id, "argv": catalog.get(&o.id).map(|c| c.argv_prefix.join(" ")).unwrap_or_default(), "score": o.score,
                 })).collect::<Vec<_>>(),
             }),
             PendingDecision::PickSlot { missing, options } => json!({
-                "status": "clarify", "kind": "slot", "slot": missing.name, "is_flag": missing.is_flag,
+                "status": "clarify", "kind": "value", "missing": missing.name, "is_flag": missing.is_flag,
                 "options": options.iter().map(|(v, _)| v).collect::<Vec<_>>(),
             }),
             PendingDecision::Unused { part, values } => json!({"status": "clarify", "kind": "unused", "part": part, "values": values}),
             PendingDecision::PromptSlot { missing } => {
-                json!({"status": "clarify", "kind": "slot", "slot": missing.name, "is_flag": missing.is_flag, "options": []})
+                json!({"status": "clarify", "kind": "value", "missing": missing.name, "is_flag": missing.is_flag, "options": []})
             }
             PendingDecision::ReadyToConfirm => {
                 let steps = self.lines.iter().map(|l| {
-                    json!({"intent": l.intent_id, "risk": l.risk.label(), "argv": l.argv, "why": l.why, "verified": l.verified})
+                    json!({"command": l.intent_id, "risk": l.risk.label(), "argv": l.argv, "why": l.why, "verified": l.verified})
                 }).collect::<Vec<_>>();
                 json!({"status": "ready", "destructive": self.has_destructive(), "steps": steps})
             }
@@ -541,7 +541,7 @@ fn share_model(goal: &mut PlanStep, model_ref: Option<&str>, catalog: &CliCatalo
 }
 
 fn without(text: &str, model_ref: Option<&str>) -> String {
-    // The words that say what to do; the model id is a value, not intent.
+    // The words that say what to do; the model id is a value, not part of what to do.
     let Some(m) = model_ref else {
         return text.to_string();
     };
@@ -609,7 +609,7 @@ fn build_step(
     world: &World,
     validate: &Validate,
 ) -> PlanStep {
-    // Extract slots for one chosen intent and compile/validate its clap argv.
+    // One command for a part: values from its words, then the argv clap checks.
     let Some(card) = catalog.get(input.intent_id) else {
         return PlanStep {
             clause: input.clause.to_string(),
@@ -624,7 +624,7 @@ fn build_step(
             alternatives: input.alternatives,
             needs_intent_pick: true,
             verified: false,
-            verify_err: Some(format!("unknown intent '{}'", input.intent_id)),
+            verify_err: Some(format!("unknown command '{}'", input.intent_id)),
             reason: None,
             part: 0,
         };

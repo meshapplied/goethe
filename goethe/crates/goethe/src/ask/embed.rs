@@ -217,7 +217,7 @@ impl HybridRetriever {
     }
 
     pub fn build_with_mode(catalog: &CliCatalog, model: Option<StaticModel>, mode: RetrievalMode) -> Self {
-        // Index all live clap intent cards with BM25 statistics and optional static embedding vectors.
+        // Word statistics for every command, and its embedding when the model is installed.
         let n = catalog.intents.len().max(1) as f32;
         let mut df: HashMap<String, usize> = HashMap::new();
         let mut doc_tf = Vec::with_capacity(catalog.intents.len());

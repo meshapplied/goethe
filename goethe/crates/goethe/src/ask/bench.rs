@@ -39,7 +39,7 @@ fn bench_dir() -> PathBuf {
 }
 
 fn load_rows(name: &str) -> Vec<Value> {
-    let raw = std::fs::read_to_string(bench_dir().join(name)).expect("read benchmark slice");
+    let raw = std::fs::read_to_string(bench_dir().join(name)).expect("read bench file");
     serde_json::from_str::<Vec<Value>>(&raw).expect("parse benchmark json")
 }
 
@@ -100,7 +100,7 @@ fn minimal_argv(card: &IntentCard) -> Vec<String> {
 
 #[test]
 fn clap_catalog_covers_visible_commands() {
-    // Every visible clap subcommand must appear as a catalog id or verb expansion parent.
+    // Every visible clap command is a command Ask can choose.
     let root = Cli::command();
     let cat = build_catalog(&root);
     let cat_ids: HashSet<&str> = cat.intents.iter().map(|i| i.id.as_str()).collect();
@@ -116,7 +116,7 @@ fn clap_catalog_covers_visible_commands() {
 
 #[test]
 fn clap_catalog_argv_prefixes_validate() {
-    // Ready-shaped argv for every catalog intent must still pass live clap parse.
+    // Every command, with sample values for what clap requires, parses.
     let cat = build_catalog(&Cli::command());
     let mut failures = Vec::new();
     for card in &cat.intents {
@@ -411,7 +411,7 @@ fn plan_build_never_panics_on_unicode_junk() {
 
 #[test]
 fn schema_drift_synthetic_zero_shot() {
-    // Inject a brand-new subcommand and flag into a synthetic clap::Command and verify zero-shot routing.
+    // A command Ask has never seen is still found from its help text, flag included.
     let synthetic = Command::new("goethe")
         .subcommand(Command::new("status").about("Show daemon status."))
         .subcommand(
@@ -545,7 +545,7 @@ fn primary(p: &PlanState) -> Option<&PlanStep> {
 }
 
 fn eval_system(name: &'static str, report_misses: bool, ret: &dyn ShortlistBackend, cat: &super::schema::CliCatalog, live: &World) -> EvalSummary {
-    // Evaluate one retrieval backend across all 6 held-out benchmark slices and record latency and clap validity.
+    // One ranking setup over every held-out set: how often it is right, and how often clap accepts what it plans.
     let core = load_rows("core.json");
     let para = load_rows("paraphrase.json");
     let ambig = load_rows("ambiguous.json");
@@ -704,7 +704,7 @@ fn eval_system(name: &'static str, report_misses: bool, ret: &dyn ShortlistBacke
 
 #[test]
 fn benchmark_suite_and_ci_gates() {
-    // Compare baselines (Random floor, BM25-only, Dense-only, Hybrid RRF) and enforce CI release gates.
+    // Words only, the embedding model only, and both; the last one available must meet its bars.
     let cat = build_catalog(&Cli::command());
     let live = fixture_world();
     let t_load = Instant::now();
@@ -743,18 +743,18 @@ fn benchmark_suite_and_ci_gates() {
     let primary = rows.last().unwrap();
     assert_eq!(primary.clap_valid, 1.0, "clap validity must be 100%");
     assert_eq!(primary.meta_reject, 1.0, "metacharacter rejection must be 100%");
-    assert!(primary.ood_abstain >= 0.98, "OOD abstain {:.3} < 0.98", primary.ood_abstain);
+    assert!(primary.ood_abstain >= 0.98, "non-Goethe requests refused {:.3} < 0.98", primary.ood_abstain);
     if has_model {
-        assert!(primary.core_exact >= 0.95, "core exact {:.3} < 0.95", primary.core_exact);
-        assert!(primary.para_top3 >= 0.90, "paraphrase top-3 recovery {:.3} < 0.90", primary.para_top3);
-        assert!(primary.ambig_clarify >= 0.90, "ambiguous clarification {:.3} < 0.90", primary.ambig_clarify);
-        assert!(primary.multi_exact >= 0.90, "multistep exact {:.3} < 0.90", primary.multi_exact);
-        assert!(primary.flags_exact >= 0.90, "flags/passthrough exact {:.3} < 0.90", primary.flags_exact);
+        assert!(primary.core_exact >= 0.95, "core {:.3} < 0.95", primary.core_exact);
+        assert!(primary.para_top3 >= 0.90, "paraphrase top-3 {:.3} < 0.90", primary.para_top3);
+        assert!(primary.ambig_clarify >= 0.90, "ambiguous asks {:.3} < 0.90", primary.ambig_clarify);
+        assert!(primary.multi_exact >= 0.90, "multi-step {:.3} < 0.90", primary.multi_exact);
+        assert!(primary.flags_exact >= 0.90, "flags {:.3} < 0.90", primary.flags_exact);
     } else {
-        assert!(primary.core_exact >= 0.90, "lexical fallback core exact {:.3} < 0.90", primary.core_exact);
-        assert!(primary.para_top3 >= 0.88, "lexical fallback paraphrase top-3 {:.3} < 0.88", primary.para_top3);
-        assert!(primary.ambig_clarify >= 0.88, "lexical fallback ambig {:.3} < 0.88", primary.ambig_clarify);
-        assert!(primary.multi_exact >= 0.85, "lexical fallback multistep {:.3} < 0.85", primary.multi_exact);
-        assert!(primary.flags_exact >= 0.90, "lexical fallback flags {:.3} < 0.90", primary.flags_exact);
+        assert!(primary.core_exact >= 0.90, "words only: core {:.3} < 0.90", primary.core_exact);
+        assert!(primary.para_top3 >= 0.88, "words only: paraphrase top-3 {:.3} < 0.88", primary.para_top3);
+        assert!(primary.ambig_clarify >= 0.88, "words only: ambiguous asks {:.3} < 0.88", primary.ambig_clarify);
+        assert!(primary.multi_exact >= 0.85, "words only: multi-step {:.3} < 0.85", primary.multi_exact);
+        assert!(primary.flags_exact >= 0.90, "words only: flags {:.3} < 0.90", primary.flags_exact);
     }
 }
