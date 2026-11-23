@@ -444,6 +444,7 @@ dependencies = [
  "clap_complete",
  "goethe-core",
  "libc",
+ "serde",
  "serde_json",
  "tempfile",
 ]

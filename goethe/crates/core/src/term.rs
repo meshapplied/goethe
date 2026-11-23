@@ -256,7 +256,7 @@ fn parse_keys(bytes: &[u8]) -> Vec<Key> {
     keys
 }
 
-pub(crate) fn read_keys(buf: &mut [u8; 16]) -> std::io::Result<usize> {
+pub(crate) fn read_keys(buf: &mut [u8]) -> std::io::Result<usize> {
     // One read from the raw terminal; a lone Esc waits 50 ms for the rest of an arrow sequence that arrived split.
     use std::io::Read;
     let mut n = std::io::stdin().read(&mut buf[..])?;

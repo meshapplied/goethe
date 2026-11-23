@@ -1,6 +1,6 @@
-// goethe with no arguments on a terminal: the main menu (Quick setup, Install models, API keys and gateway, Status, Metrics) and its pages.
+// goethe with no arguments on a terminal: the main menu (Ask, Quick setup, Install models, API keys and gateway, Status, Metrics) and its pages.
 
-use crate::keys_menu::{fit, frame_update, parse_input, screen_size, window, Input, Screen};
+use crate::keys_menu::{fit, frame_update, parse_input, screen_size, window, Input, LineEdit, Screen};
 use crate::models::{PickData, PickRow};
 use crate::paths::goethe_home;
 use crate::term::{paint, Color, RawMode};
@@ -22,6 +22,17 @@ enum Flow {
 trait Page {
     fn render(&self, width: usize, height: usize) -> Vec<String>;
     fn key(&mut self, input: Input) -> Flow;
+    fn keys(&mut self, inputs: &[Input]) -> Flow {
+        // One read can hold a paste. Default: handle each key; stop when the page leaves.
+        let mut flow = Flow::Stay;
+        for input in inputs {
+            flow = self.key(*input);
+            if !matches!(flow, Flow::Stay) {
+                break;
+            }
+        }
+        flow
+    }
     fn every(&self) -> Option<std::time::Duration> {
         // How often the page refreshes itself while it is open; None for pages that only change on a key.
         None
@@ -108,7 +119,7 @@ impl Tty {
         let mut size = screen_size();
         self.last.clear();
         self.draw(page);
-        let mut buf = [0u8; 16];
+        let mut buf = [0u8; 4096];
         let mut next = std::time::Instant::now();
         loop {
             let every = page.every();
@@ -134,16 +145,14 @@ impl Tty {
                 Ok(n) => n,
                 Err(e) => return Err(e.to_string()),
             };
-            for input in parse_input(&buf[..n]) {
-                match page.key(input) {
-                    Flow::Stay => {}
-                    Flow::Leave => return Ok(None),
-                    Flow::Quit => {
-                        self.quit = true;
-                        return Ok(None);
-                    }
-                    Flow::Pick(i) => return Ok(Some(i)),
+            match page.keys(&parse_input(&buf[..n])) {
+                Flow::Stay => {}
+                Flow::Leave => return Ok(None),
+                Flow::Quit => {
+                    self.quit = true;
+                    return Ok(None);
                 }
+                Flow::Pick(i) => return Ok(Some(i)),
             }
             self.draw(page);
         }
@@ -562,6 +571,8 @@ struct Menu {
     job: Option<LoadJob>,
     gpus: Option<GpuChoice>,
     note: Option<String>,
+    ask_run: Option<Box<dyn Fn() -> (String, bool)>>,
+    ask_line: Option<String>,
 }
 
 const INSTALL_FIRST: &str = "(install a model first)";
@@ -633,7 +644,11 @@ impl Page for Menu {
                 out.push(format!("  {}", gray(&format!("{title}{GAP}{INSTALL_FIRST}"))));
                 continue;
             }
-            let detail = if side.is_some() { "" } else { c.detail };
+            let detail = match (&self.ask_line, i) {
+                _ if side.is_some() => "",
+                (Some(line), ASK_ROW) if self.top => line.as_str(),
+                _ => c.detail,
+            };
             out.push(match (i == self.at, focused) {
                 (true, false) => format!("{} {}{GAP}{}", sgr(&hl(), "\u{27a4}"), sgr(&hl(), &title), detail),
                 (true, true) => format!("  {}", paint(&title, Color::Bold)),
@@ -742,11 +757,19 @@ impl Page for Menu {
     }
 
     fn every(&self) -> Option<std::time::Duration> {
-        self.job.as_ref().map(|_| std::time::Duration::from_millis(60))
+        let ask = self.ask_run.as_ref().map(|_| std::time::Duration::from_millis(250));
+        self.job.as_ref().map(|_| std::time::Duration::from_millis(60)).or(ask)
     }
 
     fn tick(&mut self) {
-        // The load beside its model: when it runs, the bar gives way to "loaded"; when it fails, the reason shows under the list.
+        // An Ask run in the background shows on the Ask row. The load beside its model: when it runs, the bar gives way to "loaded"; when it fails, the reason shows under the list.
+        if let Some(progress) = &self.ask_run {
+            let (line, running) = progress();
+            self.ask_line = Some(line);
+            if !running {
+                self.ask_run = None;
+            }
+        }
         let Some(j) = self.job.as_mut() else { return };
         j.tick();
         if j.finished() {
@@ -800,10 +823,13 @@ impl Page for SchemaPage {
     }
 }
 
+const ASK_ROW: usize = 0;
+
 fn main_menu() -> Menu {
     Menu {
         heading: Vec::new(),
         items: vec![
+            Choice { title: "Ask", detail: "describe what you want in plain English", side: None },
             Choice { title: "Quick setup", detail: "install a model, serve it and open the API", side: None },
             Choice { title: "Load/Unload", detail: "load an installed model, unload loaded ones", side: Some(Side::Models) },
             Choice { title: "Install models", detail: "pick models that fit your GPUs", side: None },
@@ -814,12 +840,14 @@ fn main_menu() -> Menu {
         at: 0,
         hint: "\u{2191}\u{2193} move   Enter open   q quit",
         top: true,
-        gap_before: Some(4),
+        gap_before: Some(5),
         side: None,
         off: Vec::new(),
         job: None,
         gpus: None,
         note: None,
+        ask_run: None,
+        ask_line: None,
     }
 }
 
@@ -841,6 +869,8 @@ fn access_menu() -> Menu {
         job: None,
         gpus: None,
         note: None,
+        ask_run: None,
+        ask_line: None,
     }
 }
 
@@ -982,7 +1012,501 @@ fn quick_setup(tty: &mut Tty) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run() -> Result<(), String> {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StepState {
+    #[default]
+    Planned,
+    Running,
+    Done,
+    Failed,
+    Stopped,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AskStep {
+    pub cmd: String,
+    pub why: String,
+    pub state: StepState,
+    pub part: usize,
+    pub secs: Option<u64>,
+    pub latest: Option<String>,
+    pub output: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AskPart {
+    pub text: String,
+    pub label: String,
+    pub options: Vec<(String, String)>,
+    pub chosen: Option<usize>,
+    pub unsure: bool,
+    pub question: Option<String>,
+    pub choices: Vec<(String, String)>,
+    pub left_out: bool,
+    pub unused: Vec<String>,
+}
+
+impl AskPart {
+    fn open(&self) -> bool {
+        !self.left_out && (self.unsure || self.question.is_some() || !self.unused.is_empty())
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AskFrame {
+    pub said: String,
+    pub parts: Vec<AskPart>,
+    pub steps: Vec<AskStep>,
+    pub note: Option<String>,
+    pub confirm: Option<String>,
+    pub attached: bool,
+    pub running: bool,
+    pub ran: bool,
+    pub done: bool,
+    pub can_run: bool,
+}
+
+pub trait AskDriver {
+    fn frame(&mut self) -> AskFrame;
+    fn submit(&mut self, request: &str) -> AskFrame;
+    fn choose(&mut self, part: usize, option: usize) -> AskFrame;
+    fn write(&mut self, part: usize, text: &str) -> AskFrame;
+    fn answer(&mut self, part: usize, text: &str) -> AskFrame;
+    fn pick_value(&mut self, part: usize, index: usize) -> AskFrame;
+    fn drop_value(&mut self, part: usize, index: usize) -> AskFrame;
+    fn leave_out(&mut self, part: usize) -> AskFrame;
+    fn start(&mut self) -> AskFrame;
+    fn run_attached(&mut self);
+    fn stop(&mut self);
+    fn progress(&self) -> Option<Box<dyn Fn() -> (String, bool)>>;
+}
+
+pub struct MenuHooks {
+    pub ask: Box<dyn AskDriver>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Field {
+    None,
+    Request,
+    Write,
+    Answer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Row {
+    Option(usize),
+    LeaveOut,
+    Write,
+    Value(usize),
+    TypeValue,
+    Unused(usize),
+}
+
+struct AskPage<'a> {
+    driver: &'a mut dyn AskDriver,
+    frame: AskFrame,
+    request: LineEdit,
+    field: LineEdit,
+    edit: Field,
+    page: usize,
+    row: usize,
+    confirming: bool,
+    attach: bool,
+    host: AskHost,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AskHost {
+    Menu,
+    Alone,
+}
+
+const RESULT_LINES: usize = 12;
+
+impl<'a> AskPage<'a> {
+    fn new(driver: &'a mut dyn AskDriver, host: AskHost) -> AskPage<'a> {
+        let frame = driver.frame();
+        let request = LineEdit::of(&frame.said);
+        let edit = if frame.said.is_empty() { Field::Request } else { Field::None };
+        let mut page = AskPage { driver, frame: AskFrame::default(), request, field: LineEdit::default(), edit, page: 0, row: 0, confirming: false, attach: false, host };
+        page.reset(frame);
+        page
+    }
+
+    fn confirm_page(&self) -> usize {
+        self.frame.parts.len()
+    }
+
+    fn reset(&mut self, frame: AskFrame) {
+        // A new plan: start on the first part while any part still needs an answer, else the confirm page.
+        self.frame = frame;
+        self.page = if self.frame.parts.iter().any(AskPart::open) { 0 } else { self.confirm_page() };
+        self.place();
+    }
+
+    fn update(&mut self, frame: AskFrame) {
+        // After an answer: stay while this part still needs one, else move on to the next open part (or confirm).
+        self.frame = frame;
+        if self.frame.parts.get(self.page).is_none_or(|p| !p.open()) {
+            let next = self.frame.parts.iter().enumerate().skip(self.page + 1).find(|(_, p)| p.open()).map(|(i, _)| i);
+            self.page = next.unwrap_or(self.confirm_page());
+        }
+        self.place();
+    }
+
+    fn place(&mut self) {
+        // The cursor on what the page needs: a value question first, else the chosen command.
+        self.field = LineEdit::default();
+        self.confirming = false;
+        let rows = self.rows();
+        let value = rows.iter().position(|r| matches!(r, Row::Value(_) | Row::TypeValue | Row::Unused(_)));
+        let chosen = self.part().and_then(|p| p.chosen).and_then(|c| rows.iter().position(|r| *r == Row::Option(c)));
+        self.row = value.or(chosen).unwrap_or(0);
+    }
+
+    fn part(&self) -> Option<&AskPart> {
+        self.frame.parts.get(self.page)
+    }
+
+    fn rows(&self) -> Vec<Row> {
+        let Some(p) = self.part() else {
+            return Vec::new();
+        };
+        let mut rows: Vec<Row> = (0..p.options.len()).map(Row::Option).collect();
+        rows.extend([Row::LeaveOut, Row::Write]);
+        if p.question.is_some() && !p.left_out {
+            rows.extend((0..p.choices.len()).map(Row::Value));
+            rows.push(Row::TypeValue);
+        }
+        if !p.left_out {
+            rows.extend((0..p.unused.len()).map(Row::Unused));
+        }
+        rows
+    }
+
+    fn enter(&mut self) -> Flow {
+        if self.page == self.confirm_page() {
+            return self.enter_confirm();
+        }
+        let part = self.page;
+        let frame = match self.rows().get(self.row).copied() {
+            Some(Row::Option(i)) => self.driver.choose(part, i),
+            Some(Row::LeaveOut) => self.driver.leave_out(part),
+            Some(Row::Value(i)) => self.driver.pick_value(part, i),
+            Some(Row::Unused(i)) => self.driver.drop_value(part, i),
+            Some(Row::Write) => {
+                self.edit = Field::Write;
+                return Flow::Stay;
+            }
+            Some(Row::TypeValue) => {
+                self.edit = Field::Answer;
+                return Flow::Stay;
+            }
+            None => return Flow::Stay,
+        };
+        self.update(frame);
+        Flow::Stay
+    }
+
+    fn enter_confirm(&mut self) -> Flow {
+        // Run the list (a second Enter when it deletes or opens access); a finished run plans again from what is true now.
+        if self.frame.ran {
+            let said = self.frame.said.clone();
+            let frame = self.driver.submit(&said);
+            self.reset(frame);
+        } else if !self.frame.can_run {
+            if let Some(open) = self.frame.parts.iter().position(AskPart::open) {
+                self.page = open;
+                self.place();
+            }
+        } else if self.frame.confirm.is_some() && !self.confirming {
+            self.confirming = true;
+        } else if self.frame.attached {
+            self.attach = true;
+            return Flow::Leave;
+        } else {
+            self.frame = self.driver.start();
+        }
+        Flow::Stay
+    }
+
+    fn submit_field(&mut self) {
+        let text = match self.edit {
+            Field::Request => self.request.get(),
+            _ => self.field.get(),
+        };
+        let text = text.trim().to_string();
+        let edit = std::mem::replace(&mut self.edit, Field::None);
+        if text.is_empty() {
+            return;
+        }
+        match edit {
+            Field::Request => {
+                let frame = self.driver.submit(&text);
+                self.reset(frame);
+            }
+            Field::Write => {
+                let frame = self.driver.write(self.page, &text);
+                self.update(frame);
+            }
+            Field::Answer => {
+                let frame = self.driver.answer(self.page, &text);
+                self.update(frame);
+            }
+            Field::None => {}
+        }
+    }
+
+    fn tabs(&self) -> String {
+        // One entry per part and the confirm page: the current one in the theme color, open ones marked, left out ones gray.
+        let mut items: Vec<String> = self
+            .frame
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let name = format!("{} {}{}", i + 1, p.label, if p.open() { " ?" } else { "" });
+                if i == self.page {
+                    sgr(&hl(), &name)
+                } else if p.left_out {
+                    gray(&format!("{name} (left out)"))
+                } else {
+                    name
+                }
+            })
+            .collect();
+        let confirm = if self.frame.ran { "Result" } else { "Confirm" };
+        items.push(if self.page == self.confirm_page() { sgr(&hl(), confirm) } else { gray(confirm) });
+        format!("  {}", items.join(GAP))
+    }
+
+    fn part_lines(&self, p: &AskPart) -> Vec<String> {
+        let arrow = |on: bool| if on { sgr(&hl(), "\u{27a4}") } else { " ".to_string() };
+        let rows = self.rows();
+        let here = |r: Row| self.edit == Field::None && rows.get(self.row) == Some(&r);
+        let mut out = vec![format!("  {}", gray(&p.text)), String::new()];
+        let cw = p.options.iter().map(|(c, _)| crate::term::visible_width(c)).max().unwrap_or(0);
+        for (i, (cmd, about)) in p.options.iter().enumerate() {
+            let on = here(Row::Option(i));
+            let cmd = crate::status_view::pad(cmd, cw);
+            let cmd = if on { sgr(&hl(), &cmd) } else if p.chosen == Some(i) { sgr(&format!("1;{}", crate::theme::third()), &cmd) } else { cmd };
+            out.push(format!("{} {cmd}{GAP}{}", arrow(on), gray(about)));
+        }
+        out.push(format!("{} {}", arrow(here(Row::LeaveOut)), gray("leave this part out")));
+        if self.edit == Field::Write {
+            out.push(format!("{} {}", arrow(true), self.field.draw(true)));
+        } else {
+            out.push(format!("{} {}", arrow(here(Row::Write)), gray("type something else")));
+        }
+        if let (Some(q), false) = (&p.question, p.left_out) {
+            out.push(String::new());
+            out.push(format!("  {}", paint(q, Color::Bold)));
+            let vw = p.choices.iter().map(|(v, _)| crate::term::visible_width(v)).max().unwrap_or(0);
+            for (i, (v, help)) in p.choices.iter().enumerate() {
+                let on = here(Row::Value(i));
+                let v = crate::status_view::pad(v, vw);
+                out.push(format!("{} {}{GAP}{}", arrow(on), if on { sgr(&hl(), &v) } else { v }, gray(help)));
+            }
+            if self.edit == Field::Answer {
+                out.push(format!("{} {}", arrow(true), self.field.draw(true)));
+            } else {
+                out.push(format!("{} {}", arrow(here(Row::TypeValue)), gray("type a value")));
+            }
+        }
+        if !p.left_out && !p.unused.is_empty() {
+            out.push(String::new());
+            out.push(format!("  {}", paint(&format!("Not used: {}", p.unused.join(", ")), Color::Bold)));
+            for (i, v) in p.unused.iter().enumerate() {
+                out.push(format!("{} {}", arrow(here(Row::Unused(i))), gray(&format!("leave {v} out"))));
+            }
+        }
+        out
+    }
+
+    fn confirm_lines(&self) -> Vec<String> {
+        // The commands in run order under the part they serve; once running, each one's state, time and newest line; once finished, each part's result.
+        let mut out = Vec::new();
+        let cw = self.frame.steps.iter().map(|s| crate::term::visible_width(&s.cmd)).max().unwrap_or(0);
+        for (i, p) in self.frame.parts.iter().enumerate() {
+            let label = format!("{} {}", i + 1, p.label);
+            if p.left_out {
+                out.push(format!("  {}", gray(&format!("{label}   left out"))));
+                continue;
+            }
+            out.push(format!("  {}", paint(&label, Color::Bold)));
+            let steps: Vec<&AskStep> = self.frame.steps.iter().filter(|s| s.part == i).collect();
+            for (k, s) in steps.iter().enumerate() {
+                let secs = s.secs.map(|t| format!(" {t}s")).unwrap_or_default();
+                let state = match s.state {
+                    StepState::Planned if self.frame.running => gray("waiting"),
+                    StepState::Planned => gray(&s.why),
+                    StepState::Running => format!("{}  {}", sgr(&hl(), &format!("running{secs}")), gray(s.latest.as_deref().unwrap_or(""))),
+                    StepState::Done => paint(&format!("done{secs}"), Color::Green),
+                    StepState::Failed => paint(&format!("failed{secs}"), Color::Red),
+                    StepState::Stopped => paint(&format!("stopped{secs}"), Color::Yellow),
+                };
+                out.push(format!("    {}{GAP}{state}", crate::status_view::pad(&s.cmd, cw)));
+                let last = k + 1 == steps.len();
+                if (s.state == StepState::Done && last) || matches!(s.state, StepState::Failed | StepState::Stopped) {
+                    out.extend(s.output.iter().rev().take(RESULT_LINES).rev().map(|l| format!("      {}", gray(l))));
+                }
+            }
+        }
+        out
+    }
+}
+
+impl Page for AskPage<'_> {
+    fn render(&self, width: usize, height: usize) -> Vec<String> {
+        let mut out = brand();
+        let on_request = self.edit == Field::Request;
+        out.push(format!("{} {}", if on_request { sgr(&hl(), "\u{27a4}") } else { " ".to_string() }, self.request.draw(on_request)));
+        if !self.frame.parts.is_empty() {
+            out.push(String::new());
+            out.push(self.tabs());
+            out.push(String::new());
+            match self.part() {
+                Some(p) => out.extend(self.part_lines(p)),
+                None => out.extend(self.confirm_lines()),
+            }
+        }
+        if let Some(note) = &self.frame.note {
+            out.push(String::new());
+            out.push(format!("  {}", paint(note, Color::Red)));
+        }
+        if let (true, Some(c)) = (self.confirming, &self.frame.confirm) {
+            out.push(String::new());
+            out.push(format!("  {}", paint(c, Color::Red)));
+        }
+        if self.frame.done {
+            out.push(String::new());
+            out.push(format!("  {}", paint("Done.", Color::Green)));
+        }
+        let hint = match self.edit {
+            Field::Request => "Enter plan   Esc cancel",
+            Field::Write => "Enter plan this part   Esc cancel",
+            Field::Answer => "Enter answer   Esc cancel",
+            Field::None if self.frame.running && self.host == AskHost::Alone => "Running   Ctrl-C stop",
+            Field::None if self.frame.running => "Running   Esc back to the menu (it keeps running)   Ctrl-C stop",
+            Field::None if self.frame.parts.is_empty() => "Type what you want, then Enter   Esc back",
+            Field::None if self.confirming => "Enter run   Esc cancel",
+            Field::None if self.page == self.confirm_page() && self.frame.ran => "Enter plan again   \u{2190} parts   Esc back",
+            Field::None if self.page == self.confirm_page() && self.frame.can_run => "Enter run   \u{2190} parts   \u{2191} edit request   Esc back",
+            Field::None if self.page == self.confirm_page() => "Enter answer what is open   \u{2190} parts   Esc back",
+            Field::None if matches!(self.rows().get(self.row), Some(Row::Value(_) | Row::TypeValue)) => "\u{2190}\u{2192} part   \u{2191}\u{2193} move   Enter choose   type the value   Esc back",
+            Field::None => "\u{2190}\u{2192} part   \u{2191}\u{2193} move   Enter choose   type to reword   Esc back",
+        };
+        screen(out, width, height, gray(hint))
+    }
+
+    fn every(&self) -> Option<std::time::Duration> {
+        self.frame.running.then_some(std::time::Duration::from_millis(150))
+    }
+
+    fn tick(&mut self) {
+        self.frame = self.driver.frame();
+    }
+
+    fn keys(&mut self, inputs: &[Input]) -> Flow {
+        // A paste arrives as one read: its line breaks become spaces and it is never sent on its own.
+        let pasted = inputs.iter().filter(|i| matches!(i, Input::Char(_) | Input::Space)).count() > 1;
+        let mut flow = Flow::Stay;
+        for (i, input) in inputs.iter().enumerate() {
+            flow = match input {
+                Input::Enter if pasted && i + 1 == inputs.len() => Flow::Stay,
+                Input::Enter if pasted => self.key(Input::Space),
+                other => self.key(*other),
+            };
+            if !matches!(flow, Flow::Stay) {
+                break;
+            }
+        }
+        flow
+    }
+
+    fn key(&mut self, input: Input) -> Flow {
+        // Text fields take every key but Enter and Esc; elsewhere left/right switch pages, up/down move, Enter chooses.
+        if self.frame.running {
+            return match input {
+                Input::Interrupt => {
+                    self.driver.stop();
+                    Flow::Stay
+                }
+                Input::Esc if self.host == AskHost::Menu => Flow::Leave,
+                _ => Flow::Stay,
+            };
+        }
+        if self.edit != Field::None {
+            match input {
+                Input::Esc => self.edit = Field::None,
+                Input::Interrupt => return Flow::Quit,
+                Input::Enter => self.submit_field(),
+                Input::Down if self.edit == Field::Request && !self.frame.parts.is_empty() => self.edit = Field::None,
+                Input::Left if self.edit == Field::Request && self.request.is_empty() && self.frame.parts.is_empty() => return Flow::Leave,
+                other if self.edit == Field::Request => self.request.key(other),
+                other => self.field.key(other),
+            }
+            return Flow::Stay;
+        }
+        let last = self.rows().len().saturating_sub(1);
+        match input {
+            Input::Esc if self.confirming => self.confirming = false,
+            Input::Esc => return Flow::Leave,
+            Input::Interrupt => return Flow::Quit,
+            Input::Left if self.page > 0 => {
+                self.page -= 1;
+                self.place();
+            }
+            Input::Right if self.page < self.confirm_page() => {
+                self.page += 1;
+                self.place();
+            }
+            Input::Up if self.row > 0 => self.row -= 1,
+            Input::Up => self.edit = Field::Request,
+            Input::Down => self.row = (self.row + 1).min(last),
+            Input::Enter => return self.enter(),
+            Input::Char(_) | Input::Space if self.page < self.confirm_page() => {
+                let on_value = matches!(self.rows().get(self.row), Some(Row::Value(_) | Row::TypeValue));
+                self.edit = if on_value { Field::Answer } else { Field::Write };
+                self.field.key(input);
+            }
+            Input::Char(_) | Input::Space => {
+                self.edit = Field::Request;
+                self.request.key(input);
+            }
+            _ => {}
+        }
+        Flow::Stay
+    }
+}
+
+fn ask_on(tty: &mut Tty, driver: &mut dyn AskDriver, host: AskHost) -> Result<bool, String> {
+    // Ask on the open menu screen; its commands run in the background, and a command that is its own screen (a chat) gets the terminal off the menu's alternate screen, then Ask comes back. True when Ctrl-C quits Goethe.
+    loop {
+        let mut page = AskPage::new(driver, host);
+        tty.run(&mut page)?;
+        if tty.quit || !page.attach {
+            return Ok(tty.quit);
+        }
+        tty.screen = None;
+        tty.inside_with(
+            || {
+                page.driver.run_attached();
+                Ok(())
+            },
+            false,
+        )?;
+    }
+}
+
+pub fn ask_session(driver: &mut dyn AskDriver) -> Result<bool, String> {
+    // `goethe ask` on a terminal: the same page as Ask on the menu (there is no menu to go back to while it runs).
+    let mut tty = Tty::open()?;
+    ask_on(&mut tty, driver, AskHost::Alone)
+}
+
+pub fn run(mut hooks: MenuHooks) -> Result<(), String> {
     // goethe: the main menu until q; each choice runs, then the menu comes back.
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         return Err("goethe alone needs a terminal; goethe help lists the commands".to_string());
@@ -992,12 +1516,22 @@ pub fn run() -> Result<(), String> {
     loop {
         menu.refresh_off();
         match tty.run(&mut menu)? {
+            None if menu.ask_run.is_some() => menu.note = Some("Ask is still running commands; open Ask to follow them, or press Ctrl-C there to stop them.".into()),
             None => return Ok(()),
-            Some(0) => quick_setup(&mut tty)?,
-            Some(1) => {}
-            Some(2) => install_page(&mut tty)?,
-            Some(3) => access_page(&mut tty)?,
-            Some(4) => {
+            Some(ASK_ROW) => {
+                menu.ask_run = None;
+                menu.ask_line = None;
+                if ask_on(&mut tty, hooks.ask.as_mut(), AskHost::Menu)? {
+                    tty.quit = true;
+                }
+                menu.ask_run = hooks.ask.progress();
+                menu.ask_line = menu.ask_run.as_ref().map(|p| p().0);
+            }
+            Some(1) => quick_setup(&mut tty)?,
+            Some(2) => {}
+            Some(3) => install_page(&mut tty)?,
+            Some(4) => access_page(&mut tty)?,
+            Some(5) => {
                 tty.draw(&Notice("Reading the GPUs...".to_string()));
                 let mut page = StatusPage(crate::status_view::StatusView::new());
                 tty.run(&mut page)?;
@@ -1630,6 +2164,256 @@ mod tests {
         lines.iter().map(|l| plain(l)).collect()
     }
 
+    #[derive(Default)]
+    struct Said {
+        frame: AskFrame,
+        started: usize,
+        stopped: bool,
+        written: Vec<(usize, String)>,
+        answered: Vec<(usize, String)>,
+    }
+
+    fn part(text: &str, chosen: Option<usize>) -> AskPart {
+        let options: Vec<(String, String)> = vec![("goethe install".into(), "Download a model".into()), ("goethe api".into(), "The API address".into())];
+        AskPart { text: text.into(), label: chosen.map_or(text.into(), |c| options[c].0.trim_start_matches("goethe ").to_string()), options, chosen, unsure: chosen.is_none(), ..AskPart::default() }
+    }
+
+    impl Said {
+        fn settle(&mut self) -> AskFrame {
+            self.frame.can_run = self.frame.parts.iter().all(|p| !p.open());
+            self.frame.steps = self.frame.parts.iter().enumerate().filter(|(_, p)| !p.left_out).map(|(i, p)| AskStep { cmd: format!("goethe {}", p.label), why: "w".into(), part: i, ..AskStep::default() }).collect();
+            self.frame.clone()
+        }
+    }
+
+    impl AskDriver for Said {
+        fn frame(&mut self) -> AskFrame {
+            self.frame.clone()
+        }
+        fn submit(&mut self, line: &str) -> AskFrame {
+            let parts = line
+                .split(" and ")
+                .enumerate()
+                .map(|(i, t)| AskPart { unused: t.split_whitespace().filter(|w| w.starts_with("wg")).map(str::to_string).collect(), ..part(t, (i == 0).then_some(0)) })
+                .collect();
+            self.frame = AskFrame { said: line.to_string(), parts, ..AskFrame::default() };
+            self.settle()
+        }
+        fn choose(&mut self, at: usize, option: usize) -> AskFrame {
+            self.frame.parts[at] = part(&self.frame.parts[at].text.clone(), Some(option));
+            self.settle()
+        }
+        fn write(&mut self, at: usize, text: &str) -> AskFrame {
+            self.written.push((at, text.into()));
+            self.frame.parts[at] = part(text, Some(0));
+            self.settle()
+        }
+        fn answer(&mut self, at: usize, text: &str) -> AskFrame {
+            self.answered.push((at, text.into()));
+            self.frame.parts[at].question = None;
+            self.settle()
+        }
+        fn pick_value(&mut self, at: usize, _: usize) -> AskFrame {
+            self.frame.parts[at].question = None;
+            self.settle()
+        }
+        fn drop_value(&mut self, at: usize, index: usize) -> AskFrame {
+            self.frame.parts[at].unused.remove(index);
+            self.settle()
+        }
+        fn leave_out(&mut self, at: usize) -> AskFrame {
+            self.frame.parts[at].left_out = true;
+            self.settle()
+        }
+        fn start(&mut self) -> AskFrame {
+            self.started += 1;
+            self.frame.running = true;
+            self.frame.steps[0].state = StepState::Running;
+            self.frame.clone()
+        }
+        fn run_attached(&mut self) {}
+        fn stop(&mut self) {
+            self.stopped = true;
+        }
+        fn progress(&self) -> Option<Box<dyn Fn() -> (String, bool)>> {
+            None
+        }
+    }
+
+    fn typed(page: &mut AskPage<'_>, s: &str) {
+        for c in s.chars() {
+            page.key(if c == ' ' { Input::Space } else { Input::Char(c) });
+        }
+    }
+
+    fn asked<'a>(driver: &'a mut Said, request: &str) -> AskPage<'a> {
+        let mut page = AskPage::new(driver, AskHost::Menu);
+        typed(&mut page, request);
+        page.key(Input::Enter);
+        page
+    }
+
+    #[test]
+    fn a_value_no_command_uses_is_shown_until_it_is_left_out() {
+        // "Not used: wg0" sits under the part with a row to leave it out; until then the part stays open and nothing can run.
+        let mut driver = Said::default();
+        let mut page = asked(&mut driver, "install x on wg0");
+        assert!(!page.frame.can_run);
+        let screen = text(page.render(110, 30));
+        assert!(screen.iter().any(|l| l.trim() == "Not used: wg0"), "{screen:?}");
+        assert!(screen.iter().any(|l| l.contains("leave wg0 out")), "{screen:?}");
+        assert!(page.rows().get(page.row) == Some(&Row::Unused(0)), "the cursor waits on it");
+        page.key(Input::Enter);
+        assert!(page.frame.parts[0].unused.is_empty() && page.frame.can_run);
+    }
+
+    #[test]
+    fn ask_edits_the_request_like_a_text_field() {
+        // Left moves the cursor, every letter is text, and Esc is the way back.
+        let mut driver = Said::default();
+        let mut page = AskPage::new(&mut driver, AskHost::Menu);
+        typed(&mut page, "load quick jobs");
+        for _ in 0.."jobs".len() {
+            assert!(matches!(page.key(Input::Left), Flow::Stay), "Left inside text stays on the page");
+        }
+        typed(&mut page, "q ");
+        assert_eq!(page.request.get(), "load quick q jobs");
+        page.key(Input::Right);
+        page.key(Input::Backspace);
+        assert_eq!(page.request.get(), "load quick q obs");
+        assert!(matches!(page.key(Input::Enter), Flow::Stay));
+        assert_eq!(page.driver.frame().said, "load quick q obs");
+        assert!(matches!(page.key(Input::Esc), Flow::Leave));
+    }
+
+    #[test]
+    fn a_pasted_request_waits_for_enter() {
+        // A paste ends in a line break; it must stay editable, not be sent with it.
+        let mut driver = Said::default();
+        let mut page = AskPage::new(&mut driver, AskHost::Menu);
+        let mut paste: Vec<Input> = "run orca now".chars().map(|c| if c == ' ' { Input::Space } else { Input::Char(c) }).collect();
+        paste.push(Input::Enter);
+        assert!(matches!(page.keys(&paste), Flow::Stay));
+        assert_eq!(page.request.get(), "run orca now");
+        assert!(page.driver.frame().said.is_empty(), "nothing was sent");
+        page.key(Input::Enter);
+        assert_eq!(page.driver.frame().said, "run orca now");
+    }
+
+    #[test]
+    fn each_part_is_a_page_switched_with_left_and_right() {
+        // The page opens on the first part while any part needs an answer; left/right move between parts and confirm; Enter on a command settles the part and moves on.
+        let mut driver = Said::default();
+        let mut page = asked(&mut driver, "install x and give me an api");
+        assert_eq!(page.page, 0, "the first part, even though only the second one asks");
+        page.key(Input::Left);
+        assert_eq!(page.page, 0, "no page before the first");
+        page.key(Input::Right);
+        assert_eq!(page.page, 1);
+        let screen = text(page.render(110, 30));
+        assert!(screen.iter().any(|l| l.contains("1 install") && l.contains("2 give me an api ?") && l.contains("Confirm")), "{screen:?}");
+        assert!(screen.iter().any(|l| l.contains("goethe api") && l.contains("The API address")));
+        page.key(Input::Down);
+        page.key(Input::Enter);
+        assert_eq!(page.frame.parts[1].chosen, Some(1));
+        assert_eq!(page.page, 2, "settled, so on to confirm");
+        let confirm = text(page.render(110, 30));
+        assert!(confirm.iter().any(|l| l.contains("1 install")) && confirm.iter().any(|l| l.contains("2 api")), "{confirm:?}");
+        page.key(Input::Right);
+        assert_eq!(page.page, 2, "no page after confirm");
+        page.key(Input::Enter);
+        assert!(page.frame.running);
+    }
+
+    #[test]
+    fn typing_rewords_a_part_and_a_part_can_be_left_out() {
+        // On a part page every letter starts "type something else" (left/right move its cursor, not the page); leave out takes the part off the plan.
+        let mut driver = Said::default();
+        let mut page = asked(&mut driver, "install x and give me an api");
+        page.key(Input::Right);
+        typed(&mut page, "show api");
+        assert_eq!(page.edit, Field::Write);
+        page.key(Input::Left);
+        assert_eq!(page.page, 1, "left moves the cursor inside the text");
+        page.key(Input::Enter);
+        assert_eq!(page.driver.frame().parts[1].text, "show api");
+        assert_eq!(page.page, 2, "the reworded part is settled, so confirm comes next");
+        page.key(Input::Left);
+        page.key(Input::Left);
+        let rows = page.rows();
+        page.row = rows.iter().position(|r| *r == Row::LeaveOut).unwrap();
+        page.key(Input::Enter);
+        assert!(page.frame.parts[0].left_out);
+        assert!(text(page.render(110, 30)).iter().any(|l| l.contains("1 install") && l.contains("left out")));
+        drop(page);
+        assert_eq!(driver.written, [(1, "show api".to_string())]);
+    }
+
+    #[test]
+    fn a_value_question_sits_under_the_part_and_takes_a_typed_answer() {
+        let mut driver = Said::default();
+        let mut page = asked(&mut driver, "make a key");
+        page.frame.parts[0].question = Some("Key name:".into());
+        page.page = 0;
+        page.place();
+        assert_eq!(page.rows()[page.row], Row::TypeValue, "the cursor goes to what is missing");
+        page.key(Input::Enter);
+        typed(&mut page, "my-app");
+        page.key(Input::Enter);
+        page.frame.parts[0].question = Some("Key name:".into());
+        page.page = 0;
+        page.place();
+        typed(&mut page, "ci-bot");
+        assert_eq!(page.edit, Field::Answer, "typing on the question answers it, it does not reword the part");
+        page.key(Input::Enter);
+        drop(page);
+        assert_eq!(driver.answered, [(0, "my-app".to_string()), (0, "ci-bot".to_string())]);
+        assert!(driver.written.is_empty());
+    }
+
+    #[test]
+    fn a_run_goes_on_in_the_background_and_esc_returns_to_the_menu() {
+        // While it runs, keys do not edit; Esc goes back to the menu (standalone goethe ask stays); Ctrl-C stops it.
+        let mut driver = Said::default();
+        let mut page = asked(&mut driver, "show status");
+        page.key(Input::Enter);
+        assert!(page.frame.running && page.every().is_some(), "the page follows the run");
+        assert!(text(page.render(110, 30)).iter().any(|l| l.contains("goethe install") && l.contains("running")));
+        typed(&mut page, "x");
+        assert_eq!(page.request.get(), "show status", "no typing while it runs");
+        assert!(matches!(page.key(Input::Interrupt), Flow::Stay));
+        assert!(matches!(page.key(Input::Esc), Flow::Leave), "back to the menu, the run goes on");
+        page.host = AskHost::Alone;
+        assert!(matches!(page.key(Input::Esc), Flow::Stay), "no menu to go back to");
+        drop(page);
+        assert!(driver.stopped && driver.started == 1);
+    }
+
+    #[test]
+    fn a_chat_leaves_the_page_for_the_terminal() {
+        // A plan marked attached (goethe run's chat screen) is handed the terminal instead of running in the background.
+        let mut driver = Said::default();
+        let mut page = asked(&mut driver, "chat with it");
+        page.frame.attached = true;
+        assert!(matches!(page.key(Input::Enter), Flow::Leave));
+        assert!(page.attach && !page.frame.running);
+    }
+
+    #[test]
+    fn a_plan_that_deletes_needs_a_second_enter() {
+        let mut driver = Said::default();
+        let mut page = asked(&mut driver, "remove it");
+        page.frame.confirm = Some("goethe remove org/m cannot be undone. Press Enter again to run it.".into());
+        page.key(Input::Enter);
+        assert!(!page.frame.running && page.confirming, "first Enter only asks");
+        assert!(text(page.render(110, 30)).iter().any(|l| l.contains("cannot be undone")));
+        page.key(Input::Esc);
+        assert!(!page.confirming, "Esc cancels the question, not Ask");
+        page.key(Input::Enter);
+        page.key(Input::Enter);
+        assert!(page.frame.running);
+    }
+
     #[test]
     fn the_logo_lines_are_one_width() {
         assert!(LOGO.iter().all(|l| l.chars().count() == LOGO[0].chars().count()));
@@ -1639,17 +2423,17 @@ mod tests {
     fn the_menu_lists_the_choices_together_with_the_keys_right_under_them() {
         let t = text(main_menu().render(100, 40));
         assert_eq!(t[1].trim_end(), format!("  {}", LOGO[0]).trim_end());
-        assert_eq!(t[5].trim(), SITE);
-        let first = t.iter().position(|l| l.contains("Quick setup")).unwrap();
-        for (i, title) in ["Quick setup", "Load/Unload", "Install models", "API keys and gateway"].iter().enumerate() {
+        assert_eq!(t[5].trim(), format!("Website: {SITE}"));
+        let first = t.iter().position(|l| l.contains("Ask") && l.contains("plain English")).unwrap();
+        for (i, title) in ["Ask", "Quick setup", "Load/Unload", "Install models", "API keys and gateway"].iter().enumerate() {
             assert!(t[first + i].contains(title), "no gap between choices: {t:?}");
         }
-        assert!(t[first + 4].is_empty() && t[first + 5].contains("Status") && t[first + 6].contains("Metrics"), "an empty line before Status: {t:?}");
+        assert!(t[first + 5].is_empty() && t[first + 6].contains("Status") && t[first + 7].contains("Metrics"), "an empty line before Status: {t:?}");
         assert!(t[first].starts_with('\u{27a4}'));
-        assert!(t[first + 7].is_empty() && t[first + 8].contains("Enter open"), "the keys line follows the menu: {t:?}");
-        assert!(t[first + 8].contains("theme  ") && t[first + 8].contains("2 sea") && t[first + 8].contains("3 earth"), "{}", t[first + 8]);
+        assert!(t[first + 8].is_empty() && t[first + 9].contains("Enter open"), "the keys line follows the menu: {t:?}");
+        assert!(t[first + 9].contains("theme  ") && t[first + 9].contains("2 sea") && t[first + 9].contains("3 earth"), "{}", t[first + 9]);
         let active = crate::theme::current().name();
-        assert!(t[first + 8].contains(&format!("{active}|")), "a bar marks the active theme: {}", t[first + 8]);
+        assert!(t[first + 9].contains(&format!("{active}|")), "a bar marks the active theme: {}", t[first + 9]);
         assert!(!text(access_menu().render(100, 40)).iter().any(|l| l.contains("theme  ")), "themes only on the main menu");
         assert_eq!(t.len(), 40);
     }
@@ -1686,7 +2470,7 @@ mod tests {
 
     fn models_menu() -> Menu {
         let mut m = main_menu();
-        m.at = 1;
+        m.at = 2;
         m.side = Some(SideState {
             kind: Side::Models,
             at: 0,
@@ -1705,7 +2489,7 @@ mod tests {
         let row = |t: &[String], id: &str| t.iter().find(|l| l.contains(id)).cloned().unwrap();
         assert!(row(&t, "org/a").ends_with("loaded") && !row(&t, "org/b").contains("loaded"), "{t:?}");
         assert!(!t.iter().any(|l| l.contains("Not loaded")), "no headings");
-        assert!(t.iter().position(|l| l.contains("org/a")) == t.iter().position(|l| l.contains("Quick setup")), "the list starts level with the first choice");
+        assert_eq!(t.iter().position(|l| l.contains("org/a")), t.iter().position(|l| l.split_whitespace().any(|w| w == "Ask")), "the list starts level with the first choice");
         m.key(Input::Down);
         m.key(Input::Down);
         assert!(matches!(m.key(Input::Enter), Flow::Stay), "loading keeps the menu on screen");
@@ -1778,13 +2562,14 @@ mod tests {
     #[test]
     fn load_unload_is_gray_and_skipped_until_a_model_is_installed() {
         let mut m = main_menu();
-        m.off = vec![false, true, false, false, false];
+        m.at = 1;
+        m.off = vec![false, false, true, false, false, false, false];
         let t = text(m.render(160, 40));
         assert!(t.iter().any(|l| l.contains("Load/Unload") && l.contains("(install a model first)")), "{t:?}");
         m.key(Input::Down);
-        assert_eq!(m.at, 2, "the arrow keys skip it");
+        assert_eq!(m.at, 3, "the arrow keys skip it");
         m.key(Input::Up);
-        assert_eq!(m.at, 0);
+        assert_eq!(m.at, 1);
     }
 
     #[test]
@@ -1848,7 +2633,7 @@ mod tests {
     fn digits_and_enter_pick_and_q_leaves() {
         let mut m = main_menu();
         m.key(Input::Up);
-        assert!(matches!(m.key(Input::Enter), Flow::Pick(5)), "up from the first wraps to the last");
+        assert!(matches!(m.key(Input::Enter), Flow::Pick(6)), "up from the first wraps to the last");
         assert!(matches!(m.key(Input::Right), Flow::Stay), "only Enter opens a choice without a submenu");
         assert!(matches!(m.key(Input::Left), Flow::Stay), "the left arrow on the top menu does not quit goethe");
         assert!(matches!(m.key(Input::Char('q')), Flow::Quit), "q quits goethe");
