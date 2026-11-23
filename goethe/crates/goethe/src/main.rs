@@ -2,6 +2,7 @@
 
 mod ask;
 mod complete;
+mod container;
 mod spec;
 use clap::{CommandFactory, Parser, Subcommand};
 use spec::{ArgMeta, CmdMeta, Fact::{Daemon, Installed, Key, Loaded}};
@@ -339,6 +340,11 @@ enum Commands {
         platform_url: Option<String>,
         #[arg(long = "no-link", help = "Do not link goethe and goethed onto PATH.")]
         no_link: bool,
+    },
+    #[command(hide = true, about = "Start of the container image: prepares /workspace, applies GOETHE_API_KEY, GOETHE_AUTHKEY and GOETHE_SETUP, and runs goethed.")]
+    Container {
+        #[arg(long, help = "Exit 0 when goethed runs (the image's health check).")]
+        check: bool,
     },
     #[command(add = CmdMeta::read(), display_order = 21, about = "Tab completion for bash, zsh and fish: models, keys, GPUs and interfaces complete too.")]
     Completion {
@@ -965,7 +971,11 @@ fn main() {
     let terminal = std::io::IsTerminal::is_terminal(&std::io::stdout()) && std::io::IsTerminal::is_terminal(&std::io::stderr());
     let quiet = matches!(cli.command, Commands::Install { .. } | Commands::Remove { .. } | Commands::Run { .. } | Commands::Load { json: false, dry_run: false, .. });
     goethe_core::step::set_compact(terminal && quiet);
+    if let Some(why) = image_refusal(&cli.command, goethe_core::paths::image().as_deref()) {
+        fail(why.to_string());
+    }
     let result = match cli.command {
+        Commands::Container { check } => std::process::exit(container::run(check)),
         Commands::Start => goethe_core::menu::start(),
         Commands::Up { no_boot } => do_up(!no_boot),
         Commands::Down { keep_engines: false } => shutdown::run_down(),
@@ -2193,6 +2203,19 @@ fn do_registry_add(
 }
 
 
+fn image_refusal(cmd: &Commands, image: Option<&str>) -> Option<&'static str> {
+    // In the container image these would replace or stop what the image provides; each says what to do instead.
+    image?;
+    match cmd {
+        Commands::Update { .. } => Some("this goethe comes with its container image: pull a newer ghcr.io/meshapplied/goethe tag and recreate the container"),
+        Commands::Uninstall { .. } => Some("this goethe runs in a container: remove the container and its /workspace volume instead"),
+        Commands::Up { .. } | Commands::Down { .. } => Some("goethed is this container's main process: start or stop the container instead"),
+        Commands::Setup { .. } => Some("the container image sets itself up when it starts"),
+        Commands::Completion { cmd: Some(CompletionCommands::Install), .. } => Some("tab completion is not installed in the container; run goethe commands with docker exec"),
+        _ => None,
+    }
+}
+
 fn fail(msg: String) -> ! {
     eprintln!("{msg}");
     std::process::exit(1);
@@ -2256,6 +2279,19 @@ mod tests {
         assert!(key_list_text(&[]).ends_with("Create your first API key:\n\n\t→ goethe api keys create my-app\n"));
         assert!(allowlist_text(&[]).ends_with("\t→ goethe api allow add <client-ip>/32\n"));
         assert!(alias_text(&[]).ends_with("\t→ goethe models alias set <alias> <model>\n"));
+    }
+
+    #[test]
+    fn in_the_container_image_commands_that_replace_or_stop_it_refuse() {
+        // update, uninstall, up, down, setup and completion install would fight the image; everything else runs as on a machine.
+        for refused in [&["update"][..], &["update", "engine"], &["uninstall"], &["up"], &["down"], &["setup"], &["completion", "install"]] {
+            let cli = parse(refused).unwrap();
+            assert!(image_refusal(&cli.command, Some("0.3.5")).is_some(), "{refused:?}");
+            assert!(image_refusal(&cli.command, None).is_none(), "{refused:?} runs on a machine");
+        }
+        for allowed in [&["status"][..], &["install", "org/m"], &["api", "keys", "create", "app"], &["completion", "status"], &["container", "--check"]] {
+            assert!(image_refusal(&parse(allowed).unwrap().command, Some("0.3.5")).is_none(), "{allowed:?}");
+        }
     }
 
     fn parse(v: &[&str]) -> Result<Cli, clap::Error> {

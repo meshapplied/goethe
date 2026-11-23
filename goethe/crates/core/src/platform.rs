@@ -420,15 +420,28 @@ pub fn save_state(home: &Path, state: &PlatformState) -> Result<(), String> {
 }
 
 pub fn fingerprint() -> String {
-    // sha256 of the machine id and a fixed salt, so the raw id never leaves; the hostname stands in when there is none.
+    // sha256 of the machine id and a fixed salt, so the raw id never leaves; a container's id kept in its home comes next (it outlives the container), then the hostname.
     let root = crate::host::sysroot();
     let id = ["etc/machine-id", "var/lib/dbus/machine-id"]
         .iter()
-        .filter_map(|p| fs::read_to_string(root.join(p)).ok())
+        .map(|p| root.join(p))
+        .chain([crate::paths::goethe_home().join(HOME_MACHINE_ID)])
+        .filter_map(|p| fs::read_to_string(p).ok())
         .map(|s| s.trim().to_string())
         .find(|s| !s.is_empty())
         .unwrap_or_else(|| format!("hostname:{}", hostname()));
     fingerprint_of(&id)
+}
+
+pub const HOME_MACHINE_ID: &str = "machine-id";
+
+pub fn ensure_home_machine_id(home: &Path) -> Result<(), String> {
+    // A container has no /etc/machine-id of its own: one is made once in its home, so recreating the container keeps the same console node.
+    let path = home.join(HOME_MACHINE_ID);
+    if path.is_file() {
+        return Ok(());
+    }
+    write_private(&path, crate::security::random_hex(16).as_bytes())
 }
 
 pub fn fingerprint_of(machine_id: &str) -> String {
@@ -762,6 +775,18 @@ mod tests {
         if crate::paths::setting("GOETHE_PUBLIC_IP_URL").is_none() {
             assert_eq!(public_ip_url(dir.path()).unwrap(), "https://platform.example.com/api/ip");
         }
+    }
+
+    #[test]
+    fn a_home_machine_id_is_made_once_and_kept() {
+        // A container's node id lives in its home, so a recreated container is the same console node.
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        ensure_home_machine_id(dir.path()).unwrap();
+        let first = fs::read_to_string(dir.path().join(HOME_MACHINE_ID)).unwrap();
+        assert_eq!(first.len(), 32);
+        ensure_home_machine_id(dir.path()).unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join(HOME_MACHINE_ID)).unwrap(), first);
     }
 
     #[test]

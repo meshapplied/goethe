@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Goethe also comes as a container image, `ghcr.io/meshapplied/goethe`, for Linux on x86_64 and arm64 with NVIDIA GPUs. goethed is the container's main process and everything lives on the `/workspace` volume. On hosts without a terminal, `GOETHE_SETUP` (goethe commands, one per line), `GOETHE_API_KEY`, `GOETHE_HF_TOKEN` and `GOETHE_AUTHKEY` set it up. Every release publishes it, signed with cosign.
 - A linked node reports its public IP address (and public interface addresses) to the console only while the API is open to it: `goethe api expose public`, a gateway on a public address, or an active `goethe api share`.
 - The ternary runtime is gone: the two ternary models leave the catalog, and `goethe update` no longer looks for a ternary pack. The runtime was never published, so they could not be installed.
 - `goethe start` runs Quick setup on its own (install a model, serve it and open the API), then returns to the shell; `goethe` is still the full menu.

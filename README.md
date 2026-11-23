@@ -35,6 +35,12 @@ For Windows 10/11 (x64), run this in PowerShell:
 irm https://pkg.goethe.sh/install.ps1 | iex
 ```
 
+On a Linux GPU server or cloud GPU host with Docker ([setup without a terminal](docs/user-guide.md#docker-and-cloud-gpu-hosts)):
+
+```bash
+docker run -d --name goethe --gpus all --network host -v goethe:/workspace ghcr.io/meshapplied/goethe
+```
+
 Then:
 
 ```bash
