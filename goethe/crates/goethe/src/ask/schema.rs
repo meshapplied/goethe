@@ -181,6 +181,7 @@ fn search_text(card: &IntentCard) -> String {
     let argv_tail = card.argv_prefix[1..].join(" ");
     let mut parts = vec![card.id.replace('.', " "), argv_tail, card.about.clone()];
     parts.extend(card.aliases.iter().cloned());
+    parts.extend(card.does.says.iter().map(|w| w.to_string()));
     parts.extend(card.positionals.iter().filter(|p| !p.help.is_empty()).flat_map(|p| [p.value_name.to_lowercase(), p.help.clone()]));
     parts.extend(card.flags.iter().map(|f| format!("{} {}", f.long.replace('-', " "), f.help).trim().to_string()));
     parts.join(" ")
