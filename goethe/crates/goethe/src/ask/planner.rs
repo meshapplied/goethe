@@ -116,7 +116,7 @@ impl PlanState {
         }
         let model_ref = written_model(trimmed, catalog);
         let rank = |text: &str| retriever.rank(&without(text, model_ref.as_deref()), catalog.intents.len());
-        let mut texts = request_parts(trimmed, &rank);
+        let mut texts = request_parts(trimmed, &rank, catalog, world);
         if texts.len() < 2 {
             texts = vec![(trimmed.to_string(), rank(trimmed))];
         }
@@ -143,6 +143,7 @@ impl PlanState {
         if goals.is_empty() {
             return Self::abstained(trimmed, "No Goethe command matches that request closely enough; goethe help lists the commands.", world);
         }
+        repeat_over_models(&mut goals, catalog, world, validate);
         let mut plan = PlanState { raw_query: trimmed.to_string(), parts, goals, lines: Vec::new(), abstain: None, model_ref, world: world.clone() };
         plan.refresh(catalog, validate);
         plan
@@ -464,13 +465,22 @@ fn step_model(step: &PlanStep, card: &IntentCard) -> Option<String> {
     card.model_arg().and_then(|p| step.positionals.get(&p.id)).and_then(|v| v.first()).cloned()
 }
 
-fn request_parts(request: &str, rank: &dyn Fn(&str) -> Vec<ScoredIntent>) -> Vec<(String, Vec<ScoredIntent>)> {
-    // Each piece that is a request on its own is a part; a piece that is not (a detail such as "at every boot") joins the part before it, or the next one.
+fn request_parts(request: &str, rank: &dyn Fn(&str) -> Vec<ScoredIntent>, catalog: &CliCatalog, world: &World) -> Vec<(String, Vec<ScoredIntent>)> {
+    // Each piece that is a request on its own is a part; a piece that names its own model but no command word ("and qwen on gpu1") repeats the part before for that model, since each model is its own command; any other piece (a detail such as "at every boot", or one more address) joins the part before it, or the next one.
     let mut parts: Vec<(String, Vec<ScoredIntent>)> = Vec::new();
     let mut lead = String::new();
     for piece in split_parts(request) {
+        let commanded = names_a_command(&piece, catalog);
+        if !commanded && names_a_model(&piece, world) {
+            if let Some((last, _)) = parts.last() {
+                let text = format!("{} {piece}", without_values(last, world));
+                let open = rank(&text);
+                parts.push((text, open));
+                continue;
+            }
+        }
         let open = rank(&piece);
-        let request_like = open.first().is_some_and(|t| t.score >= TAU_OOD);
+        let request_like = commanded || open.first().is_some_and(|t| t.score >= TAU_OOD);
         match parts.last_mut() {
             _ if request_like && lead.is_empty() => parts.push((piece, open)),
             _ if request_like => {
@@ -486,6 +496,59 @@ fn request_parts(request: &str, rank: &dyn Fn(&str) -> Vec<ScoredIntent>) -> Vec
         }
     }
     parts
+}
+
+fn repeat_over_models(goals: &mut Vec<PlanStep>, catalog: &CliCatalog, world: &World, validate: &Validate) {
+    // "each", "both", "them": a step that says one of these and binds no model repeats once per model the steps before it bound, on its model argument or flag.
+    let mut i = 0;
+    while i < goals.len() {
+        let says_each = split_words(&goals[i].clause.to_ascii_lowercase()).iter().any(|w| matches!(w.as_str(), "each" | "both" | "them"));
+        let binds = |g: &PlanStep| g.argv.iter().filter(|a| super::slots::is_model_value(a, world)).cloned().collect::<Vec<_>>();
+        let mut before: Vec<String> = Vec::new();
+        goals[..i].iter().flat_map(binds).for_each(|m| if !before.contains(&m) { before.push(m) });
+        let card = catalog.get(&goals[i].intent_id);
+        let flag = card.and_then(|c| c.flags.iter().find(|f| matches!(f.kind, Some(Kind::Model | Kind::InstalledModel | Kind::ModelOrAll))));
+        let slot = card.and_then(|c| c.model_arg()).map(|p| p.id.clone());
+        if !says_each || !binds(&goals[i]).is_empty() || before.is_empty() || (slot.is_none() && flag.is_none()) {
+            i += 1;
+            continue;
+        }
+        let template = goals.remove(i);
+        for (k, m) in before.iter().enumerate() {
+            let mut g = template.clone();
+            match &slot {
+                Some(id) => {
+                    g.positionals.insert(id.clone(), vec![m.clone()]);
+                }
+                None => g.flags.push((flag.map(|f| f.long.clone()).unwrap_or_default(), vec![m.clone()])),
+            }
+            g.ambiguous = None;
+            recompile_step(&mut g, catalog, validate);
+            goals.insert(i + k, g);
+        }
+        i += before.len();
+    }
+}
+
+fn names_a_command(piece: &str, catalog: &CliCatalog) -> bool {
+    // A word that names exactly one command, or a top-level one ("on" names several subcommands, so it is no command word).
+    split_words(&piece.to_ascii_lowercase()).iter().any(|w| {
+        let named: Vec<&IntentCard> = catalog.intents.iter().filter(|c| super::embed::names(c).iter().any(|n| super::embed::says(w, n))).collect();
+        named.len() == 1 || named.iter().any(|c| !c.id.contains('.'))
+    })
+}
+
+fn names_a_model(piece: &str, world: &World) -> bool {
+    !super::slots::named_models(piece, world).is_empty() || find_hf_or_path(&split_words(piece)).is_some()
+}
+
+fn holds_values(piece: &str, world: &World) -> bool {
+    names_a_model(piece, world) || !super::slots::typed_values(piece, world).is_empty()
+}
+
+fn without_values(text: &str, world: &World) -> String {
+    // A part's words with its values taken out: what a continuation repeats.
+    split_words(text).into_iter().filter(|t| !holds_values(t, world)).collect::<Vec<_>>().join(" ")
 }
 
 fn part_options(text: &str, mut open: Vec<ScoredIntent>, model_ref: Option<&str>, model_used: bool, catalog: &CliCatalog) -> (Vec<ScoredIntent>, bool) {

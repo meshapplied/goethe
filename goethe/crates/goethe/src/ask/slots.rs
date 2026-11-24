@@ -131,7 +131,7 @@ pub struct SlotExtraction {
 }
 
 pub fn extract_slots(card: &IntentCard, clause: &str, world: &World) -> SlotExtraction {
-    // Bind explicit --flags, then typed spans: positionals by their kind, and value flags whose kind is a typed token no positional took.
+    // Bind explicit --flags, then typed spans: positionals by their kind, and value flags whose kind is a typed token (or a model, when no positional takes one) no positional took.
     let mut out = SlotExtraction::default();
     let (main_text, passthrough) = split_passthrough(clause, card.accepts_passthrough);
     out.passthrough = passthrough;
@@ -156,7 +156,8 @@ pub fn extract_slots(card: &IntentCard, clause: &str, world: &World) -> SlotExtr
     }
     let taken: Vec<String> = out.positionals.values().flatten().cloned().collect();
     for f in card.flags.iter().filter(|f| f.takes_value) {
-        let Some(kind) = f.kind.filter(|k| typed_token(*k)) else {
+        let model_flag = |k: Kind| matches!(k, Kind::Model | Kind::InstalledModel | Kind::ModelOrAll) && card.model_arg().is_none();
+        let Some(kind) = f.kind.filter(|k| typed_token(*k) || model_flag(*k)) else {
             continue;
         };
         if out.flags.iter().any(|(k, _)| k == &f.long) {

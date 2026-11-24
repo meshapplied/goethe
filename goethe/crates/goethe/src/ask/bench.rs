@@ -193,6 +193,32 @@ fn a_misread_request_is_never_ready_to_change_anything() {
 }
 
 #[test]
+fn a_request_of_many_steps_binds_each_value_to_its_own_step() {
+    // The owner's request: two models on two GPUs, a third GPU blocked, a key scoped to each model; a step without a command word continues the one before, and "each" repeats over the models bound earlier.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let want = [
+        ("load", "goethe load mistralai/Mistral-7B-Instruct --gpu gpu0"),
+        ("load", "goethe load Qwen/Qwen2.5-7B-Instruct --gpu gpu1"),
+        ("gpu.deny", "goethe gpu deny gpu2"),
+        ("api.keys.create", "--models mistralai/Mistral-7B-Instruct"),
+        ("api.keys.create", "--models Qwen/Qwen2.5-7B-Instruct"),
+    ];
+    for q in [
+        "load mistral on gpu0 and qwen 7b on gpu1, deny gpu2, then create an api key for mistral and another for qwen 7b",
+        "load mistral on gpu0 and qwen 7b on gpu1, block gpu2, then give me an api key for each",
+    ] {
+        let p = PlanState::build(q, &cat, &ret, &world, &validate_cli);
+        let got: Vec<(String, String)> = p.goals.iter().filter(|g| g.reason.is_none()).map(|g| (g.intent_id.clone(), g.argv.join(" "))).collect();
+        assert_eq!(got.len(), want.len(), "{q}: {got:?}");
+        for ((id, argv), (want_id, want_argv)) in got.iter().zip(want) {
+            assert!(id == want_id && argv.contains(want_argv), "{q}: {id} `{argv}` should be {want_id} with `{want_argv}`; all: {got:?}");
+        }
+    }
+}
+
+#[test]
 fn a_part_page_reads_short_descriptions_and_value_labels() {
     // Rows drop a leading "The"; a missing value reads "Key name:", not "Which key name?".
     let cat = build_catalog(&Cli::command());
