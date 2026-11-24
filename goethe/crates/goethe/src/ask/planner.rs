@@ -108,9 +108,6 @@ impl PlanState {
         if let Some(meta) = find_shell_metachar(trimmed) {
             return Self::abstained(trimmed, &format!("Shell characters such as '{meta}' are not allowed; say it in words."), world);
         }
-        if let Some(word) = negation(trimmed) {
-            return Self::abstained(trimmed, &format!("Ask plans what to do, not what not to do ('{word}'); say what you want done."), world);
-        }
         if is_obvious_ood(trimmed) {
             return Self::abstained(trimmed, "That is not something Goethe does; goethe help lists what it does.", world);
         }
@@ -124,8 +121,14 @@ impl PlanState {
         let model_used = texts.iter().any(|(_, open)| open.first().is_some_and(|t| takes_model(catalog, &t.id)));
         let mut parts = Vec::new();
         let mut goals = Vec::new();
+        let mut negated = None;
         for (i, (text, open)) in texts.into_iter().enumerate() {
             let (options, about_model) = part_options(&text, open, model_ref.as_deref(), model_used, catalog);
+            if let Some(word) = negation(&text) {
+                negated.get_or_insert(word);
+                parts.push(PlanPart { text, options, left_out: true, ignored: Vec::new() });
+                continue;
+            }
             let Some(top) = options.first().cloned() else {
                 continue;
             };
@@ -141,9 +144,10 @@ impl PlanState {
             parts.push(PlanPart { text, options, left_out: false, ignored: Vec::new() });
         }
         if goals.is_empty() {
-            return Self::abstained(trimmed, "No Goethe command matches that request closely enough; goethe help lists the commands.", world);
+            let reason = negated.map_or_else(|| "No Goethe command matches that request closely enough; goethe help lists the commands.".to_string(), |w| format!("Ask plans what to do, not what not to do ('{w}'); say what you want done."));
+            return Self::abstained(trimmed, &reason, world);
         }
-        repeat_over_models(&mut goals, catalog, world, validate);
+        refer_back(&mut goals, catalog, world, validate);
         let mut plan = PlanState { raw_query: trimmed.to_string(), parts, goals, lines: Vec::new(), abstain: None, model_ref, world: world.clone() };
         plan.refresh(catalog, validate);
         plan
@@ -534,18 +538,23 @@ fn request_parts(request: &str, rank: &dyn Fn(&str) -> Vec<ScoredIntent>, catalo
     parts
 }
 
-fn repeat_over_models(goals: &mut Vec<PlanStep>, catalog: &CliCatalog, world: &World, validate: &Validate) {
-    // "each", "both", "them": a step that says one of these and binds no model repeats once per model the steps before it bound, on its model argument or flag.
+fn refer_back(goals: &mut Vec<PlanStep>, catalog: &CliCatalog, world: &World, validate: &Validate) {
+    // "it" is the model the step before bound; "each", "both", "them" repeat the step once per model the steps before bound; either goes on a step's model argument or flag when it binds none.
     let mut i = 0;
     while i < goals.len() {
-        let says_each = split_words(&goals[i].clause.to_ascii_lowercase()).iter().any(|w| matches!(w.as_str(), "each" | "both" | "them"));
+        let words = split_words(&goals[i].clause.to_ascii_lowercase());
+        let says_each = words.iter().any(|w| matches!(w.as_str(), "each" | "both" | "them"));
+        let says_it = words.iter().any(|w| w == "it");
         let binds = |g: &PlanStep| g.argv.iter().filter(|a| super::slots::is_model_value(a, world)).cloned().collect::<Vec<_>>();
         let mut before: Vec<String> = Vec::new();
         goals[..i].iter().flat_map(binds).for_each(|m| if !before.contains(&m) { before.push(m) });
+        if !says_each {
+            before = goals[..i].iter().rev().find_map(|g| binds(g).last().cloned()).filter(|_| says_it).into_iter().collect();
+        }
         let card = catalog.get(&goals[i].intent_id);
         let flag = card.and_then(|c| c.flags.iter().find(|f| matches!(f.kind, Some(Kind::Model | Kind::InstalledModel | Kind::ModelOrAll))));
         let slot = card.and_then(|c| c.model_arg()).map(|p| p.id.clone());
-        if !says_each || !binds(&goals[i]).is_empty() || before.is_empty() || (slot.is_none() && flag.is_none()) {
+        if !binds(&goals[i]).is_empty() || before.is_empty() || (slot.is_none() && flag.is_none()) {
             i += 1;
             continue;
         }

@@ -270,6 +270,20 @@ fn each_step_is_checked_against_the_state_the_steps_before_it_leave() {
 }
 
 #[test]
+fn it_means_the_model_before_and_a_negated_part_is_left_out() {
+    // "it" is the model the step before bound; a part that says not to do something is left out, never planned, and the rest still plans.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let it = plan("load qwen 7b, then chat with it");
+    assert!(it.goals.iter().any(|g| g.intent_id == "run" && g.argv.iter().any(|a| a == "Qwen/Qwen2.5-7B-Instruct")), "{:?}", it.goals.iter().map(|g| g.argv.join(" ")).collect::<Vec<_>>());
+    let p = plan("load mistral but don't share it");
+    assert_eq!(p.goals.iter().map(|g| g.argv.join(" ")).collect::<Vec<_>>(), ["goethe load mistralai/Mistral-7B-Instruct"]);
+    assert!(p.is_ready() && p.parts.iter().any(|x| x.left_out && x.text.contains("don't")), "{:?}", p.parts);
+}
+
+#[test]
 fn a_part_page_reads_short_descriptions_and_value_labels() {
     // Rows drop a leading "The"; a missing value reads "Key name:", not "Which key name?".
     let cat = build_catalog(&Cli::command());

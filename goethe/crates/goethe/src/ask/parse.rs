@@ -1,5 +1,29 @@
 // Refusals before ranking (shell characters, requests Goethe has nothing for) and the parsers for typed values in a request.
 
+fn quotes(s: &str) -> Vec<(usize, usize)> {
+    // Quoted spans as byte ranges of their two quote marks: a quote opens at the start of a word and closes at the end of one, so "let's" is no quote and an opener that never closes is none either.
+    let ends_word = |i: usize| s[i + 1..].chars().next().is_none_or(|c| c.is_whitespace() || ",.;:!?)".contains(c));
+    let mut spans = Vec::new();
+    let mut open: Option<(usize, char)> = None;
+    let mut prev = ' ';
+    for (i, ch) in s.char_indices() {
+        match open {
+            Some((at, q)) if ch == q && ends_word(i) => {
+                spans.push((at, i));
+                open = None;
+            }
+            None if (ch == '"' || ch == '\'') && prev.is_whitespace() => open = Some((i, ch)),
+            _ => {}
+        }
+        prev = ch;
+    }
+    spans
+}
+
+fn quoted(spans: &[(usize, usize)], i: usize) -> bool {
+    spans.iter().any(|(a, b)| (*a..=*b).contains(&i))
+}
+
 pub fn find_shell_metachar(s: &str) -> Option<&'static str> {
     // Reject shell chaining, piping, command substitution, and redirection outside quotes (and $( or ` anywhere).
     for always in ["$(", "`", "\n", "\r"] {
@@ -7,22 +31,8 @@ pub fn find_shell_metachar(s: &str) -> Option<&'static str> {
             return Some(always);
         }
     }
-    let mut quote: Option<char> = None;
-    for (i, ch) in s.char_indices() {
-        match quote {
-            Some(q) if ch == q => quote = None,
-            Some(_) => {}
-            None if ch == '"' || ch == '\'' => quote = Some(ch),
-            None => {
-                for pat in ["&&", "||", ";", "|", ">", "<"] {
-                    if s[i..].starts_with(pat) {
-                        return Some(pat);
-                    }
-                }
-            }
-        }
-    }
-    None
+    let spans = quotes(s);
+    s.char_indices().filter(|(i, _)| !quoted(&spans, *i)).find_map(|(i, _)| ["&&", "||", ";", "|", ">", "<"].into_iter().find(|p| s[i..].starts_with(p)))
 }
 
 pub fn is_obvious_ood(query: &str) -> bool {
@@ -51,24 +61,19 @@ pub fn is_obvious_ood(query: &str) -> bool {
 }
 
 pub fn split_parts(s: &str) -> Vec<String> {
-    // A request in parts: cut at the words "and" / "then" / "also" and after a word ending in a comma, all outside quotes ("X, Y and then Z").
+    // A request in parts: cut at the words "and" / "then" / "also" / "but" and after a word ending in a comma, all outside quotes ("X, Y and then Z").
+    let spans = quotes(s);
     let mut parts = Vec::new();
     let mut cur = String::new();
-    let mut quote: Option<char> = None;
     for word in s.split_whitespace() {
-        if quote.is_none() && matches!(word.to_ascii_lowercase().as_str(), "and" | "then" | "also") {
+        let outside = !quoted(&spans, word.as_ptr() as usize - s.as_ptr() as usize);
+        if outside && matches!(word.to_ascii_lowercase().as_str(), "and" | "then" | "also" | "but") {
             parts.push(std::mem::take(&mut cur));
             continue;
         }
-        for ch in word.chars() {
-            match quote {
-                Some(q) if ch == q => quote = None,
-                None if ch == '"' || ch == '\'' => quote = Some(ch),
-                _ => {}
-            }
-        }
+        let end = word.as_ptr() as usize - s.as_ptr() as usize + word.len() - 1;
         match word.strip_suffix(',') {
-            Some(head) if quote.is_none() => {
+            Some(head) if !quoted(&spans, end) => {
                 cur.push_str(head);
                 parts.push(std::mem::take(&mut cur));
             }
@@ -97,20 +102,19 @@ pub fn without_wish(s: &str) -> String {
 
 pub fn split_words(s: &str) -> Vec<String> {
     // Shell-like quote-preserving word splitter without running a shell.
+    let spans = quotes(s);
     let mut out = Vec::new();
     let mut cur = String::new();
-    let mut quote: Option<char> = None;
-    for ch in s.chars() {
-        match quote {
-            Some(q) if ch == q => quote = None,
-            Some(_) => cur.push(ch),
-            None if ch == '"' || ch == '\'' => quote = Some(ch),
-            None if ch.is_whitespace() => {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
+    for (i, ch) in s.char_indices() {
+        if spans.iter().any(|(a, b)| i == *a || i == *b) {
+            continue;
+        }
+        if ch.is_whitespace() && !quoted(&spans, i) {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
             }
-            None => cur.push(ch),
+        } else {
+            cur.push(ch);
         }
     }
     if !cur.is_empty() {
@@ -120,17 +124,7 @@ pub fn split_words(s: &str) -> Vec<String> {
 }
 
 pub fn find_quoted(text: &str) -> Option<String> {
-    for q in ['"', '\''] {
-        if let Some(a) = text.find(q) {
-            if let Some(b) = text[a + 1..].find(q) {
-                let inner = text[a + 1..a + 1 + b].trim();
-                if !inner.is_empty() {
-                    return Some(inner.to_string());
-                }
-            }
-        }
-    }
-    None
+    quotes(text).into_iter().map(|(a, b)| text[a + 1..b].trim()).find(|inner| !inner.is_empty()).map(str::to_string)
 }
 
 pub fn is_local_path(t: &str) -> bool {
@@ -328,6 +322,19 @@ mod tests {
         let _ = find_gpus("on gpu0 and GPU 1 with \u{65E5}\u{672C}\u{8A9E}");
         let _ = find_duration(&split_words(&format!("share for 2 hours {ellipsis}")));
         let _ = find_hf_or_path(&split_words("load ./\u{6A21}\u{578B}/foo"));
+    }
+
+    #[test]
+    fn a_quote_opens_at_a_word_start_and_closes_at_a_word_end() {
+        // An apostrophe inside a word ("let's") is no quote, and an opener that never closes is none either.
+        assert_eq!(split_parts("let's load qwen and share it"), ["let's load qwen", "share it"]);
+        assert_eq!(split_words("name it 'demo key', don't wait"), ["name", "it", "demo key,", "don't", "wait"]);
+        assert_eq!(find_quoted("let's call it 'demo key'").as_deref(), Some("demo key"));
+        assert_eq!(find_shell_metachar("let's go; rm x"), Some(";"));
+        assert_eq!(find_shell_metachar("call it 'a; b'"), None);
+        assert_eq!(split_words("'open never closes"), ["'open", "never", "closes"]);
+        assert_eq!(split_words("say 'it's fine' ok"), ["say", "it's fine", "ok"]);
+        assert_eq!(split_parts("load qwen but don't share it"), ["load qwen", "don't share it"]);
     }
 
     #[test]
