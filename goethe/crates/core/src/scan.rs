@@ -168,8 +168,7 @@ pub fn run(opts: ScanOpts) -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())?);
     }
     if pending > 0 {
-        eprintln!("re-run with --yes to add {pending} model(s), or run goethe models scan in a terminal to choose");
-        std::process::exit(3);
+        return Err(format!("{pending} model(s) not added: run goethe models scan in a terminal to choose\n{}", crate::host::NEEDS_YES));
     }
     if failed {
         return Err("some models could not be added".to_string());
@@ -243,7 +242,7 @@ fn hf_cache_models() -> Vec<(String, PathBuf)> {
             continue;
         };
         let snaps = e.path().join("snapshots");
-        let main = fs::read_to_string(e.path().join("refs/main")).ok().map(|r| snaps.join(r.trim()));
+        let main = fs::read_to_string(e.path().join("refs/main")).ok().filter(|r| is_plain_name(r.trim())).map(|r| snaps.join(r.trim()));
         let newest = || {
             fs::read_dir(&snaps).ok()?.flatten().max_by_key(|s| s.metadata().and_then(|m| m.modified()).ok()).map(|s| s.path())
         };
@@ -253,6 +252,11 @@ fn hf_cache_models() -> Vec<(String, PathBuf)> {
     }
     out.sort();
     out
+}
+
+fn is_plain_name(name: &str) -> bool {
+    // A commit hash from refs/main: one path component, never .., / or an absolute path.
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/')
 }
 
 pub fn register_found(home: &Path, f: &Found) -> Result<(), String> {
@@ -955,6 +959,14 @@ mod tests {
         let err = candidate_dirs(h, Some("nope__missing")).unwrap_err();
         assert!(err.contains("models"), "{err}");
         assert!(err.contains("goethe install") || err.contains("org__name") || err.contains("No such"), "{err}");
+    }
+
+    #[test]
+    fn a_cache_ref_names_one_snapshot_folder_only() {
+        assert!(is_plain_name("0123abcd"));
+        for bad in ["", ".", "..", "../../etc", "/etc", "a/b"] {
+            assert!(!is_plain_name(bad), "{bad:?}");
+        }
     }
 
     #[test]

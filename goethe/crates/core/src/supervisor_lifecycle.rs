@@ -101,15 +101,15 @@ pub fn graceful_shutdown(home: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn drain_inflight(model_ids: &[String], home: &Path) {
-    // Wait for in-flight mux requests of these models to finish, bounded by GOETHE_DRAIN_SECS.
+pub(super) fn drain_inflight(pending: impl Fn() -> usize, home: &Path) {
+    // Wait for the in-flight mux requests `pending` counts to finish, bounded by GOETHE_DRAIN_SECS.
     let max_secs: u64 = std::env::var("GOETHE_DRAIN_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(120);
     let deadline = Instant::now() + Duration::from_secs(max_secs);
     loop {
-        let pending: usize = model_ids.iter().map(|mid| crate::inflight::count(mid)).sum();
+        let pending = pending();
         if pending == 0 {
             return;
         }
@@ -124,19 +124,35 @@ pub(super) fn drain_inflight(model_ids: &[String], home: &Path) {
     }
 }
 
-pub(super) fn claim_for_unload(con: &mut Connection, model: Option<&str>, next: &str) -> rusqlite::Result<Vec<Inst>> {
-    // One immediate transaction: drop desired slots and tombstones, collect live rows, mark exactly those DRAINING/STOPPING.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target<'a> {
+    All,
+    Model(&'a str),
+    Instance(&'a str),
+}
+
+pub(super) fn claim_for_unload(con: &mut Connection, target: Target, next: &str) -> rusqlite::Result<Vec<Inst>> {
+    // One immediate transaction: drop the desired slots and tombstones of the target, collect its live rows, mark exactly those DRAINING/STOPPING.
     let tx = con.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let only = "(?1 IS NULL OR model_id = ?1)";
-    tx.execute(&format!("DELETE FROM desired_loads WHERE {only}"), [model])?;
+    let (model, instance) = match target {
+        Target::All => (None, None),
+        Target::Model(m) => (Some(m), None),
+        Target::Instance(i) => (None, Some(i)),
+    };
+    let only = "(?1 IS NULL OR model_id = ?1) AND (?2 IS NULL OR instance_id = ?2)";
+    tx.execute(
+        "DELETE FROM desired_loads WHERE (?1 IS NULL OR model_id = ?1)
+           AND (?2 IS NULL OR slot_key = (SELECT COALESCE(slot_key, model_id) FROM loaded_instances WHERE instance_id = ?2))",
+        rusqlite::params![model, instance],
+    )?;
     tx.execute(
         &format!(
             "DELETE FROM loaded_instances
              WHERE (status IN ('FAILED', 'CANCELLED') OR (status = 'RESTARTING' AND pid = 0)) AND {only}"
         ),
-        [model],
+        rusqlite::params![model, instance],
     )?;
-    let list = insts(&tx, &format!("status IN {LIVE} AND {only}"), &[&model])?;
+    let list = insts(&tx, &format!("status IN {LIVE} AND {only}"), &[&model, &instance])?;
     for i in &list {
         tx.execute(
             "UPDATE loaded_instances SET status = ?2
@@ -153,19 +169,32 @@ pub fn handle_unload(
     all: bool,
     force: bool,
 ) -> Result<Value, (i32, String)> {
+    // Every instance of one model, or of all models.
+    match (all, model_id.as_deref()) {
+        (true, _) => unload(Target::All, force),
+        (false, Some(m)) => unload(Target::Model(m), force),
+        (false, None) => Err((2, "model_id required".to_string())),
+    }
+}
+
+pub fn handle_unload_instance(instance_id: &str, force: bool) -> Result<Value, (i32, String)> {
+    // One instance; the model's other instances keep serving.
+    unload(Target::Instance(instance_id), force)
+}
+
+fn unload(target: Target, force: bool) -> Result<Value, (i32, String)> {
     // Clear desired slots first (even with no instances), then drain unless forced and stop every match (verified).
-    let model = match (all, model_id.as_deref()) {
-        (true, _) => None,
-        (false, Some(m)) => Some(m),
-        (false, None) => return Err((2, "model_id required".to_string())),
-    };
     let home = goethe_home();
     let t0 = Instant::now();
-    coordinator::cancel_queued(model);
+    match target {
+        Target::All => coordinator::cancel_queued(None),
+        Target::Model(m) => coordinator::cancel_queued(Some(m)),
+        Target::Instance(_) => {}
+    }
     let mut con = db::open(&home).map_err(|e| (1, e.to_string()))?;
     let list = {
         let _plan = coordinator::plan_lock();
-        claim_for_unload(&mut con, model, if force { "STOPPING" } else { "DRAINING" })
+        claim_for_unload(&mut con, target, if force { "STOPPING" } else { "DRAINING" })
             .map_err(|e| (1, e.to_string()))?
     };
     for i in list.iter().filter(|i| i.status == "STARTING") {
@@ -176,13 +205,12 @@ pub fn handle_unload(
         return Ok(Value::Null);
     }
     if !force {
-        let models: Vec<String> = list
-            .iter()
-            .map(|i| i.model_id.clone())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        drain_inflight(&models, &home);
+        if let Target::Instance(id) = target {
+            drain_inflight(|| crate::inflight::instance_count(id), &home);
+        } else {
+            let models: HashSet<&str> = list.iter().map(|i| i.model_id.as_str()).collect();
+            drain_inflight(|| models.iter().map(|m| crate::inflight::count(m)).sum(), &home);
+        }
         for i in &list {
             let _ = con.execute(
                 "UPDATE loaded_instances SET status = 'STOPPING' WHERE instance_id = ?1 AND status = 'DRAINING'",

@@ -83,7 +83,7 @@ fn minimal_argv(card: &IntentCard) -> Vec<String> {
             Kind::Domain => "example.com".into(),
             Kind::Cidr => "203.0.113.7/32".into(),
             Kind::Gpu => "gpu0".into(),
-            Kind::Key | Kind::KeyId | Kind::KeyName => "demo".into(),
+            Kind::Key | Kind::KeyId | Kind::KeyName | Kind::TrustKey => "demo".into(),
             Kind::Alias | Kind::NewAlias => "fast".into(),
             Kind::Folder => "/tmp".into(),
             Kind::LogTarget => "goethed".into(),

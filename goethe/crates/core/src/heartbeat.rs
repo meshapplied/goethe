@@ -308,6 +308,7 @@ mod tests {
             let u = &body(i)["usage"];
             assert_eq!((u["models"][0]["t"].as_i64(), u["models"][0]["completion_tokens"].as_i64()), (Some(t), Some(14844)), "sent until accepted");
             assert!(u["models"][0].get("prompt_tokens").is_some() && body(i)["apis"].is_array());
+            assert_eq!(u["requests"][0]["modality"].as_str(), Some("chat"), "per-dimension rows go to the console with the minute");
         }
         let after = &body(2)["usage"];
         assert!(after.is_null() || after["models"].as_array().unwrap().is_empty(), "an accepted minute is not sent again: {after}");

@@ -100,6 +100,10 @@ pub fn key_names() -> Vec<CompletionCandidate> {
     keys().iter().map(|(id, name)| candidate(name, id)).collect()
 }
 
+pub fn trust_keys() -> Vec<CompletionCandidate> {
+    goethe_core::client::remote::status(&goethe_home()).trust.iter().map(|t| candidate(&t.key_id, &format!("{} ({})", t.user_id, t.cap.name()))).collect()
+}
+
 fn script(shell: Shell) -> Result<String, String> {
     // The shell's registration script, as goethe itself prints it with COMPLETE set; it calls goethe from PATH at each Tab.
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;

@@ -408,6 +408,9 @@ dependencies = [
  "chrono",
  "flate2",
  "goethe-proto",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "nvml-wrapper",
  "ring",
@@ -415,6 +418,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "toml",
  "ureq",
 ]
@@ -434,6 +438,7 @@ name = "goethed"
 version = "0.3.6"
 dependencies = [
  "goethe-core",
+ "goethe-proto",
  "http-body-util",
  "hyper",
  "hyper-util",

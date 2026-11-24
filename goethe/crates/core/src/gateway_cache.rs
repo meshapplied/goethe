@@ -103,7 +103,7 @@ impl Snapshot {
 }
 
 fn variant_of(dir: &Path, card: &toml::Value) -> String {
-    // The weights' quantization or precision as a short tag for the usage log: the config's quant method and algorithm, ModelOpt's algorithm, gguf, or the dtype.
+    // The weights' quantization or precision as a short tag for the usage log: the config's quant method and algorithm, ModelOpt's algorithm, gguf, or the dtype; the files are the model's own, so only [a-z0-9._-] is kept.
     let json = |f: &str| std::fs::read_to_string(dir.join(f)).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
     let text = |v: Option<&serde_json::Value>| v.and_then(|x| x.as_str()).map(str::to_ascii_lowercase);
     let cfg = json("config.json");
@@ -118,7 +118,7 @@ fn variant_of(dir: &Path, card: &toml::Value) -> String {
         .or_else(|| (card.get("model").and_then(|m| m.get("format")).and_then(|f| f.as_str()) == Some("gguf")).then(|| "gguf".to_string()))
         .or_else(|| text(cfg.as_ref().and_then(|c| c.get("torch_dtype"))))
         .unwrap_or_default();
-    tag.chars().take(64).collect()
+    tag.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')).take(64).collect()
 }
 
 struct DbState {
@@ -376,6 +376,19 @@ fn write_usage(home: &Path, db: &Mutex<Option<DbState>>, pending: &HashMap<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_variant_is_the_quantization_else_the_dtype_and_only_tag_characters() {
+        let d = tempfile::tempdir().unwrap();
+        let card: toml::Value = toml::from_str("[model]\nformat = \"safetensors\"").unwrap();
+        std::fs::write(d.path().join("config.json"), r#"{"torch_dtype":"bfloat16"}"#).unwrap();
+        assert_eq!(variant_of(d.path(), &card), "bfloat16");
+        std::fs::write(d.path().join("config.json"), r#"{"quantization_config":{"quant_method":"ModelOpt","quant_algo":"NVFP4\u001b[2J x"}}"#).unwrap();
+        assert_eq!(variant_of(d.path(), &card), "modelopt-nvfp42jx");
+        std::fs::remove_file(d.path().join("config.json")).unwrap();
+        let gguf: toml::Value = toml::from_str("[model]\nformat = \"gguf\"").unwrap();
+        assert_eq!(variant_of(d.path(), &gguf), "gguf");
+    }
 
     fn insert_key(con: &Connection, key_id: &str, token: &str) {
         con.execute(

@@ -1,6 +1,7 @@
 // Passkey (WebAuthn ES256) assertions: what the browser sends, and the one check the platform and nodes both run on it.
 
-use crate::{sha256, unb64};
+use crate::action::Kind;
+use crate::{b64, hex, sha256, unb64};
 use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_ASN1};
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +53,45 @@ pub fn link_challenge(device_code_hash: &str, install_hash: &str) -> [u8; 32] {
     sha256(format!("goethe-link-v1\n{device_code_hash}\n{install_hash}").as_bytes())
 }
 
+pub fn pair_challenge(key_id: &str, public_key: &str, user_id: &str, cap: Kind) -> [u8; 32] {
+    // What a person signs in the console to hand an unattended node their passkey with this cap.
+    sha256(format!("goethe-pair-v1\n{key_id}\n{public_key}\n{user_id}\n{}", cap.name()).as_bytes())
+}
+
+pub fn key_fingerprint(public_key_b64: &str) -> String {
+    // The short form people compare between goethe login and the console: the first 16 hex characters of sha256 of the raw key.
+    hex(&sha256(&unb64(public_key_b64).unwrap_or_default()))[..16].to_string()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pairing {
+    pub key_id: String,
+    pub public_key: String,
+    pub user_id: String,
+    pub cap: Kind,
+    pub assertion: Assertion,
+}
+
+impl Pairing {
+    pub fn decode(text: &str) -> Option<Pairing> {
+        // The pairing string the console shows: base64url of this JSON.
+        serde_json::from_slice(&unb64(text.trim())?).ok()
+    }
+
+    pub fn encode(&self) -> String {
+        b64(&serde_json::to_vec(self).unwrap_or_default())
+    }
+
+    pub fn pair_challenge(&self) -> [u8; 32] {
+        pair_challenge(&self.key_id, &self.public_key, &self.user_id, self.cap)
+    }
+
+    pub fn signed(&self, challenge: &[u8], rp_id: &str, origin: &str) -> bool {
+        // True when this key itself made the assertion over `challenge`, as a pairing string or a link's trust root carries it.
+        self.assertion.key_id == self.key_id && !self.user_id.is_empty() && verify(&self.assertion, &self.public_key, challenge, rp_id, origin)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,5 +105,24 @@ mod tests {
         let a = pk.assert(&c, RP_ID, CONSOLE_ORIGIN, true);
         assert!(verify(&a, &pk.public_key_b64(), &c, RP_ID, CONSOLE_ORIGIN));
         assert!(!verify(&a, &pk.public_key_b64(), &link_challenge("dch", "other"), RP_ID, CONSOLE_ORIGIN));
+    }
+
+    #[test]
+    fn a_pairing_string_binds_key_user_and_cap() {
+        let pk = Passkey::new("k1");
+        let c = pair_challenge("k1", &pk.public_key_b64(), "user1", Kind::Change);
+        let p = Pairing { key_id: "k1".into(), public_key: pk.public_key_b64(), user_id: "user1".into(), cap: Kind::Change, assertion: pk.assert(&c, RP_ID, CONSOLE_ORIGIN, true) };
+        let back = Pairing::decode(&p.encode()).unwrap();
+        assert_eq!(back, p);
+        assert!(back.signed(&back.pair_challenge(), RP_ID, CONSOLE_ORIGIN));
+        let mut raised = back.clone();
+        raised.cap = Kind::Trust;
+        assert!(!raised.signed(&raised.pair_challenge(), RP_ID, CONSOLE_ORIGIN), "a raised cap breaks the signature");
+        let mut other = back.clone();
+        other.user_id = "user2".into();
+        assert!(!other.signed(&other.pair_challenge(), RP_ID, CONSOLE_ORIGIN));
+        assert!(Pairing::decode("not base64 json").is_none());
+        assert_eq!(key_fingerprint(&pk.public_key_b64()).len(), 16);
+        assert_ne!(key_fingerprint(&pk.public_key_b64()), key_fingerprint(&Passkey::new("k2").public_key_b64()));
     }
 }

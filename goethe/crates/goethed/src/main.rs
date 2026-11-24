@@ -63,7 +63,12 @@ fn dispatch(req: Request) -> (bool, i32, String, String, Value) {
                 .get("force")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            match supervisor::handle_unload(model_id, all, force) {
+            let instance = req.params.get("instance_id").and_then(|v| v.as_str());
+            let done = match instance {
+                Some(id) => supervisor::handle_unload_instance(id, force),
+                None => supervisor::handle_unload(model_id, all, force),
+            };
+            match done {
                 Ok(v) => (true, 0, String::new(), String::new(), v),
                 Err((code, msg)) => (false, code, String::new(), msg, Value::Null),
             }

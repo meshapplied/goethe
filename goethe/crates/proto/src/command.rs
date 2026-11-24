@@ -48,6 +48,14 @@ pub struct SignedCommand {
     pub assertion: Assertion,
 }
 
+impl SignedCommand {
+    pub fn cmd_id(&self) -> Option<String> {
+        // The command id before any check, so a refusal can name the command it refuses.
+        let body: Value = serde_json::from_slice(&unb64(&self.body_b64)?).ok()?;
+        body.get("cmd_id")?.as_str().map(str::to_string)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustEntry {
     pub key_id: String,
@@ -295,6 +303,7 @@ mod tests {
         let signed = pk.sign(&[cmd("n1", "model.load", load()), cmd("n2", "model.load", load())]);
         let ok = check(&signed[0], &trust, ALL, NOW).unwrap();
         assert_eq!(ok.command.cmd_id, "c-n1");
+        assert_eq!(signed[1].cmd_id().as_deref(), Some("c-n2"));
         assert_eq!(ok.action, Action::ModelLoad(crate::ModelLoad { model_id: "qwen3-8b".into(), gpus: None, ctx: None, max_conc: None, tp: None }));
         assert_eq!(check(&signed[1], &trust, ALL, NOW), Err(Refusal::WrongNode));
     }

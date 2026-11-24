@@ -96,7 +96,8 @@ fn confirm(question: &str, default_yes: bool, yes: bool) -> Result<bool, String>
 }
 
 fn is_everyone(cidr: &str) -> bool {
-    cidr.ends_with("/0")
+    // Judged on the canonical form, so 1.2.3.4/00 counts as the /0 it parses to.
+    security::canonical_cidr(cidr).unwrap_or_else(|_| cidr.to_string()).ends_with("/0")
 }
 
 const RESTRICT_QUESTION: &str = "Restrict API access to specific IP addresses?";
@@ -496,6 +497,7 @@ mod tests {
         assert_eq!(Mode::parse("VPN"), Ok(Mode::Vpn));
         assert!(Mode::parse("lan").is_err());
         assert!(is_everyone("0.0.0.0/0") && is_everyone("::/0") && !is_everyone("203.0.113.7/32"));
+        assert!(is_everyone("1.2.3.4/00") && is_everyone("::1/000"), "a zero prefix written with more digits is still everyone");
         assert_eq!(Net::new("10.1.2.3".parse().unwrap(), 16).to_string(), "10.1.0.0/16");
     }
 

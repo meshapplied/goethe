@@ -1,7 +1,7 @@
 diff --git a/goethe/crates/core/src/install.rs b/goethe/crates/core/src/install.rs
 --- a/goethe/crates/core/src/install.rs
 +++ b/goethe/crates/core/src/install.rs
-@@ -312,8 +312,10 @@
+@@ -278,8 +278,10 @@
                  break 'packed false;
              }
              crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
@@ -12,5 +12,5 @@ diff --git a/goethe/crates/core/src/install.rs b/goethe/crates/core/src/install.
 +                _ => break 'packed false,
 +            };
              if let Some(why) = refused_before_download(home, &plan, &crate::packs::python_runner(home)) {
-                 println!("{}", refuse(why));
+                 println!("{}", refuse(why)?);
                  break 'packed false;

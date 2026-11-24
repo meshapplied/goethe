@@ -16,6 +16,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 flate2 = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 toml = "0.8"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 
@@ -23,4 +27,7 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 test-release-key = []
 
 [dev-dependencies]
+goethe-proto = { path = "../proto", features = ["testkit"] }
+hyper = { version = "1", features = ["client"] }
 tempfile = "3"
+tokio = { version = "1", features = ["io-util", "rt-multi-thread"] }

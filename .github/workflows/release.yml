@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   guard:
@@ -302,7 +302,9 @@ jobs:
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    # Approval already happened on merge (signing). Publish only uploads the signed artifact.
+    # Approval already happened on merge (signing). Publish only uploads the signed artifact, and is the one job that may write to the repository.
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

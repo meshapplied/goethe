@@ -17,10 +17,10 @@ pub use action::{
 };
 pub use command::{prepare, verify, Batch, BATCH_SCHEMA, COMMAND_SCHEMA, Command, CommandEvent, Expect, Policy, Prepared, Refusal, SignedCommand, TrustEntry, Verified};
 pub use install::{install_hash, verify_connect, InstallKey};
-pub use route::{Usage, INSTANCE_HEADER, KEY_ID_HEADER, REQUEST_ID_HEADER, USAGE_TRAILER};
+pub use route::{Usage, DISPATCH_HEADER, INSTANCE_HEADER, KEY_ID_HEADER, REQUEST_ID_HEADER, USAGE_TRAILER, USER_HEADER};
 pub use seal::{seal, Sealed};
-pub use state::{Ack, Instance, Remote, StateEvent, STATE_SCHEMA};
-pub use webauthn::{link_challenge, Assertion};
+pub use state::{Instance, Remote, StateEvent, STATE_SCHEMA};
+pub use webauthn::{key_fingerprint, link_challenge, pair_challenge, Assertion, Pairing};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;

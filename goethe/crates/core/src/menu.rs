@@ -1551,7 +1551,13 @@ fn access_page(tty: &mut Tty) -> Result<(), String> {
             None => return Ok(()),
             Some(0) => {
                 match crate::keys_menu::session() {
-                    Ok(session) => tty.quit = session.exit,
+                    Ok(session) => match session.summary() {
+                        Some(text) => tty.inside(|| {
+                            println!("{text}");
+                            Ok(())
+                        })?,
+                        None => tty.quit = session.exit,
+                    },
                     Err(e) => report(Err(e)),
                 }
                 tty.resume()?;
@@ -2130,6 +2136,7 @@ fn apply_picks(removals: &[String], installs: &[String]) -> Result<(), String> {
             failed.push(id.clone());
         }
     }
+    crate::step::set_compact(false);
     match failed.len() {
         0 => Ok(()),
         _ => Err(format!("not done: {}", failed.join(", "))),

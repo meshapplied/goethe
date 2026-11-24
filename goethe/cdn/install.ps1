@@ -274,16 +274,12 @@ function Enable-SystemdInWsl {
     $script = @'
 set -euo pipefail
 conf=/etc/wsl.conf
-if [[ -f "$conf" ]] && grep -q '^\[boot\]' "$conf" && grep -Eq '^[[:space:]]*systemd[[:space:]]*=[[:space:]]*true' "$conf"; then
+touch "$conf"
+if awk '/^\[/{b=($0=="[boot]")} b && /^[[:space:]]*systemd[[:space:]]*=[[:space:]]*true[[:space:]]*$/{f=1} END{exit !f}' "$conf"; then
   exit 0
 fi
 tmp="$(mktemp)"
-if [[ -f "$conf" ]]; then
-  awk 'BEGIN{skip=0} /^\[/{skip=($0=="[boot]")} !skip{print}' "$conf" >"$tmp"
-else
-  : >"$tmp"
-fi
-printf '\n[boot]\nsystemd=true\n' >>"$tmp"
+awk '/^\[/{b=($0=="[boot]")} b && /^[[:space:]]*systemd[[:space:]]*=/{next} {print} $0=="[boot]" && !d{print "systemd=true"; d=1} END{if(!d) printf "\n[boot]\nsystemd=true\n"}' "$conf" >"$tmp"
 cp "$tmp" "$conf"
 rm -f "$tmp"
 '@
@@ -325,50 +321,42 @@ function Show-NvidiaDriverHint {
     Write-Goethe 'never install a Linux NVIDIA driver inside WSL'
 }
 
+function Test-PkgUrl([string]$Url) {
+    # The same rule as install.sh: https, or plain http only for this machine or with GOETHE_ALLOW_HTTP=1, since install.sh itself comes from this URL.
+    if ($Url -match '^https://') { return }
+    if ($Url -match '^http://(localhost|127\.\d+\.\d+\.\d+|\[::1\])([:/]|$)' -or $env:GOETHE_ALLOW_HTTP -eq '1') { return }
+    Die "GOETHE_PKG_URL must be an https:// URL, got $Url"
+}
+
 function Invoke-LinuxInstaller {
-    # Same install.sh as Linux and macOS; Windows only bootstraps WSL.
+    # Same install.sh as Linux and macOS; Windows only bootstraps WSL. Settings and secrets reach Ubuntu through WSLENV, never on a command line.
     param([string[]]$LinuxArgs)
     $pkg = $env:GOETHE_PKG_URL
     if (-not $pkg) { $pkg = $Script:DefaultPkgUrl }
     $pkg = $pkg.TrimEnd('/')
+    Test-PkgUrl $pkg
+    $env:GOETHE_PKG_URL = $pkg
     Write-Goethe "running install.sh inside $Script:Distro (same installer as Linux/macOS)"
     Write-Log "GOETHE_PKG_URL=$pkg"
 
-    $export = New-Object System.Collections.Generic.List[string]
-    $export.Add("export GOETHE_PKG_URL='$pkg'")
-    $hasAuth = $false
-    foreach ($a in $LinuxArgs) {
-        if ($a -eq '--authkey' -or $a.StartsWith('--authkey=')) { $hasAuth = $true }
+    $forward = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $LinuxArgs.Count; $i++) {
+        $a = $LinuxArgs[$i]
+        if ($a -eq '--authkey') { $env:GOETHE_AUTHKEY = $LinuxArgs[$i + 1]; $i++ }
+        elseif ($a.StartsWith('--authkey=')) { $env:GOETHE_AUTHKEY = $a.Substring(10) }
+        else { $forward.Add($a) }
     }
-    if ($env:GOETHE_AUTHKEY) {
-        $hasAuth = $true
-        # Single-quote for bash; refuse values that break out of the quote.
-        if ($env:GOETHE_AUTHKEY -match "'") { Die 'GOETHE_AUTHKEY must not contain a single quote' }
-        $export.Add("export GOETHE_AUTHKEY='$($env:GOETHE_AUTHKEY)'")
-    }
-    if ($env:GOETHE_PLATFORM_URL) {
-        if ($env:GOETHE_PLATFORM_URL -match "'") { Die 'GOETHE_PLATFORM_URL must not contain a single quote' }
-        $export.Add("export GOETHE_PLATFORM_URL='$($env:GOETHE_PLATFORM_URL)'")
-    }
-    if ($env:GOETHE_HOME) {
-        if ($env:GOETHE_HOME -match "'") { Die 'GOETHE_HOME must not contain a single quote' }
-        $export.Add("export GOETHE_HOME='$($env:GOETHE_HOME)'")
-    }
-    if (-not $hasAuth -and -not $env:GOETHE_LOGIN) {
-        $export.Add('export GOETHE_LOGIN=0')
-    } elseif ($env:GOETHE_LOGIN) {
-        if ($env:GOETHE_LOGIN -match "'") { Die 'GOETHE_LOGIN must not contain a single quote' }
-        $export.Add("export GOETHE_LOGIN='$($env:GOETHE_LOGIN)'")
-    }
+    if (-not $env:GOETHE_AUTHKEY -and -not $env:GOETHE_LOGIN) { $env:GOETHE_LOGIN = '0' }
+    $names = @('GOETHE_PKG_URL', 'GOETHE_AUTHKEY', 'GOETHE_PKG_TOKEN', 'GOETHE_PLATFORM_URL', 'GOETHE_HOME', 'GOETHE_LOGIN', 'GOETHE_VERSION', 'GOETHE_ALLOW_HTTP')
+    $pass = @($names | Where-Object { [Environment]::GetEnvironmentVariable($_) } | ForEach-Object { "$_/u" })
+    if ($env:WSLENV) { $pass = @($env:WSLENV) + $pass }
+    $env:WSLENV = $pass -join ':'
 
-    $argStr = ($LinuxArgs | ForEach-Object {
-        if ($_ -match "[\s`"]") { "'" + ($_ -replace "'", "'\''") + "'" } else { $_ }
-    }) -join ' '
+    $argStr = ($forward | ForEach-Object { "'" + ($_ -replace "'", "'\''") + "'" }) -join ' '
 
     $bash = @"
 set -euo pipefail
-$($export -join "`n")
-curl -fsSL "$pkg/install.sh" | bash -s -- $argStr
+curl -fsSL "`${GOETHE_PKG_URL}/install.sh" | bash -s -- $argStr
 command -v goethe >/dev/null
 goethe --version
 "@

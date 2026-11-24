@@ -540,17 +540,26 @@ fn add_columns<R: Row>(con: &Connection) -> rusqlite::Result<()> {
         let have: HashSet<String> =
             con.prepare(&format!("PRAGMA table_info({table})"))?.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<_>>()?;
         for c in R::COLS.iter().filter(|c| !have.contains(**c)) {
-            con.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {c};"))?;
+            add_column(con, &table, c)?;
         }
     }
     Ok(())
+}
+
+fn add_column(con: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
+    // Another process (goethed and the CLI after an upgrade) may add the same column first; that is not an error.
+    con.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column};")).or_else(|e| {
+        let added = con.prepare(&format!("SELECT {column} FROM {table} LIMIT 0")).is_ok();
+        if added { Ok(()) } else { Err(e) }
+    })
 }
 
 pub fn ensure_tables(con: &Connection) -> rusqlite::Result<()> {
     // New tables and columns need no schema version bump: an older goethe opens the database and never looks at them.
     con.execute_batch(&format!("{}{}{}{}{}", ddl::<Requests>(), ddl::<KeyRequests>(), ddl::<Traffic>(), ddl::<Gpu>(), ddl::<Host>()))?;
     add_columns::<Requests>(con)?;
-    add_columns::<KeyRequests>(con)
+    add_columns::<KeyRequests>(con)?;
+    add_columns::<Traffic>(con)
 }
 
 fn select<R: Row>(con: &Connection, table: &str, filter: &str, args: &[Value]) -> rusqlite::Result<Vec<(i64, String, R)>> {
@@ -1054,6 +1063,7 @@ pub(crate) fn put_minute_for_test(con: &Connection, t: i64, model: &str, complet
     let mut r = Requests::default();
     r.add(&Sample::new(200, false, 1.0, Some(0.1), 1, completion));
     put(con, "minute", t, model, &r, true).unwrap();
+    put(con, "minute", t, &Dims { model: model.into(), modality: "chat".into(), ..Dims::default() }.key(), &Traffic(r), true).unwrap();
 }
 
 fn report_at(con: &Connection, now: i64, written_to: i64) -> Option<Report> {
@@ -1276,6 +1286,8 @@ mod tests {
         con.execute_batch("INSERT INTO usage_minute (t, k, requests, prompt_tokens, latency_hist) VALUES (60, 'm', 2, 7, '0,2');").unwrap();
         ensure_tables(&con).unwrap();
         ensure_tables(&con).unwrap();
+        add_column(&con, "usage_minute", "cached_tokens").expect("a column another process added first is not an error");
+        assert!(add_column(&con, "no_such_table", "x").is_err());
         let rows = select::<Requests>(&con, "minute", "", &[]).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].2.requests, rows[0].2.prompt_tokens, rows[0].2.cached_tokens, rows[0].2.latency_hist.clone()), (2, 7, 0, vec![0, 2]));

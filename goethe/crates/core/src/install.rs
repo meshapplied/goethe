@@ -271,23 +271,17 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             // Only the files the pack was built for, at its pinned revision; a pack no allowed GPU runs is refused from its manifest before anything is installed, the engine layer once, on first use.
             let token = || Ok(choice.creds.token.expose().to_string());
             let broker = crate::packs::HttpBroker::new(&choice.creds.platform_url, &token);
-            let refuse = |why: String| match pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why, fallback_allowed(opts.fallback)) {
-                Ok(line) => line,
-                Err(refusal) => {
-                    eprintln!("{refusal}");
-                    std::process::exit(3);
-                }
-            };
+            let refuse = |why: String| pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why, fallback_allowed(opts.fallback));
             let early = crate::packs::unverified_prefix(&opts.model_id, &choice.offer.arch, &broker).ok().flatten().and_then(|(_, prefix)| sku_refused(home, &prefix));
             if let Some(why) = early {
-                println!("{}", refuse(why));
+                println!("{}", refuse(why)?);
                 break 'packed false;
             }
             crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
             let plan = crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home))?
                 .ok_or_else(|| format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch))?;
             if let Some(why) = refused_before_download(home, &plan, &crate::packs::python_runner(home)) {
-                println!("{}", refuse(why));
+                println!("{}", refuse(why)?);
                 break 'packed false;
             }
             let rev = choice.offer.revision.clone();
@@ -916,13 +910,20 @@ fn refused_before_download(home: &Path, plan: &crate::packs::Plan, run: crate::p
     if let Some(why) = sku_refused(home, &plan.prefix) {
         return Some(why);
     }
-    let work = home.join("packs");
+    let packs = home.join("packs");
+    let work = match fs::create_dir_all(&packs).map_err(|e| e.to_string()).and_then(|()| crate::paths::private_dir_in(&packs, "check")) {
+        Ok(w) => w,
+        Err(e) => return Some(format!("the kernel pack could not be checked here ({e})")),
+    };
     let (prefix, sig) = (work.join("check.prefix"), work.join("check.sig"));
-    fs::write(&prefix, &plan.prefix).ok()?;
-    fs::write(&sig, serde_json::to_vec(&plan.entry.sig).ok()?).ok()?;
-    let why = pack_runs(&prefix, Some(&sig), run);
+    let written = fs::write(&prefix, &plan.prefix).and_then(|()| fs::write(&sig, serde_json::to_vec(&plan.entry.sig).unwrap_or_default()));
+    let why = match written {
+        Ok(()) => pack_runs(&prefix, Some(&sig), run),
+        Err(e) => Some(format!("the kernel pack could not be checked here ({e})")),
+    };
     let _ = fs::remove_file(&prefix);
     let _ = fs::remove_file(&sig);
+    let _ = fs::remove_dir(&work);
     why
 }
 
@@ -1613,8 +1614,7 @@ pub fn send_load(mut params: Value) -> Result<crate::rpc::RpcReply, String> {
     if reply.code == 3 {
         print_reply_text(&reply);
         if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
-            eprintln!("not loading next to processes goethe did not start: re-run with --yes (no terminal to ask on)");
-            std::process::exit(3);
+            return Err(format!("not loading next to processes goethe did not start\n{}", crate::host::NEEDS_YES));
         }
         eprint!("Load alongside these processes? [y/N] ");
         std::io::stderr().flush().ok();

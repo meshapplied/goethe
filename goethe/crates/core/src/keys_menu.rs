@@ -885,14 +885,17 @@ fn carry_out(app: &mut App, effect: Effect, made: &mut Vec<(String, String)>) ->
     let focus_right = matches!(effect, Effect::Save { .. } | Effect::Rotate { .. });
     let right = app.right;
     match result {
-        Ok(msg) => {
-            app.reload(keys()?, hover.as_deref());
-            app.focus_right = focus_right;
-            if focus_right {
-                app.right = right.min(app.fields().len().saturating_sub(1));
+        Ok(msg) => match keys() {
+            Ok(list) => {
+                app.reload(list, hover.as_deref());
+                app.focus_right = focus_right;
+                if focus_right {
+                    app.right = right.min(app.fields().len().saturating_sub(1));
+                }
+                app.status = msg;
             }
-            app.status = msg;
-        }
+            Err(e) => app.status = format!("{msg} The list could not be read again: {e}"),
+        },
         Err(e) => app.status = format!("Not done: {e}"),
     }
     Ok(())

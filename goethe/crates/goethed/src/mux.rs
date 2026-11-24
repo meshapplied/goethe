@@ -35,12 +35,13 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, UnixListener};
+use tokio::sync::oneshot;
 
 type MuxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 pub type Upstream = Client<HttpConnector, Full<Bytes>>;
-type MuxRef = &'static Mux;
+pub type MuxRef = &'static Mux;
 
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_IDLE: Duration = Duration::from_secs(4);
@@ -52,6 +53,7 @@ const SSE_LINE_CAP: usize = 1 << 20;
 const REBUILD_CAP: usize = 64 << 20;
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 const X_SESSION_ID: HeaderName = HeaderName::from_static("x-session-id");
+const ROUTER_MS_CAP: u64 = 600_000;
 
 pub struct Mux {
     pub cache: GatewayCache,
@@ -285,7 +287,7 @@ async fn api(m: MuxRef, req: Request<Incoming>, path: &str, rid: &str, public: b
         Api::Models => list_models(m, &key),
         Api::Model(id) => get_model(m, &key, &id),
         Api::ModelInfo { group } => model_info(m, &key, group),
-        Api::Proxy(upstream) => route_post(m, req, &upstream, &key, rid, public).await,
+        Api::Proxy(upstream) => route_post(m, req, &upstream, Caller::Local { key: &key, public }, rid, None).await,
     }
 }
 
@@ -418,6 +420,7 @@ struct Finish {
     started: Instant,
     dims: Dims,
     router_ms: Option<f64>,
+    trailer: Option<oneshot::Sender<HeaderMap>>,
 }
 
 impl Finish {
@@ -455,8 +458,88 @@ impl Finish {
         if let Some(t) = ttft {
             metrics::record_ttft(&self.label, t);
         }
-        self.m.cache.record_usage(&self.key_id, u.prompt, u.completion);
+        if !self.key_id.is_empty() {
+            self.m.cache.record_usage(&self.key_id, u.prompt, u.completion);
+        }
     }
+}
+
+pub struct Routed {
+    pub request_id: String,
+    pub key_id: String,
+    pub user_id: String,
+    pub dispatch_ms: Option<u64>,
+    pub instance: Option<String>,
+}
+
+impl Routed {
+    fn from_headers(h: &HeaderMap) -> Routed {
+        // The ids goethe-server puts on a forwarded request; read only on the node connection, never on a local listener.
+        let get = |name: &str| h.get(name).and_then(|v| v.to_str().ok()).map(str::trim).filter(|v| !v.is_empty() && v.len() <= 128).map(str::to_string);
+        Routed {
+            request_id: get(goethe_proto::REQUEST_ID_HEADER).unwrap_or_default(),
+            key_id: get(goethe_proto::KEY_ID_HEADER).unwrap_or_default(),
+            user_id: get(goethe_proto::USER_HEADER).unwrap_or_default(),
+            dispatch_ms: get(goethe_proto::DISPATCH_HEADER).and_then(|v| v.parse().ok()),
+            instance: get(goethe_proto::INSTANCE_HEADER),
+        }
+    }
+
+    fn router_ms(&self, now_ms: u64) -> Option<f64> {
+        // goethe-server's dispatch to our receipt, 0 to 10 minutes; a clock ahead of ours gives 0.
+        self.dispatch_ms.map(|d| now_ms.saturating_sub(d).min(ROUTER_MS_CAP) as f64)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Caller<'a> {
+    Local { key: &'a ResolvedKey, public: bool },
+    Routed(&'a Routed),
+}
+
+impl Caller<'_> {
+    fn key_id(&self) -> String {
+        // Workspace key ids get a prefix so they never collide with this node's own key ids.
+        match self {
+            Caller::Local { key, .. } => key.key_id.clone(),
+            Caller::Routed(r) if r.key_id.is_empty() => String::new(),
+            Caller::Routed(r) => format!("ck:{}", r.key_id),
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn gateway(m: MuxRef) -> goethe_core::client::Gateway {
+    // The /v1 handler of the node connection (goethe-core client): the connection is the authentication, so its headers are trusted here and only here.
+    Arc::new(move |req: Request<Incoming>| {
+        let r = Routed::from_headers(req.headers());
+        Box::pin(routed(m, req, r))
+    })
+}
+
+async fn routed(m: MuxRef, req: Request<Incoming>, r: Routed) -> Response<MuxBody> {
+    // A request goethe-server forwarded: no node-local key, address or rate check (CONTRACTS 7.2), otherwise the local path; a proxied answer ends with the goethe-usage trailer.
+    let path = req.uri().path().to_string();
+    let rid = if r.request_id.is_empty() { request_id(&HeaderMap::new()) } else { r.request_id.clone() };
+    let (tx, rx) = oneshot::channel();
+    let mut resp = match api_route(&path) {
+        Some((allowed, _)) if req.method() != allowed => method_not_allowed(&allowed),
+        Some((_, Api::Proxy(upstream))) => route_post(m, req, &upstream, Caller::Routed(&r), &rid, Some(tx)).await,
+        Some((_, Api::Models)) => {
+            let snap = m.cache.exact();
+            let data: Vec<Value> = snap.serving_models().into_iter().map(|id| model_object(&snap, id)).collect();
+            json_response(StatusCode::OK, json!({"object": "list", "data": data}))
+        }
+        _ => not_found(),
+    };
+    if is_anthropic(&path) {
+        resp = anthropic_error(resp);
+    }
+    if let Ok(v) = HeaderValue::from_str(&rid) {
+        resp.headers_mut().insert(X_REQUEST_ID, v);
+    }
+    let (parts, body) = resp.into_parts();
+    Response::from_parts(parts, body.with_trailers(async move { rx.await.ok().map(Ok) }).boxed())
 }
 
 fn modality(path: &str) -> &'static str {
@@ -488,15 +571,24 @@ async fn route_post(
     m: MuxRef,
     req: Request<Incoming>,
     path: &str,
-    key: &ResolvedKey,
+    caller: Caller<'_>,
     rid: &str,
-    public: bool,
+    trailer: Option<oneshot::Sender<HeaderMap>>,
 ) -> Response<MuxBody> {
-    // Parse the body once, resolve the model, take the in-flight guard before the drain check, then proxy.
+    // Parse the body once, resolve the model, take the in-flight guard before the drain check, then proxy; a routed request without a key id gets no session notes, which its callers would share.
     let started = Instant::now();
     let wall = SystemTime::now();
-    let hint = session_hint(req.headers());
-    let network = if public { "public" } else { network_path(req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok())) };
+    let network = match caller {
+        Caller::Local { public: true, .. } => "public",
+        Caller::Local { .. } => network_path(req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok())),
+        Caller::Routed(_) => "routed",
+    };
+    let (key, routed) = match caller {
+        Caller::Local { key, .. } => (Some(key), None),
+        Caller::Routed(r) => (None, Some(r)),
+    };
+    let key_id = caller.key_id();
+    let hint = session_hint(req.headers()).filter(|_| !key_id.is_empty());
     let audio = api_tail(path) == "/audio/transcriptions";
     let content_type = req.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let declared = req
@@ -536,18 +628,21 @@ async fn route_post(
         model: label.clone(),
         engine: snap.engine(&model).map_or("", |e| e.id).into(),
         variant: snap.variant(&model).into(),
-        api_key_id: key.key_id.clone(),
+        api_key_id: key_id.clone(),
+        user_id: routed.map(|r| r.user_id.clone()).unwrap_or_default(),
         modality: modality(path).into(),
         network_path: network.into(),
         ..Dims::default()
     };
-    let finish = Finish { m, label, key_id: key.key_id.clone(), started, dims, router_ms: None };
-    if !security::model_allowed(&key.model_scope, &model) {
+    let now_ms = wall.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let router_ms = routed.and_then(|r| r.router_ms(now_ms));
+    let finish = Finish { m, label, key_id: key.map(|k| k.key_id.clone()).unwrap_or_default(), started, dims, router_ms, trailer };
+    if key.is_some_and(|k| !security::model_allowed(&k.model_scope, &model)) {
         return finish.now(model_not_found());
     }
     let mut guard = inflight::track(&model);
     let snap = m.cache.exact();
-    if !snap.has_key(key) {
+    if key.is_some_and(|k| !snap.has_key(k)) {
         drop(guard);
         return finish.now(revoked());
     }
@@ -557,8 +652,12 @@ async fn route_post(
         drop(guard);
         return finish.now(if routes.is_empty() { model_not_found() } else { draining() });
     }
-    let ids: Vec<&str> = live.iter().map(|r| r.instance_id.as_str()).collect();
-    let route = live[guard.pick(&ids).unwrap_or(0)].clone();
+    let pinned = routed.and_then(|r| r.instance.as_deref()).and_then(|id| live.iter().position(|r| r.instance_id == id));
+    let ids: Vec<&str> = match pinned {
+        Some(i) => vec![live[i].instance_id.as_str()],
+        None => live.iter().map(|r| r.instance_id.as_str()).collect(),
+    };
+    let route = live[pinned.unwrap_or(0) + guard.pick(&ids).unwrap_or(0)].clone();
     let engine = snap.engine(&model);
     if let Some(e) = engine.filter(|e| audio && e.id != engines::goethe_engine::ENGINE.id) {
         drop(guard);
@@ -576,15 +675,15 @@ async fn route_post(
     let stream = matches!(head.stream, Some(Value::Bool(true)));
     let body = prepare_body(path, body);
     let (upstream_body, mode) = streamed(path, stream, &body);
-    let (sent, retry, learn_note) = apply_note(m, &snap, path, &model, key, hint.as_deref(), &upstream_body);
-    let tap = snap.trace().records(&key.key_id).then(|| api_tail(path)).filter(|t| TraceApi::from_path(t).is_some()).map(|t| {
+    let (sent, retry, learn_note) = apply_note(m, &snap, path, &model, &key_id, hint.as_deref(), &upstream_body);
+    let tap = snap.trace().records(&key_id).then(|| api_tail(path)).filter(|t| TraceApi::from_path(t).is_some()).map(|t| {
         let cfg = snap.trace();
         Box::new(Capture {
             dir: cfg.dir(&goethe_home()),
             max_gb: cfg.max_gb(),
             path: t.to_string(),
             request_id: rid.to_string(),
-            key_id: key.key_id.clone(),
+            key_id: key_id.clone(),
             instance_id: route.instance_id.clone(),
             model: model.clone(),
             session_hint: hint,
@@ -641,7 +740,7 @@ fn apply_note(
     snap: &Snapshot,
     path: &str,
     model: &str,
-    key: &ResolvedKey,
+    key_id: &str,
     hint: Option<&str>,
     body: &Bytes,
 ) -> (Bytes, Option<NoteRetry>, Option<String>) {
@@ -653,7 +752,7 @@ fn apply_note(
     let Some(api) = TraceApi::from_path(api_tail(path)).filter(|a| a.has_messages()) else {
         return unchanged();
     };
-    let Some(step) = m.learn.observe(&key.key_id, session, model, api, body, snap.context_length(model)) else {
+    let Some(step) = m.learn.observe(key_id, session, model, api, body, snap.context_length(model)) else {
         return unchanged();
     };
     if let Some(job) = step.job {
@@ -665,7 +764,7 @@ fn apply_note(
     let Some(spliced) = learn::splice(api, body, &step.block) else {
         return unchanged();
     };
-    let retry = NoteRetry { original: body.clone(), key_id: key.key_id.clone(), session: session.to_string() };
+    let retry = NoteRetry { original: body.clone(), key_id: key_id.to_string(), session: session.to_string() };
     (Bytes::from(spliced), Some(retry), Some(step.block))
 }
 
@@ -944,7 +1043,7 @@ impl MeteredBody {
 
     fn finish(&mut self) {
         // Record once, at end of stream or when the client goes away (neither end nor engine error: cancelled); this also releases the in-flight slot.
-        if let Some((finish, guard, code)) = self.done.take() {
+        if let Some((mut finish, guard, code)) = self.done.take() {
             let mut used = self.meter.totals();
             if self.cut {
                 used.finish = "error";
@@ -952,6 +1051,9 @@ impl MeteredBody {
             let cancelled = !self.ended && !self.cut;
             finish.record(code, cancelled, &used, self.meter.ttft());
             drop(guard);
+            if let Some(tx) = finish.trailer.take().filter(|_| self.ended && !self.cut) {
+                let _ = tx.send(usage_trailer(&used, self.meter.ttft()));
+            }
             if let Some(mut c) = self.tap.take() {
                 c.duration_s = finish.started.elapsed().as_secs_f64();
                 c.ttft_s = self.meter.ttft();
@@ -962,6 +1064,15 @@ impl MeteredBody {
             }
         }
     }
+}
+
+fn usage_trailer(used: &Metered, ttft: Option<f64>) -> HeaderMap {
+    let usage = goethe_proto::Usage { prompt: used.prompt.max(0) as u64, completion: used.completion.max(0) as u64, ttft_ms: ttft.map_or(0, |t| (t * 1000.0).round() as u64) };
+    let mut map = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(&usage.header()) {
+        map.insert(goethe_proto::USAGE_TRAILER, v);
+    }
+    map
 }
 
 impl Body for MeteredBody {
@@ -1054,7 +1165,7 @@ struct Usage {
 impl Usage {
     fn prompt(&self) -> Option<i64> {
         // Anthropic counts cache reads and writes outside input_tokens; the prompt is all three.
-        self.prompt_tokens.map(|p| p + self.cache_read_input_tokens.unwrap_or(0) + self.cache_creation_input_tokens.unwrap_or(0))
+        self.prompt_tokens.map(|p| p.saturating_add(self.cache_read_input_tokens.unwrap_or(0)).saturating_add(self.cache_creation_input_tokens.unwrap_or(0)))
     }
 
     fn cached(&self) -> Option<i64> {
@@ -1099,6 +1210,14 @@ struct StopDelta {
 }
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum TopDelta {
+    // Anthropic's message_delta carries an object; a Responses text delta is a plain string, which must not fail the whole chunk.
+    Stop(StopDelta),
+    Other(serde::de::IgnoredAny),
+}
+
+#[derive(Deserialize)]
 struct StreamChunk {
     #[serde(default, rename = "type")]
     kind: Option<String>,
@@ -1115,7 +1234,7 @@ struct StreamChunk {
     #[serde(default)]
     response: Option<UsageEnvelope>,
     #[serde(default)]
-    delta: Option<StopDelta>,
+    delta: Option<TopDelta>,
     #[serde(default)]
     choices: Vec<StreamChoice>,
 }
@@ -1230,7 +1349,11 @@ impl UsageMeter {
             }
         }
         let reasons = chunk.choices.iter().filter_map(|c| c.finish_reason.as_deref());
-        if let Some(stop) = reasons.chain(chunk.delta.as_ref().and_then(|d| d.stop_reason.as_deref())).last() {
+        let delta = match &chunk.delta {
+            Some(TopDelta::Stop(d)) => d.stop_reason.as_deref(),
+            _ => None,
+        };
+        if let Some(stop) = reasons.chain(delta).last() {
             self.finish = Some(finish_word(stop));
         }
     }
@@ -1674,6 +1797,8 @@ mod tests {
         assert_eq!(j.totals(), Metered { prompt: 3, completion: 8, reasoning: 0, cached: 0, finish: "stop" });
         let mut e = meter_feed(false, &[b"{\"data\":[{\"embedding\":[0.1]}],\"usage\":{\"prompt_tokens\":4}}"]);
         assert_eq!(e.totals(), Metered { prompt: 4, ..Metered::default() });
+        let mut huge = meter_feed(false, &[b"{\"usage\":{\"input_tokens\":9223372036854775807,\"cache_read_input_tokens\":9}}"]);
+        assert_eq!(huge.totals().prompt, i64::MAX, "an absurd count saturates instead of overflowing");
     }
 
     #[test]
@@ -1790,6 +1915,7 @@ mod tests {
             ],
         );
         assert_eq!(r.totals().tokens(), (5, 2));
+        assert!(r.ttft().is_some(), "a Responses text delta (a string, not an object) is output");
         let mut j = meter_feed(false, &[b"{\"type\":\"message\",\"usage\":{\"input_tokens\":3,\"output_tokens\":8}}"]);
         assert_eq!(j.totals().tokens(), (3, 8));
     }
@@ -1930,21 +2056,25 @@ mod tests {
     fn test_mux(name: &str) -> MuxRef {
         let dir = std::env::temp_dir().join(format!("goethe-mux-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        test_mux_at(&dir)
+    }
+
+    fn test_mux_at(dir: &std::path::Path) -> MuxRef {
         Box::leak(Box::new(Mux {
-            cache: GatewayCache::open(&dir),
+            cache: GatewayCache::open(dir),
             client: upstream_client(),
             max_body: 8 << 20,
             rpm: Mutex::new(HashMap::new()),
             ready: Mutex::new(HashMap::new()),
-            trace: Recorder::start(&dir),
-            learn: Store::start(&dir),
+            trace: Recorder::start(dir),
+            learn: Store::start(dir),
             learn_gates: Gates::default(),
         }))
     }
 
     async fn proxied(mux: MuxRef, port: u16, body: &[u8], mode: Mode) -> Response<MuxBody> {
         let route = Route { instance_id: "i".into(), port, engine_key: None, draining: false };
-        let finish = Finish { m: mux, label: "m".into(), key_id: "k".into(), started: Instant::now(), dims: Dims::default(), router_ms: None };
+        let finish = Finish { m: mux, label: "m".into(), key_id: "k".into(), started: Instant::now(), dims: Dims::default(), router_ms: None, trailer: None };
         proxy(mux, "/v1/chat/completions", &route, Bytes::copy_from_slice(body), None, "req-1", mode, inflight::track("m"), finish, None, "application/json").await
     }
 
@@ -2016,5 +2146,80 @@ data: {\"error\":{\"message\":\"context too long\",\"type\":\"BadRequestError\",
         assert_eq!((code, reply["type"].clone()), (StatusCode::BAD_GATEWAY, json!("error")), "no numeric code: 502, Anthropic shape");
         let fine = json!({"object": "chat.completion"});
         assert_eq!(rebuilt_reply(StatusCode::OK, fine.clone(), false), (StatusCode::OK, fine));
+    }
+
+    #[tokio::test]
+    async fn a_routed_request_needs_no_node_key_streams_back_with_the_usage_trailer_and_is_logged_as_routed() {
+        let sse = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n";
+        let (port, seen) = fake_engine(sse, "text/event-stream").await;
+        let dir = tempfile_dir("routed");
+        let con = db::open(&dir).unwrap();
+        con.execute_batch(&format!(
+            "INSERT INTO loaded_instances (instance_id, model_id, pid, pgid, internal_port, gpu_indices, allocated_vram_gb_per_gpu, mem_fraction_static, ctx_len, max_conc, status)
+             VALUES ('i-0', 'org/routed', 1, 1, 1, '0', 1, 0.8, 4096, 8, 'RUNNING'), ('i-1', 'org/routed', 1, 1, {port}, '0', 1, 0.8, 4096, 8, 'RUNNING');"
+        ))
+        .unwrap();
+        let m = test_mux_at(&dir);
+        let node = Arc::new(goethe_core::client::Node::new(dir.clone(), "n1", "h1"));
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        tokio::spawn(goethe_core::client::serve(ours, node, gateway(m)));
+        let (mut c, conn) = hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(theirs)).await.unwrap();
+        tokio::spawn(conn);
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let req = Request::post("http://node/v1/chat/completions")
+            .header(goethe_proto::REQUEST_ID_HEADER, "r-1")
+            .header(goethe_proto::KEY_ID_HEADER, "key1")
+            .header(goethe_proto::USER_HEADER, "u1")
+            .header(goethe_proto::DISPATCH_HEADER, (now_ms - 50).to_string())
+            .header(goethe_proto::INSTANCE_HEADER, "i-1")
+            .body(Full::new(Bytes::from_static(br#"{"model":"org/routed","stream":true}"#)))
+            .unwrap();
+        let resp = c.send_request(req).await.unwrap();
+        assert_eq!((resp.status(), resp.headers()[X_REQUEST_ID].to_str().unwrap()), (StatusCode::OK, "r-1"));
+        let got = resp.into_body().collect().await.unwrap();
+        let trailer = got.trailers().and_then(|t| t.get(goethe_proto::USAGE_TRAILER)).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let usage = trailer.as_deref().and_then(goethe_proto::Usage::parse).expect("the answer ends with the usage trailer");
+        assert_eq!((usage.prompt, usage.completion), (7, 2));
+        let body = got.to_bytes();
+        assert!(body.starts_with(b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}") && body.ends_with(b"data: [DONE]\n\n"), "{body:?}");
+        assert!(!seen.lock().unwrap().is_empty(), "the pinned instance answered");
+
+        usage_log::flush(&dir);
+        let rows: Vec<(String, i64, i64)> = con
+            .prepare("SELECT k, router_n, router_ms_sum FROM req_minute")
+            .unwrap()
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|(k, _, _)| k.starts_with("org/routed"))
+            .collect();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let (k, n, ms) = &rows[0];
+        let parts: Vec<&str> = k.split('\u{1f}').collect();
+        assert_eq!((parts[3], parts[4], parts[6]), ("ck:key1", "u1", "routed"));
+        assert!(*n == 1 && (50..600_000).contains(ms), "router_ms {ms}");
+
+        let models = c.send_request(Request::get("http://node/v1/models").body(Full::new(Bytes::new())).unwrap()).await.unwrap();
+        let v: Value = serde_json::from_slice(&models.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(v["data"][0]["id"], "org/routed", "no key needed on the connection");
+        let missing = c.send_request(Request::post("http://node/v1/nope").body(Full::new(Bytes::new())).unwrap()).await.unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn router_time_is_clamped_and_absent_without_a_dispatch_stamp() {
+        let r = |d: Option<u64>| Routed { request_id: String::new(), key_id: String::new(), user_id: String::new(), dispatch_ms: d, instance: None };
+        assert_eq!(r(Some(1_000)).router_ms(1_250), Some(250.0));
+        assert_eq!(r(Some(2_000)).router_ms(1_000), Some(0.0), "a server clock ahead of ours");
+        assert_eq!(r(Some(0)).router_ms(10_000_000), Some(600_000.0));
+        assert_eq!(r(None).router_ms(5), None);
+        assert_eq!(Caller::Routed(&r(None)).key_id(), "");
+        assert_eq!(Caller::Routed(&Routed { key_id: "k".into(), ..r(None) }).key_id(), "ck:k");
+    }
+
+    fn tempfile_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("goethe-mux-{name}-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

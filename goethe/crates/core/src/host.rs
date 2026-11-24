@@ -523,15 +523,20 @@ pub fn ask_yes_no(question: &str) -> Result<bool, String> {
     Ok(matches!(buf.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
+pub const NEEDS_YES: &str = "confirmation required: re-run with --yes (no terminal to ask on)";
+
+pub fn needs_yes(err: &str) -> bool {
+    // An error that only asks for --yes: the CLI exits 3 on it, a menu shows it and goes on.
+    err.lines().last() == Some(NEEDS_YES)
+}
+
 pub fn confirm(question: &str, yes: bool) -> Result<(), String> {
-    // Proceed on --yes or a y answer on a terminal; without a terminal exit 3 (confirmation required).
+    // Proceed on --yes or a y answer on a terminal; without a terminal the error asks for --yes.
     if yes {
         return Ok(());
     }
     if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
-        eprintln!("{question}");
-        eprintln!("confirmation required: re-run with --yes (no terminal to ask on)");
-        std::process::exit(3);
+        return Err(format!("{question}\n{NEEDS_YES}"));
     }
     eprint!("{question} [y/N] ");
     std::io::stderr().flush().ok();
@@ -547,6 +552,17 @@ pub fn confirm(question: &str, yes: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn without_a_terminal_a_question_becomes_an_error_that_asks_for_yes() {
+        assert_eq!(confirm("Remove?", true), Ok(()));
+        if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+            return;
+        }
+        let err = confirm("Remove?", false).unwrap_err();
+        assert!(err.starts_with("Remove?") && needs_yes(&err), "{err}");
+        assert!(!needs_yes("aborted") && !needs_yes(&format!("{NEEDS_YES}\nmore")));
+    }
 
     fn root_with(files: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

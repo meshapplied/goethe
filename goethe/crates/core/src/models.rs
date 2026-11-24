@@ -575,13 +575,11 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool, delete_traces: Option<
         return Err(format!("{model_id} is not installed (goethe models --installed lists installed models)"));
     };
     let plan = removal_plan(&home, &con, model_id, &local_path, managed != 0)?;
-    let instances: i64 = con
-        .query_row(
-            &format!("SELECT COUNT(*) FROM loaded_instances WHERE model_id = ?1 AND {LIVE}"),
-            [model_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| format!("state.db: {e}"))?;
+    let live = |con: &Connection| -> Result<i64, String> {
+        con.query_row(&format!("SELECT COUNT(*) FROM loaded_instances WHERE model_id = ?1 AND {LIVE}"), [model_id], |r| r.get(0))
+            .map_err(|e| format!("state.db: {e}"))
+    };
+    let instances = live(&con)?;
     let mut steps = Vec::new();
     if instances > 0 {
         let how = if force { "immediately, without draining" } else { "after draining in-flight requests" };
@@ -614,6 +612,7 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool, delete_traces: Option<
             ))?
         }
     };
+    let instances = live(&con)?;
     let compact = crate::step::compact();
     let progress = |done: usize, of: usize| {
         if compact {

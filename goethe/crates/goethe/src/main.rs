@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 
 const CTX_MAX: u64 = 1 << 24;
 const MAX_CONC: u64 = 4096;
+const MAX_GPUS: u64 = 64;
 
 const KEY_HELP: &str = "On a terminal, goethe api keys alone opens a menu to add, scope, show or delete keys.
 
@@ -90,6 +91,15 @@ const EXPOSE_HELP: &str = "Who can reach the API:
 Public always needs --allow <their-ip>/32 and a confirm (--yes, or y on a terminal). It never opens on a leftover allowlist alone.
 
 goethe api expose alone shows where the API listens and who may connect.";
+
+const REMOTE_HELP: &str = "Console commands are signed with a person's passkey and checked here. This node runs one only when its kind is allowed and the passkey is pinned with a cap that covers it:
+
+\t→ goethe remote allow change
+\t→ goethe remote deny change
+\t→ goethe remote trust add <pairing>
+\t→ goethe remote trust remove <key-id>
+
+Kinds, least to most powerful: change, network, keys, update, destructive, trust. goethe remote alone shows the policy and the pinned passkeys.";
 
 const SHARE_HELP: &str = "Examples:
 
@@ -168,7 +178,7 @@ enum Commands {
         name: Option<String>,
         #[arg(long, help = "Copy a local folder instead of linking to it.")]
         copy: bool,
-        #[arg(long, help = "If the model's kernel pack cannot run here, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also GOETHE_ALLOW_FALLBACK=1.")]
+        #[arg(long, help = "Serve the model with its plain runtime (llama.cpp or SGLang) when its kernel pack cannot run here, even with GOETHE_ALLOW_FALLBACK=0 (the plain runtime takes over by default).")]
         fallback: bool,
         #[arg(last = true, help = "Extra engine flags, only after --.")]
         extra: Vec<String>,
@@ -196,13 +206,13 @@ enum Commands {
         model: Vec<String>,
         #[arg(add = ArgMeta::of(spec::Value::Gpu), long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "GPUs to load on, as goethe gpu lists them: --gpu gpu3, or --gpu gpu2 gpu3 to split the model across both.")]
         gpu: Vec<u32>,
-        #[arg(long, value_name = "N", conflicts_with = "gpu", help = "Split the model across N GPUs that goethe picks (with --gpu, the number of GPUs given is used).")]
+        #[arg(long, value_name = "N", conflicts_with = "gpu", value_parser = clap::value_parser!(u64).range(1..=MAX_GPUS), help = "Split the model across N GPUs that goethe picks (with --gpu, the number of GPUs given is used).")]
         tp: Option<u64>,
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=CTX_MAX), help = "Context length for this load.")]
         ctx: Option<u64>,
         #[arg(long = "max-conc", value_parser = clap::value_parser!(u64).range(1..=MAX_CONC), help = "Max concurrent requests.")]
         max_conc: Option<u64>,
-        #[arg(long, help = "Expert parallel size (SGLang --ep-size).")]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=MAX_GPUS), help = "Expert parallel size (SGLang --ep-size).")]
         ep: Option<u64>,
         #[arg(long, help = "Keep --gpu, --ctx, --max-conc and the flags after -- as the model's defaults.")]
         save: bool,
@@ -212,7 +222,7 @@ enum Commands {
         yes: bool,
         #[arg(long, help = "Start another instance even when the model is already loaded.")]
         replica: bool,
-        #[arg(long, help = "If the model's kernel pack fails to open, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also GOETHE_ALLOW_FALLBACK=1.")]
+        #[arg(long, help = "Serve the model with its plain runtime (llama.cpp or SGLang) when its kernel pack fails to open, even with GOETHE_ALLOW_FALLBACK=0 (the plain runtime takes over by default).")]
         fallback: bool,
         #[arg(long, help = "Return once the engine starts instead of waiting until it answers.")]
         no_wait: bool,
@@ -328,6 +338,11 @@ enum Commands {
     },
     #[command(add = CmdMeta::destructive().says(&["log out", "sign out", "signout", "unlink", "disconnect"]), display_order = 20, about = "Unlink this node from the Goethe console and remove its local credentials.")]
     Logout,
+    #[command(add = CmdMeta::read(), display_order = 20, args_conflicts_with_subcommands = true, about = "Which console changes this node accepts, and the passkeys allowed to sign them; every kind is off until allowed here.", after_help = REMOTE_HELP)]
+    Remote {
+        #[command(subcommand)]
+        cmd: Option<RemoteCommands>,
+    },
     #[command(hide = true, about = "Finish an install: run by install.sh once it verified this goethe; safe to run again to repair or upgrade.")]
     Setup {
         #[arg(long = "pkg-url", value_name = "URL", help = "The package host to keep using (default pkg.goethe.sh).")]
@@ -432,6 +447,48 @@ enum UpdateCommands {
 }
 
 #[derive(Subcommand)]
+enum RemoteCommands {
+    #[command(add = CmdMeta::network().says(&["enable", "accept", "permit"]), about = "Accept signed console commands of this kind: change, network, keys, update, destructive or trust.")]
+    Allow {
+        #[arg(value_name = "KIND", value_parser = REMOTE_KINDS, help = "The kind of change: change (load, unload, GPUs), network, keys, update, destructive or trust (pin passkeys).")]
+        kind: String,
+    },
+    #[command(add = CmdMeta::change().says(&["disable", "refuse", "block"]), about = "Refuse console commands of this kind again.")]
+    Deny {
+        #[arg(value_name = "KIND", value_parser = REMOTE_KINDS, help = "The kind of change: change, network, keys, update, destructive or trust.")]
+        kind: String,
+    },
+    #[command(add = CmdMeta::read(), about = "Each kind on or off, and the pinned passkeys.")]
+    Status,
+    #[command(add = CmdMeta::read(), about = "The passkeys this node trusts: list, add one from a pairing string, or remove one.")]
+    Trust(TrustArgs),
+}
+
+const REMOTE_KINDS: [&str; 6] = ["change", "network", "keys", "update", "destructive", "trust"];
+
+#[derive(clap::Args)]
+struct TrustArgs {
+    #[command(subcommand)]
+    cmd: Option<TrustCommands>,
+}
+
+#[derive(Subcommand)]
+enum TrustCommands {
+    #[command(add = CmdMeta::read(), about = "The pinned passkeys: key id, user, cap and fingerprint.")]
+    List,
+    #[command(add = CmdMeta::network().says(&["pin", "pair"]), about = "Pin a passkey from the pairing string the console shows; its signature is checked first.")]
+    Add {
+        #[arg(add = ArgMeta::of(spec::Value::Text), value_name = "PAIRING", help = "The pairing string from the console.")]
+        pairing: String,
+    },
+    #[command(add = CmdMeta::change().says(&["unpin", "delete", "revoke"]), about = "Stop trusting a pinned passkey.")]
+    Remove {
+        #[arg(add = ArgMeta::of(spec::Value::TrustKey), value_name = "KEY_ID", help = "The key id, as goethe remote trust list shows it.")]
+        key_id: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum CompletionCommands {
     #[command(add = CmdMeta::change(), about = "Install tab completion for your shell.")]
     Install,
@@ -495,7 +552,7 @@ enum KeyCommands {
         name: String,
         #[arg(add = ArgMeta::of(spec::Value::When), long, value_name = "WHEN", help = "Expiry, days from now like 30d, or a date like 2026-12-31.")]
         expires: Option<String>,
-        #[arg(long, value_name = "N", help = "Requests per minute (default 120, 0 = unlimited).")]
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(i64).range(0..), help = "Requests per minute (default 120, 0 = unlimited).")]
         rpm: Option<i64>,
         #[arg(add = ArgMeta::of(spec::Value::InstalledModel), long, value_name = "IDS", help = "Only these models, comma-separated.")]
         models: Option<String>,
@@ -888,6 +945,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("goethe uninstall", "remove Goethe and the models it installed"),
         ("goethe login", "link this node to the Goethe console (optional)"),
         ("goethe logout", "unlink it and remove its local credentials"),
+        ("goethe remote allow change", "accept signed console commands of a kind (deny refuses them)"),
         ("goethe completion install", "tab completion for your shell"),
         ("goethe ask REQUEST", "turn a request in plain English into Goethe commands (also Ask on the main menu)"),
         ("goethe ?", "same as goethe ask"),
@@ -1215,6 +1273,7 @@ fn main() {
             }
         }
         Commands::Logout => goethe_core::platform_cli::logout(),
+        Commands::Remote { cmd } => do_remote(cmd),
         Commands::Setup { pkg_url, from, keep_file_url, platform_url, no_link } => goethe_core::setup::run(goethe_core::setup::Opts {
             pkg: pkg_url.or_else(|| std::env::var("GOETHE_PKG_URL").ok().filter(|v| !v.is_empty())).unwrap_or_else(|| goethe_core::setup::DEFAULT_PKG_URL.to_string()),
             from,
@@ -1266,12 +1325,28 @@ fn main() {
         Ok(()) => {}
         Err(msg) => {
             // A failure no site coded itself still gets a row; it names the command only, because the message can hold what the user typed.
-            if !goethe_core::errcode::recorded() {
+            if !goethe_core::errcode::recorded() && !goethe_core::host::needs_yes(&msg) {
                 let cmd = args.iter().skip(1).find(|a| !a.starts_with('-')).map_or("goethe", String::as_str);
                 goethe_core::errcode::record(goethe_core::errcode::Code::CmdFailed, cmd);
             }
             fail(msg)
         }
+    }
+}
+
+fn do_remote(cmd: Option<RemoteCommands>) -> Result<(), String> {
+    // goethe remote allow|deny KIND and trust list|add|remove edit GOETHE_HOME/remote.json; nothing, or status, shows it.
+    use goethe_core::client::remote;
+    let home = goethe_home();
+    let kind = |k: &str| remote::Kind::parse(k).unwrap_or_else(|| usage(format!("{k} is not a kind of change")));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    match cmd {
+        Some(RemoteCommands::Allow { kind: k }) => remote::set_allowed(&home, kind(&k), true).map(|()| println!("This node now accepts {k} commands signed by a pinned passkey whose cap allows them.")),
+        Some(RemoteCommands::Deny { kind: k }) => remote::set_allowed(&home, kind(&k), false).map(|()| println!("This node refuses {k} commands from the console.")),
+        Some(RemoteCommands::Trust(TrustArgs { cmd: Some(TrustCommands::Add { pairing }) })) => remote::add_pairing(&home, &pairing, now).map(|t| println!("Pinned {}", remote::key_line(&t))),
+        Some(RemoteCommands::Trust(TrustArgs { cmd: Some(TrustCommands::Remove { key_id }) })) => remote::unpin(&home, &key_id, remote::LOCAL, now).map(|t| println!("Removed {}", remote::key_line(&t))),
+        Some(RemoteCommands::Trust(_)) => remote::load(&home).map(|s| print!("{}", remote::trust_text(&s.trust))),
+        Some(RemoteCommands::Status) | None => remote::status_text(&home).map(|t| print!("{t}")),
     }
 }
 
@@ -1366,14 +1441,11 @@ struct DoLoadArgs {
 fn do_load(args: DoLoadArgs) -> Result<(), String> {
     // Validate locally, warn about host RAM for offloading cards, then load with the foreign-process prompt.
     checked_id(&args.model_id);
-    if matches!(args.ep, Some(0)) {
-        usage("--ep must be at least 1");
-    }
     if let Err(e) = config::validate_limits(&goethe_home(), &args.model_id, args.ctx, args.max_conc) {
         usage(e);
     }
     if let (Some(ep), Some(tp)) = (args.ep, args.tp) {
-        if ep > 0 && tp % ep != 0 {
+        if tp % ep != 0 {
             usage(format!("--tp {tp} is not divisible by --ep {ep}"));
         }
     }
@@ -2081,12 +2153,11 @@ fn do_api(json: bool) -> Result<(), String> {
     let home = goethe_home();
     let api = format!("https://{}/v1", nginx::gateway_connect_addr(&home));
     let (ps, models) = served_models();
-    let state = |s: &[String]| if s.iter().any(|x| x == "RUNNING") { "RUNNING".to_string() } else { s[0].clone() };
     let keys = security::key_list_detailed()?;
     if json {
         let list: Vec<Value> = models
             .iter()
-            .map(|(id, st, g)| json!({"model": id, "status": state(st), "instances": st.len(), "gpus": g}))
+            .map(|(id, st, g)| json!({"model": id, "status": served_state(st), "instances": st.len(), "gpus": g}))
             .collect();
         println!("{}", json!({"api": api, "schemas": ["openai", "anthropic", "litellm"], "goethed_running": ps, "keys": keys, "models": list}));
         return Ok(());
@@ -2107,6 +2178,11 @@ fn do_api(json: bool) -> Result<(), String> {
 }
 
 type ServedModel = (String, Vec<String>, Vec<String>);
+
+fn served_state(statuses: &[String]) -> String {
+    // A served model's status: RUNNING when any instance runs, else its first instance's.
+    if statuses.iter().any(|x| x == "RUNNING") { "RUNNING".to_string() } else { statuses.first().cloned().unwrap_or_default() }
+}
 
 fn served_models() -> (bool, Vec<ServedModel>) {
     // Whether goethed answered, and each served model with the status and GPUs of its instances.
@@ -2137,10 +2213,9 @@ fn models_text(running: bool, models: &[ServedModel]) -> String {
     if models.is_empty() {
         return format!("{}\n", no_models_text());
     }
-    let state = |s: &[String]| if s.iter().any(|x| x == "RUNNING") { "RUNNING".to_string() } else { s[0].clone() };
     let mut table = Table::new(&["MODEL", "STATUS", "INSTANCES", "GPUS"]);
     for (id, st, g) in models {
-        table.row(vec![id.clone(), goethe_core::term::status(&state(st)), st.len().to_string(), g.join(" ")]);
+        table.row(vec![id.clone(), goethe_core::term::status(&served_state(st)), st.len().to_string(), g.join(" ")]);
     }
     table.render()
 }
@@ -2157,6 +2232,14 @@ fn curl_example(api: &str) -> String {
     )
 }
 
+fn read_ids_file(repo_ids: &mut Vec<String>, path: Option<&str>) -> Result<(), String> {
+    // --ids-file: one repo id per line; blank lines and # comments are skipped.
+    let Some(path) = path else { return Ok(()) };
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    repo_ids.extend(text.lines().map(str::trim).filter(|t| !t.is_empty() && !t.starts_with('#')).map(str::to_string));
+    Ok(())
+}
+
 fn do_registry_entry(
     mut repo_ids: Vec<String>,
     runtime: Option<String>,
@@ -2164,15 +2247,7 @@ fn do_registry_entry(
     ids_file: Option<String>,
     strict: bool,
 ) -> Result<(), String> {
-    if let Some(path) = ids_file {
-        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        for line in text.lines() {
-            let t = line.trim();
-            if !t.is_empty() && !t.starts_with('#') {
-                repo_ids.push(t.to_string());
-            }
-        }
-    }
+    read_ids_file(&mut repo_ids, ids_file.as_deref())?;
     registry::run_entries(
         &repo_ids,
         runtime.as_deref(),
@@ -2190,15 +2265,7 @@ fn do_registry_add(
     dry_run: bool,
     strict: bool,
 ) -> Result<(), String> {
-    if let Some(path) = ids_file {
-        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        for line in text.lines() {
-            let t = line.trim();
-            if !t.is_empty() && !t.starts_with('#') {
-                repo_ids.push(t.to_string());
-            }
-        }
-    }
+    read_ids_file(&mut repo_ids, ids_file.as_deref())?;
     registry::run_add(&registry::AddOpts {
         repo_ids,
         file,
@@ -2224,8 +2291,9 @@ fn image_refusal(cmd: &Commands, image: Option<&str>) -> Option<&'static str> {
 }
 
 fn fail(msg: String) -> ! {
+    // Exit 3 when the only thing missing is --yes, else 1.
     eprintln!("{msg}");
-    std::process::exit(1);
+    std::process::exit(if goethe_core::host::needs_yes(&msg) { 3 } else { 1 });
 }
 
 #[cfg(test)]
@@ -2410,6 +2478,10 @@ mod tests {
             assert!(parse(&["install", "org/m", bad[0], bad[1]]).is_err(), "{bad:?}");
         }
         assert!(parse(&["load", "org/m", "--gpu", "gpux"]).is_err());
+        for zero in [&["load", "org/m", "--tp", "0"][..], &["load", "org/m", "--ep", "0"], &["api", "keys", "create", "a", "--rpm=-1"]] {
+            assert!(parse(zero).is_err(), "{zero:?} should be refused");
+        }
+        assert!(parse(&["load", "org/m", "--tp", "2", "--ep", "2"]).is_ok() && parse(&["api", "keys", "create", "a", "--rpm", "0"]).is_ok());
         assert!(parse(&["load", "org/m", "--gpu", "gpu2", "--tp", "2"]).is_err(), "the GPUs given are the split");
         let Commands::Load { model, extra, .. } = parse(&["load", "qwen", "27b", "--ctx", "4096", "--", "--chunked-prefill-size", "8"]).unwrap().command else { panic!() };
         assert_eq!((model.join(" "), extra), ("qwen 27b".to_string(), vec!["--chunked-prefill-size".to_string(), "8".to_string()]), "words are the model, -- starts engine flags");

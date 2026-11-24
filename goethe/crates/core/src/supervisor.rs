@@ -36,7 +36,7 @@ use supervisor_load::tree_cpu_ticks;
 
 #[path = "supervisor_lifecycle.rs"]
 mod supervisor_lifecycle;
-pub use supervisor_lifecycle::{graceful_shutdown, handle_ps, handle_unload, reconcile_on_start};
+pub use supervisor_lifecycle::{graceful_shutdown, handle_ps, handle_unload, handle_unload_instance, reconcile_on_start};
 use supervisor_lifecycle::stop_processes;
 
 static SLOT_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
@@ -1178,6 +1178,31 @@ mod tests {
                 .query_row("SELECT COUNT(*) FROM watchdog_restarts", [], |r| r.get(0))
                 .unwrap();
             assert_eq!((left, desired, restarts), (0, 0, 0));
+            child.kill().unwrap();
+            child.wait().unwrap();
+        });
+    }
+
+    #[test]
+    fn unloading_one_instance_keeps_the_other_and_its_slot() {
+        with_temp_home(|_home, con| {
+            let (mut child, ticks) = sleeper();
+            insert_running(con, "i1", child.id() as i32, ticks + 5, 30001);
+            insert_running(con, "i2", child.id() as i32, ticks + 5, 30002);
+            con.execute("UPDATE loaded_instances SET slot_key = 'm|1|1' WHERE instance_id = 'i2'", []).unwrap();
+            con.execute("INSERT INTO desired_loads (slot_key, model_id) VALUES ('m|0|0', 'm'), ('m|1|1', 'm')", []).unwrap();
+            handle_unload_instance("i1", false).expect("unload");
+            let left: Vec<(String, String)> = con
+                .prepare("SELECT instance_id, status FROM loaded_instances")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            let desired: Vec<String> =
+                con.prepare("SELECT slot_key FROM desired_loads").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+            assert_eq!(left, [("i2".to_string(), "RUNNING".to_string())]);
+            assert_eq!(desired, ["m|1|1"]);
             child.kill().unwrap();
             child.wait().unwrap();
         });

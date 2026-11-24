@@ -19,6 +19,25 @@ pub enum Kind {
     Trust,
 }
 
+impl Kind {
+    pub const ALL: [Kind; 6] = [Kind::Change, Kind::Network, Kind::Keys, Kind::Update, Kind::Destructive, Kind::Trust];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Change => "change",
+            Kind::Network => "network",
+            Kind::Keys => "keys",
+            Kind::Update => "update",
+            Kind::Destructive => "destructive",
+            Kind::Trust => "trust",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Kind> {
+        Kind::ALL.into_iter().find(|k| k.name() == name)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", content = "args")]
 pub enum Action {
@@ -294,5 +313,10 @@ mod tests {
         assert!(Kind::Update < Kind::Destructive && Kind::Destructive < Kind::Trust);
         assert_eq!(Action::max_window_ms("goethe.update"), 7_200_000);
         assert_eq!(Action::max_window_ms("model.load"), 300_000);
+        for k in Kind::ALL {
+            assert_eq!(serde_json::to_value(k).unwrap(), json!(k.name()));
+            assert_eq!(Kind::parse(k.name()), Some(k));
+        }
+        assert_eq!(Kind::parse("shell"), None);
     }
 }
