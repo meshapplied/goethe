@@ -59,6 +59,7 @@ struct Installed {
     input: ChooserInput,
     default_tp: i64,
     runtime: String,
+    present: bool,
 }
 
 const SCREEN_LINES: usize = 40;
@@ -97,6 +98,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
             let verdict = verdict(view.as_ref(), &m.id, &m.input, pinned);
             let (status, fit) = match loaded.get(&m.id) {
                 Some(live) => loaded_state(live),
+                None if !m.present => ("files missing".to_string(), "does not fit: its files are gone; goethe install brings them back".to_string()),
                 None => ("installed".to_string(), verdict.label()),
             };
             rows.push(ModelRow {
@@ -459,10 +461,12 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
             let kv_bytes: i64 = r.get(2)?;
             let default_ctx: i64 = r.get(3)?;
             let max_ctx = r.get::<_, Option<i64>>(6)?.unwrap_or(default_ctx).max(1) as u64;
-            let card = card_value(&home.join(r.get::<_, String>(11)?));
+            let path = home.join(r.get::<_, String>(11)?);
+            let card = card_value(&path);
             let elems = r.get::<_, Option<i64>>(10)?.unwrap_or(kv_bytes).max(0) as u64;
             Ok(Installed {
                 id: r.get(0)?,
+                present: path.exists(),
                 default_tp: r.get(5)?,
                 runtime: card.get("runtime").and_then(|v| v.as_str()).unwrap_or("sglang").to_string(),
                 input: crate::engines::llama_cpp::with_header_kv(ChooserInput {
@@ -876,6 +880,25 @@ pub fn installed_ids(home: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_installed_model_whose_folder_is_gone_is_marked_so() {
+        // A cleaned disk leaves rows behind: a model counts as present only while its folder is there.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let con = db::open(home).unwrap();
+        for id in ["org/here", "org/gone"] {
+            con.execute(
+                "INSERT INTO installed_models (model_id, local_path, architecture, static_vram_gb, kv_bytes_per_token, default_ctx, default_max_conc, default_tp) VALUES (?1, ?2, 'a', 1.0, 1, 4096, 1, 0)",
+                rusqlite::params![id, format!("models/{}", id.replace('/', "__"))],
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(home.join("models/org__here")).unwrap();
+        let rows = installed_rows(home, &con).unwrap();
+        let present = |id: &str| rows.iter().find(|m| m.id == id).map(|m| m.present);
+        assert_eq!((present("org/here"), present("org/gone")), (Some(true), Some(false)));
+    }
+
     #[test]
     fn words_find_models_by_any_part_of_their_name() {
         let ids: Vec<String> = ["meshapplied/Qwen3.8-27B-NVFP4-NInfer", "nvidia/Qwen3.8-27B-NVFP4", "nvidia/Qwen2.5-VL-7B-Instruct-NVFP4"].iter().map(|s| s.to_string()).collect();

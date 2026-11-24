@@ -193,6 +193,21 @@ fn a_misread_request_is_never_ready_to_change_anything() {
 }
 
 #[test]
+fn a_model_whose_folder_is_gone_is_not_installed_for_ask() {
+    // Ask plans from what is on disk: a row left behind by a cleaned models folder means the model must be installed again.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let con = goethe_core::db::open(home).unwrap();
+    for id in ["org/here", "org/gone"] {
+        let sql = format!("INSERT INTO installed_models (model_id, local_path, architecture, static_vram_gb, kv_bytes_per_token, default_ctx, default_max_conc, default_tp) VALUES ('{id}', 'models/{}', 'a', 1.0, 1, 4096, 1, 0)", id.replace('/', "__"));
+        con.execute(&sql, []).unwrap();
+    }
+    std::fs::create_dir_all(home.join("models/org__here")).unwrap();
+    let (known, installed, _) = super::slots::read_models(home);
+    assert!(known && installed == ["org/here"], "{installed:?}");
+}
+
+#[test]
 fn a_part_page_reads_short_descriptions_and_value_labels() {
     // Rows drop a leading "The"; a missing value reads "Key name:", not "Which key name?".
     let cat = build_catalog(&Cli::command());
