@@ -1,7 +1,7 @@
 // One request (one or more parts) to an ordered list of clap commands: rank each part, read the live state, ask for what is missing, validate.
 
 use super::embed::{ScoredIntent, ShortlistBackend};
-use super::parse::{find_hf_or_path, find_shell_metachar, is_obvious_ood, split_parts, split_words};
+use super::parse::{find_hf_or_path, find_shell_metachar, is_obvious_ood, split_parts, split_words, without_wish};
 use super::schema::{CliCatalog, IntentCard, Kind, Risk};
 use super::slots::{extract_slots, slot_candidates, World};
 use crate::spec::{Asked, Fact};
@@ -111,7 +111,7 @@ impl PlanState {
         if is_obvious_ood(trimmed) {
             return Self::abstained(trimmed, "That is not something Goethe does; goethe help lists what it does.", world);
         }
-        let model_ref = find_hf_or_path(&split_words(trimmed));
+        let model_ref = written_model(trimmed, catalog);
         let rank = |text: &str| retriever.rank(&without(text, model_ref.as_deref()), catalog.intents.len());
         let mut texts = request_parts(trimmed, &rank);
         if texts.len() < 2 {
@@ -152,14 +152,14 @@ impl PlanState {
     fn focus(&self) -> usize {
         // Which command a part is comes first, then the values it is missing, in order.
         let pick = self.goals.iter().position(|g| g.needs_intent_pick);
-        pick.or_else(|| self.goals.iter().position(|g| g.ambiguous.is_some() || !g.missing.is_empty())).unwrap_or(0)
+        pick.or_else(|| self.goals.iter().position(|g| g.ambiguous.is_some() || !g.missing.is_empty())).or_else(|| self.goals.iter().position(|g| g.verify_err.is_some())).unwrap_or(0)
     }
 
     fn part_focus(&self, part: usize) -> Option<usize> {
         // Within one part: which command first, then its missing values, then its own command.
         let mine = |g: &&PlanStep| g.part == part;
         let at = |f: &dyn Fn(&PlanStep) -> bool| self.goals.iter().position(|g| mine(&g) && f(g));
-        at(&|g| g.needs_intent_pick).or_else(|| at(&|g| g.ambiguous.is_some() || !g.missing.is_empty())).or_else(|| at(&|g| g.reason.is_none()))
+        at(&|g| g.needs_intent_pick).or_else(|| at(&|g| g.ambiguous.is_some() || !g.missing.is_empty())).or_else(|| at(&|g| g.verify_err.is_some())).or_else(|| at(&|g| g.reason.is_none()))
     }
 
     pub fn next_decision(&self, catalog: &CliCatalog, world: &World) -> PendingDecision {
@@ -323,7 +323,7 @@ impl PlanState {
         if let Some(meta) = find_shell_metachar(text) {
             return Err(format!("Shell characters such as '{meta}' are not allowed; say it in words."));
         }
-        let model_ref = self.model_ref.clone().or_else(|| find_hf_or_path(&split_words(text)));
+        let model_ref = self.model_ref.clone().or_else(|| written_model(text, catalog));
         let open = retriever.rank(&without(text, model_ref.as_deref()), catalog.intents.len());
         let model_used = self.goals.iter().any(|g| g.part != part && takes_model(catalog, &g.intent_id));
         let (options, about_model) = part_options(text, open, model_ref.as_deref(), model_used, catalog);
@@ -402,6 +402,7 @@ impl PlanState {
             }
             goals.push(goal);
         }
+        refuse_undoing_what_it_gives(&mut goals, catalog);
         self.goals = goals;
         self.lines = order_lines(&self.goals, &self.world, catalog);
     }
@@ -540,8 +541,31 @@ fn share_model(goal: &mut PlanStep, model_ref: Option<&str>, catalog: &CliCatalo
     recompile_step(goal, catalog, validate);
 }
 
+fn refuse_undoing_what_it_gives(goals: &mut [PlanStep], catalog: &CliCatalog) {
+    // A request that gives a fact and undoes it again on the same model contradicts itself (a stray "Unload"): that step is invalid until the request is fixed.
+    let mut given: Vec<(Fact, Option<String>, String)> = Vec::new();
+    for g in goals.iter_mut().filter(|g| !g.needs_intent_pick) {
+        let Some(card) = catalog.get(&g.intent_id) else {
+            continue;
+        };
+        let model = step_model(g, card);
+        if let Some((_, _, by)) = given.iter().find(|(f, m, _)| *m == model && card.does.undoes.contains(f)) {
+            g.verified = false;
+            g.verify_err = Some(format!("this request asks for both {by} and {}{}; say which one you want", g.intent_id, model.as_deref().map(|m| format!(" {m}")).unwrap_or_default()));
+        }
+        given.extend(card.does.gives.iter().map(|f| (*f, model.clone(), g.intent_id.clone())));
+    }
+}
+
+fn written_model(text: &str, catalog: &CliCatalog) -> Option<String> {
+    // A model id or path written in the request; "Load/Unload" is two command words, not an id.
+    let leaves: Vec<&str> = catalog.intents.iter().filter_map(|c| c.id.rsplit('.').next()).collect();
+    find_hf_or_path(&split_words(text)).filter(|m| !m.split('/').all(|h| leaves.contains(&h.to_ascii_lowercase().as_str())))
+}
+
 fn without(text: &str, model_ref: Option<&str>) -> String {
     // The words that say what to do; the model id is a value, not part of what to do.
+    let text = &without_wish(text);
     let Some(m) = model_ref else {
         return text.to_string();
     };
