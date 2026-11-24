@@ -26,6 +26,7 @@ pub enum RetrievalMode {
 
 pub trait ShortlistBackend {
     fn rank(&self, query: &str, top_k: usize) -> Vec<ScoredIntent>;
+    fn knows(&self, word: &str) -> bool;
 }
 
 pub struct StaticModel {
@@ -307,6 +308,11 @@ impl HybridRetriever {
 }
 
 impl ShortlistBackend for HybridRetriever {
+    fn knows(&self, word: &str) -> bool {
+        // Whether any command's words hold this one.
+        self.idf.contains_key(word)
+    }
+
     fn rank(&self, query: &str, top_k: usize) -> Vec<ScoredIntent> {
         // BM25 and embedding similarity, fused by reciprocal rank and blended with both scores.
         let head = query.split_once(" -- ").map(|(l, _)| l).unwrap_or(query);
@@ -363,9 +369,9 @@ pub(super) fn names(card: &super::schema::IntentCard) -> Vec<String> {
 }
 
 pub(super) fn says(token: &str, name: &str) -> bool {
-    // The word itself or a plain inflection of it (unloads, unloading, removed), never a longer word that merely contains it.
+    // The word itself or a plain inflection of it (unloads, unloading), never a longer word that merely contains it; a past form ("is qwen loaded") asks about a state, it does not ask for a change.
     let stem = name.strip_suffix('e').unwrap_or(name);
-    token == name || token.strip_prefix(stem).is_some_and(|end| matches!(end, "s" | "es" | "d" | "ed" | "ing"))
+    token == name || token.strip_prefix(stem).is_some_and(|end| matches!(end, "s" | "es" | "ing"))
 }
 
 impl HybridRetriever {

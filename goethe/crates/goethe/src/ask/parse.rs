@@ -145,6 +145,13 @@ pub fn is_auth_key(t: &str) -> bool {
     t.starts_with("msh_ak_")
 }
 
+pub fn negation(text: &str) -> Option<String> {
+    // A word that says not to do something; ranking ignores it, so "don't stop goethe" would read as "stop goethe".
+    text.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '\'' && c != '\u{2019}').to_ascii_lowercase().replace('\u{2019}', "'"))
+        .find(|w| matches!(w.as_str(), "not" | "never" | "dont" | "doesnt" | "didnt") || w.ends_with("n't"))
+}
+
 pub fn find_hf_or_path(tokens: &[String]) -> Option<String> {
     for t in tokens {
         let clean = t.trim_matches(|c: char| matches!(c, ',' | ';' | ')' | '('));

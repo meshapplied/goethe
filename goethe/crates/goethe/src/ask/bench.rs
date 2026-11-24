@@ -172,6 +172,27 @@ fn world_orders_up_and_install_before_load() {
 }
 
 #[test]
+fn a_misread_request_is_never_ready_to_change_anything() {
+    // Found on a real box: a model no command takes, a negation, a path that is no installed model, a stray word beside a command's name, the whole internet allowed in.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let shown = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
+    for q in ["uninstall mistral", "uninstall the qwen 7b model", "do not unload mistral", "never remove mistral", "don't stop goethe", "delete the file /tmp/x", "start the car"] {
+        let p = plan(q);
+        assert!(!p.is_ready(), "{q} is ready: {:?}", shown(&p));
+    }
+    let open = plan("allow 0.0.0.0/0");
+    assert!(!open.is_ready() || open.has_destructive(), "the whole internet on one Enter: {:?}", shown(&open));
+    assert!(super::embed::says("loads", "load") && super::embed::says("loading", "load") && !super::embed::says("loaded", "load"), "a past form asks about a state");
+    for (q, want) in [("remove mistral", "goethe remove mistralai/Mistral-7B-Instruct"), ("load fast", "goethe load fast"), ("uninstall goethe", "goethe uninstall"), ("stop goethe", "goethe down")] {
+        let p = plan(q);
+        assert!(p.is_ready() && shown(&p).last().is_some_and(|l| l == want), "{q}: {:?}", shown(&p));
+    }
+}
+
+#[test]
 fn a_part_page_reads_short_descriptions_and_value_labels() {
     // Rows drop a leading "The"; a missing value reads "Key name:", not "Which key name?".
     let cat = build_catalog(&Cli::command());
