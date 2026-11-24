@@ -147,7 +147,6 @@ impl PlanState {
             let reason = negated.map_or_else(|| "No Goethe command matches that request closely enough; goethe help lists the commands.".to_string(), |w| format!("Ask plans what to do, not what not to do ('{w}'); say what you want done."));
             return Self::abstained(trimmed, &reason, world);
         }
-        refer_back(&mut goals, catalog, world, validate);
         let mut plan = PlanState { raw_query: trimmed.to_string(), parts, goals, lines: Vec::new(), abstain: None, model_ref, world: world.clone() };
         plan.refresh(catalog, validate);
         plan
@@ -417,8 +416,9 @@ impl PlanState {
     }
 
     fn refresh(&mut self, catalog: &CliCatalog, validate: &Validate) {
-        // Steps Goethe's state needs come first: each part's command, after the giver of every fact it needs that is not true yet (recursively). An auto step keeps the values already given to it.
-        let (old_auto, user): (Vec<PlanStep>, Vec<PlanStep>) = std::mem::take(&mut self.goals).into_iter().partition(|g| g.reason.is_some());
+        // Steps Goethe's state needs come first: each part's command (repeated for "each", given its model for "it"), after the giver of every fact it needs that is not true yet (recursively). An auto step keeps the values already given to it.
+        let (old_auto, mut user): (Vec<PlanStep>, Vec<PlanStep>) = std::mem::take(&mut self.goals).into_iter().partition(|g| g.reason.is_some());
+        refer_back(&mut user, catalog, &self.world, validate);
         let mut have: Vec<(Fact, Option<String>)> = Vec::new();
         let mut lost: Vec<(Fact, Option<String>)> = Vec::new();
         let mut denied = self.world.denied.clone();

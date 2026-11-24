@@ -284,6 +284,32 @@ fn it_means_the_model_before_and_a_negated_part_is_left_out() {
 }
 
 #[test]
+fn a_step_repeated_for_each_model_stays_repeated_when_picked_and_answered() {
+    // Picking the command of a part that says "each" keeps one command per earlier model, and each one asks for its own key name.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let mut p = PlanState::build("load mistral and qwen 7b, then create an api key for each", &cat, &ret, &world, &validate_cli);
+    let keys = p.parts.len() - 1;
+    p.apply_to(keys, PlanAction::SelectIntent { intent_id: "api.keys.create".into() }, &cat, &world, &validate_cli);
+    assert_eq!(p.goals.iter().filter(|g| g.intent_id == "api.keys.create").count(), 2, "{:?}", cmds(&p.lines));
+    for name in ["first", "second"] {
+        match p.next_decision(&cat, &world) {
+            PendingDecision::PromptSlot { missing } => p.apply(PlanAction::SetSlot { is_flag: false, name: missing.name, values: vec![name.into()] }, &cat, &world, &validate_cli),
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    assert!(p.is_ready(), "{:?}", cmds(&p.lines));
+    let lines = cmds(&p.lines);
+    assert!(lines.contains(&"goethe api keys create first --models mistralai/Mistral-7B-Instruct".to_string()) && lines.contains(&"goethe api keys create second --models Qwen/Qwen2.5-7B-Instruct".to_string()), "{lines:?}");
+    let mut menu = super::MenuAsk::new(Cli::command(), Box::new(validate_cli));
+    menu.world = world;
+    menu.plan = Some(p);
+    menu.sync(&cat);
+    assert_eq!(menu.frame.parts[keys].label, "api keys create x2", "the screen says the part runs twice");
+}
+
+#[test]
 fn a_part_page_reads_short_descriptions_and_value_labels() {
     // Rows drop a leading "The"; a missing value reads "Key name:", not "Which key name?".
     let cat = build_catalog(&Cli::command());

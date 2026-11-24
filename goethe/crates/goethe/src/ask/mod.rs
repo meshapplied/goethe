@@ -259,7 +259,7 @@ impl MenuAsk {
                 chosen: settled.and_then(|g| part.options.iter().position(|o| o.id == g.intent_id)),
                 unsure: !part.left_out && settled.is_none(),
                 left_out: part.left_out,
-                label: settled.and_then(|g| catalog.get(&g.intent_id)).map_or_else(|| short(&part.text), |c| c.argv_prefix[1..].join(" ")),
+                label: settled.and_then(|g| catalog.get(&g.intent_id)).map_or_else(|| short(&part.text), |c| times(&c.argv_prefix[1..].join(" "), plan.goals.iter().filter(|g| g.part == i && g.reason.is_none()).count())),
                 ..AskPart::default()
             };
             view.unused = plan.unused(i, &self.world);
@@ -300,6 +300,11 @@ impl MenuAsk {
         self.sync(&catalog);
         self.frame.clone()
     }
+}
+
+fn times(label: &str, n: usize) -> String {
+    // A part that runs its command once per model ("each") says how many times.
+    if n > 1 { format!("{label} x{n}") } else { label.to_string() }
 }
 
 fn short(text: &str) -> String {
