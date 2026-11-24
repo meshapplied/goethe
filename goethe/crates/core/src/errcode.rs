@@ -107,10 +107,10 @@ pub fn recorded() -> bool {
 }
 
 fn append(home: &Path, t: i64, code: &str, v: &str, detail: &str) -> std::io::Result<()> {
-    // One row per code per day; over the size cap the newest half of the file stays.
+    // The same failure (code and detail) once a day, and one row per code and second, the key the console and the send cursor use; over the size cap the newest half stays.
     let path = home.join(FILE);
     let old = fs::read_to_string(&path).unwrap_or_default();
-    if rows(&old).any(|e| e.code == code && t - e.t < REPEAT_S) {
+    if rows(&old).any(|e| e.code == code && (e.t == t || (e.detail == detail && t - e.t < REPEAT_S))) {
         return Ok(());
     }
     fs::create_dir_all(home)?;
@@ -208,14 +208,17 @@ mod tests {
     }
 
     #[test]
-    fn a_repeat_inside_a_day_is_not_logged_again() {
+    fn the_same_failure_is_logged_once_a_day_and_different_ones_each() {
         let h = tempfile::tempdir().unwrap();
-        append(h.path(), 1000, "ENV_DEPS", "1.0", "a").unwrap();
-        append(h.path(), 1500, "ENV_DEPS", "1.0", "b").unwrap();
-        append(h.path(), 1500, "ENV_FIX", "1.0", "c").unwrap();
-        append(h.path(), 1000 + REPEAT_S, "ENV_DEPS", "1.0", "d").unwrap();
+        append(h.path(), 1000, "CMD_FAILED", "1.0", "login").unwrap();
+        append(h.path(), 1500, "CMD_FAILED", "1.0", "install").unwrap();
+        append(h.path(), 1500, "CMD_FAILED", "1.0", "load").unwrap();
+        append(h.path(), 1600, "CMD_FAILED", "1.0", "login").unwrap();
+        append(h.path(), 1600, "ENV_FIX", "1.0", "x").unwrap();
+        append(h.path(), 1000 + REPEAT_S, "CMD_FAILED", "1.0", "login").unwrap();
         let text = fs::read_to_string(h.path().join(FILE)).unwrap();
-        assert_eq!(rows(&text).map(|e| e.detail).collect::<Vec<_>>(), ["a", "c", "d"]);
+        let got: Vec<(i64, String)> = rows(&text).map(|e| (e.t, e.detail)).collect();
+        assert_eq!(got, [(1000, "login".into()), (1500, "install".into()), (1600, "x".into()), (1000 + REPEAT_S, "login".into())]);
     }
 
     #[test]

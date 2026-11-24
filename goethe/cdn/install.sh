@@ -8,15 +8,17 @@ DEFAULT_PKG_URL="https://pkg.goethe.sh"
 GLIBC_MIN=2.30
 
 die() {
-  # die CODE message: tell the user, and log one row to <home>/errors.log (see errcode.rs) unless the file is over 64k or the same code was logged in the last day, as goethe does.
-  local code="$1" msg="$2" home="${GOETHE_HOME:-$(default_home 2>/dev/null || true)}" v="${VERSION:-latest}" log detail
+  # die CODE message: tell the user, and log one row to <home>/errors.log (see errcode.rs) unless the file is over 64k, the same code and detail were logged in the last day, or the code in this second, as goethe does.
+  local code="$1" msg="$2" home="${GOETHE_HOME:-$(default_home 2>/dev/null || true)}" v="${VERSION:-latest}" now log detail
   echo "goethe install: ${msg}" >&2
   log="${home}/errors.log"
   [[ "${v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]] || v=unknown
   detail="$(printf '%s' "${msg}" | head -n1 | sed -E "s#[A-Za-z]+://[^ ]+#<url>#g; s#(^|[ (=])[/~][^ ]*#\\1<path>#g" | tr '\t' ' ' | cut -c1-120)"
+  now="$(date +%s)"
   if [[ -n "${home}" ]] && mkdir -p "${home}" 2>/dev/null && [[ ! -e "${log}" || -z "$(find "${log}" -size +64k 2>/dev/null)" ]] &&
-    ! awk -F'\t' -v c="${code}" -v now="$(date +%s)" '$2 == c && now - $1 < 86400 { f = 1 } END { exit !f }' "${log}" 2>/dev/null; then
-    (umask 077 && printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "${code}" "${v}" "${detail}" >>"${log}") 2>/dev/null || true
+    ! GOETHE_ERR_DETAIL="${detail}" awk -F'\t' -v c="${code}" -v now="${now}" \
+      '$2 == c && ($1 == now || ($4 == ENVIRON["GOETHE_ERR_DETAIL"] && now - $1 < 86400)) { f = 1 } END { exit !f }' "${log}" 2>/dev/null; then
+    (umask 077 && printf '%s\t%s\t%s\t%s\n' "${now}" "${code}" "${v}" "${detail}" >>"${log}") 2>/dev/null || true
   fi
   exit 1
 }
