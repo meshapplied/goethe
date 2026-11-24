@@ -2,7 +2,6 @@
 
 use crate::paths::{ensure_layout, goethe_home};
 use crate::pyenv::{self, Layer};
-use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::fs;
 use std::io::Read;
@@ -479,7 +478,7 @@ pub(crate) fn swap_all(staged: &[Staged]) -> Result<(), String> {
 
 pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
     let mut f = fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut h = Sha256::new();
+    let mut h = ring::digest::Context::new(&ring::digest::SHA256);
     let mut buf = [0u8; 65536];
     loop {
         let n = f.read(&mut buf).map_err(|e| e.to_string())?;
@@ -488,7 +487,7 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
         }
         h.update(&buf[..n]);
     }
-    Ok(format!("{:x}", h.finalize()))
+    Ok(crate::sha::hex(h.finish().as_ref()))
 }
 
 fn restart_goethed(home: &Path) -> Result<(), String> {

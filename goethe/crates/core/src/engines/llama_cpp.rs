@@ -549,8 +549,7 @@ mod tests {
     }
 
     fn sha(bytes: &[u8]) -> String {
-        use sha2::Digest;
-        format!("{:x}", sha2::Sha256::digest(bytes))
+        crate::sha::digest_hex(bytes)
     }
 
     const URL: &str = "https://example.invalid/llama-b1-bin.tar.gz";

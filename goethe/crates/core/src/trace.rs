@@ -9,7 +9,6 @@ use flate2::Compression;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -374,14 +373,7 @@ fn random_hex(n: usize) -> String {
 type Hash = [u8; 32];
 
 fn hash_step(prev: &Hash, part: &str) -> Hash {
-    let mut h = Sha256::new();
-    h.update(prev);
-    h.update(part.as_bytes());
-    h.finalize().into()
-}
-
-fn hex(h: &Hash) -> String {
-    h.iter().map(|x| format!("{x:02x}")).collect()
+    crate::sha::digest(&[prev, part.as_bytes()])
 }
 
 pub struct Capture {
@@ -765,8 +757,8 @@ impl Writer {
         if api.has_messages() {
             rec.insert("parent".into(), parent_json);
             rec.insert("messages_from".into(), json!(messages_from));
-            rec.insert("request_hash".into(), json!(hex(&request_hash)));
-            rec.insert("reply_hash".into(), json!(reply_hash.as_ref().map(hex)));
+            rec.insert("request_hash".into(), json!(crate::sha::hex(&request_hash)));
+            rec.insert("reply_hash".into(), json!(reply_hash.as_ref().map(|h| crate::sha::hex(h))));
         }
         if params_same {
             rec.insert("params_from_parent".into(), json!(true));
@@ -935,7 +927,7 @@ impl Writer {
         let Some((entry, path)) = self.describe_instance(instance_id) else {
             return "unknown".into();
         };
-        let fp = format!("m_{}", &hex(&hash_step(&[0; 32], &entry.to_string()))[..16]);
+        let fp = format!("m_{}", &crate::sha::hex(&hash_step(&[0; 32], &entry.to_string()))[..16]);
         self.fingerprints.insert(instance_id.to_string(), fp.clone());
         if !self.models.contains_key(&fp) {
             let mut entry = entry;
@@ -1095,7 +1087,7 @@ fn model_files(dir: &Path) -> Map<String, Value> {
         .iter()
         .filter_map(|name| {
             let bytes = std::fs::read(dir.join(name)).ok()?;
-            Some((name.to_string(), json!(hex(&Sha256::digest(&bytes).into()))))
+            Some((name.to_string(), json!(crate::sha::digest_hex(&bytes))))
         })
         .collect()
 }
@@ -1118,14 +1110,12 @@ fn single_file_sample(path: &Path, size: u64) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     const SAMPLE: u64 = 1 << 20;
     let mut f = std::fs::File::open(path).ok()?;
-    let mut h = Sha256::new();
-    let mut buf = vec![0u8; SAMPLE.min(size) as usize];
-    f.read_exact(&mut buf).ok()?;
-    h.update(&buf);
+    let mut head = vec![0u8; SAMPLE.min(size) as usize];
+    let mut tail = head.clone();
+    f.read_exact(&mut head).ok()?;
     f.seek(SeekFrom::Start(size.saturating_sub(SAMPLE))).ok()?;
-    f.read_exact(&mut buf).ok()?;
-    h.update(&buf);
-    Some(hex(&h.finalize().into()))
+    f.read_exact(&mut tail).ok()?;
+    Some(crate::sha::hex(&crate::sha::digest(&[&head, &tail])))
 }
 
 fn weight_files(dir: &Path) -> Value {

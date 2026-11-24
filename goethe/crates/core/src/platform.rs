@@ -445,9 +445,7 @@ pub fn ensure_home_machine_id(home: &Path) -> Result<(), String> {
 }
 
 pub fn fingerprint_of(machine_id: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(format!("{machine_id}{FINGERPRINT_SALT}").as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    crate::sha::digest_hex(format!("{machine_id}{FINGERPRINT_SALT}").as_bytes())
 }
 
 pub fn hostname() -> String {
