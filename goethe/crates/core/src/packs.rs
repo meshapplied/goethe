@@ -671,28 +671,54 @@ pub fn variant_max_ctx(prefix: &[u8], variant: &str) -> Option<u64> {
     manifest_of(prefix)?["buckets"].as_array()?.iter().filter(|b| b["variant"].as_str() == Some(variant)).filter_map(|b| b["maxctx"].as_u64()).max()
 }
 
-fn fetch_prefix(broker: &impl Broker, entry: &Entry) -> Result<(Vec<u8>, usize), String> {
-    // The pack's head, container header and manifest (its first bytes, no weights), the manifest checked against the index entry's hash; and where the manifest starts in them.
-    let head = broker.range(&entry.file, 0, 16)?;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlanError {
+    Unreachable(String),
+    Refused(String),
+}
+
+impl From<String> for PlanError {
+    fn from(e: String) -> Self {
+        PlanError::Refused(e)
+    }
+}
+
+impl From<&str> for PlanError {
+    fn from(e: &str) -> Self {
+        PlanError::Refused(e.to_string())
+    }
+}
+
+impl From<PlanError> for String {
+    fn from(e: PlanError) -> Self {
+        match e {
+            PlanError::Unreachable(e) | PlanError::Refused(e) => e,
+        }
+    }
+}
+
+fn fetch_prefix(broker: &impl Broker, entry: &Entry) -> Result<(Vec<u8>, usize), PlanError> {
+    // The pack's head, container header and manifest (its first bytes, no weights), the manifest checked against the index entry's hash; and where the manifest starts in them. A store that does not answer is Unreachable, a pack that does not check out is Refused.
+    let head = broker.range(&entry.file, 0, 16).map_err(PlanError::Unreachable)?;
     if &head[..8] != b"GCPACK3\n" {
-        return Err(format!("{}: not a pack of ABI 3", entry.file));
+        return Err(format!("{}: not a pack of ABI 3", entry.file).into());
     }
     let n = u64::from_le_bytes(head[8..16].try_into().map_err(|_| "pack header")?);
     if n == 0 || n > MAX_HEADER || 16 + n > entry.size {
-        return Err(format!("{}: bad container header length", entry.file));
+        return Err(format!("{}: bad container header length", entry.file).into());
     }
-    let header = broker.range(&entry.file, 16, n)?;
+    let header = broker.range(&entry.file, 16, n).map_err(PlanError::Unreachable)?;
     let h: Value = serde_json::from_slice(&header).map_err(|e| format!("{}: container header: {e}", entry.file))?;
     let (off, len) = (h["manifest"][0].as_u64().ok_or("container header: manifest")?, h["manifest"][1].as_u64().ok_or("container header: manifest")?);
     let end = off.checked_add(len).and_then(|x| x.checked_add(16 + n));
     if len == 0 || len > MAX_MANIFEST || !end.is_some_and(|e| e <= entry.size) {
-        return Err(format!("{}: bad manifest range", entry.file));
+        return Err(format!("{}: bad manifest range", entry.file).into());
     }
-    let body = broker.range(&entry.file, 16 + n, off + len)?;
+    let body = broker.range(&entry.file, 16 + n, off + len).map_err(PlanError::Unreachable)?;
     let at = 16 + n as usize + off as usize;
     let manifest = &body[off as usize..];
     if crate::sha::digest_hex(manifest) != entry.manifest_sha256 {
-        return Err(format!("{}: manifest differs from the signed index", entry.file));
+        return Err(format!("{}: manifest differs from the signed index", entry.file).into());
     }
     Ok(([head, header, body].concat(), at))
 }
@@ -705,14 +731,14 @@ pub fn unverified_prefix(model_id: &str, arch: &str, broker: &impl Broker) -> Re
     Ok(Some((entry, prefix)))
 }
 
-pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &impl Broker, run: Runner) -> Result<Option<Plan>, String> {
-    // The signed index's pack for this model and arch, and its manifest's weight files per variant (what to download), only the variant a quant names (id, desc.quant or desc.format, any case). None: no pack.
+pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &impl Broker, run: Runner) -> Result<Option<Plan>, PlanError> {
+    // The signed index's pack for this model and arch, and its manifest's weight files per variant (what to download), only the variant a quant names (id, desc.quant or desc.format, any case). None: no pack. A store that does not answer is Unreachable; an index or pack that does not verify is Refused.
     let work = home.join("packs");
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let (ix, sg) = (work.join("index.json"), work.join("index.sig"));
-    let raw = broker.index()?;
+    let raw = broker.index().map_err(PlanError::Unreachable)?;
     std::fs::write(&ix, &raw).map_err(|e| e.to_string())?;
-    std::fs::write(&sg, broker.index_sig()?).map_err(|e| e.to_string())?;
+    std::fs::write(&sg, broker.index_sig().map_err(PlanError::Unreachable)?).map_err(|e| e.to_string())?;
     let v = |x: &str| x.to_string();
     let verified = run(&[v("index"), v("verify"), v("--index"), s(&ix), v("--sig"), s(&sg), v("--last-serial"), last_serial(home).to_string()])?.1;
     let serial = serde_json::from_str::<Value>(&verified).map_err(|e| format!("index verify: {e}"))?["serial"].as_u64().ok_or("index verify: no serial")?;
@@ -739,7 +765,8 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
         return Err(match quant {
             Some(q) => format!("{model_id}: its kernel pack has no variant {q} (available: {})", all.join(", ")),
             None => format!("{}: the manifest names no model files", entry.file),
-        });
+        }
+        .into());
     }
     Ok(Some(Plan { entry, prefix, variants, variant_ids, serial }))
 }
@@ -1166,7 +1193,7 @@ mod tests {
         let q8 = plan(home.path(), "org/m-gguf", "sm_120a", Some("Q8"), &b, &engine(&b.pack, &[])).unwrap().unwrap();
         assert_eq!(q8.variants, vec![vec!["m-Q8_0.gguf".to_string()]], "a quant names one variant by id");
         let e = plan(home.path(), "org/m-gguf", "sm_120a", Some("q5"), &b, &engine(&b.pack, &[])).unwrap_err();
-        assert_eq!(e, "org/m-gguf: its kernel pack has no variant q5 (available: q4, q8)");
+        assert_eq!(e, PlanError::Refused("org/m-gguf: its kernel pack has no variant q5 (available: q4, q8)".into()));
         assert!(plan(home.path(), "org/other", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap().is_none());
         assert!(plan(home.path(), "org/m-gguf", "sm_90a", None, &b, &engine(&b.pack, &[])).unwrap().is_none());
     }
@@ -1210,7 +1237,8 @@ mod tests {
         let index = index_of(&pack, &sha(&pack.manifest));
         let b = Spy(Fake { pack, index, tamper: false, refuse: false, ranges: RefCell::new(Vec::new()) });
         let e = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.0.pack, &[])).unwrap_err();
-        assert!(e.contains("bad manifest range"), "{e}");
+        assert_eq!(e, PlanError::Refused(e.clone().into()), "a pack that does not check out is refused, not a store that did not answer");
+        assert!(String::from(e).contains("bad manifest range"));
     }
 
     #[test]
@@ -1238,7 +1266,7 @@ mod tests {
         let (home, _) = dirs();
         let mut b = fake();
         b.index = index_of(&b.pack, &"0".repeat(64));
-        assert!(plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap_err().contains("manifest differs"));
+        assert!(plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[])).map_err(String::from).unwrap_err().contains("manifest differs"));
     }
 
     #[test]

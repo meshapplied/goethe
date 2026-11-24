@@ -266,6 +266,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         no_verify: opts.no_verify,
         only: None,
     };
+    let mut packs_down = false;
     let declined = match pack_decision(home, opts)? {
         PackDecision::Use(mut choice) => 'packed: {
             // Only the files the pack was built for, at its pinned revision; a pack no allowed GPU runs is refused from its manifest before anything is installed, the engine layer once, on first use.
@@ -278,8 +279,16 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 break 'packed false;
             }
             crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
-            let plan = crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home))?
-                .ok_or_else(|| format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch))?;
+            let plan = match crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home)) {
+                Ok(Some(plan)) => plan,
+                Ok(None) => return Err(format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch)),
+                Err(crate::packs::PlanError::Refused(e)) => return Err(e),
+                Err(crate::packs::PlanError::Unreachable(why)) => {
+                    crate::step::note(&packs_unreachable(&why, fallback_allowed(opts.fallback))?);
+                    packs_down = true;
+                    break 'packed false;
+                }
+            };
             if let Some(why) = refused_before_download(home, &plan, &crate::packs::python_runner(home)) {
                 println!("{}", refuse(why)?);
                 break 'packed false;
@@ -378,7 +387,8 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         }
     }
     fetch_weights(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf.clone(), ..dl })?;
-    let pack = readable(structure_offer(home, opts, &card_dir)?, |c| config_for_pack(home, opts, &card_dir, c, gguf.as_deref().unwrap_or_default()), fallback_allowed(opts.fallback))?;
+    let offer = if packs_down { None } else { structure_offer(home, opts, &card_dir)? };
+    let pack = readable(offer, |c| config_for_pack(home, opts, &card_dir, c, gguf.as_deref().unwrap_or_default()), fallback_allowed(opts.fallback))?;
     Ok(Target {
         model_id: opts.model_id.clone(),
         card_dir,
@@ -940,6 +950,14 @@ fn pack_only_gate(model_id: &str, pack_only: bool, declined: bool, no_pack_gpu: 
         Some(why) => Err(format!("{model_id}: {why}")),
         None => Ok(()),
     }
+}
+
+fn packs_unreachable(why: &str, allow: bool) -> Result<String, String> {
+    // The pack store did not answer (down, offline, an HTTP error): install with the model's plain runtime (SGLang, else llama.cpp), saying why; GOETHE_ALLOW_FALLBACK=0 makes it an error. An index or pack that fails verification never falls back silently: it is refused.
+    if !allow {
+        return Err(format!("kernel packs could not be reached ({why}); {NOTHING_DOWNLOADED}; {FALLBACK_HINT}"));
+    }
+    Ok(format!("note: kernel packs could not be reached ({why}); installing with the plain runtime"))
 }
 
 fn pack_only_refusal(model_id: &str, pack_only: bool, why: &str, allow: bool) -> Result<String, String> {
@@ -1742,6 +1760,14 @@ mod tests {
         assert_eq!(pack_runs(&home.path().join("p.prefix"), None, &yes), None);
         let old = |_: &[String]| Err("exit 2: invalid choice: 'runs'".to_string());
         assert_eq!(pack_runs(&home.path().join("p.prefix"), None, &old), None, "an engine without pack runs: load decides");
+    }
+
+    #[test]
+    fn a_pack_store_that_does_not_answer_gives_way_to_the_plain_runtime_unless_fallback_is_off() {
+        let ok = packs_unreachable("/packs/v2/index.json: HTTP 503", true).unwrap();
+        assert!(ok.contains("could not be reached (/packs/v2/index.json: HTTP 503)") && ok.contains("plain runtime"), "{ok}");
+        let err = packs_unreachable("/packs/v2/index.json: HTTP 503", false).unwrap_err();
+        assert!(err.contains(NOTHING_DOWNLOADED) && err.contains("--fallback"), "{err}");
     }
 
     #[test]

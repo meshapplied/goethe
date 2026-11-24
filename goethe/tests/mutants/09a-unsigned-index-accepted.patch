@@ -1,9 +1,9 @@
 diff --git a/goethe/crates/core/src/packs.rs b/goethe/crates/core/src/packs.rs
 --- a/goethe/crates/core/src/packs.rs
 +++ b/goethe/crates/core/src/packs.rs
-@@ -719,7 +719,7 @@
+@@ -740,7 +740,7 @@
      std::fs::write(&ix, &raw).map_err(|e| e.to_string())?;
-     std::fs::write(&sg, broker.index_sig()?).map_err(|e| e.to_string())?;
+     std::fs::write(&sg, broker.index_sig().map_err(PlanError::Unreachable)?).map_err(|e| e.to_string())?;
      let v = |x: &str| x.to_string();
 -    let verified = run(&[v("index"), v("verify"), v("--index"), s(&ix), v("--sig"), s(&sg), v("--last-serial"), last_serial(home).to_string()])?.1;
 +    let verified = run(&[v("index"), v("verify"), v("--index"), s(&ix), v("--sig"), s(&sg), v("--last-serial"), last_serial(home).to_string()]).unwrap_or((0, "{\"serial\": 1}".to_string())).1;
