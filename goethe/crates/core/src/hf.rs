@@ -576,7 +576,7 @@ pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: 
     let (status, tail) = outcome.map_err(|e| format!("hf download failed to start: {e}"))?;
     if !status.success() {
         let log = crate::step::log_path().map_or(String::new(), |p| format!("\nfull log: {}", p.display()));
-        return Err(format!("{}{log}", download_failure(&status, &tail)));
+        return Err(crate::errcode::coded(crate::errcode::Code::ModelDownload, format!("{}{log}", download_failure(&status, &tail))));
     }
     Ok(())
 }

@@ -289,10 +289,13 @@ pub(crate) fn install_from(home: &Path, pkg: &str, sums: &Path, tmp: &Path, laye
     crate::progress::end_line();
     let done = done?;
     if !done.status.success() {
-        return Err(crate::step::failure(
-            &format!("installing the {} layer of the Python environment", layer.name()),
-            &done,
-            "what was installed before still works; run the command again to retry",
+        return Err(crate::errcode::coded(
+            crate::errcode::Code::EnvDeps,
+            crate::step::failure(
+                &format!("installing the {} layer of the Python environment", layer.name()),
+                &done,
+                "what was installed before still works; run the command again to retry",
+            ),
         ));
     }
     if let Some(w) = wheel {

@@ -464,7 +464,7 @@ fn vram_preflight(home: &Path, bytes: u64) -> Result<(), String> {
     let total = hw.gpus.iter().filter(|g| !denied.contains(&g.index)).map(|g| g.vram_total_mb as f64 / 1024.0).sum::<f64>();
     let gb = bytes as f64 / GIB;
     if total > 0.0 && gb > total {
-        return Err(format!("the weights ({gb:.1} GB) are larger than the allowed GPUs together ({total:.1} GB); {NOTHING_DOWNLOADED}"));
+        return Err(crate::errcode::coded(crate::errcode::Code::ModelFit, format!("the weights ({gb:.1} GB) are larger than the allowed GPUs together ({total:.1} GB); {NOTHING_DOWNLOADED}")));
     }
     Ok(())
 }
@@ -573,10 +573,10 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         .filter(|n| crate::engines::llama_cpp::is_model_gguf(n))
         .collect();
     if !has_pack && gguf.is_empty() && !src.join("config.json").is_file() {
-        return Err(format!("{} has no config.json", src.display()));
+        return Err(crate::errcode::coded(crate::errcode::Code::ModelFiles, format!("{} has no config.json", src.display())));
     }
     if !has_pack && gguf.is_empty() && model_facts::weight_files(&src)?.is_empty() {
-        return Err(format!("{} has no .safetensors or .gguf weights", src.display()));
+        return Err(crate::errcode::coded(crate::errcode::Code::ModelFiles, format!("{} has no .safetensors or .gguf weights", src.display())));
     }
     let dir_name = src
         .file_name()
@@ -826,7 +826,7 @@ fn register(home: &Path, opts: &InstallOpts, mut t: Target) -> Result<(), String
     if let Some(why) = refused {
         drop_pack(&planned.dir);
         if !fallback_allowed(opts.fallback) {
-            return Err(format!("{why}; {FALLBACK_HINT}"));
+            return Err(crate::errcode::coded(crate::errcode::Code::ModelPack, format!("{why}; {FALLBACK_HINT}")));
         }
         t.pack = None;
         planned = plan(home, opts, &t)?;
@@ -933,7 +933,7 @@ fn pack_only_gate(model_id: &str, pack_only: bool, declined: bool, no_pack_gpu: 
     }
     if declined {
         let cards = if built.is_empty() { String::new() } else { format!(" (packs are built for {built})") };
-        return Err(format!("{model_id} {ONLY_PACK}: {LOGIN_FIRST}{cards}; {NOTHING_DOWNLOADED}"));
+        return Err(crate::errcode::coded(crate::errcode::Code::ModelPack, format!("{model_id} {ONLY_PACK}: {LOGIN_FIRST}{cards}; {NOTHING_DOWNLOADED}")));
     }
     match no_pack_gpu {
         Some(why) => Err(format!("{model_id}: {why}")),
@@ -944,7 +944,7 @@ fn pack_only_gate(model_id: &str, pack_only: bool, declined: bool, no_pack_gpu: 
 fn pack_only_refusal(model_id: &str, pack_only: bool, why: &str, allow: bool) -> Result<String, String> {
     // A pack that cannot run here before any download: a pack-only model is refused with the cards its pack is built for; any other is refused too unless the user opted into its plain runtime.
     if pack_only {
-        return Err(format!("{model_id} {ONLY_PACK}, and {why}; {NOTHING_DOWNLOADED}; it has no plain runtime, so pick a model this GPU runs (goethe models recommend)"));
+        return Err(crate::errcode::coded(crate::errcode::Code::ModelPack, format!("{model_id} {ONLY_PACK}, and {why}; {NOTHING_DOWNLOADED}; it has no plain runtime, so pick a model this GPU runs (goethe models recommend)")));
     }
     if !allow {
         return Err(format!("{why}; {NOTHING_DOWNLOADED}; {FALLBACK_HINT}"));

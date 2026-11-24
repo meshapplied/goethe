@@ -25,6 +25,8 @@ pub struct StateSnapshot {
     pub apis: Vec<Api>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::usage_log::Report>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<crate::errcode::Event>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -184,6 +186,7 @@ impl Collector {
             models,
             apis: con.as_ref().map(apis).unwrap_or_default(),
             usage: con.as_ref().and_then(crate::usage_log::report),
+            errors: con.as_ref().map(|c| crate::errcode::pending(home, &crate::errcode::sent_to(c))).unwrap_or_default(),
         }
     }
 

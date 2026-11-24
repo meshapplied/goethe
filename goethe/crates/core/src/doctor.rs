@@ -28,6 +28,11 @@ pub fn run(json: bool, probe_public: bool) -> Result<(), String> {
     let home = goethe_home();
     let checks = collect_checks(&home);
     let fail = checks.iter().any(|c| c.status == "FAIL");
+    for c in checks.iter().filter(|c| c.status == "FAIL") {
+        if let Some(code) = crate::errcode::Code::for_check(&c.name) {
+            crate::errcode::record(code, &c.hint);
+        }
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&checks).map_err(|e| e.to_string())?);
     } else {
@@ -195,6 +200,10 @@ fn check_llama_cpp(home: &Path) -> Check {
             Err(why) => check("llama.cpp", "FAIL", why),
         },
     }
+}
+
+pub fn check_names() -> impl Iterator<Item = &'static str> {
+    CHECKS.iter().chain(MAC_CHECKS).map(|(n, _)| *n)
 }
 
 fn collect_checks(home: &Path) -> Vec<Check> {

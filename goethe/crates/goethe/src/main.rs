@@ -1264,7 +1264,14 @@ fn main() {
     };
     match result {
         Ok(()) => {}
-        Err(msg) => fail(msg),
+        Err(msg) => {
+            // A failure no site coded itself still gets a row; it names the command only, because the message can hold what the user typed.
+            if !goethe_core::errcode::recorded() {
+                let cmd = args.iter().skip(1).find(|a| !a.starts_with('-')).map_or("goethe", String::as_str);
+                goethe_core::errcode::record(goethe_core::errcode::Code::CmdFailed, cmd);
+            }
+            fail(msg)
+        }
     }
 }
 
