@@ -36,18 +36,24 @@ pub struct Worker {
     failures: u32,
     last_loaded: Option<usize>,
     server_interval: Option<u64>,
+    stream_url: Option<String>,
     last_note: Option<String>,
     seed: u64,
 }
 
 impl Worker {
+    pub fn stream_url(&self) -> Option<&str> {
+        // The goethe-server the console told this node to dial (a paid workspace), as of the last accepted heartbeat.
+        self.stream_url.as_deref()
+    }
+
     pub fn new(home: PathBuf, collector: Collector) -> Worker {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(1)
             ^ ((std::process::id() as u64) << 32);
-        Worker { home, collector, client: None, failures: 0, last_loaded: None, server_interval: None, last_note: None, seed: seed | 1 }
+        Worker { home, collector, client: None, failures: 0, last_loaded: None, server_interval: None, stream_url: None, last_note: None, seed: seed | 1 }
     }
 
     pub fn step(&mut self, reason: Reason) -> (Outcome, Duration) {
@@ -88,6 +94,7 @@ impl Worker {
             Ok(reply) => {
                 self.last_loaded = Some(loaded);
                 self.server_interval = reply.interval;
+                self.stream_url = reply.stream_url;
                 if let Some(to) = usage_to {
                     crate::usage_log::mark_sent(&self.home, to);
                 }

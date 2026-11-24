@@ -508,7 +508,10 @@ impl Caller<'_> {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+pub fn running() -> Option<MuxRef> {
+    MUX.get()
+}
+
 pub fn gateway(m: MuxRef) -> goethe_core::client::Gateway {
     // The /v1 handler of the node connection (goethe-core client): the connection is the authentication, so its headers are trusted here and only here.
     Arc::new(move |req: Request<Incoming>| {

@@ -2,7 +2,8 @@
 
 use crate::paths::goethe_home;
 use crate::client::link::{self, Credentials, Secret};
-use crate::client::api::{Approved, ApiError, Client, Poll, Started};
+use crate::client::api::{Approved, ApiError, Client, Poll, Started, TrustRoot};
+use goethe_proto::{InstallKey, TrustEntry};
 use crate::term::{command, paint, Color};
 use std::io::BufRead;
 use std::path::Path;
@@ -85,7 +86,7 @@ pub fn wait_for_approval(
             Ok(Poll::SlowDown) => interval = (interval + Duration::from_secs(5)).min(Duration::from_secs(60)),
             Ok(Poll::Expired) => return Err(WaitError::Failed("the code expired before it was approved; run goethe login again".into())),
             Ok(Poll::Denied) => return Err(WaitError::Failed("the login was denied on the console; nothing was linked".into())),
-            Ok(Poll::Approved(a)) => return Ok(a),
+            Ok(Poll::Approved(a)) => return Ok(*a),
             Err(ApiError::Status(404, code)) if code == "invalid_device_code" => {
                 return Err(WaitError::Failed("the console no longer knows this code (already used or unknown); run goethe login again".into()))
             }
@@ -176,12 +177,31 @@ fn replace_old_link(home: &Path, old: Option<Credentials>, same_node: Option<&st
     link::remove_credentials(home).map(|_| ())
 }
 
-fn finish(home: &Path, approved: Approved, url: &str) -> Result<(), String> {
-    // Store the credentials, tell goethed, and report the first heartbeat when goethed is up.
+fn pin_root(home: &Path, root: &TrustRoot, device_code: &Secret, node: &InstallKey) -> Result<String, String> {
+    // The approver's passkey, pinned only when it signed this device code for this install key at the console's origin (CONTRACTS 11.3).
+    let challenge = goethe_proto::link_challenge(&crate::security::token_hash(device_code.expose()), &node.hash());
+    if root.assertion.key_id != root.key_id || !goethe_proto::verify_assertion(&root.assertion, &root.public_key, &challenge, goethe_proto::RP_ID, goethe_proto::CONSOLE_ORIGIN) {
+        return Err("the console's approval signature does not verify, so no passkey was pinned".into());
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let entry = TrustEntry { key_id: root.key_id.clone(), public_key: root.public_key.clone(), user_id: root.user_id.clone(), cap: root.cap, added_by: root.user_id.clone(), added_ms: now };
+    crate::client::remote::pin(home, entry, "login")?;
+    Ok(goethe_proto::key_fingerprint(&root.public_key))
+}
+
+fn finish(home: &Path, approved: Approved, url: &str, linked: Option<(&Secret, &InstallKey)>) -> Result<(), String> {
+    // Store the credentials, pin the approver's passkey when the console sent one, tell goethed, and report the first heartbeat when goethed is up.
+    let root = approved.trust_root.clone();
     let creds = approved.into_credentials(url);
     link::save_credentials(home, &creds)?;
     let ws = link::clean_text(&creds.workspace.name, 64);
     println!("{} this node to workspace {ws} on {url}.", paint("Linked", Color::Green));
+    if let (Some(root), Some((code, node))) = (root, linked) {
+        match pin_root(home, &root, code, node) {
+            Ok(fp) => println!("Pinned the approver's passkey ({}); check the console shows the same fingerprint: {}", link::clean_text(&root.user_id, 64), paint(&fp, Color::Bold)),
+            Err(e) => println!("{e}; remote changes from the console stay off until a passkey is paired (goethe remote trust add)."),
+        }
+    }
     if !link::poke_daemon() {
         if crate::service::goethed_running() {
             println!("goethed is running an older version without console support; it starts sending heartbeats after goethe update.");
@@ -231,17 +251,17 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
         }
     }
     let client = Client::new(&url, REQUEST_TIMEOUT)?;
-    let (hostname, fingerprint, install_key) = (link::hostname(), link::fingerprint(), link::install_key(&home)?);
+    let (hostname, fingerprint, install_key, node) = (link::hostname(), link::fingerprint(), link::install_key(&home)?, link::node_key(&home)?);
     let _ctrl_c = CtrlC::catch();
     if let Some(key) = key {
-        let approved = with_retries(|| client.enroll(&key, &hostname, &fingerprint, &install_key)).map_err(|e| match e {
+        let approved = with_retries(|| client.enroll(&key, &hostname, &fingerprint, &install_key, &node)).map_err(|e| match e {
             ApiError::Unauthorized => "the console did not accept the auth key (wrong, used or expired); nothing was changed".to_string(),
             e => format!("{e}; nothing was changed"),
         })?;
         replace_old_link(&home, old, Some(&approved.node_id))?;
-        return finish(&home, approved, &client.base());
+        return finish(&home, approved, &client.base(), None);
     }
-    let started = with_retries(|| client.auth_start(&hostname, &fingerprint, &install_key)).map_err(|e| format!("{e}; nothing was changed"))?;
+    let started = with_retries(|| client.auth_start(&hostname, &fingerprint, &install_key, &node)).map_err(|e| format!("{e}; nothing was changed"))?;
     replace_old_link(&home, old, None)?;
     println!(
         "\nTo link this node ({hostname}), open:\n\n{}\n\nand enter the code {} (it is valid for {})\n",
@@ -263,7 +283,7 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
         },
     );
     match result {
-        Ok(approved) => finish(&home, approved, &client.base()),
+        Ok(approved) => finish(&home, approved, &client.base(), Some((&started.device_code, &node))),
         Err(WaitError::Cancelled) => Err("login cancelled; this node is not linked".into()),
         Err(WaitError::Failed(e)) => Err(e),
     }
@@ -434,6 +454,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_approvers_passkey_is_pinned_only_for_this_device_code_and_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let node = link::node_key(&home).unwrap();
+        let code = Secret::new("device-code-1");
+        let pk = goethe_proto::testkit::Passkey::new("k1");
+        let sign = |code: &str, install: &str| {
+            let challenge = goethe_proto::link_challenge(&crate::security::token_hash(code), install);
+            pk.assert(&challenge, goethe_proto::RP_ID, goethe_proto::CONSOLE_ORIGIN, true)
+        };
+        let root = |assertion| TrustRoot { key_id: "k1".into(), public_key: pk.public_key_b64(), user_id: "u1".into(), cap: goethe_proto::Kind::Network, assertion };
+        assert!(pin_root(&home, &root(sign("device-code-2", &node.hash())), &code, &node).is_err(), "another device code");
+        assert!(pin_root(&home, &root(sign("device-code-1", "other-install")), &code, &node).is_err(), "another install");
+        assert!(crate::client::remote::status(&home).trust.is_empty());
+        let fp = pin_root(&home, &root(sign("device-code-1", &node.hash())), &code, &node).unwrap();
+        assert_eq!(fp, goethe_proto::key_fingerprint(&pk.public_key_b64()));
+        let pinned = crate::client::remote::status(&home).trust;
+        assert_eq!((pinned.len(), pinned[0].cap, pinned[0].user_id.as_str()), (1, goethe_proto::Kind::Network, "u1"));
+    }
+
+    #[test]
     fn the_login_code_says_how_long_it_lives() {
         assert_eq!(lifetime(900), "15 minutes");
         assert_eq!(lifetime(90), "1 minute");
@@ -458,7 +499,7 @@ mod tests {
     }
 
     fn approved() -> Approved {
-        Approved { node_id: "n1".into(), node_token: Secret::new("mesh_node_cccccccccccccccc"), workspace: Workspace { id: "w".into(), name: "Lab".into() } }
+        Approved { node_id: "n1".into(), node_token: Secret::new("mesh_node_cccccccccccccccc"), workspace: Workspace { id: "w".into(), name: "Lab".into() }, trust_root: None }
     }
 
     fn run(replies: Vec<Result<Poll, ApiError>>, s: &Started, cancel_after: Option<usize>) -> (Result<Approved, WaitError>, Vec<Duration>, usize) {
@@ -479,7 +520,7 @@ mod tests {
 
     #[test]
     fn polls_at_the_interval_and_slows_down_when_told() {
-        let (r, slept, _) = run(vec![Ok(Poll::Pending), Ok(Poll::SlowDown), Ok(Poll::Pending), Ok(Poll::Approved(approved()))], &started(3, 900), None);
+        let (r, slept, _) = run(vec![Ok(Poll::Pending), Ok(Poll::SlowDown), Ok(Poll::Pending), Ok(Poll::Approved(Box::new(approved())))], &started(3, 900), None);
         assert_eq!(r.unwrap().node_id, "n1");
         let secs: Vec<u64> = slept.iter().map(|d| d.as_secs()).collect();
         assert_eq!(secs, [3, 3, 8, 8]);
@@ -487,7 +528,7 @@ mod tests {
 
     #[test]
     fn network_blips_are_retried_and_hard_errors_stop() {
-        let (r, _, blips) = run(vec![Err(ApiError::Network("reset".into())), Err(ApiError::Status(503, String::new())), Ok(Poll::Approved(approved()))], &started(1, 900), None);
+        let (r, _, blips) = run(vec![Err(ApiError::Network("reset".into())), Err(ApiError::Status(503, String::new())), Ok(Poll::Approved(Box::new(approved())))], &started(1, 900), None);
         assert!(r.is_ok());
         assert_eq!(blips, 2);
         let (r, _, _) = run(vec![Err(ApiError::Status(400, "bad_code".into()))], &started(1, 900), None);
@@ -495,9 +536,9 @@ mod tests {
         let (r, slept, _) = run(vec![Ok(Poll::Pending), Err(ApiError::Status(404, "invalid_device_code".into()))], &started(3, 900), None);
         assert!(matches!(r, Err(WaitError::Failed(e)) if e.contains("goethe login again")));
         assert_eq!(slept.len(), 2, "a used or unknown code stops the polling");
-        let (r, _, blips) = run(vec![Err(ApiError::RateLimited(Duration::from_secs(2))), Ok(Poll::Approved(approved()))], &started(3, 900), None);
+        let (r, _, blips) = run(vec![Err(ApiError::RateLimited(Duration::from_secs(2))), Ok(Poll::Approved(Box::new(approved())))], &started(3, 900), None);
         assert!(r.is_ok() && blips == 1);
-        let (r, _, blips) = run(vec![Err(ApiError::Status(404, String::new())), Ok(Poll::Pending), Ok(Poll::Approved(approved()))], &started(1, 900), None);
+        let (r, _, blips) = run(vec![Err(ApiError::Status(404, String::new())), Ok(Poll::Pending), Ok(Poll::Approved(Box::new(approved())))], &started(1, 900), None);
         assert!(r.is_ok() && blips == 1, "a 404 page without the console's own code (a deploy or a proxy) is only a blip");
     }
 
@@ -526,7 +567,7 @@ mod tests {
             (200, r#"{"status":"approved","node_id":"n7","node_token":"mesh_node_dddddddddddddddd","workspace":{"id":"w7","name":"Prod"}}"#.into()),
         ]);
         let c = Client::new(&m.url, Duration::from_secs(5)).unwrap();
-        let s = c.auth_start("h", "f", &Secret::new("gik_install")).unwrap();
+        let s = c.auth_start("h", "f", &Secret::new("gik_install"), &InstallKey::from_pkcs8(&InstallKey::generate().unwrap()).unwrap()).unwrap();
         let mut blips = 0;
         let a = wait_for_approval(&s, &mut || c.auth_poll(&s.device_code), &mut |_| true, &mut |_| blips += 1).unwrap();
         assert_eq!((a.node_id.as_str(), a.workspace.name.as_str(), blips), ("n7", "Prod", 1));

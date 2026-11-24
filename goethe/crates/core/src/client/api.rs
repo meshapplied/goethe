@@ -1,6 +1,7 @@
 // Platform device API client: the five documented calls, strict response parsing and errors without secrets.
 
 use crate::client::link::{clean_text, valid_id, valid_token, Credentials, Secret, Workspace};
+use goethe_proto::InstallKey;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::Read;
@@ -102,8 +103,8 @@ impl Client {
         }
     }
 
-    pub fn auth_start(&self, hostname: &str, fingerprint: &str, install_key: &Secret) -> Result<Started, ApiError> {
-        let body = json!({"action": "start", "hostname": hostname, "version": env!("CARGO_PKG_VERSION"), "fingerprint": fingerprint, "install_key": install_key.expose()});
+    pub fn auth_start(&self, hostname: &str, fingerprint: &str, install_key: &Secret, node: &InstallKey) -> Result<Started, ApiError> {
+        let body = json!({"action": "start", "hostname": hostname, "version": env!("CARGO_PKG_VERSION"), "fingerprint": fingerprint, "install_key": install_key.expose(), "install_pub": node.public_b64(), "install_hash": node.hash()});
         parse_started(&self.post("/api/device/auth", body.to_string().as_bytes(), None)?, &self.base())
     }
 
@@ -112,8 +113,8 @@ impl Client {
         parse_poll(&self.post("/api/device/auth", body.to_string().as_bytes(), None)?)
     }
 
-    pub fn enroll(&self, authkey: &Secret, hostname: &str, fingerprint: &str, install_key: &Secret) -> Result<Approved, ApiError> {
-        let body = json!({"authkey": authkey.expose(), "hostname": hostname, "version": env!("CARGO_PKG_VERSION"), "fingerprint": fingerprint, "install_key": install_key.expose()});
+    pub fn enroll(&self, authkey: &Secret, hostname: &str, fingerprint: &str, install_key: &Secret, node: &InstallKey) -> Result<Approved, ApiError> {
+        let body = json!({"authkey": authkey.expose(), "hostname": hostname, "version": env!("CARGO_PKG_VERSION"), "fingerprint": fingerprint, "install_key": install_key.expose(), "install_pub": node.public_b64(), "install_hash": node.hash()});
         parse_approved(&self.post("/api/device/enroll", body.to_string().as_bytes(), None)?)
     }
 
@@ -212,11 +213,21 @@ pub struct Started {
     pub interval: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct TrustRoot {
+    pub key_id: String,
+    pub public_key: String,
+    pub user_id: String,
+    pub cap: goethe_proto::Kind,
+    pub assertion: goethe_proto::Assertion,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Approved {
     pub node_id: String,
     pub node_token: Secret,
     pub workspace: Workspace,
+    pub trust_root: Option<TrustRoot>,
 }
 
 impl Approved {
@@ -237,13 +248,14 @@ pub enum Poll {
     SlowDown,
     Expired,
     Denied,
-    Approved(Approved),
+    Approved(Box<Approved>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeartbeatReply {
     pub interval: Option<u64>,
     pub public_ip: Option<Option<String>>,
+    pub stream_url: Option<String>,
 }
 
 fn malformed(what: &str) -> ApiError {
@@ -311,6 +323,8 @@ pub fn parse_approved(v: &Value) -> Result<Approved, ApiError> {
         node_id: String,
         node_token: String,
         workspace: RawWorkspace,
+        #[serde(default)]
+        trust_root: Option<Value>,
     }
     let r: Raw = serde_json::from_value(v.clone()).map_err(|_| malformed("the approval did not carry node_id, node_token and workspace {id, name}"))?;
     if !valid_id(&r.node_id) {
@@ -326,6 +340,7 @@ pub fn parse_approved(v: &Value) -> Result<Approved, ApiError> {
         node_id: r.node_id,
         node_token: Secret::new(r.node_token),
         workspace: Workspace { id: r.workspace.id, name: clean_text(&r.workspace.name, 128) },
+        trust_root: r.trust_root.and_then(|t| serde_json::from_value(t).ok()),
     })
 }
 
@@ -335,7 +350,7 @@ pub fn parse_poll(v: &Value) -> Result<Poll, ApiError> {
         Some("slow_down") => Ok(Poll::SlowDown),
         Some("expired") => Ok(Poll::Expired),
         Some("denied") => Ok(Poll::Denied),
-        Some("approved") => parse_approved(v).map(Poll::Approved),
+        Some("approved") => parse_approved(v).map(|a| Poll::Approved(Box::new(a))),
         _ => Err(malformed("poll returned no known status")),
     }
 }
@@ -357,7 +372,8 @@ pub fn parse_heartbeat(v: &Value) -> Result<HeartbeatReply, ApiError> {
         }
         Some(_) => return Err(malformed("heartbeat public_ip is not a string")),
     };
-    Ok(HeartbeatReply { interval, public_ip })
+    let stream_url = v.pointer("/stream/url").and_then(Value::as_str).and_then(|u| crate::client::link::check_url(u).ok());
+    Ok(HeartbeatReply { interval, public_ip, stream_url })
 }
 
 #[cfg(test)]
@@ -427,6 +443,10 @@ pub mod mock {
 mod tests {
     use super::*;
 
+    fn node() -> InstallKey {
+        InstallKey::from_pkcs8(&InstallKey::generate().unwrap()).unwrap()
+    }
+
     #[test]
     fn only_a_same_path_move_between_a_domain_and_its_www_twin_is_followed() {
         let p = "/api/device/auth";
@@ -462,7 +482,7 @@ mod tests {
             (200, approved_json()),
         ]);
         let c = Client::new(&m.url, Duration::from_secs(5)).unwrap();
-        let s = c.auth_start("host", "fp", &Secret::new("gik_install")).unwrap();
+        let s = c.auth_start("host", "fp", &Secret::new("gik_install"), &node()).unwrap();
         assert_eq!((s.user_code.as_str(), s.interval, s.expires_in), ("ABCD-1234", 3, 900));
         assert_eq!(s.verification_uri_complete, "http://127.0.0.1:9/device?code=ABCD-1234");
         assert_eq!(c.auth_poll(&s.device_code).unwrap(), Poll::Pending);
@@ -496,10 +516,10 @@ mod tests {
         assert!(matches!(c.auth_poll(&Secret::new("d")), Err(ApiError::Malformed(e)) if e.contains("larger")));
         let m = mock::serve(vec![(200, r#"{"device_code":"d","user_code":"AB\u001b[2J","verification_uri_complete":"http://evil.example.com/x","expires_in":900,"interval":3}"#.into())]);
         let c = Client::new(&m.url, Duration::from_secs(5)).unwrap();
-        assert!(c.auth_start("h", "f", &Secret::new("gik_install")).is_err());
+        assert!(c.auth_start("h", "f", &Secret::new("gik_install"), &node()).is_err());
         let m = mock::serve(vec![(200, r#"{"device_code":"d","user_code":"ABCD-1234","verification_uri_complete":"https://evil.example.com/x","expires_in":900,"interval":3}"#.into())]);
         let c = Client::new(&m.url, Duration::from_secs(5)).unwrap();
-        assert!(c.auth_start("h", "f", &Secret::new("gik_install")).is_err(), "https on another origin is refused");
+        assert!(c.auth_start("h", "f", &Secret::new("gik_install"), &node()).is_err(), "https on another origin is refused");
     }
 
     #[test]
@@ -546,6 +566,29 @@ mod tests {
         for e in [ApiError::Unauthorized, ApiError::Network("x".into()), ApiError::Status(500, "e".into())] {
             assert!(!format!("{e} {e:?}").contains(TOKEN));
         }
+    }
+
+    #[test]
+    fn the_heartbeat_reply_may_name_the_goethe_server_to_dial() {
+        let r = |v: Value| parse_heartbeat(&v).unwrap().stream_url;
+        assert_eq!(r(json!({"ok": true})), None, "no stream: the workspace is not on a paid plan, nothing dials");
+        assert_eq!(r(json!({"ok": true, "stream": {"url": "https://server.goethe.sh"}})).as_deref(), Some("https://server.goethe.sh"));
+        assert_eq!(r(json!({"ok": true, "stream": {"url": "http://server.goethe.sh"}})), None, "plain http only on loopback");
+        assert_eq!(r(json!({"ok": true, "stream": {"url": "http://127.0.0.1:9"}})).as_deref(), Some("http://127.0.0.1:9"));
+    }
+
+    #[test]
+    fn an_approval_may_carry_the_approvers_passkey() {
+        let base = json!({"node_id": "n1", "node_token": "mesh_node_cccccccccccccccc", "workspace": {"id": "w1", "name": "Lab"}});
+        assert_eq!(parse_approved(&base).unwrap().trust_root, None);
+        let pk = goethe_proto::testkit::Passkey::new("k1");
+        let assertion = pk.assert(&[0u8; 32], goethe_proto::RP_ID, goethe_proto::CONSOLE_ORIGIN, true);
+        let mut with = base.clone();
+        with["trust_root"] = json!({"key_id": "k1", "public_key": pk.public_key_b64(), "user_id": "u1", "cap": "change", "assertion": assertion});
+        let root = parse_approved(&with).unwrap().trust_root.unwrap();
+        assert_eq!((root.key_id.as_str(), root.cap), ("k1", goethe_proto::Kind::Change));
+        with["trust_root"] = json!({"key_id": "k1"});
+        assert!(parse_approved(&with).unwrap().trust_root.is_none(), "a malformed passkey is dropped, the link still works");
     }
 
     #[test]

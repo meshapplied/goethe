@@ -185,7 +185,10 @@ async fn main() {
     }
     eprintln!("goethed listening on {}", sock.display());
     goethe_core::autostart::spawn_restore_background();
-    heartbeat::spawn(home.clone());
+    let stream = heartbeat::spawn(home.clone());
+    if let Some(m) = mux::running() {
+        tokio::spawn(goethe_core::client::connect::run(home.clone(), mux::gateway(m), stream));
+    }
     goethe_core::usage_log::spawn(home.clone());
     let _ = goethe_core::log_rotation::run_rotation_pass(&home);
     let home_rot = home.clone();

@@ -169,6 +169,22 @@ pub fn install_key(home: &Path) -> Result<Secret, String> {
     Ok(Secret::new(key))
 }
 
+pub fn node_key(home: &Path) -> Result<goethe_proto::InstallKey, String> {
+    // This install's Ed25519 key (pkcs8, hex, 0600), made once like the install key: its public half goes up when linking, and it proves the node when it connects to goethe-server.
+    let path = platform_dir(home).join("node_key");
+    let parse = |t: &str| {
+        let bytes: Option<Vec<u8>> = t.len().is_multiple_of(2).then(|| (0..t.len()).step_by(2).map(|i| u8::from_str_radix(&t[i..i + 2], 16).ok()).collect()).flatten();
+        bytes.and_then(|b| goethe_proto::InstallKey::from_pkcs8(&b))
+    };
+    if let Some(key) = read_private(&path, 1024, true)?.and_then(|t| parse(t.trim())) {
+        return Ok(key);
+    }
+    ensure_platform_dir(home)?;
+    let pkcs8 = goethe_proto::InstallKey::generate().ok_or("could not make the node key")?;
+    write_private(&path, crate::sha::hex(&pkcs8).as_bytes())?;
+    goethe_proto::InstallKey::from_pkcs8(&pkcs8).ok_or_else(|| "could not read the node key back".to_string())
+}
+
 pub fn state_path(home: &Path) -> PathBuf {
     platform_dir(home).join("platform_state.json")
 }
@@ -605,6 +621,20 @@ mod tests {
         assert_eq!(install_key(&home).unwrap().expose(), first.expose(), "logout keeps it");
         let other = dir.path().join("other");
         assert_ne!(install_key(&other).unwrap().expose(), first.expose(), "each home is its own node");
+    }
+
+    #[test]
+    fn the_node_key_is_made_once_private_and_outlives_a_logout() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let first = node_key(&home).unwrap();
+        assert_eq!(fs::metadata(platform_dir(&home).join("node_key")).unwrap().mode() & 0o777, 0o600);
+        save_credentials(&home, &creds()).unwrap();
+        remove_credentials(&home).unwrap();
+        assert_eq!(node_key(&home).unwrap().public_b64(), first.public_b64(), "logout keeps it");
+        assert_ne!(node_key(&dir.path().join("other")).unwrap().public_b64(), first.public_b64(), "each home is its own node");
+        fs::write(platform_dir(&home).join("node_key"), "zz").unwrap();
+        assert_ne!(node_key(&home).unwrap().public_b64(), first.public_b64(), "a damaged key is made again, never half used");
     }
 
     #[test]
