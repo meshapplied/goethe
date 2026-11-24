@@ -156,7 +156,7 @@ fn redact(word: &str) -> &str {
 }
 
 pub fn pending(home: &Path, after: &(i64, String)) -> Vec<Event> {
-    // The oldest unsent rows, at most SEND_MAX per heartbeat, ordered by (time, code): a row's key, since a code is logged once a day, so a second with many rows (one doctor run) is never cut.
+    // The oldest unsent rows, at most SEND_MAX per heartbeat, ordered by (time, code): a row's key, since a code is logged at most once a second, so a second with many rows (one doctor run) is never cut.
     let text = fs::read_to_string(home.join(FILE)).unwrap_or_default();
     let mut rows: Vec<Event> = rows(&text).filter(|e| (e.t, &e.code) > (after.0, &after.1)).collect();
     rows.sort_by(|a, b| (a.t, &a.code).cmp(&(b.t, &b.code)));
