@@ -515,6 +515,22 @@ mod tests {
     }
 
     #[test]
+    fn cli_md_names_every_command() {
+        // docs/cli.md is written by hand around examples; every command of the CLI must at least appear in it.
+        fn paths(n: &Node, out: &mut Vec<String>) {
+            for c in &n.commands {
+                out.push(c.path.clone());
+                paths(c, out);
+            }
+        }
+        let md = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/cli.md")).expect("docs/cli.md");
+        let mut all = Vec::new();
+        paths(&reference().expect("every example parses"), &mut all);
+        let missing: Vec<String> = all.into_iter().filter(|p| !md.contains(p.as_str())).collect();
+        assert!(missing.is_empty(), "docs/cli.md does not mention: {missing:?}");
+    }
+
+    #[test]
     fn completers_follow_the_value_kind() {
         // The arguments that completed before still complete, from the same lists.
         let cli = with_completers(crate::Cli::command());
