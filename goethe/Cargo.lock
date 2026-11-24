@@ -467,6 +467,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "goethe-proto"
+version = "0.3.6"
+dependencies = [
+ "base64",
+ "ring",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "goethed"
 version = "0.3.6"
 dependencies = [

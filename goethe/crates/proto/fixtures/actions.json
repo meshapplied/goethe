@@ -1,0 +1,18 @@
+[
+  {"action":"model.install","args":{"model_id":"Qwen/Qwen3-8B","runtime":"sglang"}},
+  {"action":"model.load","args":{"model_id":"qwen3-8b","gpus":[0,1],"ctx":32768,"max_conc":8,"tp":2}},
+  {"action":"model.unload","args":{"instance_id":"i-1"}},
+  {"action":"model.remove","args":{"model_id":"qwen3-8b"}},
+  {"action":"gpu.allow","args":{"gpus":[0]}},
+  {"action":"gpu.deny","args":{"gpus":[1,2]}},
+  {"action":"api.key.create","args":{"name":"laptop","models":["qwen3-8b"],"browser_pub":"BBKv0P4kp3XhXgzVgcdR9cUWbdaoLskd3UOUf9KYbKcMeqDm9ZCLvq8v5BCF5TfCZf7ZbWkOt5wLXPnpzcUrAhU"}},
+  {"action":"api.key.revoke","args":{"key_id":"key_1"}},
+  {"action":"api.key.rotate","args":{"key_id":"key_1","browser_pub":"BBKv0P4kp3XhXgzVgcdR9cUWbdaoLskd3UOUf9KYbKcMeqDm9ZCLvq8v5BCF5TfCZf7ZbWkOt5wLXPnpzcUrAhU"}},
+  {"action":"api.expose","args":{"mode":"vpn"}},
+  {"action":"api.allow","args":{"add":["203.0.113.7/32"],"remove":["198.51.100.0/24"]}},
+  {"action":"api.share","args":{"keys":["key_1"],"allow":["203.0.113.7/32"],"ttl_s":3600}},
+  {"action":"goethe.update","args":{"version":"0.3.7"}},
+  {"action":"goethe.update.rollback","args":{}},
+  {"action":"trust.add","args":{"key_id":"cred-2","public_key":"BBKv0P4kp3XhXgzVgcdR9cUWbdaoLskd3UOUf9KYbKcMeqDm9ZCLvq8v5BCF5TfCZf7ZbWkOt5wLXPnpzcUrAhU","user_id":"user_3def","cap":"change"}},
+  {"action":"trust.remove","args":{"key_id":"cred-2"}}
+]
