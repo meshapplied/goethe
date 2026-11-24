@@ -3,7 +3,7 @@
 use crate::alias;
 use crate::db;
 use crate::models;
-use crate::trace::{self, key_names, now_rfc3339, write_private_atomic};
+use crate::trace::{self, key_names, now_rfc3339};
 use crate::trace_assemble::{item_canonical, Api};
 use rusqlite::Connection;
 use serde::de::{Deserializer, MapAccess, Visitor};
@@ -157,10 +157,7 @@ impl LearnConfig {
 }
 
 pub fn load_config(con: &Connection) -> LearnConfig {
-    con.query_row("SELECT value FROM goethe_settings WHERE key = ?1", [SETTING], |r| r.get::<_, String>(0))
-        .ok()
-        .and_then(|v| serde_json::from_str(&v).ok())
-        .unwrap_or_default()
+    crate::db::setting(con, SETTING).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
 }
 
 pub fn notes_dir(home: &Path) -> PathBuf {
@@ -194,11 +191,7 @@ pub fn set(home: &Path, on: bool, models: &[String]) -> Result<Vec<(String, u64)
         cfg.turn_off(&ids);
     }
     let text = serde_json::to_string(&cfg).map_err(|e| e.to_string())?;
-    con.execute(
-        "INSERT INTO goethe_settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        rusqlite::params![SETTING, text],
-    )
-    .map_err(|e| format!("state.db: {e}"))?;
+    db::set_setting(&con, SETTING, &text).map_err(|e| format!("state.db: {e}"))?;
     if !on {
         return Ok(Vec::new());
     }
@@ -1257,7 +1250,7 @@ impl Store {
 
     fn save(&self, id: &str, s: &Session) -> std::io::Result<()> {
         trace::make_private_dir(&self.dir)?;
-        write_private_atomic(&self.dir.join(format!("{id}.json")), &serde_json::to_vec(s)?)
+        crate::paths::write_private(&self.dir.join(format!("{id}.json")), &serde_json::to_vec(s)?)
     }
 
     pub fn idle(&self) -> Vec<Candidate> {

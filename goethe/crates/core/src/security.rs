@@ -6,7 +6,6 @@ use crate::paths::goethe_home;
 use rusqlite::{Connection, OptionalExtension};
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
@@ -439,14 +438,10 @@ fn new_token() -> String {
 }
 
 pub(crate) fn random_hex(n: usize) -> String {
-    // n bytes from /dev/urandom as lowercase hex.
+    // n bytes of kernel randomness as lowercase hex.
     let mut buf = vec![0u8; n];
-    let mut f = fs::File::open("/dev/urandom").expect("urandom");
-    f.read_exact(&mut buf).expect("random bytes");
-    buf.iter().fold(String::with_capacity(2 * n), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    crate::sys::random_bytes(&mut buf);
+    buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub fn token_hash(token: &str) -> String {

@@ -197,7 +197,7 @@ fn layer_label(layer: Layer) -> &'static str {
 
 fn check_disk(home: &Path, layer: Layer) -> Result<(), String> {
     // Stop before downloading when the disk at GOETHE_HOME cannot hold the layer.
-    let Some(free) = free_bytes(home) else {
+    let Some(free) = crate::paths::free_bytes(home) else {
         return Ok(());
     };
     let need = layer.need_gb();
@@ -210,12 +210,6 @@ fn check_disk(home: &Path, layer: Layer) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-fn free_bytes(path: &Path) -> Option<u64> {
-    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
-    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-    (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| st.f_bavail as u64 * st.f_frsize as u64)
 }
 
 pub struct Lock(#[allow(dead_code)] fs::File);

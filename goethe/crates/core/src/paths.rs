@@ -1,9 +1,10 @@
 // GOETHE_HOME resolution, model id validation, and paths under GOETHE_HOME.
 
 use std::collections::BTreeMap;
-use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 pub const HOME_MARKER: &str = ".goethe-home";
@@ -94,11 +95,46 @@ pub fn default_home(root: &Path, user_home: &Path) -> PathBuf {
     user_home.join(".goethe")
 }
 
-pub fn is_writable(path: &Path) -> bool {
-    let Ok(c) = CString::new(path.as_os_str().as_bytes()) else {
-        return false;
-    };
-    unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    // Atomically replace path with data at mode 0600: a unique temp file beside it, fsync, rename, fsync the directory.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = path.parent().ok_or_else(|| std::io::Error::other(format!("{} has no parent", path.display())))?;
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp = dir.join(format!(".{name}.{}.{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    let res = (|| {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res?;
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
+}
+
+pub fn is_writable(dir: &Path) -> bool {
+    // A real write, since permission bits do not show ACLs, read-only mounts seen as root, or container overlays; the name is unique, so probes in parallel never collide.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let probe = dir.join(format!(".goethe-probe-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    let ok = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe).is_ok();
+    let _ = std::fs::remove_file(probe);
+    ok
+}
+
+pub fn free_bytes(dir: &Path) -> Option<u64> {
+    // Free space for an unprivileged writer on the folder's filesystem (or its nearest existing parent).
+    let mut p = dir;
+    while !p.exists() {
+        p = p.parent()?;
+    }
+    let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| st.f_bavail as u64 * st.f_frsize as u64)
 }
 
 pub fn goethe_sock() -> PathBuf {
@@ -214,6 +250,14 @@ pub fn shell_quote(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parallel_probes_of_one_folder_all_see_it_writable() {
+        let d = tempfile::tempdir().unwrap();
+        let all: Vec<bool> = std::thread::scope(|s| (0..16).map(|_| s.spawn(|| is_writable(d.path()))).collect::<Vec<_>>().into_iter().map(|h| h.join().unwrap()).collect());
+        assert!(all.iter().all(|w| *w), "{all:?}");
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0, "probes clean up");
+    }
+
     use super::*;
 
     #[test]

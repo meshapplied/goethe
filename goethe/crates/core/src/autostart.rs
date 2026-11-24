@@ -40,14 +40,7 @@ pub fn restore_enabled(home: &Path) -> bool {
     let Ok(con) = db::open(home) else {
         return true;
     };
-    let Ok(v) = con.query_row(
-        "SELECT value FROM goethe_settings WHERE key = 'restore_desired'",
-        [],
-        |r| r.get::<_, String>(0),
-    ) else {
-        return true;
-    };
-    v != "off"
+    db::setting(&con, "restore_desired").is_none_or(|v| v != "off")
 }
 
 pub fn spawn_restore_background() {

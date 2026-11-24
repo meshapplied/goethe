@@ -756,7 +756,7 @@ impl Report {
 }
 
 fn sent(con: &Connection) -> Option<i64> {
-    con.query_row("SELECT value FROM goethe_settings WHERE key = ?1", [SENT_KEY], |r| r.get::<_, String>(0)).ok().and_then(|v| v.parse().ok())
+    crate::db::setting(con, SENT_KEY).and_then(|v| v.parse().ok())
 }
 
 pub fn report(con: &Connection) -> Option<Report> {
@@ -888,7 +888,7 @@ fn report_at(con: &Connection, now: i64, written_to: i64) -> Option<Report> {
 pub fn mark_sent(home: &Path, to: i64) {
     // The platform has the minutes before `to`; the next heartbeat starts there.
     if let Ok(con) = crate::db::open(home) {
-        let _ = con.execute("INSERT OR REPLACE INTO goethe_settings (key, value) VALUES (?1, ?2)", rusqlite::params![SENT_KEY, to.to_string()]);
+        let _ = crate::db::set_setting(&con, SENT_KEY, &to.to_string());
     }
 }
 
@@ -1010,7 +1010,7 @@ mod tests {
         let rep = report_at(&con, now, minute_of(now)).unwrap();
         assert_eq!((rep.to, rep.gpus.len(), rep.models.len()), (minute_of(now), 10, 1));
         assert!(rep.from <= base);
-        con.execute("INSERT INTO goethe_settings (key, value) VALUES (?1, ?2)", rusqlite::params![SENT_KEY, (base + 300).to_string()]).unwrap();
+        crate::db::set_setting(&con, SENT_KEY, &(base + 300).to_string()).unwrap();
         let rep = report_at(&con, now, minute_of(now)).unwrap();
         assert_eq!((rep.from, rep.gpus.len(), rep.models.len()), (base + 300, 5, 0));
         let json = serde_json::to_value(&rep).unwrap();
