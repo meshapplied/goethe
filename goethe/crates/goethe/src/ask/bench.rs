@@ -193,6 +193,20 @@ fn a_misread_request_is_never_ready_to_change_anything() {
 }
 
 #[test]
+fn the_catalog_dump_holds_what_a_trainer_needs() {
+    // goethe ask --dump-catalog: each command's own words, what it needs, gives and undoes, and the kind (and help) of every argument, so data made from it matches what ask reads.
+    let cat = build_catalog(&Cli::command());
+    let dump = cat.to_json();
+    let load = dump["commands"].as_array().and_then(|c| c.iter().find(|c| c["id"] == "load")).expect("load is in the dump");
+    assert!(load["names"].as_array().is_some_and(|n| n.iter().any(|w| w == "load") && n.iter().any(|w| w == "serve")), "{}", load["names"]);
+    assert_eq!(load["gives"], serde_json::json!(["loaded"]));
+    assert_eq!(load["positionals"][0]["kind"], "installed_model");
+    let ctx = load["flags"].as_array().and_then(|f| f.iter().find(|f| f["long"] == "--ctx")).expect("--ctx");
+    assert!(ctx["kind"] == "number" && ctx["help"].as_str().is_some_and(|h| h.contains("Context")), "{ctx}");
+    assert!(dump["schema_hash"].is_string());
+}
+
+#[test]
 fn a_part_page_reads_short_descriptions_and_value_labels() {
     // Rows drop a leading "The"; a missing value reads "Key name:", not "Which key name?".
     let cat = build_catalog(&Cli::command());

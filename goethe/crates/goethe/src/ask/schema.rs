@@ -91,9 +91,13 @@ impl CliCatalog {
                     "argv_prefix": c.argv_prefix,
                     "about": c.about,
                     "risk": c.risk.label(),
+                    "names": super::embed::names(c),
+                    "needs": c.does.needs,
+                    "gives": c.does.gives,
+                    "undoes": c.does.undoes,
                     "accepts_passthrough": c.accepts_passthrough,
                     "positionals": c.positionals.iter().map(|p| json!({
-                        "id": p.id, "value_name": p.value_name, "required": p.required, "multiple": p.multiple,
+                        "id": p.id, "value_name": p.value_name, "required": p.required, "multiple": p.multiple, "kind": p.kind,
                     })).collect::<Vec<_>>(),
                     "flags": c.flags.iter().map(|f| json!({
                         "long": format!("--{}", f.long),
@@ -101,6 +105,8 @@ impl CliCatalog {
                         "takes_value": f.takes_value,
                         "default": f.default_value,
                         "possible_values": f.possible_values,
+                        "kind": f.kind,
+                        "help": f.help,
                     })).collect::<Vec<_>>(),
                 })
             })
