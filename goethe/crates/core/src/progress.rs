@@ -236,22 +236,6 @@ pub fn end_line() {
     }
 }
 
-fn warmup_file(home: &Path) -> std::path::PathBuf {
-    home.join("warmup.json")
-}
-
-pub fn warmup_secs(home: &Path, model_id: &str) -> Option<u64> {
-    // How long this model's last warm-up request took.
-    let text = std::fs::read_to_string(warmup_file(home)).ok()?;
-    serde_json::from_str::<serde_json::Value>(&text).ok()?[model_id].as_u64()
-}
-
-pub fn record_warmup(home: &Path, model_id: &str, secs: u64) {
-    let mut all: serde_json::Value = std::fs::read_to_string(warmup_file(home)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| serde_json::json!({}));
-    all[model_id] = secs.into();
-    let _ = std::fs::write(warmup_file(home), all.to_string());
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -309,15 +293,12 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_counts_partial_files_and_the_warmup_is_remembered() {
+    fn a_directory_counts_partial_files() {
         let d = std::env::temp_dir().join(format!("goethe-progress-{}", std::process::id()));
         std::fs::create_dir_all(d.join(".cache/dl")).unwrap();
         std::fs::write(d.join("a"), [0u8; 10]).unwrap();
         std::fs::write(d.join(".cache/dl/b.incomplete"), [0u8; 5]).unwrap();
         assert_eq!(dir_bytes(&d), 15);
-        assert_eq!(warmup_secs(&d, "m"), None);
-        record_warmup(&d, "m", 42);
-        assert_eq!(warmup_secs(&d, "m"), Some(42));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

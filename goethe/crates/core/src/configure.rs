@@ -396,7 +396,7 @@ fn configure_public(opts: &ApiOpts) -> Result<String, String> {
     // Warn, require named clients (or an explicit world-open), confirm, bind every interface.
     println!("{}: {PUBLIC_WARNING}", crate::term::paint("WARNING", crate::term::Color::Yellow));
     let port = nginx::public_port_u16(&goethe_home());
-    let public = lookup_public_ip();
+    let public = crate::platform::lookup_public_ip(&goethe_home());
     let public_host = public.as_ref().ok().map(|ip| ip.to_string());
     for line in public_ip_lines(public, port, &nginx::interface_addrs().unwrap_or_default()) {
         println!("{line}");
@@ -424,11 +424,6 @@ fn configure_public(opts: &ApiOpts) -> Result<String, String> {
         allow(r, "public client", true)?;
     }
     Ok(public_host.unwrap_or_else(|| "0.0.0.0".to_string()))
-}
-
-fn lookup_public_ip() -> Result<IpAddr, String> {
-    // This machine's address as the internet sees it, asked of the Goethe platform; GOETHE_PUBLIC_IP overrides, GOETHE_PUBLIC_IP_LOOKUP=0 disables.
-    crate::platform::lookup_public_ip(&goethe_home())
 }
 
 fn public_ip_lines(ip: Result<IpAddr, String>, port: u16, local: &[InterfaceAddr]) -> Vec<String> {
@@ -463,7 +458,7 @@ pub fn apply_access(opts: &ApiOpts) -> Result<String, String> {
     };
     let port = nginx::public_port_u16(&goethe_home());
     let host = match bound.as_str() {
-        "0.0.0.0" => lookup_public_ip().map_or_else(|_| "<this machine's address>".to_string(), |ip| ip.to_string()),
+        "0.0.0.0" => crate::platform::lookup_public_ip(&goethe_home()).map_or_else(|_| "<this machine's address>".to_string(), |ip| ip.to_string()),
         _ => bound,
     };
     Ok(format!("https://{host}:{port}/v1"))

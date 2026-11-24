@@ -9,13 +9,6 @@ use std::process::{Command, Stdio};
 
 const CRON_MARKER: &str = "# goethe-goethed-reboot";
 
-pub fn run_enable() -> Result<(), String> {
-    for line in enable_boot(&goethe_home())? {
-        println!("{line}");
-    }
-    Ok(())
-}
-
 pub fn enable_boot(home: &Path) -> Result<Vec<String>, String> {
     // Prefer systemd when it is PID 1 (with lingering for a user unit); containers without it get cron and a nohup start; macOS a LaunchAgent.
     let goethed = home.join("bin/goethed");
@@ -106,36 +99,6 @@ pub fn disable_boot(home: &Path) -> Result<Vec<String>, String> {
 
 pub fn autostart_opted_out() -> bool {
     std::env::var("GOETHE_NO_AUTOSTART").is_ok_and(|v| v.trim() == "1")
-}
-
-pub fn run_status() -> Result<(), String> {
-    let home = goethe_home();
-    let env = crate::host::probe_environment(crate::nginx::public_port_u16(&home));
-    println!("boot method: {}", active_method(&home));
-    println!("goethed: {}", if goethed_running() { "running" } else { "stopped" });
-    println!(
-        "init: {}{}",
-        if env.systemd_pid1 { "systemd" } else { "no systemd" },
-        env.container.map(|c| format!(", container {c}")).unwrap_or_default()
-    );
-    Ok(())
-}
-
-fn active_method(home: &Path) -> String {
-    // This home's boot method, naming a unit that belongs to another home.
-    #[cfg(target_os = "macos")]
-    return launchd::method(home);
-    #[cfg_attr(target_os = "macos", allow(unreachable_code))]
-    let mut other = String::new();
-    for (path, label) in [(system_unit_path(), "systemd (system)"), (user_unit_path(), "systemd (--user)")] {
-        match unit_owner(&path, home) {
-            UnitOwner::Ours => return label.into(),
-            UnitOwner::Other(h) => other = format!(" ({label} unit starts {})", describe_home(h.as_deref())),
-            UnitOwner::Absent => {}
-        }
-    }
-    let method = if crontab_entry_for(&read_crontab(), home) { "crontab @reboot" } else { "none" };
-    format!("{method}{other}")
 }
 
 pub fn goethed_running() -> bool {
@@ -393,14 +356,6 @@ pub mod launchd {
     pub fn refresh(home: &Path) {
         if matches!(owner(home), UnitOwner::Ours) && fs::read_to_string(plist_path()).ok().as_deref() != Some(plist_text(home).as_str()) {
             let _ = fs::write(plist_path(), plist_text(home));
-        }
-    }
-
-    pub fn method(home: &Path) -> String {
-        match owner(home) {
-            UnitOwner::Ours => "launchd (LaunchAgent)".to_string(),
-            UnitOwner::Other(h) => format!("none (the LaunchAgent starts {})", describe_home(h.as_deref())),
-            UnitOwner::Absent => "none".to_string(),
         }
     }
 
