@@ -193,8 +193,8 @@ fn a_misread_request_is_never_ready_to_change_anything() {
 }
 
 #[test]
-fn the_catalog_dump_holds_what_a_trainer_needs() {
-    // goethe ask --dump-catalog: each command's own words, what it needs, gives and undoes, and the kind (and help) of every argument, so data made from it matches what ask reads.
+fn the_catalog_dump_holds_what_ask_reads() {
+    // goethe ask --dump-catalog: each command's own words, what it needs, gives and undoes, and the kind (and help) of every argument, so anything made from it sees the CLI as ask does.
     let cat = build_catalog(&Cli::command());
     let dump = cat.to_json();
     let load = dump["commands"].as_array().and_then(|c| c.iter().find(|c| c["id"] == "load")).expect("load is in the dump");
