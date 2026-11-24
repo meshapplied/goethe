@@ -25,8 +25,6 @@ pub use webauthn::{link_challenge, Assertion};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 
-pub const PROTO: u32 = 1;
-pub const UPGRADE: &str = "goethe-node/1";
 pub const RP_ID: &str = "console.goethe.sh";
 pub const CONSOLE_ORIGIN: &str = "https://console.goethe.sh";
 

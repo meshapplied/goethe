@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const USER_PRESENT: u8 = 0x01;
 pub(crate) const USER_VERIFIED: u8 = 0x04;
+const AUTH_DATA_MIN: usize = 37;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,7 +38,7 @@ fn checked(a: &Assertion, public_key_b64: &str, challenge: &[u8], rp_id: &str, o
     let data: ClientData = serde_json::from_slice(&client).ok()?;
     let flags = USER_PRESENT | USER_VERIFIED;
     let fresh = data.kind == "webauthn.get" && data.origin == origin && unb64(&data.challenge).as_deref() == Some(challenge);
-    let scoped = auth.len() >= 37 && auth[..32] == sha256(rp_id.as_bytes()) && auth[32] & flags == flags;
+    let scoped = auth.len() >= AUTH_DATA_MIN && auth[..32] == sha256(rp_id.as_bytes()) && auth[32] & flags == flags;
     if !(fresh && scoped) {
         return None;
     }
