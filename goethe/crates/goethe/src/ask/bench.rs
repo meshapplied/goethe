@@ -220,6 +220,32 @@ fn a_request_of_many_steps_binds_each_value_to_its_own_step() {
 }
 
 #[test]
+fn a_number_takes_the_flag_its_words_name_and_a_count_must_match() {
+    // A number goes to the number flag whose own name or help has the word beside it; a count ("two keys") must match the steps planned; any other number blocks the plan.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let shown = |p: &PlanState| p.goals.iter().map(|g| g.argv.join(" ")).collect::<Vec<_>>();
+    for (q, want) in [
+        ("load mistral with 32k context", "goethe load mistralai/Mistral-7B-Instruct --ctx 32768"),
+        ("load mistral with a context of 8192", "goethe load mistralai/Mistral-7B-Instruct --ctx 8192"),
+        ("load mistral split across 2 gpus", "goethe load mistralai/Mistral-7B-Instruct --tp 2"),
+    ] {
+        let p = plan(q);
+        assert!(p.is_ready() && shown(&p).last().is_some_and(|l| l == want), "{q}: {:?}", shown(&p));
+    }
+    for q in ["load mistral with 32k", "load mistral 7", "load mistral and qwen 7b, then create three api keys for each"] {
+        let p = plan(q);
+        assert!(!p.is_ready(), "{q}: a number no flag or count takes is not dropped: {:?}", shown(&p));
+    }
+    let two = plan("load mistral and qwen 7b, then create two api keys, one for each");
+    assert_eq!(two.goals.iter().filter(|g| g.intent_id == "api.keys.create").count(), 2, "{:?}", shown(&two));
+    assert!(two.goals.iter().all(|g| !g.argv.iter().any(|a| a == "two")), "a count is no key name: {:?}", shown(&two));
+    assert!(two.unused(two.parts.len() - 1, &world).is_empty(), "the count matches: {:?}", two.unused(two.parts.len() - 1, &world));
+}
+
+#[test]
 fn a_part_page_reads_short_descriptions_and_value_labels() {
     // Rows drop a leading "The"; a missing value reads "Key name:", not "Which key name?".
     let cat = build_catalog(&Cli::command());

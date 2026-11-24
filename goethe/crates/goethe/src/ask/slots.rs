@@ -2,9 +2,9 @@
 
 use super::parse::{
     is_auth_key, is_url, find_cidrs, find_domain, find_duration, find_gpus, find_hf_or_path, find_named_token, find_path_token,
-    find_quoted, is_duration, split_words,
+    find_quoted, is_duration, number, split_words,
 };
-use super::schema::{IntentCard, Kind};
+use super::schema::{FlagSpec, IntentCard, Kind};
 use crate::complete;
 use crate::spec::Fact;
 use std::collections::HashMap;
@@ -172,7 +172,39 @@ pub fn extract_slots(card: &IntentCard, clause: &str, world: &World) -> SlotExtr
             }
         }
     }
+    let bound: Vec<String> = out.positionals.values().chain(out.flags.iter().map(|(_, v)| v)).flatten().cloned().collect();
+    bind_numbers(card, &tokens, &bound, &mut out.flags);
     out
+}
+
+pub fn uses(value: &str, token: &str, n: u64) -> bool {
+    // A bound value made from this number: the number itself, or it with a unit word glued on (2h, gpu1).
+    let unit = |rest: &str| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphabetic());
+    value == n.to_string() || value.strip_prefix(token).is_some_and(unit) || value.strip_suffix(token).is_some_and(unit)
+}
+
+pub const REACH: usize = 3;
+pub const SHORT: usize = 2;
+
+fn bind_numbers(card: &IntentCard, tokens: &[String], bound: &[String], flags: &mut Vec<(String, Vec<String>)>) {
+    // A number no other value took goes to the one number flag whose own name or help has a word within REACH words of it ("32k context" is --ctx 32768); words of SHORT letters or fewer ("of") and the command's own words are no cue, and two flags cued alike leave it unbound.
+    let own = super::embed::names(card);
+    let cues = |f: &FlagSpec| -> Vec<String> {
+        f.long.split('-').map(str::to_string).chain(super::embed::lex_tokens(&f.help)).filter(|w| w.len() > SHORT && number(w).is_none() && !own.iter().any(|n| n == w)).collect()
+    };
+    let numeric: Vec<(&FlagSpec, Vec<String>)> = card.flags.iter().filter(|f| f.takes_value && f.kind == Some(Kind::Number)).map(|f| (f, cues(f))).collect();
+    for (i, t) in tokens.iter().enumerate() {
+        let Some(n) = number(t).filter(|n| t.bytes().next().is_some_and(|b| b.is_ascii_digit()) && !bound.iter().any(|v| uses(v, t, *n))) else {
+            continue;
+        };
+        let near = &tokens[i.saturating_sub(REACH)..(i + REACH + 1).min(tokens.len())];
+        let hits: Vec<&FlagSpec> = numeric.iter().filter(|(_, c)| c.iter().any(|c| near.iter().any(|w| super::embed::same_word(&w.to_ascii_lowercase(), c)))).map(|(f, _)| *f).collect();
+        if let [f] = hits[..] {
+            if !flags.iter().any(|(k, _)| k == &f.long) {
+                flags.push((f.long.clone(), vec![n.to_string()]));
+            }
+        }
+    }
 }
 
 fn typed_token(kind: Kind) -> bool {

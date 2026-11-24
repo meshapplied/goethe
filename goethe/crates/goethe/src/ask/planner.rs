@@ -188,7 +188,7 @@ impl PlanState {
     }
 
     pub fn unused(&self, part: usize, world: &World) -> Vec<String> {
-        // Values written in a part that no command of the plan takes and that were not left out, and a model it names when none of its settled commands acts on one ("uninstall llama" never uninstalls Goethe); Ask never runs something other than what was said.
+        // Values written in a part that no command of the plan takes and that were not left out, a model it names when none of its settled commands acts on one ("uninstall llama" never uninstalls Goethe), and a number no command took that is not a matching count ("two keys"); Ask never runs something other than what was said.
         let Some(p) = self.parts.get(part).filter(|p| !p.left_out) else {
             return Vec::new();
         };
@@ -199,6 +199,16 @@ impl PlanState {
         if settled && !mine.iter().any(|g| g.argv.iter().any(|a| super::slots::is_model_value(a, world))) {
             let named: Vec<String> = super::slots::named_models(&p.text, world).into_iter().filter(|m| !p.ignored.contains(m) && !out.contains(m)).collect();
             out.extend(named);
+        }
+        let tokens = split_words(&p.text);
+        let took = |t: &str, n: u64| mine.iter().flat_map(|g| &g.argv).any(|a| super::slots::uses(a, t, n));
+        let counts = |i: usize, n: u64| mine.len() as u64 == n && tokens[i + 1..(i + 1 + super::slots::REACH).min(tokens.len())].iter().any(|w| w.len() > super::slots::SHORT && w.ends_with('s'));
+        for (i, t) in tokens.iter().enumerate() {
+            if let Some(n) = super::parse::number(t) {
+                if n != 1 && !took(t, n) && !counts(i, n) && !p.ignored.contains(t) {
+                    out.push(t.clone());
+                }
+            }
         }
         out
     }
@@ -466,7 +476,7 @@ fn step_model(step: &PlanStep, card: &IntentCard) -> Option<String> {
 }
 
 fn request_parts(request: &str, rank: &dyn Fn(&str) -> Vec<ScoredIntent>, catalog: &CliCatalog, world: &World) -> Vec<(String, Vec<ScoredIntent>)> {
-    // Each piece that is a request on its own is a part; a piece that names its own model but no command word ("and qwen on gpu1") repeats the part before for that model, since each model is its own command; any other piece (a detail such as "at every boot", or one more address) joins the part before it, or the next one.
+    // Each piece with a command word is a part; a piece that names its own model but no command word ("and qwen on gpu1") repeats the part before for that model, since each model is its own command; any other piece (a detail such as "at every boot", or one more address) joins the part before it, or the next one.
     let mut parts: Vec<(String, Vec<ScoredIntent>)> = Vec::new();
     let mut lead = String::new();
     for piece in split_parts(request) {
@@ -479,11 +489,12 @@ fn request_parts(request: &str, rank: &dyn Fn(&str) -> Vec<ScoredIntent>, catalo
                 continue;
             }
         }
-        let open = rank(&piece);
-        let request_like = commanded || open.first().is_some_and(|t| t.score >= TAU_OOD);
         match parts.last_mut() {
-            _ if request_like && lead.is_empty() => parts.push((piece, open)),
-            _ if request_like => {
+            _ if commanded && lead.is_empty() => {
+                let open = rank(&piece);
+                parts.push((piece, open));
+            }
+            _ if commanded => {
                 let text = format!("{} {piece}", std::mem::take(&mut lead));
                 let open = rank(&text);
                 parts.push((text, open));

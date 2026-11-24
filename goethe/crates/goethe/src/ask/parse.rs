@@ -272,6 +272,17 @@ pub fn find_domain(tokens: &[String]) -> Option<String> {
     None
 }
 
+pub fn number(token: &str) -> Option<u64> {
+    // 8192, 32k (32768), or a small count in words.
+    const WORDS: [&str; 10] = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+    let t = token.to_ascii_lowercase();
+    let (digits, scale) = t.strip_suffix('k').map_or((t.as_str(), 1), |d| (d, 1024));
+    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+        return digits.parse::<u64>().ok().and_then(|n| n.checked_mul(scale));
+    }
+    WORDS.iter().position(|w| *w == t).map(|i| i as u64 + 1)
+}
+
 pub fn find_named_token(text: &str, tokens: &[String], cues: &[&str]) -> Option<String> {
     if let Some(q) = find_quoted(text) {
         return Some(q);
@@ -281,6 +292,7 @@ pub fn find_named_token(text: &str, tokens: &[String], cues: &[&str]) -> Option<
         if cues.contains(&l.as_str()) && i + 1 < tokens.len() {
             let next = tokens[i + 1].trim_matches(|c: char| matches!(c, ',' | '.'));
             if !next.starts_with('-')
+                && number(next).is_none()
                 && !cues.contains(&next.to_ascii_lowercase().as_str())
                 && !matches!(
                     next.to_ascii_lowercase().as_str(),
