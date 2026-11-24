@@ -236,7 +236,7 @@ fn json_u64(v: &serde_json::Value, key: &str) -> Option<u64> {
     n.as_u64().or_else(|| n.as_f64().map(|f| f.round() as u64))
 }
 
-fn ninfer_bin() -> Result<PathBuf, String> {
+pub(crate) fn ninfer_bin() -> Result<PathBuf, String> {
     if let Some(p) = std::env::var_os("NINFER_SERVE") {
         let p = PathBuf::from(p);
         if p.is_file() {

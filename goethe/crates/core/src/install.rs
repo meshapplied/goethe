@@ -278,7 +278,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                     std::process::exit(3);
                 }
             };
-            let early = crate::packs::unverified_prefix(&opts.model_id, &choice.offer.arch, &broker).ok().flatten().and_then(|(_, prefix)| sku_refused(home, &prefix));
+            let early = manifest_refused(home, &opts.model_id, &choice.offer.arch, &broker);
             if let Some(why) = early {
                 println!("{}", refuse(why));
                 break 'packed false;
@@ -875,6 +875,25 @@ fn say_once(said: &std::sync::atomic::AtomicBool, line: &str) -> bool {
         eprintln!("{line}");
     }
     first
+}
+
+fn manifest_refused(home: &Path, model_id: &str, arch: &str, broker: &impl crate::packs::Broker) -> Option<String> {
+    // Why the pack's manifest (its header, fetched before any weight) runs no variant on an allowed GPU; None when one runs or it cannot be fetched.
+    crate::packs::unverified_prefix(model_id, arch, broker).ok().flatten().and_then(|(_, prefix)| sku_refused(home, &prefix))
+}
+
+pub(crate) fn pack_refused_here(home: &Path, model_id: &str) -> Option<String> {
+    // Why no kernel pack of a pack-only model runs on this machine, by the checks install makes before a download: none in the platform's index for these GPUs, no login to fetch one, or its manifest needs another GPU; None when one runs or it cannot be told.
+    let index = crate::packs::catalog(home)?;
+    let archs = crate::packs::local_archs(home);
+    let Some(offer) = crate::packs::offers_for(&index, model_id, &archs, &crate::packs::pack_engine_version(home)).into_iter().next() else {
+        return Some(format!("its kernel packs are built for {}, not for this machine's GPUs", crate::packs::pack_archs(&index, model_id).join(", ")));
+    };
+    let Some(creds) = crate::platform::load_credentials(home).ok().flatten() else {
+        return Some(format!("its kernel pack needs a node logged in to the console: {LOGIN_FIRST}"));
+    };
+    let token = || Ok(creds.token.expose().to_string());
+    manifest_refused(home, model_id, &offer.arch, &crate::packs::HttpBroker::new(&creds.platform_url, &token))
 }
 
 fn sku_refused(home: &Path, prefix: &[u8]) -> Option<String> {
