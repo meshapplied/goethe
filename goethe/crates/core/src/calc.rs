@@ -29,7 +29,7 @@ impl Need {
 }
 
 pub fn missing_gb(need: &Need, free_gb: f64) -> f64 {
-    // Weights+peak in free; total leaves SAFETY_MARGIN_GB. (ponytail: pool-cap == free is dead under the margin.)
+    // Weights+peak in free; total leaves SAFETY_MARGIN_GB. A pool cap equal to free never binds under the margin, so it is not checked.
     (need.weights + need.load_peak - free_gb)
         .max(need.total() - (free_gb - SAFETY_MARGIN_GB))
         .max(0.0)

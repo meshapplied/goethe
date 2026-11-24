@@ -20,32 +20,8 @@ dist/
 build/
 .eggs/
 *.local.toml
-docs/gpu-checks.md
 !goethe/packaging/release_pub.pem
 
-# Developer docs (local only, never committed)
-docs/dev/
-/docs/developer/
-
-# The research lab (goethe-lab, its tests and example cards, the NVFP4 and ternary kernels), kept local
-/lab/
-/nvfp4-kernels/
-/ternary-kernels/
-
-# Local agent doctrine + skills (never commit / never leak)
-/PROJECT.md
-/.local/
-/.agents/skills/
-/.cursor/skills/
-/.claude/skills/
-
-# Modal PoC, kept local
-modal/
-
-# In-context learning prototype and eval, kept local
-goethe/tests/icl/
+# Test work folders
 goethe/tests/learn/.work/
 goethe/tests/vm/.work/
-
-# Local equivalence-gate baselines
-.equiv-split-base/

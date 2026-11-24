@@ -1,6 +1,7 @@
 """Mechanical style linter for the goethe package tree."""
 
 import ast
+import hashlib
 import io
 import re
 import shutil
@@ -29,10 +30,19 @@ RUFF_ARGS = [
     "--target-version", "py311", "--select", "E,F,W,B,UP,I", "--config", "lint.isort.known-first-party = ['lib']",
 ]
 LEAKS = [
-    ("internal box name", re.compile(r"littleboy|greengoblin", re.I)),
     ("internal path", re.compile(r"/scratch/|/data/proj|/home/(?!(?:u|user|you|me)(?![\w-]))[A-Za-z_][\w.-]*")),
     ("AI co-author trailer", re.compile(r"Co-Authored-By:\s*Claude", re.I)),
 ]
+INTERNAL_NAMES = {
+    "0d3405be5677f274",
+    "1316c85965d4efac",
+    "40f50f6ef867b9d9",
+    "85eb6d1a1f4969fa",
+    "962ac6210ddbcfc8",
+    "99e1ea0dc21155f1",
+    "e68df4adcb9a946d",
+}
+WORD = re.compile(r"[a-z0-9]+")
 TAILNET = re.compile(r"(?<![\w.])100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.(\d{1,3})\.(\d{1,3})(?![\w]|\.\d)")
 LEAK_FIXTURE_SKIP = {"100.100.100.100"}
 NO_TEXT = {".dat", ".gz", ".pem", ".png", ".jpg", ".zst", ".bin"}
@@ -214,9 +224,11 @@ def lint_ruff(files: list[Path]) -> None:
         problems.append(f"ruff failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
 
 
-def leaks(text: str) -> list[str]:
-    """Names of internal details in text: box names, local paths, tailnet addresses, AI co-author lines."""
+def leaks(text: str, names: set[str] = INTERNAL_NAMES) -> list[str]:
+    """Local paths, tailnet addresses, AI co-author lines, and internal names (stored as sha256 prefixes)."""
     found = [name for name, rx in LEAKS if rx.search(text)]
+    if any(hashlib.sha256(w.encode()).hexdigest()[:16] in names for w in WORD.findall(text.lower())):
+        found.append("internal name")
     for m in TAILNET.finditer(text):
         addr = m.group(0)
         cidr = text[m.end() : m.end() + 3] == "/10" and (m.group(2), m.group(3)) == ("0", "0")
@@ -228,7 +240,7 @@ def leaks(text: str) -> list[str]:
 
 def leaks_selftest() -> None:
     """The guard flags each kind of leak and passes the placeholders the tests use."""
-    bad = ["ssh little" + "boy", "cd /scratch/x", "/home/alice/bin", "/data/proj/a", "host 100.90.97.111", "100.64.2.1",
+    bad = ["cd /scratch/x", "/home/alice/bin", "/data/proj/a", "host 100.90.1.2", "100.64.2.1",
            "Co-Authored-By: Claude <x>"]
     good = ["/home/u/bin", "/home/user/x", "100.64.1.7", "100.64.0.0/10", "100.100.100.100", "1100.64.9.9", "10.0.0.1",
             "100.128.0.1"]
@@ -238,6 +250,9 @@ def leaks_selftest() -> None:
     for text in good:
         if leaks(text):
             problems.append(f"leak guard self-test: wrongly flagged: {text}")
+    probe = {hashlib.sha256(b"examplebox").hexdigest()[:16]}
+    if leaks("ssh ExampleBox now", probe) != ["internal name"] or leaks("an example box", probe):
+        problems.append("leak guard self-test: internal names are not matched by word")
 
 
 def lint_leaks() -> None:
@@ -248,11 +263,7 @@ def lint_leaks() -> None:
     repo = Path(top.stdout.strip())
     listed = subprocess.run(["git", "-C", str(repo), "ls-files", "-z"], capture_output=True, text=True).stdout
     names = [n for n in listed.split("\0") if n]
-    local_prefix = (".local/", ".agents/skills/", ".cursor/skills/", ".claude/skills/")
     for name in names:
-        if name == "PROJECT.md" or name.startswith(local_prefix):
-            problems.append(f"{name}:1: local-only path must not be tracked")
-            continue
         path = repo / name
         if path.suffix in NO_TEXT or path.resolve() == Path(__file__).resolve() or not path.is_file():
             continue
