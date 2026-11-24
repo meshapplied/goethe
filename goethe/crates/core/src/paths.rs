@@ -118,8 +118,9 @@ pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
 }
 
 pub fn is_writable(dir: &Path) -> bool {
-    // A real write, since permission bits do not show ACLs, read-only mounts seen as root, or container overlays.
-    let probe = dir.join(format!(".goethe-probe-{}", std::process::id()));
+    // A real write, since permission bits do not show ACLs, read-only mounts seen as root, or container overlays; the name is unique, so probes in parallel never collide.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let probe = dir.join(format!(".goethe-probe-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
     let ok = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe).is_ok();
     let _ = std::fs::remove_file(probe);
     ok
@@ -249,6 +250,14 @@ pub fn shell_quote(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parallel_probes_of_one_folder_all_see_it_writable() {
+        let d = tempfile::tempdir().unwrap();
+        let all: Vec<bool> = std::thread::scope(|s| (0..16).map(|_| s.spawn(|| is_writable(d.path()))).collect::<Vec<_>>().into_iter().map(|h| h.join().unwrap()).collect());
+        assert!(all.iter().all(|w| *w), "{all:?}");
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0, "probes clean up");
+    }
+
     use super::*;
 
     #[test]
