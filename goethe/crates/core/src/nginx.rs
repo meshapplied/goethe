@@ -8,7 +8,6 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 use std::{fs, io, thread};
@@ -74,21 +73,7 @@ pub fn nginx_prefix(home: &Path) -> PathBuf {
 }
 
 pub fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
-    // Atomically replace path with data at mode 0600: temp file in the same directory, fsync, rename.
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = path.parent().ok_or_else(|| format!("{} has no parent", path.display()))?;
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let tmp = dir.join(format!(".{name}.{}.{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
-    let res = (|| -> io::Result<()> {
-        let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
-        fs::rename(&tmp, path)
-    })();
-    if res.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    res.map_err(|e| format!("write {}: {e}", path.display()))
+    crate::paths::write_private(path, data).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 fn private_dir(path: &Path, worker_traversable: bool) -> Result<(), String> {
@@ -203,10 +188,7 @@ pub fn persist_max_body_mb(home: &Path) -> u64 {
 pub fn bind_interface(home: &Path) -> Option<String> {
     // The network interface the gateway follows, when it was configured by interface instead of by address.
     let con = crate::db::open(home).ok()?;
-    let v: String = con
-        .query_row("SELECT value FROM goethe_settings WHERE key = 'public_bind_interface'", [], |r| r.get(0))
-        .ok()?;
-    Some(v.trim().to_string()).filter(|v| !v.is_empty())
+    Some(crate::db::setting(&con, "public_bind_interface")?.trim().to_string()).filter(|v| !v.is_empty())
 }
 
 pub fn interface_ipv4(name: &str) -> Option<Ipv4Addr> {
@@ -223,19 +205,8 @@ pub fn public_bind(home: &Path) -> String {
     if let Some(name) = bind_interface(home) {
         return interface_ipv4(&name).map_or_else(|| "127.0.0.1".to_string(), |ip| ip.to_string());
     }
-    if let Ok(con) = crate::db::open(home) {
-        if let Ok(v) = con.query_row(
-            "SELECT value FROM goethe_settings WHERE key = 'public_bind'",
-            [],
-            |r| r.get::<_, String>(0),
-        ) {
-            let t = v.trim();
-            if !t.is_empty() {
-                return t.to_string();
-            }
-        }
-    }
-    "127.0.0.1".to_string()
+    let stored = crate::db::open(home).ok().and_then(|con| crate::db::setting(&con, "public_bind"));
+    stored.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
 pub fn set_public_bind(home: &Path, addr: &str) -> Result<String, String> {
@@ -283,7 +254,7 @@ fn store_bind(home: &Path, setting: &BindSetting) -> Result<(), String> {
         BindSetting::Address(v) => ("public_bind", v, "public_bind_interface"),
         BindSetting::Interface(v) => ("public_bind_interface", v, "public_bind"),
     };
-    tx.execute("INSERT OR REPLACE INTO goethe_settings (key, value) VALUES (?1, ?2)", [key, value.as_str()]).map_err(|e| e.to_string())?;
+    crate::db::set_setting(&tx, key, value).map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM goethe_settings WHERE key = ?1", [other]).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
@@ -726,10 +697,6 @@ fn read_record(home: &Path) -> Option<MasterRecord> {
     })
 }
 
-fn boot_id() -> String {
-    crate::sys::boot_id()
-}
-
 fn proc_stat(pid: i32) -> Option<(char, i32, u64)> {
     // (state, process group, start ticks) of a process.
     let st = crate::sys::stat(pid)?;
@@ -771,7 +738,7 @@ fn verified_master(home: &Path) -> Option<i32> {
     let from_file = fs::read_to_string(prefix.join("nginx.pid"))
         .ok()
         .and_then(|t| t.trim().parse::<i32>().ok());
-    let boot = boot_id();
+    let boot = crate::sys::boot_id();
     [from_file, record.as_ref().map(|r| r.pid)]
         .into_iter()
         .flatten()
@@ -826,7 +793,7 @@ fn reap_orphans(home: &Path) {
     let Some(rec) = read_record(home) else {
         return;
     };
-    if rec.boot_id != boot_id() {
+    if rec.boot_id != crate::sys::boot_id() {
         let _ = fs::remove_file(record_path(home));
         return;
     }
@@ -913,7 +880,7 @@ fn spawn_private(home: &Path) -> Result<(), String> {
     let pid = child.id() as i32;
     let start_ticks = proc_stat(pid).map(|s| s.2).unwrap_or(0);
     master_slot().replace(child);
-    let record = serde_json::json!({"pid": pid, "start_ticks": start_ticks, "boot_id": boot_id()});
+    let record = serde_json::json!({"pid": pid, "start_ticks": start_ticks, "boot_id": crate::sys::boot_id()});
     write_private(&record_path(home), record.to_string().as_bytes())?;
     let deadline = Instant::now() + Duration::from_secs(4);
     while verified_master(home) != Some(pid) && Instant::now() < deadline && child_alive() {

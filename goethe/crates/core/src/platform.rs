@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
@@ -287,37 +287,12 @@ fn read_private(path: &Path, cap: u64, in_private_dir: bool) -> Result<Option<St
 }
 
 pub fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
-    // Temp file 0600 beside the target, fsync, rename over it, fsync the directory.
+    // Only into the private platform directory.
     let dir = path.parent().ok_or_else(|| format!("{} has no parent directory", path.display()))?;
     if !check_private_dir(dir, false)? {
         return Err(format!("{} does not exist", dir.display()));
     }
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    let tmp = dir.join(format!(".{name}.tmp.{}.{nanos}", std::process::id()));
-    let result = (|| {
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)
-            .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
-        f.set_permissions(fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
-        f.write_all(data).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-        f.sync_all().map_err(|e| format!("cannot sync {}: {e}", tmp.display()))?;
-        fs::rename(&tmp, path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result?;
-    if let Ok(d) = fs::File::open(dir) {
-        let _ = d.sync_all();
-    }
-    Ok(())
+    crate::paths::write_private(path, data).map_err(|e| format!("cannot replace {}: {e}", path.display()))
 }
 
 pub fn load_credentials(home: &Path) -> Result<Option<Credentials>, String> {
@@ -445,9 +420,7 @@ pub fn ensure_home_machine_id(home: &Path) -> Result<(), String> {
 }
 
 pub fn fingerprint_of(machine_id: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(format!("{machine_id}{FINGERPRINT_SALT}").as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    crate::sha::digest_hex(format!("{machine_id}{FINGERPRINT_SALT}").as_bytes())
 }
 
 pub fn hostname() -> String {
@@ -808,8 +781,8 @@ mod tests {
 
     #[test]
     fn a_hostname_the_platform_would_refuse_is_made_safe() {
-        assert_eq!(host_label("Mozers-MacBook-Pro"), "Mozers-MacBook-Pro");
-        assert_eq!(host_label("Mozer's MacBook Pro"), "Mozer-s-MacBook-Pro");
+        assert_eq!(host_label("Alices-MacBook-Pro"), "Alices-MacBook-Pro");
+        assert_eq!(host_label("Alice's MacBook Pro"), "Alice-s-MacBook-Pro");
         assert_eq!(host_label("gpu-box.lan"), "gpu-box.lan");
     }
 }

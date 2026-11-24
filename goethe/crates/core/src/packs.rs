@@ -3,7 +3,6 @@
 use crate::engines::{goethe_engine::{PACK_FILE, PACK_VERIFY}, resolve_python};
 use crate::messages::{NOTHING_DOWNLOADED, ONLY_PACK};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -586,10 +585,6 @@ pub fn drafter(e: &Entry) -> Option<Drafter> {
     Some(Drafter { name: d["name"].as_str().unwrap_or("drafter").to_string(), repo, revision: d["revision"].as_str().map(String::from), files })
 }
 
-fn sha256_file(p: &Path) -> Option<String> {
-    crate::update::sha256_file(p).ok()
-}
-
 pub fn safe_name(f: &str) -> bool {
     // A plain file name in the repo root: the download and the model dir never see a path from a pack.
     !f.is_empty() && !f.contains(['/', '\\']) && f != "." && f != ".." && !f.starts_with('.')
@@ -696,7 +691,7 @@ fn fetch_prefix(broker: &impl Broker, entry: &Entry) -> Result<(Vec<u8>, usize),
     let body = broker.range(&entry.file, 16 + n, off + len)?;
     let at = 16 + n as usize + off as usize;
     let manifest = &body[off as usize..];
-    if format!("{:x}", Sha256::digest(manifest)) != entry.manifest_sha256 {
+    if crate::sha::digest_hex(manifest) != entry.manifest_sha256 {
         return Err(format!("{}: manifest differs from the signed index", entry.file));
     }
     Ok(([head, header, body].concat(), at))
@@ -874,7 +869,7 @@ pub fn finish_as(
                 Some((d, from)) if r.3 => {
                     let mut bytes = vec![0u8; r.1 as usize];
                     let read = std::fs::File::open(&d.pack).and_then(|mut old| old.seek(SeekFrom::Start(from)).and_then(|_| std::io::Read::read_exact(&mut old, &mut bytes)));
-                    let good = read.is_ok() && format!("{:x}", Sha256::digest(&bytes)) == r.2;
+                    let good = read.is_ok() && crate::sha::digest_hex(&bytes) == r.2;
                     if good {
                         f.seek(SeekFrom::Start(r.0)).and_then(|_| f.write_all(&bytes)).map_err(|err| undo(err.to_string()))?;
                         delta.reused += r.1;
@@ -899,7 +894,7 @@ pub fn finish_as(
             let bytes = broker.range(&e.file, o, l).map_err(undo)?;
             for (ro, rl, h, _) in missing.iter().filter(|(ro, rl, _, stored)| *stored && *ro >= o && ro + rl <= o + l) {
                 let part = &bytes[(ro - o) as usize..(ro - o + rl) as usize];
-                if format!("{:x}", Sha256::digest(part)) != *h {
+                if crate::sha::digest_hex(part) != *h {
                     return Err(undo(format!("pack download: a block of {} does not hash to its name", e.file)));
                 }
             }
@@ -910,7 +905,7 @@ pub fn finish_as(
     }
     let mut ok = verify().map_err(undo)?.1;
     if let Some(d) = drafter(e).filter(|d| dir.join("drafter").join(&d.files[0].0).is_file()) {
-        match d.files.iter().all(|(n, _, h)| sha256_file(&dir.join("drafter").join(n)).as_deref() == Some(h.as_str())) {
+        match d.files.iter().all(|(n, _, h)| crate::update::sha256_file(&dir.join("drafter").join(n)).ok().as_deref() == Some(h.as_str())) {
             true => {
                 let mut v: Value = serde_json::from_str(&ok).map_err(|err| undo(format!("pack verify: {err}")))?;
                 v["drafter"] = d.files.iter().map(|(n, ..)| format!("drafter/{n}")).collect();
@@ -944,7 +939,7 @@ mod tests {
     const BLOB: &[u8] = b"kernel blob bytes";
 
     fn sha(b: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(b))
+        crate::sha::digest_hex(b)
     }
 
     struct Pack {

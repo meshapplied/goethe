@@ -173,7 +173,6 @@ pub fn installed_overlays(dir: &Path) -> Vec<String> {
 
 fn overlay_only(dir: &Path, entry: &Entry, installed: &str, broker: &impl Broker, run: Runner) -> Result<u64, String> {
     // The entry lists overlays for the installed base: fetch only those (small), check each against its hash and the engine, then stack them.
-    use sha2::{Digest, Sha256};
     let have = installed_overlays(dir);
     let mut files = have.clone();
     let mut fetched = 0;
@@ -181,7 +180,7 @@ fn overlay_only(dir: &Path, entry: &Entry, installed: &str, broker: &impl Broker
     std::fs::create_dir_all(&odir).map_err(|e| e.to_string())?;
     for o in entry.overlays.iter().filter(|o| o.base == installed && !have.contains(&o.file)) {
         let bytes = broker.range(&o.file, 0, o.size)?;
-        if format!("{:x}", Sha256::digest(&bytes)) != o.sha256 {
+        if crate::sha::digest_hex(&bytes) != o.sha256 {
             return Err(format!("overlay {}: does not hash to the signed index's figure; the installed pack is kept", o.file));
         }
         let (path, sig) = (odir.join(&o.file), odir.join(format!("{}.sig", o.file)));
@@ -313,12 +312,11 @@ pub fn note_if_newer(home: &Path, model_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
     use std::cell::Cell;
     use std::collections::HashMap;
 
     fn sha(b: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(b))
+        crate::sha::digest_hex(b)
     }
 
     struct PackV {

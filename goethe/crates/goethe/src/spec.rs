@@ -64,13 +64,17 @@ pub struct CmdMeta {
     pub gives: &'static [Fact],
     pub confirms: bool,
     pub terminal: bool,
+    #[serde(skip)]
+    pub says: &'static [&'static str],
+    #[serde(skip)]
+    pub undoes: &'static [Fact],
 }
 
 impl CommandExt for CmdMeta {}
 
 impl CmdMeta {
     const fn of(risk: Risk) -> Self {
-        CmdMeta { risk, needs: &[], gives: &[], confirms: false, terminal: false }
+        CmdMeta { risk, needs: &[], gives: &[], confirms: false, terminal: false, says: &[], undoes: &[] }
     }
 
     pub const fn read() -> Self {
@@ -99,6 +103,16 @@ impl CmdMeta {
 
     pub const fn gives(self, gives: &'static [Fact]) -> Self {
         CmdMeta { gives, ..self }
+    }
+
+    pub const fn undoes(self, undoes: &'static [Fact]) -> Self {
+        // What this command takes away again; one request may not give a fact and undo it on the same model.
+        CmdMeta { undoes, ..self }
+    }
+
+    pub const fn says(self, says: &'static [&'static str]) -> Self {
+        // Other words a person uses for this command; Ask needs one of them (or the name) before it plans a command that changes something.
+        CmdMeta { says, ..self }
     }
 
     pub const fn confirms(self) -> Self {
@@ -512,6 +526,22 @@ mod tests {
         }
         let have = std::fs::read_to_string(&path).unwrap_or_default();
         assert!(have == want, "docs/cli.json is out of date; refresh it with: GOETHE_WRITE_CLI_JSON=1 cargo test -p goethe cli_json");
+    }
+
+    #[test]
+    fn cli_md_names_every_command() {
+        // docs/cli.md is written by hand around examples; every command of the CLI must at least appear in it.
+        fn paths(n: &Node, out: &mut Vec<String>) {
+            for c in &n.commands {
+                out.push(c.path.clone());
+                paths(c, out);
+            }
+        }
+        let md = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/cli.md")).expect("docs/cli.md");
+        let mut all = Vec::new();
+        paths(&reference().expect("every example parses"), &mut all);
+        let missing: Vec<String> = all.into_iter().filter(|p| !md.contains(p.as_str())).collect();
+        assert!(missing.is_empty(), "docs/cli.md does not mention: {missing:?}");
     }
 
     #[test]

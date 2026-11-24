@@ -366,9 +366,9 @@ The recipient verifies the gateway with the certificate goethe prints, `GOETHE_H
 
 ## Learning and traces
 
-### `goethe trace [on | off]`
+### `goethe trace [on | off | status]`
 
-Records every generation request and reply, grouped into sessions, as a corpus for training later. `off` stops recording and keeps the chosen keys; `on` resumes with them (every key the first time). Without `on` or `off` it shows what is recorded, the folder, its size and the free disk. Changes apply to the next request. The format is in [traces.md](traces.md).
+Records every generation request and reply, grouped into sessions, as a corpus for training later. `off` stops recording and keeps the chosen keys; `on` resumes with them (every key the first time). `status` (or no action) shows what is recorded, the folder, its size and the free disk. Changes apply to the next request. The format is in [traces.md](traces.md).
 
 | Option | Description |
 |---|---|
@@ -382,11 +382,12 @@ Records every generation request and reply, grouped into sessions, as a corpus f
 goethe trace on
 goethe trace on --key my-app
 goethe trace off
+goethe trace status
 ```
 
-### `goethe learn [on | off]`
+### `goethe learn [on | off | status]`
 
-Lets a session keep what context compaction would drop, in a small note that goes into the prompt after each compaction. Sessions are told apart by the client's `X-Session-Id` header. Without `on` or `off` it shows the scope and the sessions kept. Changes apply to the next request. `on` warns about models with a context under 100k tokens. See [learn.md](learn.md).
+Lets a session keep what context compaction would drop, in a small note that goes into the prompt after each compaction. Sessions are told apart by the client's `X-Session-Id` header. `status` (or no action) shows the scope and the sessions kept. Changes apply to the next request. `on` warns about models with a context under 100k tokens. See [learn.md](learn.md).
 
 | Option | Description |
 |---|---|
@@ -398,6 +399,7 @@ Lets a session keep what context compaction would drop, in a small note that goe
 goethe learn on
 goethe learn on --model my-model
 goethe learn off --model my-model
+goethe learn status
 goethe learn --print my-session-id
 ```
 
@@ -455,13 +457,13 @@ Folders of your own files stay: for a model registered in place only Goethe's li
 | `--keep-models` | Keep the installed models |
 | `--yes` | Don't ask |
 
-### `goethe completion [install | remove]`
+### `goethe completion [install | remove | status]`
 
 Tab completion for bash, zsh and fish. Commands, subcommands and flags complete, and so do live values: installed models (by full id, by the name after the organisation, in any case, and by alias), GPU names, API key ids and names, network interfaces and listen addresses. The shell asks `goethe` for them at each Tab, so they are always current.
 
 | Command | Description |
 |---|---|
-| `goethe completion` | Whether it is on for each shell |
+| `goethe completion status` | Whether it is on for each shell (also without an action) |
 | `goethe completion install` | Turn it on for your shell (`--shell bash\|zsh\|fish` for another) |
 | `goethe completion remove` | Turn it off again |
 

@@ -58,6 +58,7 @@ pub mod cuda_dev;
 pub mod cuda_toolkit;
 pub mod doctor;
 pub mod errcode;
+pub mod sha;
 pub mod domain;
 pub mod gpu_policy;
 pub mod logs;

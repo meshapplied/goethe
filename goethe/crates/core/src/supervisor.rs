@@ -768,10 +768,7 @@ pub(super) fn warm_up(s: &Starting) {
         .set("Content-Type", "application/json")
         .send_string(&body.to_string());
     let outcome = match res {
-        Ok(_) => {
-            crate::progress::record_warmup(&s.home, &s.params.model_id, started.elapsed().as_secs());
-            format!("warm-up request took {:.0} s", started.elapsed().as_secs_f64())
-        }
+        Ok(_) => format!("warm-up request took {:.0} s", started.elapsed().as_secs_f64()),
         Err(e) => format!("warm-up request skipped ({e})"),
     };
     append_goethed_log(&s.home, &format!("{}: {outcome}\n", s.instance_id));

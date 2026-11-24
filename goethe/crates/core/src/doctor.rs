@@ -536,7 +536,7 @@ fn check_ask_model(home: &Path) -> Check {
 }
 
 fn check_goethe_home(home: &Path) -> Check {
-    if is_writable(home) {
+    if crate::paths::is_writable(home) {
         Check {
             name: "goethe_home".into(),
             status: "OK".into(),
@@ -886,22 +886,6 @@ fn read_port(home: &Path, rel: &str) -> Option<u16> {
     fs::read_to_string(home.join(rel))
         .ok()
         .and_then(|s| s.trim().parse().ok())
-}
-
-fn is_writable(path: &Path) -> bool {
-    let probe = path.join(format!(".goethe-probe-{}", std::process::id()));
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-    {
-        Ok(f) => {
-            drop(f);
-            let _ = fs::remove_file(probe);
-            true
-        }
-        Err(_) => false,
-    }
 }
 
 fn available_gb(path: &Path) -> Result<f64, String> {

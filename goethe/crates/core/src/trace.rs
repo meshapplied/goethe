@@ -9,7 +9,6 @@ use flate2::Compression;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -130,20 +129,12 @@ impl TraceConfig {
 }
 
 pub fn load_config(con: &Connection) -> TraceConfig {
-    con.query_row("SELECT value FROM goethe_settings WHERE key = ?1", [SETTING], |r| r.get::<_, String>(0))
-        .ok()
-        .and_then(|v| serde_json::from_str(&v).ok())
-        .unwrap_or_default()
+    crate::db::setting(con, SETTING).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
 }
 
 fn save_config(con: &Connection, cfg: &TraceConfig) -> Result<(), String> {
     let text = serde_json::to_string(cfg).map_err(|e| e.to_string())?;
-    con.execute(
-        "INSERT OR REPLACE INTO goethe_settings (key, value) VALUES (?1, ?2)",
-        rusqlite::params![SETTING, text],
-    )
-    .map(|_| ())
-    .map_err(|e| e.to_string())
+    crate::db::set_setting(con, SETTING, &text).map_err(|e| e.to_string())
 }
 
 fn resolve_keys(con: &Connection, wanted: &[String]) -> Result<Vec<String>, String> {
@@ -271,7 +262,7 @@ pub fn status(home: &Path) -> Result<Value, String> {
         "last_turn_at": manifest.get("last_turn_at").cloned().unwrap_or(Value::Null),
         "dropped": manifest.get("dropped").cloned().unwrap_or(json!(0)),
         "paused": manifest.get("paused").cloned().unwrap_or(Value::Null),
-        "free_bytes": free_bytes(&dir),
+        "free_bytes": crate::paths::free_bytes(&dir),
     }))
 }
 
@@ -299,17 +290,6 @@ fn folder_totals(dir: &Path) -> (u64, u64) {
         }
     }
     (bytes, sessions)
-}
-
-fn free_bytes(dir: &Path) -> Option<u64> {
-    // Free space for an unprivileged writer on the folder's filesystem (or its nearest existing parent).
-    let mut p = dir;
-    while !p.exists() {
-        p = p.parent()?;
-    }
-    let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).ok()?;
-    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-    (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| st.f_bavail as u64 * st.f_frsize as u64)
 }
 
 pub fn human_bytes(n: u64) -> String {
@@ -356,32 +336,10 @@ fn append_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     written
 }
 
-pub(crate) fn write_private_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    {
-        let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&tmp)?;
-        f.write_all(data)?;
-    }
-    std::fs::rename(tmp, path)
-}
-
-fn random_hex(n: usize) -> String {
-    let mut b = vec![0u8; n];
-    crate::sys::random_bytes(&mut b);
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
 type Hash = [u8; 32];
 
 fn hash_step(prev: &Hash, part: &str) -> Hash {
-    let mut h = Sha256::new();
-    h.update(prev);
-    h.update(part.as_bytes());
-    h.finalize().into()
-}
-
-fn hex(h: &Hash) -> String {
-    h.iter().map(|x| format!("{x:02x}")).collect()
+    crate::sha::digest(&[prev, part.as_bytes()])
 }
 
 pub struct Capture {
@@ -608,7 +566,7 @@ impl Writer {
         let low_disk = self
             .dir
             .as_deref()
-            .and_then(free_bytes)
+            .and_then(crate::paths::free_bytes)
             .is_some_and(|b| (b as f64) < MIN_FREE_GB * 1e9);
         if over_cap && !capped {
             self.turn_off_at_limit(max_gb);
@@ -735,7 +693,7 @@ impl Writer {
 
         let fingerprint = self.fingerprint(&c.instance_id);
         let session = self.sessions.get_mut(&session_id).ok_or("session vanished")?;
-        let turn_id = format!("t_{}", random_hex(8));
+        let turn_id = format!("t_{}", crate::security::random_hex(8));
         let started: DateTime<Utc> = c.started_at.into();
         let response_id = if api == Api::Responses { body.get("id").and_then(Value::as_str).map(str::to_string) } else { None };
         let reply_parts = if ok { trace_assemble::reply_canonical(api, &body) } else { Vec::new() };
@@ -765,8 +723,8 @@ impl Writer {
         if api.has_messages() {
             rec.insert("parent".into(), parent_json);
             rec.insert("messages_from".into(), json!(messages_from));
-            rec.insert("request_hash".into(), json!(hex(&request_hash)));
-            rec.insert("reply_hash".into(), json!(reply_hash.as_ref().map(hex)));
+            rec.insert("request_hash".into(), json!(crate::sha::hex(&request_hash)));
+            rec.insert("reply_hash".into(), json!(reply_hash.as_ref().map(|h| crate::sha::hex(h))));
         }
         if params_same {
             rec.insert("params_from_parent".into(), json!(true));
@@ -818,7 +776,7 @@ impl Writer {
         // File per session under v1/<model>/<day>/, plus one line in sessions.jsonl.
         let dir = self.dir.clone().ok_or("no trace folder")?;
         let started: DateTime<Utc> = c.started_at.into();
-        let sid = format!("s_{}", random_hex(8));
+        let sid = format!("s_{}", crate::security::random_hex(8));
         let rel = PathBuf::from(format!("v1/{}/{}", sanitize_model_id(&c.model), started.format("%Y-%m-%d")))
             .join(format!("{}_{sid}.jsonl.gz", started.format("%Y%m%dT%H%M%SZ")));
         let file = dir.join(&rel);
@@ -920,7 +878,7 @@ impl Writer {
             "paused": self.paused,
         });
         let text = serde_json::to_vec_pretty(&manifest).unwrap_or_default();
-        if let Err(e) = write_private_atomic(&dir.join("manifest.json"), &text) {
+        if let Err(e) = crate::paths::write_private(&dir.join("manifest.json"), &text) {
             eprintln!("goethe trace: manifest.json: {e}");
         }
         self.dirty = false;
@@ -935,7 +893,7 @@ impl Writer {
         let Some((entry, path)) = self.describe_instance(instance_id) else {
             return "unknown".into();
         };
-        let fp = format!("m_{}", &hex(&hash_step(&[0; 32], &entry.to_string()))[..16]);
+        let fp = format!("m_{}", &crate::sha::hex(&hash_step(&[0; 32], &entry.to_string()))[..16]);
         self.fingerprints.insert(instance_id.to_string(), fp.clone());
         if !self.models.contains_key(&fp) {
             let mut entry = entry;
@@ -946,7 +904,7 @@ impl Writer {
             self.models.insert(fp.clone(), entry);
             if let Some(dir) = &self.dir {
                 let text = serde_json::to_vec_pretty(&self.models).unwrap_or_default();
-                if let Err(e) = locked(dir, || write_private_atomic(&dir.join("models.json"), &text)) {
+                if let Err(e) = locked(dir, || crate::paths::write_private(&dir.join("models.json"), &text)) {
                     eprintln!("goethe trace: models.json: {e}");
                 }
             }
@@ -1018,7 +976,7 @@ fn prune(dir: &Path) -> Result<(), String> {
                 .map(|l| format!("{l}\n"))
                 .collect();
             if kept.len() != text.len() {
-                write_private_atomic(&sessions, kept.as_bytes())?;
+                crate::paths::write_private(&sessions, kept.as_bytes())?;
             }
         }
         let models_path = dir.join("models.json");
@@ -1030,7 +988,7 @@ fn prune(dir: &Path) -> Result<(), String> {
         let before = models.len();
         models.retain(|_, m| m["model_id"].as_str().is_none_or(present));
         if models.len() != before {
-            write_private_atomic(&models_path, &serde_json::to_vec_pretty(&models).unwrap_or_default())?;
+            crate::paths::write_private(&models_path, &serde_json::to_vec_pretty(&models).unwrap_or_default())?;
         }
         let path = dir.join("manifest.json");
         let Some(mut manifest) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else {
@@ -1051,7 +1009,7 @@ fn prune(dir: &Path) -> Result<(), String> {
             m.insert("models".into(), json!(models.len()));
             m.insert("updated".into(), json!(now_rfc3339()));
         }
-        write_private_atomic(&path, &serde_json::to_vec_pretty(&manifest).unwrap_or_default())
+        crate::paths::write_private(&path, &serde_json::to_vec_pretty(&manifest).unwrap_or_default())
     })
     .map_err(|e| format!("pruning {}: {e}", dir.display()))
 }
@@ -1095,7 +1053,7 @@ fn model_files(dir: &Path) -> Map<String, Value> {
         .iter()
         .filter_map(|name| {
             let bytes = std::fs::read(dir.join(name)).ok()?;
-            Some((name.to_string(), json!(hex(&Sha256::digest(&bytes).into()))))
+            Some((name.to_string(), json!(crate::sha::digest_hex(&bytes))))
         })
         .collect()
 }
@@ -1118,14 +1076,12 @@ fn single_file_sample(path: &Path, size: u64) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     const SAMPLE: u64 = 1 << 20;
     let mut f = std::fs::File::open(path).ok()?;
-    let mut h = Sha256::new();
-    let mut buf = vec![0u8; SAMPLE.min(size) as usize];
-    f.read_exact(&mut buf).ok()?;
-    h.update(&buf);
+    let mut head = vec![0u8; SAMPLE.min(size) as usize];
+    let mut tail = head.clone();
+    f.read_exact(&mut head).ok()?;
     f.seek(SeekFrom::Start(size.saturating_sub(SAMPLE))).ok()?;
-    f.read_exact(&mut buf).ok()?;
-    h.update(&buf);
-    Some(hex(&h.finalize().into()))
+    f.read_exact(&mut tail).ok()?;
+    Some(crate::sha::hex(&crate::sha::digest(&[&head, &tail])))
 }
 
 fn weight_files(dir: &Path) -> Value {
