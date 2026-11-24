@@ -310,6 +310,47 @@ fn a_step_repeated_for_each_model_stays_repeated_when_picked_and_answered() {
 }
 
 #[test]
+fn the_owners_request_reads_as_meant() {
+    // The owner's own words: a wish in the past form names its command, a word only one command has names it, and a step repeated over models pairs up with as many values of another kind, in order.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let argvs = |p: &PlanState| p.goals.iter().filter(|g| g.reason.is_none()).map(|g| (g.intent_id.clone(), g.argv.join(" "))).collect::<Vec<_>>();
+    let wish = plan("i want qwen 7b loaded");
+    assert!(wish.is_ready() && argvs(&wish).iter().any(|(id, _)| id == "load"), "{:?}", argvs(&wish));
+    assert!(!plan("is qwen 7b loaded").goals.iter().any(|g| g.intent_id == "load" && !g.needs_intent_pick), "a question plans no load");
+    let block = plan("block gpu2");
+    assert!(block.is_ready() && argvs(&block) == [("gpu.deny".to_string(), "goethe gpu deny gpu2".to_string())], "{:?}", argvs(&block));
+    let p = plan("install mistral and qwen 7b, load them on gpu0 and gpu1, block gpu2, then create two api keys, one for each");
+    let got = argvs(&p);
+    for want in ["goethe load mistralai/Mistral-7B-Instruct --gpu gpu0", "goethe load Qwen/Qwen2.5-7B-Instruct --gpu gpu1", "goethe gpu deny gpu2", "goethe api keys create --models mistralai/Mistral-7B-Instruct", "goethe api keys create --models Qwen/Qwen2.5-7B-Instruct"] {
+        assert!(got.iter().any(|(_, a)| a == want), "missing `{want}`: {got:?}");
+    }
+    assert!(p.goals.iter().all(|g| !g.needs_intent_pick), "{got:?}");
+    let literal = plan("i want like have 2 models installed on gpu0 and gpu1, but block gpu2, then give me two scoped to (one model only) API keys for both");
+    let got = argvs(&literal);
+    assert!(got.first().is_some_and(|(id, _)| id == "install") && got.iter().any(|(_, a)| a == "goethe gpu deny gpu2"), "{got:?}");
+    assert!(!literal.is_ready() && !literal.has_destructive(), "it asks, never guesses: {got:?}");
+}
+
+#[test]
+fn filler_in_front_and_the_order_of_values_never_change_the_plan() {
+    // Metamorphic: a polite wish before a request, or its values in another order, plans the very same commands.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| cmds(&PlanState::build(q, &cat, &ret, &world, &validate_cli).lines);
+    for q in ["load mistral", "remove mistral", "stop goethe", "deny gpu2", "load mistral with 32k context on gpu0", "load mistral on gpu0 and qwen 7b on gpu1", "create an api key for mistral"] {
+        for wish in ["please", "could you", "i want to", "can you please"] {
+            assert_eq!(plan(&format!("{wish} {q}")), plan(q), "'{wish} {q}'");
+        }
+    }
+    assert_eq!(plan("load mistral on gpu0 with 32k context"), plan("load mistral with 32k context on gpu0"));
+    assert_eq!(plan("share the api for 2 hours with key friend-demo for 203.0.113.7"), plan("share the api with key friend-demo for 203.0.113.7 for 2 hours"));
+}
+
+#[test]
 fn a_part_page_reads_short_descriptions_and_value_labels() {
     // Rows drop a leading "The"; a missing value reads "Key name:", not "Which key name?".
     let cat = build_catalog(&Cli::command());

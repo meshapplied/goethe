@@ -112,7 +112,7 @@ impl PlanState {
             return Self::abstained(trimmed, "That is not something Goethe does; goethe help lists what it does.", world);
         }
         let model_ref = written_model(trimmed, catalog);
-        let rank = |text: &str| retriever.rank(&without(text, model_ref.as_deref()), catalog.intents.len());
+        let rank = |text: &str| retriever.rank(&without(&present(text, catalog), model_ref.as_deref()), catalog.intents.len());
         let mut texts = request_parts(trimmed, &rank, catalog, world);
         if texts.len() < 2 {
             texts = vec![(trimmed.to_string(), rank(trimmed))];
@@ -132,10 +132,11 @@ impl PlanState {
             let Some(top) = options.first().cloned() else {
                 continue;
             };
-            if !about_model && !several && top.score < TAU_OOD {
+            let named = named_alone(&top.id, &present(&text, catalog), catalog);
+            if !about_model && !several && top.score < TAU_OOD && !named {
                 continue;
             }
-            let needs_intent_pick = !clear(&options, if about_model { TAU_OOD } else { TAU_HI }) || changes_beside_a_stray_word(&top.id, &text, catalog, retriever, world);
+            let needs_intent_pick = !(named || clear(&options, if about_model { TAU_OOD } else { TAU_HI })) || changes_beside_a_stray_word(&top.id, &text, catalog, retriever, world);
             let input = StepBuildInput { clause: &text, intent_id: &top.id, alternatives: options.clone(), needs_intent_pick };
             let mut goal = build_step(input, catalog, world, validate);
             goal.part = i;
@@ -351,7 +352,7 @@ impl PlanState {
             return Err(format!("Ask plans what to do, not what not to do ('{word}'); say what you want done."));
         }
         let model_ref = self.model_ref.clone().or_else(|| written_model(text, catalog));
-        let open = retriever.rank(&without(text, model_ref.as_deref()), catalog.intents.len());
+        let open = retriever.rank(&without(&present(text, catalog), model_ref.as_deref()), catalog.intents.len());
         let model_used = self.goals.iter().any(|g| g.part != part && takes_model(catalog, &g.intent_id));
         let (options, about_model) = part_options(text, open, model_ref.as_deref(), model_used, catalog);
         let Some(top) = options.first().cloned() else {
@@ -359,7 +360,8 @@ impl PlanState {
         };
         self.model_ref = model_ref;
         self.parts[part] = PlanPart { text: text.to_string(), options: options.clone(), left_out: false, ignored: Vec::new() };
-        let needs_intent_pick = !clear(&options, if about_model { TAU_OOD } else { TAU_HI }) || changes_beside_a_stray_word(&top.id, text, catalog, retriever, &self.world);
+        let named = clear(&options, if about_model { TAU_OOD } else { TAU_HI }) || named_alone(&top.id, &present(text, catalog), catalog);
+        let needs_intent_pick = !named || changes_beside_a_stray_word(&top.id, text, catalog, retriever, &self.world);
         let input = StepBuildInput { clause: text, intent_id: &top.id, alternatives: options.clone(), needs_intent_pick };
         let mut goal = build_step(input, catalog, &self.world, validate);
         goal.part = part;
@@ -509,7 +511,7 @@ fn request_parts(request: &str, rank: &dyn Fn(&str) -> Vec<ScoredIntent>, catalo
     let mut parts: Vec<(String, Vec<ScoredIntent>)> = Vec::new();
     let mut lead = String::new();
     for piece in split_parts(request) {
-        let commanded = names_a_command(&piece, catalog);
+        let commanded = names_a_command(&present(&piece, catalog), catalog);
         if !commanded && names_a_model(&piece, world) {
             if let Some((last, _)) = parts.last() {
                 let text = format!("{} {piece}", without_values(last, world));
@@ -539,7 +541,7 @@ fn request_parts(request: &str, rank: &dyn Fn(&str) -> Vec<ScoredIntent>, catalo
 }
 
 fn refer_back(goals: &mut Vec<PlanStep>, catalog: &CliCatalog, world: &World, validate: &Validate) {
-    // "it" is the model the step before bound; "each", "both", "them" repeat the step once per model the steps before bound; either goes on a step's model argument or flag when it binds none.
+    // "it" is the model the step before bound; "each", "both", "them" repeat the step once per model the steps before bound, and a list of as many other values pairs up with them in order ("load them on gpu0 and gpu1"); either goes on a step's model argument or flag when it binds none.
     let mut i = 0;
     while i < goals.len() {
         let words = split_words(&goals[i].clause.to_ascii_lowercase());
@@ -559,8 +561,10 @@ fn refer_back(goals: &mut Vec<PlanStep>, catalog: &CliCatalog, world: &World, va
             continue;
         }
         let template = goals.remove(i);
+        let n = before.len();
         for (k, m) in before.iter().enumerate() {
             let mut g = template.clone();
+            g.flags.iter_mut().map(|(_, v)| v).chain(g.positionals.values_mut()).filter(|v| v.len() == n && n > 1).for_each(|v| *v = vec![v[k].clone()]);
             match &slot {
                 Some(id) => {
                     g.positionals.insert(id.clone(), vec![m.clone()]);
@@ -577,6 +581,24 @@ fn refer_back(goals: &mut Vec<PlanStep>, catalog: &CliCatalog, world: &World, va
 
 fn named_by<'a>(word: &str, catalog: &'a CliCatalog) -> Vec<&'a IntentCard> {
     catalog.intents.iter().filter(|c| super::embed::names(c).iter().any(|n| super::embed::says(word, n))).collect()
+}
+
+fn present(text: &str, catalog: &CliCatalog) -> String {
+    // After a wish ("I want qwen loaded") a past form says what to do, so it reads as its command's word; a question ("is qwen loaded") keeps it.
+    if without_wish(text) == text.trim_start() {
+        return text.to_string();
+    }
+    let word_of = |w: &str| catalog.intents.iter().flat_map(super::embed::names).find(|n| w.strip_prefix(n.strip_suffix('e').unwrap_or(n)) == Some("ed"));
+    text.split_whitespace().map(|w| word_of(&w.to_ascii_lowercase()).unwrap_or_else(|| w.to_string())).collect::<Vec<_>>().join(" ")
+}
+
+fn named_alone(id: &str, text: &str, catalog: &CliCatalog) -> bool {
+    // A word the CLI gives to this command alone, and every other such word gives it to this one or a parent of it ("block" is only gpu deny's, "api" is api's): the command is named, not guessed; a parent's word alone names no child, and words for two unrelated commands stay a question.
+    let alone: Vec<String> = split_words(&text.to_ascii_lowercase()).iter().filter_map(|w| match named_by(w, catalog)[..] {
+        [c] => Some(c.id.clone()),
+        _ => None,
+    }).collect();
+    alone.iter().any(|a| a == id) && alone.iter().all(|a| a == id || id.starts_with(&format!("{a}.")))
 }
 
 fn names_a_command(piece: &str, catalog: &CliCatalog) -> bool {
