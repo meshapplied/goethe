@@ -207,8 +207,9 @@ mod tests {
         c
     }
 
-    fn lines_of(p: &Path) -> Vec<String> {
-        std::fs::read_to_string(p).unwrap().lines().map(String::from).collect()
+    fn fake_lines(p: &Path) -> usize {
+        // Lines of the fake process only: other tests running in parallel write their own lines to the same process-wide log.
+        std::fs::read_to_string(p).unwrap().lines().filter(|l| l.contains("noise ") || l.contains("error: broke")).count()
     }
 
     #[test]
@@ -224,7 +225,7 @@ mod tests {
         });
         assert_eq!(shown, Ok(TAIL_LINES));
         let path = log_path().expect("the log exists once something was written");
-        assert_eq!(lines_of(&path).len(), 301, "all 300 lines and the stderr line");
+        assert_eq!(fake_lines(&path), 301, "all 300 lines and the stderr line");
         assert!(path.starts_with(home.path().join("logs")) && path.file_name().unwrap().to_string_lossy().starts_with("install-"));
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(took(Duration::from_secs(2)), "");
@@ -259,7 +260,7 @@ mod tests {
         assert_eq!(shown.load(Ordering::Relaxed), 0, "the default shows none of the process's lines");
         run_with(&mut fake(), Some(&count)).unwrap();
         assert_eq!(shown.load(Ordering::Relaxed), 301, "-v shows every line");
-        assert_eq!(lines_of(&log_path().unwrap()).len(), 602, "both runs are in the log");
+        assert_eq!(fake_lines(&log_path().unwrap()), 602, "both runs are in the log");
     }
 
     #[test]
