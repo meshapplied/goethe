@@ -242,6 +242,7 @@ pub fn run(yes: bool) -> Result<(), String> {
                 }
                 if let Err(e) = apply(&home, &fix) {
                     eprintln!("{e}");
+                    crate::errcode::record(crate::errcode::Code::EnvFix, &e);
                     failed = Some(e);
                 }
             }

@@ -91,6 +91,9 @@ impl Worker {
                 if let Some(to) = usage_to {
                     crate::usage_log::mark_sent(&self.home, to);
                 }
+                if let Some(last) = snap.errors.last() {
+                    crate::errcode::mark_sent(&self.home, last.t);
+                }
                 if self.failures > 0 || state.last_ok_at.is_none() {
                     self.note(&format!("console: heartbeat OK, linked to workspace {}", platform::clean_text(&creds.workspace.name, 64)));
                 }
@@ -238,6 +241,22 @@ mod tests {
         assert_eq!(*m.connections.lock().unwrap(), 0, "no connection without a link");
         assert!(!platform::state_path(dir.path()).exists(), "no state file without a link");
         assert!(!dir.path().join("logs").exists());
+    }
+
+    #[test]
+    fn error_rows_ride_the_heartbeat_until_one_is_accepted() {
+        let m = mock::serve(vec![(500, r#"{"error":"server_error"}"#.into()), (200, r#"{"ok":true}"#.into()), (200, r#"{"ok":true}"#.into())]);
+        let dir = home();
+        std::fs::write(dir.path().join("errors.log"), "1700000000\tINSTALL_DOWNLOAD\t0.4.1\tcould not download <url>\n").unwrap();
+        link(dir.path(), &m.url);
+        let mut w = worker(dir.path());
+        for _ in 0..3 {
+            w.step(Reason::Start);
+            w.failures = 0;
+        }
+        let seen = m.seen.lock().unwrap();
+        let rows = |i: usize| serde_json::from_str::<serde_json::Value>(&seen[i].body).unwrap()["errors"].as_array().map(Vec::len);
+        assert_eq!((rows(0), rows(1), rows(2)), (Some(1), Some(1), None), "kept after a 500, sent again, then gone once accepted");
     }
 
     #[test]

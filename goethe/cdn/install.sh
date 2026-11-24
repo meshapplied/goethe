@@ -8,7 +8,16 @@ DEFAULT_PKG_URL="https://pkg.goethe.sh"
 GLIBC_MIN=2.30
 
 die() {
-  echo "goethe install: $*" >&2
+  # die CODE message: tell the user, and log one row to <home>/errors.log (see errcode.rs) unless the file is over 64k or the last row has the same code.
+  local code="$1" msg="$2" home="${GOETHE_HOME:-$(default_home 2>/dev/null || true)}" v="${VERSION:-latest}" log detail
+  echo "goethe install: ${msg}" >&2
+  log="${home}/errors.log"
+  [[ "${v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]] || v=unknown
+  detail="$(printf '%s' "${msg}" | head -n1 | sed -E "s#[A-Za-z]+://[^ ]+#<url>#g; s#(^|[ (=])[/~][^ ]*#\\1<path>#g" | tr '\t' ' ' | cut -c1-120)"
+  if [[ -n "${home}" ]] && mkdir -p "${home}" 2>/dev/null && [[ ! -e "${log}" || -z "$(find "${log}" -size +64k 2>/dev/null)" ]] &&
+    [[ "$(tail -n1 "${log}" 2>/dev/null | cut -f2)" != "${code}" ]]; then
+    (umask 077 && printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "${code}" "${v}" "${detail}" >>"${log}") 2>/dev/null || true
+  fi
   exit 1
 }
 
@@ -56,7 +65,7 @@ parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --authkey | --platform-url | --version)
-        [[ $# -ge 2 ]] || die "$1 needs a value"
+        [[ $# -ge 2 ]] || die INSTALL_ARGS "$1 needs a value"
         case "$1" in --authkey) AUTHKEY="$2" ;; --platform-url) PLATFORM_URL="$2" ;; --version) VERSION="$2" ;; esac
         shift 2
         ;;
@@ -67,7 +76,7 @@ parse_args() {
     esac
   done
   VERSION="${VERSION#v}"
-  [[ -z "${VERSION}" || "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]] || die "--version ${VERSION} is not a version like 0.3.3"
+  [[ -z "${VERSION}" || "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]] || die INSTALL_ARGS "--version ${VERSION} is not a version like 0.3.3"
 }
 
 check_machine() {
@@ -75,18 +84,18 @@ check_machine() {
   local ver
   case "${OS}" in
     Darwin)
-      [[ "${ARCH}" == aarch64 ]] || die "this is an Intel Mac: goethe needs Apple Silicon (M1 or newer)"
+      [[ "${ARCH}" == aarch64 ]] || die INSTALL_ARCH "this is an Intel Mac: goethe needs Apple Silicon (M1 or newer)"
       ver="$(sw_vers -productVersion 2>/dev/null || echo 0)"
-      version_ge "${ver}" 14 || die "macOS ${ver} is too old: goethe needs macOS 14 (Sonoma) or newer"
+      version_ge "${ver}" 14 || die INSTALL_OS "macOS ${ver} is too old: goethe needs macOS 14 (Sonoma) or newer"
       ;;
     Linux)
-      [[ "${ARCH}" == x86_64 || "${ARCH}" == aarch64 ]] || die "unsupported architecture ${ARCH} (goethe runs on x86_64 and aarch64)"
+      [[ "${ARCH}" == x86_64 || "${ARCH}" == aarch64 ]] || die INSTALL_ARCH "unsupported architecture ${ARCH} (goethe runs on x86_64 and aarch64)"
       ver="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)"
       [[ -n "${ver}" ]] || ver="$(ldd --version 2>/dev/null | head -n1 | awk '{print $NF}' || true)"
-      [[ "${ver}" =~ ^[0-9]+\.[0-9]+ ]] || die "goethe needs glibc ${GLIBC_MIN} or newer, and this system's C library is not glibc (Alpine and other musl systems are not supported)"
-      version_ge "${ver}" "${GLIBC_MIN}" || die "glibc ${ver} is older than ${GLIBC_MIN}"
+      [[ "${ver}" =~ ^[0-9]+\.[0-9]+ ]] || die INSTALL_GLIBC "goethe needs glibc ${GLIBC_MIN} or newer, and this system's C library is not glibc (Alpine and other musl systems are not supported)"
+      version_ge "${ver}" "${GLIBC_MIN}" || die INSTALL_GLIBC "glibc ${ver} is older than ${GLIBC_MIN}"
       ;;
-    *) die "unsupported system ${OS}: goethe runs on Linux and macOS" ;;
+    *) die INSTALL_OS "unsupported system ${OS}: goethe runs on Linux and macOS" ;;
   esac
 }
 
@@ -101,10 +110,10 @@ need_tools() {
     missing+=(ca-certificates)
   fi
   [[ ${#missing[@]} -eq 0 ]] && return 0
-  [[ "${OS}" == Darwin ]] && die "${missing[*]} missing; they are part of macOS, so check your PATH"
+  [[ "${OS}" == Darwin ]] && die INSTALL_TOOLS "${missing[*]} missing; they are part of macOS, so check your PATH"
   mgr="$(command -v apt-get || command -v dnf || command -v yum || command -v zypper || true)"
   if [[ "$(id -u)" -ne 0 || -z "${mgr}" || "${GOETHE_INSTALL_DEPS:-1}" == 0 ]]; then
-    die "missing ${missing[*]}: install it with your package manager (for example: sudo apt-get install -y ${missing[*]}) and run the installer again"
+    die INSTALL_TOOLS "missing ${missing[*]}: install it with your package manager (for example: sudo apt-get install -y ${missing[*]}) and run the installer again"
   fi
   echo "installing ${missing[*]} with ${mgr##*/} (GOETHE_INSTALL_DEPS=0 skips this)"
   case "${mgr##*/}" in
@@ -140,9 +149,9 @@ check_pkg_url() {
         return 0
       fi
       [[ "${GOETHE_ALLOW_HTTP:-0}" == 1 ]] && return 0
-      die "${1} is plain http; use https, file:// or a loopback address (GOETHE_ALLOW_HTTP=1 allows a test host)"
+      die INSTALL_URL "${1} is plain http; use https, file:// or a loopback address (GOETHE_ALLOW_HTTP=1 allows a test host)"
       ;;
-    *) die "GOETHE_PKG_URL must be an https:// or file:// URL, got ${1}" ;;
+    *) die INSTALL_URL "GOETHE_PKG_URL must be an https:// or file:// URL, got ${1}" ;;
   esac
 }
 
@@ -163,28 +172,28 @@ pick_base() {
 verify_package() {
   # SHA256SUMS signed by the release key embedded above, then goethe for this platform against it.
   local want
-  [[ "${GOETHE_RELEASE_PUB_PEM}" != *"__GOETHE_RELEASE_PUB_PEM__"* ]] || die "this install.sh has no release key; use the one from ${DEFAULT_PKG_URL}"
+  [[ "${GOETHE_RELEASE_PUB_PEM}" != *"__GOETHE_RELEASE_PUB_PEM__"* ]] || die INSTALL_NO_KEY "this install.sh has no release key; use the one from ${DEFAULT_PKG_URL}"
   printf '%s\n' "${GOETHE_RELEASE_PUB_PEM}" >"${TMP}/release_pub.pem"
-  get SHA256SUMS "${TMP}/SHA256SUMS" || die "could not download ${BASE}/SHA256SUMS${VERSION:+ (is ${VERSION} a published version?)}"
-  get SHA256SUMS.sig "${TMP}/SHA256SUMS.sig" || die "could not download ${BASE}/SHA256SUMS.sig"
+  get SHA256SUMS "${TMP}/SHA256SUMS" || die INSTALL_DOWNLOAD "could not download ${BASE}/SHA256SUMS${VERSION:+ (is ${VERSION} a published version?)}"
+  get SHA256SUMS.sig "${TMP}/SHA256SUMS.sig" || die INSTALL_DOWNLOAD "could not download ${BASE}/SHA256SUMS.sig"
   openssl dgst -sha256 -verify "${TMP}/release_pub.pem" -signature "${TMP}/SHA256SUMS.sig" "${TMP}/SHA256SUMS" >/dev/null 2>&1 ||
-    die "the package list is not signed by the Goethe release key; nothing was installed"
+    die INSTALL_SIGNATURE "the package list is not signed by the Goethe release key; nothing was installed"
   echo "  SHA256SUMS signed by the Goethe release key; every download is checked against it"
   want="$(awk -v p="bin/${PLATFORM}/goethe" '$2 == p { print $1; exit }' "${TMP}/SHA256SUMS")"
-  [[ -n "${want}" ]] || die "this release has no goethe for ${PLATFORM}"
-  get "bin/${PLATFORM}/goethe" "${TMP}/goethe" || die "could not download goethe for ${PLATFORM}"
-  [[ "$(sha256_of "${TMP}/goethe")" == "${want}" ]] || die "the downloaded goethe does not match the signed package list; nothing was installed"
+  [[ -n "${want}" ]] || die INSTALL_NO_BUILD "this release has no goethe for ${PLATFORM}"
+  get "bin/${PLATFORM}/goethe" "${TMP}/goethe" || die INSTALL_DOWNLOAD "could not download goethe for ${PLATFORM}"
+  [[ "$(sha256_of "${TMP}/goethe")" == "${want}" ]] || die INSTALL_SIGNATURE "the downloaded goethe does not match the signed package list; nothing was installed"
   chmod +x "${TMP}/goethe"
-  "${TMP}/goethe" --version >/dev/null 2>&1 || die "the downloaded goethe does not run on this machine; nothing was installed"
+  "${TMP}/goethe" --version >/dev/null 2>&1 || die INSTALL_BINARY "the downloaded goethe does not run on this machine; nothing was installed"
 }
 
 older_release() {
   # A pinned release from before goethe setup: its own signed install.sh installs it, from its folder.
   local want
   want="$(awk '$2 == "install.sh" { print $1; exit }' "${TMP}/SHA256SUMS")"
-  [[ -n "${want}" ]] || die "release ${VERSION:-${BASE}} has no installer in its package list"
-  get install.sh "${TMP}/release-install.sh" || die "could not download that release's install.sh"
-  [[ "$(sha256_of "${TMP}/release-install.sh")" == "${want}" ]] || die "that release's install.sh does not match its signed package list"
+  [[ -n "${want}" ]] || die INSTALL_NO_BUILD "release ${VERSION:-${BASE}} has no installer in its package list"
+  get install.sh "${TMP}/release-install.sh" || die INSTALL_DOWNLOAD "could not download that release's install.sh"
+  [[ "$(sha256_of "${TMP}/release-install.sh")" == "${want}" ]] || die INSTALL_SIGNATURE "that release's install.sh does not match its signed package list"
   echo "  this release predates goethe setup; running its own installer"
   local args=() script
   [[ -n "${PLATFORM_URL}" ]] && args+=(--platform-url "${PLATFORM_URL}")
