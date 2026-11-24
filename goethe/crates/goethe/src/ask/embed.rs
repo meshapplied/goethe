@@ -285,7 +285,7 @@ impl HybridRetriever {
         }
         let mut norm = if max_possible > 0.0 { (raw / max_possible).clamp(0.0, 1.0) } else { 0.0 };
         let cmd = &self.cmd_tokens[idx];
-        let hits = cmd.iter().filter(|ct| q_toks.iter().any(|qt| qt == *ct)).count();
+        let hits = cmd.iter().enumerate().filter(|(k, ct)| q_toks.iter().any(|qt| qt == *ct || (k + 1 < cmd.len() && same_word(qt, ct)))).count();
         if hits == cmd.len() && hits > 0 {
             let cov = (hits as f32 / q_toks.len().max(1) as f32).clamp(0.15, 1.0);
             if hits >= 2 {
@@ -366,6 +366,11 @@ pub(super) fn gated(card: &super::schema::IntentCard) -> bool {
 
 pub(super) fn names(card: &super::schema::IntentCard) -> Vec<String> {
     card.id.rsplit('.').next().into_iter().map(str::to_string).chain(card.aliases.iter().map(|a| a.to_ascii_lowercase())).chain(card.does.says.iter().map(|w| w.to_string())).collect()
+}
+
+pub(super) fn same_word(a: &str, b: &str) -> bool {
+    // One word, singular or plural: "key" names the `keys` in `api keys create`; a command's own last word is still said as itself.
+    a == b || a.strip_suffix('s') == Some(b) || b.strip_suffix('s') == Some(a)
 }
 
 pub(super) fn says(token: &str, name: &str) -> bool {

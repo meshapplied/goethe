@@ -207,11 +207,12 @@ fn a_request_of_many_steps_binds_each_value_to_its_own_step() {
     ];
     for q in [
         "load mistral on gpu0 and qwen 7b on gpu1, deny gpu2, then create an api key for mistral and another for qwen 7b",
-        "load mistral on gpu0 and qwen 7b on gpu1, block gpu2, then give me an api key for each",
+        "load mistral on gpu0 and qwen 7b on gpu1, deny gpu2, then create an api key for each",
     ] {
         let p = PlanState::build(q, &cat, &ret, &world, &validate_cli);
         let got: Vec<(String, String)> = p.goals.iter().filter(|g| g.reason.is_none()).map(|g| (g.intent_id.clone(), g.argv.join(" "))).collect();
         assert_eq!(got.len(), want.len(), "{q}: {got:?}");
+        assert!(StaticModel::load_default().is_none() || p.goals.iter().all(|g| !g.needs_intent_pick), "{q}: with the embedding model every step's command is clear: {got:?}");
         for ((id, argv), (want_id, want_argv)) in got.iter().zip(want) {
             assert!(id == want_id && argv.contains(want_argv), "{q}: {id} `{argv}` should be {want_id} with `{want_argv}`; all: {got:?}");
         }

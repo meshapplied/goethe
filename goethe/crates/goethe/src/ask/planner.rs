@@ -530,10 +530,14 @@ fn repeat_over_models(goals: &mut Vec<PlanStep>, catalog: &CliCatalog, world: &W
     }
 }
 
+fn named_by<'a>(word: &str, catalog: &'a CliCatalog) -> Vec<&'a IntentCard> {
+    catalog.intents.iter().filter(|c| super::embed::names(c).iter().any(|n| super::embed::says(word, n))).collect()
+}
+
 fn names_a_command(piece: &str, catalog: &CliCatalog) -> bool {
     // A word that names exactly one command, or a top-level one ("on" names several subcommands, so it is no command word).
     split_words(&piece.to_ascii_lowercase()).iter().any(|w| {
-        let named: Vec<&IntentCard> = catalog.intents.iter().filter(|c| super::embed::names(c).iter().any(|n| super::embed::says(w, n))).collect();
+        let named = named_by(w, catalog);
         named.len() == 1 || named.iter().any(|c| !c.id.contains('.'))
     })
 }
@@ -594,8 +598,8 @@ fn prefer_named_child(open: &mut Vec<ScoredIntent>, text: &str) {
 }
 
 fn changes_beside_a_stray_word(id: &str, text: &str, catalog: &CliCatalog, retriever: &dyn ShortlistBackend, world: &World) -> bool {
-    // A command that changes something is asked, never taken, while a word means nothing to any command and is no value or model: "start the car" is not "goethe start".
-    if !catalog.get(id).is_some_and(super::embed::gated) {
+    // A command that changes something and takes no values is asked, never taken, while a word means nothing to any command and is no value or model: "start the car" is not "goethe start" (a command that takes values has the unused-value rule instead).
+    if !catalog.get(id).is_some_and(|c| super::embed::gated(c) && c.positionals.is_empty() && c.flags.is_empty()) {
         return false;
     }
     let mut rest = text.to_string();

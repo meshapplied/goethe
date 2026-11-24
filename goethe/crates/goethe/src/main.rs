@@ -489,7 +489,7 @@ struct KeyArgs {
 
 #[derive(Subcommand)]
 enum KeyCommands {
-    #[command(add = CmdMeta::change().gives(&[Key]).says(&["make", "new", "generate", "give"]), about = "Create an API key.")]
+    #[command(add = CmdMeta::change().gives(&[Key]).says(&["make", "new", "generate"]), about = "Create an API key.")]
     Create {
         #[arg(add = ArgMeta::of(spec::Value::KeyName), value_name = "KEY_NAME", help = "A name for the key, such as my-app.")]
         name: String,
