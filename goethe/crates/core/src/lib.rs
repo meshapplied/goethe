@@ -64,6 +64,7 @@ pub mod gpu_policy;
 pub mod logs;
 pub mod log_rotation;
 pub mod build_info;
+pub mod remote;
 pub mod update;
 pub mod uninstall;
 pub mod autostart;

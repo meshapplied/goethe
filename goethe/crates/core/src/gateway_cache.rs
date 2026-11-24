@@ -36,6 +36,7 @@ pub struct Snapshot {
     contexts: HashMap<String, u64>,
     engines: HashMap<String, &'static crate::engines::Engine>,
     tasks: HashMap<String, String>,
+    variants: HashMap<String, String>,
 }
 
 impl Snapshot {
@@ -53,6 +54,10 @@ impl Snapshot {
 
     pub fn engine(&self, model_id: &str) -> Option<&'static crate::engines::Engine> {
         self.engines.get(model_id).copied()
+    }
+
+    pub fn variant(&self, model_id: &str) -> &str {
+        self.variants.get(model_id).map_or("", String::as_str)
     }
 
     pub fn task(&self, model_id: &str) -> Option<&str> {
@@ -95,6 +100,25 @@ impl Snapshot {
         ids.sort_unstable();
         ids
     }
+}
+
+fn variant_of(dir: &Path, card: &toml::Value) -> String {
+    // The weights' quantization or precision as a short tag for the usage log: the config's quant method and algorithm, ModelOpt's algorithm, gguf, or the dtype.
+    let json = |f: &str| std::fs::read_to_string(dir.join(f)).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let text = |v: Option<&serde_json::Value>| v.and_then(|x| x.as_str()).map(str::to_ascii_lowercase);
+    let cfg = json("config.json");
+    let tag = cfg
+        .as_ref()
+        .and_then(|c| c.get("quantization_config"))
+        .and_then(|q| {
+            let method = text(q.get("quant_method"))?;
+            Some(text(q.get("quant_algo")).map_or(method.clone(), |a| format!("{method}-{a}")))
+        })
+        .or_else(|| json("hf_quant_config.json").and_then(|v| text(v.pointer("/quantization/quant_algo").or_else(|| v.get("quant_algo")))))
+        .or_else(|| (card.get("model").and_then(|m| m.get("format")).and_then(|f| f.as_str()) == Some("gguf")).then(|| "gguf".to_string()))
+        .or_else(|| text(cfg.as_ref().and_then(|c| c.get("torch_dtype"))))
+        .unwrap_or_default();
+    tag.chars().take(64).collect()
 }
 
 struct DbState {
@@ -287,6 +311,7 @@ fn load_snapshot(con: &Connection, home: &Path) -> rusqlite::Result<Snapshot> {
             if let Some(t) = c.get("task").and_then(|v| v.as_str()) {
                 snap.tasks.insert(model_id.clone(), t.to_string());
             }
+            snap.variants.insert(model_id.clone(), variant_of(&home.join(&local), &c));
         }
         if let Some(ctx) = u64::try_from(ctx).ok().filter(|c| *c > 0) {
             snap.contexts.insert(model_id.clone(), ctx);

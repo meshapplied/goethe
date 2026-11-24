@@ -407,6 +407,7 @@ version = "0.3.6"
 dependencies = [
  "chrono",
  "flate2",
+ "goethe-proto",
  "libc",
  "nvml-wrapper",
  "ring",

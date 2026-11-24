@@ -294,10 +294,10 @@ mod tests {
 
     fn view() -> MetricsView {
         let mut a = Requests::default();
-        a.add(200, false, 2.0, Some(0.5), 40, 132);
-        a.add(200, false, 60.0, Some(1.0), 900, 14712);
+        a.add(&crate::usage_log::Sample::new(200, false, 2.0, Some(0.5), 40, 132));
+        a.add(&crate::usage_log::Sample::new(200, false, 60.0, Some(1.0), 900, 14712));
         let mut b = Requests::default();
-        b.add(500, false, 0.2, None, 0, 0);
+        b.add(&crate::usage_log::Sample::new(500, false, 0.2, None, 0, 0));
         let gpu = Gpu { samples: 12, util_pct: Some(73.0), util_max_pct: Some(100.0), membw_pct: Some(40.0), vram_used_mb: Some(80_000.0), vram_goethe_mb: Some(20_000.0), power_w: Some(250.0), power_limit_w: Some(300.0), temp_max_c: Some(71.0), throttle: 4, ..Gpu::default() };
         MetricsView {
             range: 1,

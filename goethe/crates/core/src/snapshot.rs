@@ -780,7 +780,7 @@ mod tests {
         let models = (0..400)
             .map(|i| crate::usage_log::ModelRow { t: 60 * (i / 4), model: format!("{}{i}", "m".repeat(400)), stats: stats.clone() })
             .collect();
-        s.usage = Some(crate::usage_log::Report { from: 0, to: 6000, bounds_ms: vec![], models, gpus: vec![], host: vec![] });
+        s.usage = Some(crate::usage_log::Report { from: 0, to: 6000, bounds_ms: vec![], models, requests: vec![], gpus: vec![], host: vec![] });
         let (data, to) = encode_sent(&s).unwrap();
         assert!(data.len() <= crate::platform_api::MAX_SNAPSHOT_BYTES);
         let v: serde_json::Value = serde_json::from_slice(&data).unwrap();

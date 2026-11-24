@@ -15,6 +15,7 @@ use goethe_core::public_share;
 use goethe_core::security::{self, ResolvedKey};
 use goethe_core::trace::{self, Capture, Recorder};
 use goethe_core::trace_assemble::Api as TraceApi;
+use goethe_core::usage_log::{self, Dims, Sample};
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::body::{Body, Bytes, Frame, Incoming, SizeHint};
 use hyper::header::{HeaderMap, HeaderName, HeaderValue, ALLOW, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
@@ -29,7 +30,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::Write as _;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -276,14 +277,15 @@ async fn api(m: MuxRef, req: Request<Incoming>, path: &str, rid: &str, public: b
     }
     if let Some(retry) = gcra_check(&mut lock(&m.rpm), &key.key_id, key.rpm_limit, Instant::now()) {
         metrics::inc_rate_limited(&key.key_id);
-        goethe_core::usage_log::record_request(&key.key_id, goethe_core::usage_log::RATE_LIMITED, 429, false, 0.0, None, 0, 0);
+        let dims = Dims { model: usage_log::RATE_LIMITED.into(), api_key_id: key.key_id.clone(), ..Dims::default() };
+        usage_log::record(&dims, &Sample::new(429, false, 0.0, None, 0, 0));
         return rate_limited(retry);
     }
     match route {
         Api::Models => list_models(m, &key),
         Api::Model(id) => get_model(m, &key, &id),
         Api::ModelInfo { group } => model_info(m, &key, group),
-        Api::Proxy(upstream) => route_post(m, req, &upstream, &key, rid).await,
+        Api::Proxy(upstream) => route_post(m, req, &upstream, &key, rid, public).await,
     }
 }
 
@@ -414,23 +416,71 @@ struct Finish {
     label: String,
     key_id: String,
     started: Instant,
+    dims: Dims,
+    router_ms: Option<f64>,
 }
 
 impl Finish {
     fn now(self, resp: Response<MuxBody>) -> Response<MuxBody> {
-        self.record(resp.status().as_u16(), false, 0, 0, None);
+        self.record(resp.status().as_u16(), false, &Metered::default(), None);
         resp
     }
 
-    fn record(&self, code: u16, cancelled: bool, prompt: i64, completion: i64, ttft: Option<f64>) {
+    fn record(&self, code: u16, cancelled: bool, u: &Metered, ttft: Option<f64>) {
         // Metrics and the usage log use the full duration to the last byte; key usage goes to the batched writer.
         let secs = self.started.elapsed().as_secs_f64();
-        metrics::record_request(&self.label, code, secs, prompt, completion);
-        goethe_core::usage_log::record_request(&self.key_id, &self.label, code, cancelled, secs, ttft, prompt, completion);
+        metrics::record_request(&self.label, code, secs, u.prompt, u.completion);
+        let finish = match code {
+            _ if cancelled => "cancelled",
+            400.. => "error",
+            _ => u.finish,
+        };
+        let dims = Dims {
+            finish_reason: finish.into(),
+            context_length_bucket: if u.prompt > 0 { usage_log::context_bucket(u.prompt).into() } else { String::new() },
+            ..self.dims.clone()
+        };
+        let sample = Sample {
+            code,
+            cancelled,
+            duration_s: secs,
+            ttft_s: ttft,
+            prompt: u.prompt,
+            completion: u.completion,
+            reasoning: u.reasoning,
+            cached: u.cached,
+            router_ms: self.router_ms,
+        };
+        usage_log::record(&dims, &sample);
         if let Some(t) = ttft {
             metrics::record_ttft(&self.label, t);
         }
-        self.m.cache.record_usage(&self.key_id, prompt, completion);
+        self.m.cache.record_usage(&self.key_id, u.prompt, u.completion);
+    }
+}
+
+fn modality(path: &str) -> &'static str {
+    match api_tail(path) {
+        "/embeddings" => "embeddings",
+        "/rerank" => "rerank",
+        "/audio/transcriptions" => "audio",
+        "/messages/count_tokens" => "count_tokens",
+        _ => "chat",
+    }
+}
+
+fn network_path(client: Option<IpAddr>) -> &'static str {
+    // Where a direct request came from, by nginx's X-Real-IP: this machine, a private network, a Tailscale or WireGuard overlay (100.64.0.0/10, fd7a:115c:a1e0::/48), or the internet.
+    let Some(ip) = client.map(|ip| ip.to_canonical()) else {
+        return "local";
+    };
+    match ip {
+        _ if ip.is_loopback() => "local",
+        IpAddr::V4(a) if a.octets()[0] == 100 && a.octets()[1] & 0xc0 == 64 => "tailscale_wireguard",
+        IpAddr::V6(a) if a.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0] => "tailscale_wireguard",
+        IpAddr::V4(a) if a.is_private() || a.is_link_local() => "lan",
+        IpAddr::V6(a) if a.segments()[0] & 0xfe00 == 0xfc00 || a.segments()[0] & 0xffc0 == 0xfe80 => "lan",
+        _ => "public",
     }
 }
 
@@ -440,11 +490,13 @@ async fn route_post(
     path: &str,
     key: &ResolvedKey,
     rid: &str,
+    public: bool,
 ) -> Response<MuxBody> {
     // Parse the body once, resolve the model, take the in-flight guard before the drain check, then proxy.
     let started = Instant::now();
     let wall = SystemTime::now();
     let hint = session_hint(req.headers());
+    let network = if public { "public" } else { network_path(req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok())) };
     let audio = api_tail(path) == "/audio/transcriptions";
     let content_type = req.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let declared = req
@@ -479,12 +531,17 @@ async fn route_post(
         snap = m.cache.exact();
     }
     let model = snap.resolve_model(&raw_model).to_string();
-    let finish = Finish {
-        m,
-        label: if snap.is_known(&model) { model.clone() } else { metrics::UNKNOWN_MODEL.to_string() },
-        key_id: key.key_id.clone(),
-        started,
+    let label = if snap.is_known(&model) { model.clone() } else { metrics::UNKNOWN_MODEL.to_string() };
+    let dims = Dims {
+        model: label.clone(),
+        engine: snap.engine(&model).map_or("", |e| e.id).into(),
+        variant: snap.variant(&model).into(),
+        api_key_id: key.key_id.clone(),
+        modality: modality(path).into(),
+        network_path: network.into(),
+        ..Dims::default()
     };
+    let finish = Finish { m, label, key_id: key.key_id.clone(), started, dims, router_ms: None };
     if !security::model_allowed(&key.model_scope, &model) {
         return finish.now(model_not_found());
     }
@@ -888,9 +945,12 @@ impl MeteredBody {
     fn finish(&mut self) {
         // Record once, at end of stream or when the client goes away (neither end nor engine error: cancelled); this also releases the in-flight slot.
         if let Some((finish, guard, code)) = self.done.take() {
-            let (prompt, completion) = self.meter.totals();
+            let mut used = self.meter.totals();
+            if self.cut {
+                used.finish = "error";
+            }
             let cancelled = !self.ended && !self.cut;
-            finish.record(code, cancelled, prompt, completion, self.meter.ttft());
+            finish.record(code, cancelled, &used, self.meter.ttft());
             drop(guard);
             if let Some(mut c) = self.tap.take() {
                 c.duration_s = finish.started.elapsed().as_secs_f64();
@@ -968,17 +1028,74 @@ impl Drop for MeteredBody {
 }
 
 #[derive(Deserialize)]
+struct TokenDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<i64>,
+    #[serde(default)]
+    cached_tokens: Option<i64>,
+}
+
+#[derive(Deserialize)]
 struct Usage {
     #[serde(default, alias = "input_tokens")]
     prompt_tokens: Option<i64>,
     #[serde(default, alias = "output_tokens")]
     completion_tokens: Option<i64>,
+    #[serde(default, alias = "output_tokens_details")]
+    completion_tokens_details: Option<TokenDetails>,
+    #[serde(default, alias = "input_tokens_details")]
+    prompt_tokens_details: Option<TokenDetails>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<i64>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<i64>,
+}
+
+impl Usage {
+    fn prompt(&self) -> Option<i64> {
+        // Anthropic counts cache reads and writes outside input_tokens; the prompt is all three.
+        self.prompt_tokens.map(|p| p + self.cache_read_input_tokens.unwrap_or(0) + self.cache_creation_input_tokens.unwrap_or(0))
+    }
+
+    fn cached(&self) -> Option<i64> {
+        self.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens).or(self.cache_read_input_tokens)
+    }
+
+    fn reasoning(&self) -> Option<i64> {
+        self.completion_tokens_details.as_ref().and_then(|d| d.reasoning_tokens)
+    }
+}
+
+#[derive(Deserialize)]
+struct Incomplete {
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct UsageEnvelope {
     #[serde(default)]
     usage: Option<Usage>,
+    #[serde(default)]
+    stop_reason: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    incomplete_details: Option<Incomplete>,
+}
+
+fn stop_of<'a>(stop_reason: &'a Option<String>, incomplete: &'a Option<Incomplete>, status: &'a Option<String>) -> Option<&'a str> {
+    // Anthropic's stop_reason, or a Responses status (an incomplete one by its reason).
+    stop_reason
+        .as_deref()
+        .or_else(|| incomplete.as_ref().and_then(|d| d.reason.as_deref()))
+        .or(status.as_deref().filter(|s| *s != "in_progress"))
+}
+
+#[derive(Deserialize)]
+struct StopDelta {
+    #[serde(default)]
+    stop_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -988,11 +1105,30 @@ struct StreamChunk {
     #[serde(default)]
     usage: Option<Usage>,
     #[serde(default)]
+    stop_reason: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    incomplete_details: Option<Incomplete>,
+    #[serde(default)]
     message: Option<UsageEnvelope>,
     #[serde(default)]
     response: Option<UsageEnvelope>,
     #[serde(default)]
+    delta: Option<StopDelta>,
+    #[serde(default)]
     choices: Vec<StreamChoice>,
+}
+
+fn finish_word(raw: &str) -> &'static str {
+    // One vocabulary over OpenAI finish_reason, Anthropic stop_reason and Responses status.
+    match raw {
+        "stop" | "end_turn" | "stop_sequence" | "completed" | "eos" => "stop",
+        "length" | "max_tokens" | "max_output_tokens" | "model_context_window_exceeded" => "length",
+        "tool_calls" | "tool_use" | "function_call" => "tool_calls",
+        "content_filter" | "refusal" => "content_filter",
+        _ => "other",
+    }
 }
 
 impl StreamChunk {
@@ -1009,6 +1145,8 @@ struct StreamChoice {
     delta: Option<Delta>,
     #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1022,6 +1160,10 @@ struct Delta {
 }
 
 impl StreamChoice {
+    fn has_reasoning(&self) -> bool {
+        self.delta.as_ref().and_then(|d| d.reasoning_content.as_deref()).is_some_and(|t| !t.is_empty())
+    }
+
     fn has_output(&self) -> bool {
         let filled = |s: &Option<String>| s.as_deref().is_some_and(|t| !t.is_empty());
         filled(&self.text)
@@ -1032,28 +1174,64 @@ impl StreamChoice {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Metered {
+    prompt: i64,
+    completion: i64,
+    reasoning: i64,
+    cached: i64,
+    finish: &'static str,
+}
+
+#[cfg(test)]
+impl Metered {
+    fn tokens(&self) -> (i64, i64) {
+        (self.prompt, self.completion)
+    }
+}
+
+#[derive(Default)]
 struct UsageMeter {
     sse: bool,
-    started: Instant,
+    started: Option<Instant>,
     buf: Vec<u8>,
     prompt: Option<i64>,
     completion: Option<i64>,
+    reasoning: Option<i64>,
+    cached: Option<i64>,
+    finish: Option<&'static str>,
     chunks: i64,
+    reasoning_chunks: i64,
     first_token: Option<Duration>,
     overflow: bool,
 }
 
 impl UsageMeter {
     fn new(sse: bool, started: Instant) -> Self {
-        Self {
-            sse,
-            started,
-            buf: Vec::new(),
-            prompt: None,
-            completion: None,
-            chunks: 0,
-            first_token: None,
-            overflow: false,
+        Self { sse, started: Some(started), ..Self::default() }
+    }
+
+    fn absorb(&mut self, chunk: &StreamChunk) {
+        // Reported usage and stop reasons win over earlier ones (Anthropic splits usage over message_start and message_delta).
+        let top = (&chunk.usage, stop_of(&chunk.stop_reason, &chunk.incomplete_details, &chunk.status));
+        let nested = [chunk.message.as_ref(), chunk.response.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|e| (&e.usage, stop_of(&e.stop_reason, &e.incomplete_details, &e.status)));
+        for (usage, stop) in std::iter::once(top).chain(nested) {
+            if let Some(u) = usage {
+                self.prompt = u.prompt().or(self.prompt);
+                self.completion = u.completion_tokens.or(self.completion);
+                self.cached = u.cached().or(self.cached);
+                self.reasoning = u.reasoning().or(self.reasoning);
+            }
+            if let Some(stop) = stop {
+                self.finish = Some(finish_word(stop));
+            }
+        }
+        let reasons = chunk.choices.iter().filter_map(|c| c.finish_reason.as_deref());
+        if let Some(stop) = reasons.chain(chunk.delta.as_ref().and_then(|d| d.stop_reason.as_deref())).last() {
+            self.finish = Some(finish_word(stop));
         }
     }
 
@@ -1095,33 +1273,37 @@ impl UsageMeter {
         let Ok(chunk) = serde_json::from_slice::<StreamChunk>(data) else {
             return;
         };
-        let has_output = chunk.has_output();
-        for u in [chunk.usage, chunk.message.and_then(|e| e.usage), chunk.response.and_then(|e| e.usage)].into_iter().flatten() {
-            self.prompt = u.prompt_tokens.or(self.prompt);
-            self.completion = u.completion_tokens.or(self.completion);
-        }
-        if has_output {
+        self.absorb(&chunk);
+        if chunk.has_output() {
             self.chunks += 1;
+            if chunk.choices.iter().any(StreamChoice::has_reasoning) {
+                self.reasoning_chunks += 1;
+            }
             if self.first_token.is_none() {
-                self.first_token = Some(self.started.elapsed());
+                self.first_token = self.started.map(|s| s.elapsed());
             }
         }
     }
 
-    fn totals(&mut self) -> (i64, i64) {
-        // (prompt, completion): JSON usage, or for SSE the usage chunk, else the count of output chunks.
+    fn totals(&mut self) -> Metered {
+        // JSON usage, or for SSE the usage chunk, else the count of output chunks; reasoning tokens as reported, else the count of reasoning chunks.
         if !self.sse {
-            return serde_json::from_slice::<UsageEnvelope>(&self.buf)
-                .ok()
-                .and_then(|e| e.usage)
-                .map_or((0, 0), |u| (u.prompt_tokens.unwrap_or(0), u.completion_tokens.unwrap_or(0)));
+            if let Ok(chunk) = serde_json::from_slice::<StreamChunk>(&self.buf) {
+                self.absorb(&chunk);
+            }
+            self.buf = Vec::new();
+        } else {
+            let rest = std::mem::take(&mut self.buf);
+            self.sse_line(&rest);
         }
-        let rest = std::mem::take(&mut self.buf);
-        self.sse_line(&rest);
-        if self.prompt.is_none() && self.completion.is_none() {
-            return (0, self.chunks);
+        let counted = self.sse && self.prompt.is_none() && self.completion.is_none();
+        Metered {
+            prompt: self.prompt.unwrap_or(0),
+            completion: if counted { self.chunks } else { self.completion.unwrap_or(if self.sse { self.chunks } else { 0 }) },
+            reasoning: self.reasoning.unwrap_or(self.reasoning_chunks),
+            cached: self.cached.unwrap_or(0),
+            finish: self.finish.unwrap_or(""),
         }
-        (self.prompt.unwrap_or(0), self.completion.unwrap_or(self.chunks))
     }
 
     fn ttft(&self) -> Option<f64> {
@@ -1463,6 +1645,51 @@ mod tests {
         assert_eq!(form_field(ct, b"--B\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nunterminated", "model"), None);
     }
 
+    #[test]
+    fn the_meter_reads_reasoning_cache_and_finish_from_every_api_shape() {
+        let mut o = meter_feed(
+            true,
+            &[
+                b"data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"hm\"}}]}\n\n",
+                b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":50,\"completion_tokens\":9,\"prompt_tokens_details\":{\"cached_tokens\":32},\"completion_tokens_details\":{\"reasoning_tokens\":4}}}\n\ndata: [DONE]\n\n",
+            ],
+        );
+        assert_eq!(o.totals(), Metered { prompt: 50, completion: 9, reasoning: 4, cached: 32, finish: "tool_calls" });
+        let mut a = meter_feed(
+            true,
+            &[
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":90,\"output_tokens\":1}}}\n\n",
+                b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n",
+                b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":7}}\n\n",
+            ],
+        );
+        assert_eq!(a.totals(), Metered { prompt: 100, completion: 7, reasoning: 0, cached: 90, finish: "length" });
+        let mut r = meter_feed(
+            true,
+            &[b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":1},\"output_tokens_details\":{\"reasoning_tokens\":1}}}}\n\n"],
+        );
+        assert_eq!(r.totals(), Metered { prompt: 5, completion: 2, reasoning: 1, cached: 1, finish: "stop" });
+        let mut j = meter_feed(false, &[b"{\"type\":\"message\",\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":3,\"output_tokens\":8}}"]);
+        assert_eq!(j.totals(), Metered { prompt: 3, completion: 8, reasoning: 0, cached: 0, finish: "stop" });
+        let mut e = meter_feed(false, &[b"{\"data\":[{\"embedding\":[0.1]}],\"usage\":{\"prompt_tokens\":4}}"]);
+        assert_eq!(e.totals(), Metered { prompt: 4, ..Metered::default() });
+    }
+
+    #[test]
+    fn requests_are_labelled_by_the_network_they_came_from() {
+        let p = |s: &str| network_path(s.parse().ok());
+        assert_eq!(network_path(None), "local");
+        assert_eq!(
+            [p("127.0.0.1"), p("::1"), p("::ffff:192.168.1.4"), p("10.0.0.2"), p("fd12::1"), p("100.64.1.9"), p("fd7a:115c:a1e0::5"), p("100.200.0.1"), p("8.8.8.8")],
+            ["local", "local", "lan", "lan", "lan", "tailscale_wireguard", "tailscale_wireguard", "public", "public"]
+        );
+        assert_eq!(
+            ["/v1/chat/completions", "/v1/messages", "/embeddings", "/v1/rerank", "/v1/audio/transcriptions"].map(modality),
+            ["chat", "chat", "embeddings", "rerank", "audio"]
+        );
+    }
+
     fn meter_feed(sse: bool, parts: &[&[u8]]) -> UsageMeter {
         let mut m = UsageMeter::new(sse, Instant::now());
         for p in parts {
@@ -1513,7 +1740,7 @@ mod tests {
                 b"data: [DONE]\n\n",
             ],
         );
-        assert_eq!(m.totals(), (7, 11));
+        assert_eq!(m.totals().tokens(), (7, 11));
         assert!(m.ttft().is_some());
     }
 
@@ -1530,17 +1757,17 @@ mod tests {
                 b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"r\"}}]}",
             ],
         );
-        assert_eq!(m.totals(), (0, 5));
+        assert_eq!(m.totals().tokens(), (0, 5));
     }
 
     #[test]
     fn json_usage_is_read_once_at_the_end() {
         let mut m = meter_feed(false, &[b"{\"id\":\"x\",\"choices\":[],", b"\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}"]);
-        assert_eq!(m.totals(), (3, 2));
+        assert_eq!(m.totals().tokens(), (3, 2));
         assert_eq!(m.ttft(), None);
         let mut bad = meter_feed(false, &[b"not json"]);
-        assert_eq!(bad.totals(), (0, 0));
-        assert_eq!(meter_feed(false, &[b"And so, my fellow Americans"]).totals(), (0, 0), "a plain text transcript meters nothing");
+        assert_eq!(bad.totals().tokens(), (0, 0));
+        assert_eq!(meter_feed(false, &[b"And so, my fellow Americans"]).totals().tokens(), (0, 0), "a plain text transcript meters nothing");
     }
 
     #[test]
@@ -1553,7 +1780,7 @@ mod tests {
                 b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\n",
             ],
         );
-        assert_eq!(a.totals(), (9, 4));
+        assert_eq!(a.totals().tokens(), (9, 4));
         assert!(a.ttft().is_some());
         let mut r = meter_feed(
             true,
@@ -1562,9 +1789,9 @@ mod tests {
                 b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n",
             ],
         );
-        assert_eq!(r.totals(), (5, 2));
+        assert_eq!(r.totals().tokens(), (5, 2));
         let mut j = meter_feed(false, &[b"{\"type\":\"message\",\"usage\":{\"input_tokens\":3,\"output_tokens\":8}}"]);
-        assert_eq!(j.totals(), (3, 8));
+        assert_eq!(j.totals().tokens(), (3, 8));
     }
 
     #[test]
@@ -1717,7 +1944,7 @@ mod tests {
 
     async fn proxied(mux: MuxRef, port: u16, body: &[u8], mode: Mode) -> Response<MuxBody> {
         let route = Route { instance_id: "i".into(), port, engine_key: None, draining: false };
-        let finish = Finish { m: mux, label: "m".into(), key_id: "k".into(), started: Instant::now() };
+        let finish = Finish { m: mux, label: "m".into(), key_id: "k".into(), started: Instant::now(), dims: Dims::default(), router_ms: None };
         proxy(mux, "/v1/chat/completions", &route, Bytes::copy_from_slice(body), None, "req-1", mode, inflight::track("m"), finish, None, "application/json").await
     }
 
