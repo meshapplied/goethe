@@ -1139,9 +1139,12 @@ impl<'a> AskPage<'a> {
     }
 
     fn reset(&mut self, frame: AskFrame) {
-        // A new plan: start on the first part while any part still needs an answer, else the confirm page.
+        // A new plan: start on the first part while any part still needs an answer, else the confirm page; a refusal has nothing to confirm, so the request stays the field.
         self.frame = frame;
         self.page = if self.frame.parts.iter().any(AskPart::open) { 0 } else { self.confirm_page() };
+        if self.frame.parts.is_empty() {
+            self.edit = Field::Request;
+        }
         self.place();
     }
 
@@ -2191,6 +2194,10 @@ mod tests {
             self.frame.clone()
         }
         fn submit(&mut self, line: &str) -> AskFrame {
+            if line.contains("pizza") {
+                self.frame = AskFrame { said: line.to_string(), note: Some("No Goethe command matches that request".into()), ..AskFrame::default() };
+                return self.frame.clone();
+            }
             let parts = line
                 .split(" and ")
                 .enumerate()
@@ -2284,6 +2291,25 @@ mod tests {
         assert!(matches!(page.key(Input::Enter), Flow::Stay));
         assert_eq!(page.driver.frame().said, "load quick q obs");
         assert!(matches!(page.key(Input::Esc), Flow::Leave));
+    }
+
+    #[test]
+    fn a_request_ask_cannot_match_stays_editable() {
+        // After the red refusal the request is still the field: Backspace edits it and Enter sends it again, also when the screen opens on one.
+        let mut driver = Said::default();
+        let mut page = asked(&mut driver, "order pizza");
+        assert!(page.frame.note.is_some() && page.frame.parts.is_empty());
+        for _ in 0.."pizza".len() {
+            page.key(Input::Backspace);
+        }
+        typed(&mut page, "x");
+        assert_eq!(page.request.get(), "order x");
+        page.key(Input::Enter);
+        assert_eq!(page.driver.frame().said, "order x");
+        let mut opened = Said { frame: AskFrame { said: "order pizza".into(), note: Some("n".into()), ..AskFrame::default() }, ..Said::default() };
+        let mut page = AskPage::new(&mut opened, AskHost::Menu);
+        page.key(Input::Backspace);
+        assert_eq!(page.request.get(), "order pizz");
     }
 
     #[test]

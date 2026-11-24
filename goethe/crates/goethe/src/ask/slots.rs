@@ -145,7 +145,7 @@ pub fn extract_slots(card: &IntentCard, clause: &str, world: &World) -> SlotExtr
     }
     for pos in &card.positionals {
         match find_kind(pos.kind, &pos.possible_values, main_text, &tokens, world) {
-            PosMatch::Values(vs) if !vs.is_empty() => {
+            PosMatch::Values(vs) if !vs.is_empty() && vs.iter().all(|v| takes_model_value(card, pos.kind, v, world)) => {
                 out.positionals.insert(pos.id.clone(), vs);
             }
             PosMatch::Ambiguous(cands) if out.ambiguous.is_none() => {
@@ -256,6 +256,28 @@ fn extract_expose_target(tokens: &[String], world: &World) -> PosMatch {
         }
     }
     PosMatch::None
+}
+
+pub fn named_models(text: &str, world: &World) -> Vec<String> {
+    // The installed models or aliases a request's words name (words of three or more characters with a letter, so "gpu 1" names none).
+    let words: Vec<String> = split_words(text).into_iter().filter(|t| t.len() >= 3 && t.chars().any(|c| c.is_ascii_alphabetic())).collect();
+    match match_installed_model(&words, world) {
+        PosMatch::Values(v) | PosMatch::Ambiguous(v) => v,
+        PosMatch::None => Vec::new(),
+    }
+}
+
+pub fn is_model_value(value: &str, world: &World) -> bool {
+    world.installed.iter().any(|m| m == value) || world.aliases.iter().any(|(a, _)| a == value) || find_hf_or_path(&[value.to_string()]).is_some()
+}
+
+pub fn takes_model_value(card: &IntentCard, kind: Kind, value: &str, world: &World) -> bool {
+    // A command on an installed model that nothing installs first (remove, not load) takes only one that is installed: "delete the file /tmp/x" is no model to remove.
+    !matches!(kind, Kind::InstalledModel | Kind::ModelOrAll)
+        || card.does.needs.contains(&Fact::Installed)
+        || !world.installed_known
+        || world.installed.iter().any(|m| m == value)
+        || world.aliases.iter().any(|(a, _)| a == value)
 }
 
 fn match_installed_model(tokens: &[String], world: &World) -> PosMatch {

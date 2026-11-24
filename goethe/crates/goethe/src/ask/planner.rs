@@ -1,7 +1,7 @@
 // One request (one or more parts) to an ordered list of clap commands: rank each part, read the live state, ask for what is missing, validate.
 
 use super::embed::{ScoredIntent, ShortlistBackend};
-use super::parse::{find_hf_or_path, find_shell_metachar, is_obvious_ood, split_parts, split_words, without_wish};
+use super::parse::{find_hf_or_path, find_shell_metachar, is_obvious_ood, negation, split_parts, split_words, without_wish};
 use super::schema::{CliCatalog, IntentCard, Kind, Risk};
 use super::slots::{extract_slots, slot_candidates, World};
 use crate::spec::{Asked, Fact};
@@ -108,6 +108,9 @@ impl PlanState {
         if let Some(meta) = find_shell_metachar(trimmed) {
             return Self::abstained(trimmed, &format!("Shell characters such as '{meta}' are not allowed; say it in words."), world);
         }
+        if let Some(word) = negation(trimmed) {
+            return Self::abstained(trimmed, &format!("Ask plans what to do, not what not to do ('{word}'); say what you want done."), world);
+        }
         if is_obvious_ood(trimmed) {
             return Self::abstained(trimmed, "That is not something Goethe does; goethe help lists what it does.", world);
         }
@@ -129,11 +132,11 @@ impl PlanState {
             if !about_model && !several && top.score < TAU_OOD {
                 continue;
             }
-            let needs_intent_pick = !clear(&options, if about_model { TAU_OOD } else { TAU_HI });
+            let needs_intent_pick = !clear(&options, if about_model { TAU_OOD } else { TAU_HI }) || changes_beside_a_stray_word(&top.id, &text, catalog, retriever, world);
             let input = StepBuildInput { clause: &text, intent_id: &top.id, alternatives: options.clone(), needs_intent_pick };
             let mut goal = build_step(input, catalog, world, validate);
             goal.part = i;
-            share_model(&mut goal, model_ref.as_deref(), catalog, validate);
+            share_model(&mut goal, model_ref.as_deref(), catalog, world, validate);
             goals.push(goal);
             parts.push(PlanPart { text, options, left_out: false, ignored: Vec::new() });
         }
@@ -184,12 +187,19 @@ impl PlanState {
     }
 
     pub fn unused(&self, part: usize, world: &World) -> Vec<String> {
-        // Values written in a part that no command of the plan takes and that were not left out; Ask never runs something other than what was said.
+        // Values written in a part that no command of the plan takes and that were not left out, and a model it names when none of its settled commands acts on one ("uninstall llama" never uninstalls Goethe); Ask never runs something other than what was said.
         let Some(p) = self.parts.get(part).filter(|p| !p.left_out) else {
             return Vec::new();
         };
         let used = |v: &str| self.goals.iter().any(|g| g.argv.iter().any(|a| a == v || *a == world.key_id(v)));
-        super::slots::typed_values(&p.text, world).into_iter().filter(|v| !used(v) && !p.ignored.contains(v)).collect()
+        let mut out: Vec<String> = super::slots::typed_values(&p.text, world).into_iter().filter(|v| !used(v) && !p.ignored.contains(v)).collect();
+        let mine: Vec<&PlanStep> = self.goals.iter().filter(|g| g.part == part).collect();
+        let settled = !mine.is_empty() && mine.iter().all(|g| !g.needs_intent_pick && g.ambiguous.is_none() && g.missing.is_empty());
+        if settled && !mine.iter().any(|g| g.argv.iter().any(|a| super::slots::is_model_value(a, world))) {
+            let named: Vec<String> = super::slots::named_models(&p.text, world).into_iter().filter(|m| !p.ignored.contains(m) && !out.contains(m)).collect();
+            out.extend(named);
+        }
+        out
     }
 
     fn decide(&self, at: Option<usize>, catalog: &CliCatalog, world: &World) -> PendingDecision {
@@ -282,7 +292,7 @@ impl PlanState {
                 let input = StepBuildInput { clause: &p.text, intent_id: &intent_id, alternatives: p.options.clone(), needs_intent_pick: false };
                 let mut goal = build_step(input, catalog, world, validate);
                 goal.part = part;
-                share_model(&mut goal, model_ref.as_deref(), catalog, validate);
+                share_model(&mut goal, model_ref.as_deref(), catalog, world, validate);
                 self.goals.retain(|g| g.part != part || g.reason.is_some());
                 let at = self.goals.iter().position(|g| g.part > part).unwrap_or(self.goals.len());
                 self.goals.insert(at, goal);
@@ -323,6 +333,9 @@ impl PlanState {
         if let Some(meta) = find_shell_metachar(text) {
             return Err(format!("Shell characters such as '{meta}' are not allowed; say it in words."));
         }
+        if let Some(word) = negation(text) {
+            return Err(format!("Ask plans what to do, not what not to do ('{word}'); say what you want done."));
+        }
         let model_ref = self.model_ref.clone().or_else(|| written_model(text, catalog));
         let open = retriever.rank(&without(text, model_ref.as_deref()), catalog.intents.len());
         let model_used = self.goals.iter().any(|g| g.part != part && takes_model(catalog, &g.intent_id));
@@ -332,10 +345,11 @@ impl PlanState {
         };
         self.model_ref = model_ref;
         self.parts[part] = PlanPart { text: text.to_string(), options: options.clone(), left_out: false, ignored: Vec::new() };
-        let input = StepBuildInput { clause: text, intent_id: &top.id, alternatives: options.clone(), needs_intent_pick: !clear(&options, if about_model { TAU_OOD } else { TAU_HI }) };
+        let needs_intent_pick = !clear(&options, if about_model { TAU_OOD } else { TAU_HI }) || changes_beside_a_stray_word(&top.id, text, catalog, retriever, &self.world);
+        let input = StepBuildInput { clause: text, intent_id: &top.id, alternatives: options.clone(), needs_intent_pick };
         let mut goal = build_step(input, catalog, &self.world, validate);
         goal.part = part;
-        share_model(&mut goal, self.model_ref.as_deref(), catalog, validate);
+        share_model(&mut goal, self.model_ref.as_deref(), catalog, &self.world, validate);
         self.goals.retain(|g| g.part != part);
         let at = self.goals.iter().position(|g| g.part > part).unwrap_or(self.goals.len());
         self.goals.insert(at, goal);
@@ -516,6 +530,18 @@ fn prefer_named_child(open: &mut Vec<ScoredIntent>, text: &str) {
     }
 }
 
+fn changes_beside_a_stray_word(id: &str, text: &str, catalog: &CliCatalog, retriever: &dyn ShortlistBackend, world: &World) -> bool {
+    // A command that changes something is asked, never taken, while a word means nothing to any command and is no value or model: "start the car" is not "goethe start".
+    if !catalog.get(id).is_some_and(super::embed::gated) {
+        return false;
+    }
+    let mut rest = text.to_string();
+    for v in super::slots::typed_values(text, world) {
+        rest = rest.replace(&v, " ");
+    }
+    super::embed::lex_tokens(&rest).iter().any(|t| !t.chars().all(|c| c.is_ascii_digit()) && !retriever.knows(t) && super::slots::named_models(t, world).is_empty())
+}
+
 fn clear(ranked: &[ScoredIntent], bar: f32) -> bool {
     // One command stands out: over the bar and ahead of the next by the margin (a parent command and its own subcommand do not compete).
     let Some(top) = ranked.first() else {
@@ -525,12 +551,12 @@ fn clear(ranked: &[ScoredIntent], bar: f32) -> bool {
     top.score >= bar && lead
 }
 
-fn share_model(goal: &mut PlanStep, model_ref: Option<&str>, catalog: &CliCatalog, validate: &Validate) {
+fn share_model(goal: &mut PlanStep, model_ref: Option<&str>, catalog: &CliCatalog, world: &World, validate: &Validate) {
     // A part whose command needs a model and names none uses the request's model ("install and load it").
     let (Some(model), Some(card)) = (model_ref, catalog.get(&goal.intent_id)) else {
         return;
     };
-    let Some(pos) = card.model_arg() else {
+    let Some(pos) = card.model_arg().filter(|p| super::slots::takes_model_value(card, p.kind, model, world)) else {
         return;
     };
     if goal.positionals.contains_key(&pos.id) || goal.ambiguous.as_ref().is_some_and(|(n, _)| n != &pos.id) {
@@ -698,8 +724,9 @@ pub(crate) fn recompile_step(step: &mut PlanStep, catalog: &CliCatalog, validate
     let mut missing = Vec::new();
     step.verified = false;
     step.verify_err = None;
-    let widens = step.flags.iter().any(|(k, _)| card.flags.iter().any(|f| &f.long == k && f.widens));
-    step.risk = if widens { Risk::Destructive } else { card.risk };
+    let flag_widens = step.flags.iter().any(|(k, _)| card.flags.iter().any(|f| &f.long == k && f.widens));
+    let lets_everyone_in = step.positionals.values().chain(step.flags.iter().map(|(_, v)| v)).flatten().any(|v| v.ends_with("/0"));
+    step.risk = if flag_widens || lets_everyone_in { Risk::Destructive } else { card.risk };
     let dash = step.positionals.values().flatten().find(|v| v.starts_with('-'));
     match dash.map_or_else(|| validate(&argv), |v| Err(clap::Error::raw(clap::error::ErrorKind::InvalidValue, format!("a value cannot start with '-': {v}")))) {
         Ok(()) => step.verified = step.ambiguous.is_none(),
