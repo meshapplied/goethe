@@ -4,7 +4,6 @@ use crate::db;
 use crate::nginx;
 use crate::paths::goethe_home;
 use rusqlite::{Connection, OptionalExtension};
-use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Read;
@@ -451,9 +450,7 @@ pub(crate) fn random_hex(n: usize) -> String {
 }
 
 pub fn token_hash(token: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(token.as_bytes());
-    format!("{:x}", h.finalize())
+    crate::sha::digest_hex(token.as_bytes())
 }
 
 #[cfg(test)]
