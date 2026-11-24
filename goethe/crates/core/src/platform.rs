@@ -808,8 +808,8 @@ mod tests {
 
     #[test]
     fn a_hostname_the_platform_would_refuse_is_made_safe() {
-        assert_eq!(host_label("Mozers-MacBook-Pro"), "Mozers-MacBook-Pro");
-        assert_eq!(host_label("Mozer's MacBook Pro"), "Mozer-s-MacBook-Pro");
+        assert_eq!(host_label("Alices-MacBook-Pro"), "Alices-MacBook-Pro");
+        assert_eq!(host_label("Alice's MacBook Pro"), "Alice-s-MacBook-Pro");
         assert_eq!(host_label("gpu-box.lan"), "gpu-box.lan");
     }
 }

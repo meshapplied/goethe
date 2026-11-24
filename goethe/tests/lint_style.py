@@ -32,6 +32,7 @@ LEAKS = [
     ("internal box name", re.compile(r"littleboy|greengoblin", re.I)),
     ("internal path", re.compile(r"/scratch/|/data/proj|/home/(?!(?:u|user|you|me)(?![\w-]))[A-Za-z_][\w.-]*")),
     ("AI co-author trailer", re.compile(r"Co-Authored-By:\s*Claude", re.I)),
+    ("internal jargon", re.compile(r"ponytail|geohot", re.I)),
 ]
 TAILNET = re.compile(r"(?<![\w.])100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.(\d{1,3})\.(\d{1,3})(?![\w]|\.\d)")
 LEAK_FIXTURE_SKIP = {"100.100.100.100"}
@@ -215,7 +216,7 @@ def lint_ruff(files: list[Path]) -> None:
 
 
 def leaks(text: str) -> list[str]:
-    """Names of internal details in text: box names, local paths, tailnet addresses, AI co-author lines."""
+    """Internal details in text: box names, local paths, tailnet addresses, AI co-author lines, internal jargon."""
     found = [name for name, rx in LEAKS if rx.search(text)]
     for m in TAILNET.finditer(text):
         addr = m.group(0)
@@ -229,7 +230,7 @@ def leaks(text: str) -> list[str]:
 def leaks_selftest() -> None:
     """The guard flags each kind of leak and passes the placeholders the tests use."""
     bad = ["ssh little" + "boy", "cd /scratch/x", "/home/alice/bin", "/data/proj/a", "host 100.90.97.111", "100.64.2.1",
-           "Co-Authored-By: Claude <x>"]
+           "Co-Authored-By: Claude <x>", "a pony" + "tail cut", "geo" + "hot mode"]
     good = ["/home/u/bin", "/home/user/x", "100.64.1.7", "100.64.0.0/10", "100.100.100.100", "1100.64.9.9", "10.0.0.1",
             "100.128.0.1"]
     for text in bad:

@@ -20,7 +20,7 @@ Index for coding agents in this repo. Read what you need; do not invent architec
 - Fail closed (allowlist, packs, release key, share). Silent success is a bug.
 - Smallest change that fixes the real bug. No speculative frameworks.
 - Never force-push `main`/`master`. Commit only when asked. No AI co-author trailers.
-- No internal jargon ("ponytail", agent traces) in commits/PR/user-facing text.
+- No internal jargon (style nicknames, agent traces) in commits/PR/user-facing text; `goethe/tests/lint_style.py` refuses the known ones.
 - Never track `PROJECT.md` or `.local/` / agent skill dirs. Lint refuses if they appear in `git ls-files`.
 - Match `goethe/tests/lint_style.py` (and CI lint).
 
