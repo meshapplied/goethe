@@ -43,6 +43,7 @@ pub enum Fact {
     Installed,
     Loaded,
     Key,
+    Gpu,
 }
 
 impl Fact {
@@ -53,6 +54,7 @@ impl Fact {
             Fact::Installed => "not installed yet",
             Fact::Loaded => "the API serves loaded models",
             Fact::Key => "no API key yet",
+            Fact::Gpu => "the GPU is denied",
         }
     }
 }

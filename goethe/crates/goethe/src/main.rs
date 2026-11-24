@@ -5,7 +5,7 @@ mod complete;
 mod container;
 mod spec;
 use clap::{CommandFactory, Parser, Subcommand};
-use spec::{ArgMeta, CmdMeta, Fact::{Daemon, Installed, Key, Loaded}};
+use spec::{ArgMeta, CmdMeta, Fact::{Daemon, Gpu, Installed, Key, Loaded}};
 use goethe_core::alias;
 use goethe_core::config::{self, ConfigOpts};
 use goethe_core::db;
@@ -396,12 +396,12 @@ enum ModelsCommands {
 
 #[derive(Subcommand)]
 enum GpuCommands {
-    #[command(add = CmdMeta::change(), about = "Let new models use these GPUs again.")]
+    #[command(add = CmdMeta::change().gives(&[Gpu]), about = "Let new models use these GPUs again.")]
     Allow {
         #[arg(add = ArgMeta::of(spec::Value::Gpu), value_name = "GPU", required = true, value_parser = parse_gpu_name, help = "GPUs as goethe gpu lists them, for example gpu0 gpu1.")]
         gpus: Vec<u32>,
     },
-    #[command(add = CmdMeta::change().says(&["exclude", "block", "forbid", "off"]), about = "Keep new models off these GPUs; running ones stay.")]
+    #[command(add = CmdMeta::change().undoes(&[Gpu]).says(&["exclude", "block", "forbid", "off"]), about = "Keep new models off these GPUs; running ones stay.")]
     Deny {
         #[arg(add = ArgMeta::of(spec::Value::Gpu), value_name = "GPU", required = true, value_parser = parse_gpu_name, help = "GPUs as goethe gpu lists them, for example gpu0 gpu1.")]
         gpus: Vec<u32>,

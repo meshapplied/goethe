@@ -416,14 +416,18 @@ impl PlanState {
         // Steps Goethe's state needs come first: each part's command, after the giver of every fact it needs that is not true yet (recursively). An auto step keeps the values already given to it.
         let (old_auto, user): (Vec<PlanStep>, Vec<PlanStep>) = std::mem::take(&mut self.goals).into_iter().partition(|g| g.reason.is_some());
         let mut have: Vec<(Fact, Option<String>)> = Vec::new();
+        let mut lost: Vec<(Fact, Option<String>)> = Vec::new();
+        let mut denied = self.world.denied.clone();
         let mut goals = Vec::new();
-        for goal in user {
+        for mut goal in user {
             if let Some(card) = catalog.get(&goal.intent_id).filter(|_| !goal.needs_intent_pick) {
                 let model = step_model(&goal, card).or_else(|| self.model_ref.clone().filter(|_| card.model_arg().is_none()));
                 for need in card.does.needs {
-                    self.satisfy(*need, model.as_deref(), goal.part, catalog, validate, &old_auto, &mut have, &mut goals);
+                    self.satisfy(*need, model.as_deref(), goal.part, catalog, validate, &old_auto, &lost, &mut have, &mut goals);
                 }
+                check_gpus(&mut goal, card, &self.world, &mut denied);
                 have.extend(card.does.gives.iter().map(|f| (*f, model.clone())));
+                lost.extend(card.does.undoes.iter().map(|f| (*f, model.clone())));
             }
             goals.push(goal);
         }
@@ -441,18 +445,20 @@ impl PlanState {
         catalog: &CliCatalog,
         validate: &Validate,
         old_auto: &[PlanStep],
+        lost: &[(Fact, Option<String>)],
         have: &mut Vec<(Fact, Option<String>)>,
         goals: &mut Vec<PlanStep>,
     ) {
         let model = model.filter(|_| matches!(fact, Fact::Installed | Fact::Loaded));
-        if self.world.has(fact, model) || have.iter().any(|(f, m)| *f == fact && m.as_deref() == model) {
+        let undone = lost.iter().any(|(f, m)| *f == fact && (m.is_none() || m.as_deref() == model));
+        if (self.world.has(fact, model) && !undone) || have.iter().any(|(f, m)| *f == fact && m.as_deref() == model) {
             return;
         }
         let Some(giver) = catalog.giver(fact) else {
             return;
         };
         for need in giver.does.needs {
-            self.satisfy(*need, model, part, catalog, validate, old_auto, have, goals);
+            self.satisfy(*need, model, part, catalog, validate, old_auto, lost, have, goals);
         }
         let kept = old_auto.iter().find(|s| s.intent_id == giver.id && s.part == part && step_model(s, giver).as_deref() == model);
         let step = kept.cloned().unwrap_or_else(|| {
@@ -468,6 +474,25 @@ impl PlanState {
         });
         have.extend(giver.does.gives.iter().map(|f| (*f, model.map(str::to_string))));
         goals.push(step);
+    }
+}
+
+fn check_gpus(goal: &mut PlanStep, card: &IntentCard, world: &World, denied: &mut Vec<String>) {
+    // A GPU a step names must exist on this machine and, unless the step is the one allowing or denying it, not be denied there or by an earlier step; allowing and denying change that for the steps after.
+    let gpu_args = card.positionals.iter().filter(|p| p.kind == Kind::Gpu).map(|p| &p.id).chain(card.flags.iter().filter(|f| f.kind == Some(Kind::Gpu)).map(|f| &f.long));
+    let gpus: Vec<String> = gpu_args.flat_map(|id| goal.positionals.get(id).cloned().or_else(|| goal.flags.iter().find(|(k, _)| k == id).map(|(_, v)| v.clone())).unwrap_or_default()).collect();
+    let (allows, denies) = (card.does.gives.contains(&Fact::Gpu), card.does.undoes.contains(&Fact::Gpu));
+    let unknown = gpus.iter().find(|g| !world.gpus.is_empty() && !world.gpus.iter().any(|(id, _)| id == *g));
+    let blocked = gpus.iter().find(|g| !allows && !denies && denied.contains(g));
+    if let Some(err) = unknown.map(|g| format!("there is no {g} on this machine; goethe gpu lists them")).or_else(|| blocked.map(|g| format!("{g} is denied; goethe gpu allow {g} first"))) {
+        goal.verified = false;
+        goal.verify_err = Some(err);
+    }
+    if allows {
+        denied.retain(|g| !gpus.contains(g));
+    }
+    if denies {
+        denied.extend(gpus);
     }
 }
 
@@ -546,10 +571,10 @@ fn named_by<'a>(word: &str, catalog: &'a CliCatalog) -> Vec<&'a IntentCard> {
 }
 
 fn names_a_command(piece: &str, catalog: &CliCatalog) -> bool {
-    // A word that names exactly one command, or a top-level one ("on" names several subcommands, so it is no command word).
+    // A word that names a command: longer than a short word ("on" names trace on, yet is a preposition), or a top-level command's ("up").
     split_words(&piece.to_ascii_lowercase()).iter().any(|w| {
         let named = named_by(w, catalog);
-        named.len() == 1 || named.iter().any(|c| !c.id.contains('.'))
+        !named.is_empty() && (w.len() > super::slots::SHORT || named.iter().any(|c| !c.id.contains('.')))
     })
 }
 

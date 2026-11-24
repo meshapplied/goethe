@@ -54,6 +54,7 @@ pub struct World {
     pub interfaces: Vec<(String, String)>,
     pub keys: Vec<(String, String)>,
     pub log_targets: Vec<(String, String)>,
+    pub denied: Vec<String>,
 }
 
 impl World {
@@ -69,7 +70,9 @@ impl World {
         let interfaces = cand_pairs(complete::interfaces());
         let keys = cand_pairs(complete::key_ids());
         let log_targets = cand_pairs(complete::log_targets());
-        World { daemon_up, installed_known, installed, loaded, aliases, gpus, interfaces, keys, log_targets }
+        let denied = goethe_core::db::open(&home).ok().and_then(|c| goethe_core::gpu_policy::denied_set(&c).ok()).unwrap_or_default();
+        let denied = denied.iter().map(|i| format!("gpu{i}")).collect();
+        World { daemon_up, installed_known, installed, loaded, aliases, gpus, interfaces, keys, log_targets, denied }
     }
 }
 
@@ -80,13 +83,13 @@ impl World {
     }
 
     pub fn has(&self, fact: Fact, model: Option<&str>) -> bool {
-        // Whether a fact holds now; a fact about a model holds when there is no model to act on.
+        // Whether a fact holds now; a fact about a model holds when there is no model to act on, and a stopped Goethe serves nothing whatever its rows say.
         match (fact, model) {
             (Fact::Daemon, _) => self.daemon_up,
             (Fact::Key, _) => !self.keys.is_empty(),
             (Fact::Installed, Some(m)) => !super::planner::needs_install(m, self),
-            (Fact::Loaded, Some(m)) => self.loaded.iter().any(|id| id == m),
-            (Fact::Installed | Fact::Loaded, None) => true,
+            (Fact::Loaded, Some(m)) => self.daemon_up && self.loaded.iter().any(|id| id == m),
+            (Fact::Installed | Fact::Loaded, None) | (Fact::Gpu, _) => true,
         }
     }
 }

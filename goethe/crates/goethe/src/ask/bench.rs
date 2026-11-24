@@ -246,6 +246,30 @@ fn a_number_takes_the_flag_its_words_name_and_a_count_must_match() {
 }
 
 #[test]
+fn each_step_is_checked_against_the_state_the_steps_before_it_leave() {
+    // A GPU must exist and not be denied, on the machine or by an earlier step; what a step undoes is gone for the steps after it; a stopped Goethe serves nothing.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let plan = |q: &str, w: &World| PlanState::build(q, &cat, &ret, w, &validate_cli);
+    let mut world = fixture_world();
+    world.denied = vec!["gpu1".into()];
+    for q in ["deny gpu0, then load mistral on gpu0", "load mistral on gpu1", "load mistral on gpu7"] {
+        let p = plan(q, &world);
+        assert!(!p.is_ready(), "{q} is ready: {:?}", cmds(&p.lines));
+        assert!(p.goals.iter().any(|g| g.verify_err.as_deref().is_some_and(|e| e.contains("gpu"))), "{q}: the reason names the GPU: {:?}", p.goals.iter().map(|g| &g.verify_err).collect::<Vec<_>>());
+    }
+    let allowed = plan("allow gpu1, then load mistral on gpu1", &world);
+    assert!(allowed.is_ready(), "{:?}", allowed.goals.iter().map(|g| &g.verify_err).collect::<Vec<_>>());
+    assert_eq!(cmds(&plan("stop goethe and load mistral", &world).lines), ["goethe down", "goethe up", "goethe load mistralai/Mistral-7B-Instruct"]);
+    let mut stale = fixture_world();
+    stale.daemon_up = false;
+    stale.loaded = vec!["mistralai/Mistral-7B-Instruct".into()];
+    assert!(!stale.has(crate::spec::Fact::Loaded, Some("mistralai/Mistral-7B-Instruct")), "a stopped Goethe serves nothing, whatever its rows say");
+    stale.daemon_up = true;
+    assert!(stale.has(crate::spec::Fact::Loaded, Some("mistralai/Mistral-7B-Instruct")));
+}
+
+#[test]
 fn a_part_page_reads_short_descriptions_and_value_labels() {
     // Rows drop a leading "The"; a missing value reads "Key name:", not "Which key name?".
     let cat = build_catalog(&Cli::command());
