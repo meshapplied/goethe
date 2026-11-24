@@ -8,6 +8,7 @@ use serde_json::Value;
 
 pub const COMMAND_SCHEMA: &str = "goethe.command.v1";
 pub const BATCH_SCHEMA: &str = "goethe.batch.v1";
+const CLOCK_SKEW_MS: u64 = 60_000;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -237,7 +238,8 @@ pub fn verify(signed: &SignedCommand, x: &Expect) -> Result<Verified, Refusal> {
         return Err(Refusal::Sig);
     }
     let window = cmd.expires_ms.saturating_sub(cmd.issued_ms);
-    if x.now_ms >= cmd.expires_ms || window == 0 || window > Action::max_window_ms(&cmd.action) {
+    let early = cmd.issued_ms > x.now_ms.saturating_add(CLOCK_SKEW_MS);
+    if early || x.now_ms >= cmd.expires_ms || window == 0 || window > Action::max_window_ms(&cmd.action) {
         return Err(Refusal::Expired);
     }
     if !x.policy.allows(kind) {
@@ -318,6 +320,9 @@ mod tests {
         let mut long = cmd("n1", "model.load", load());
         long.expires_ms = NOW + 10 * 60_000;
         let shell = cmd("n1", "shell.run", json!({ "cmd": "id" }));
+        let mut later = cmd("n1", "model.load", load());
+        later.issued_ms = NOW + 365 * 86_400_000;
+        later.expires_ms = later.issued_ms + 60_000;
         let world = cmd("n1", "api.share", json!({ "keys": ["k"], "allow": ["0.0.0.0/0"], "ttl_s": 600 }));
         let bad_arg = cmd("n1", "model.load", json!({ "model_id": "m", "extra": 1 }));
 
@@ -328,6 +333,7 @@ mod tests {
             (good.clone(), &trust, ALL, NOW + 60_000, Refusal::Expired),
             (good.clone(), &trust, Policy::default(), NOW, Refusal::Policy),
             (pk.sign(&[long]).remove(0), &trust, ALL, NOW, Refusal::Expired),
+            (pk.sign(&[later]).remove(0), &trust, ALL, NOW, Refusal::Expired),
             (pk.sign(&[shell]).remove(0), &trust, ALL, NOW, Refusal::ActionUnknown),
             (pk.sign(&[cmd("n1", "model.remove", load())]).remove(0), &trust, ALL, NOW, Refusal::KeyCap),
             (pk.sign(&[bad_arg]).remove(0), &trust, ALL, NOW, Refusal::Args),
