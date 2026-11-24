@@ -128,6 +128,14 @@ CREATE TABLE IF NOT EXISTS watchdog_probe_state (
 );
 ";
 
+pub fn setting(con: &Connection, key: &str) -> Option<String> {
+    con.query_row("SELECT value FROM goethe_settings WHERE key = ?1", [key], |r| r.get(0)).ok()
+}
+
+pub fn set_setting(con: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    con.execute("INSERT OR REPLACE INTO goethe_settings (key, value) VALUES (?1, ?2)", [key, value]).map(|_| ())
+}
+
 pub fn open(home: &Path) -> rusqlite::Result<Connection> {
     // Open state.db; the schema is checked once per process and never rewritten when current.
     let path = home.join("state.db");

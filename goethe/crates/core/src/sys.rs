@@ -25,16 +25,24 @@ pub fn children(pid: i32) -> Vec<i32> {
 }
 
 pub fn random_bytes(buf: &mut [u8]) {
-    // Kernel randomness: getrandom on Linux, getentropy (256 bytes per call) on macOS.
+    // Kernel randomness: getrandom on Linux, getentropy (256 bytes per call) on macOS; a failure panics, since zeros would still look like a valid key.
     #[cfg(target_os = "linux")]
-    unsafe {
-        libc::getrandom(buf.as_mut_ptr().cast(), buf.len(), 0);
+    {
+        let mut done = 0;
+        while done < buf.len() {
+            let n = unsafe { libc::getrandom(buf[done..].as_mut_ptr().cast(), buf.len() - done, 0) };
+            let err = std::io::Error::last_os_error();
+            if n < 0 && err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            assert!(n > 0, "kernel randomness unavailable: {err}");
+            done += n as usize;
+        }
     }
     #[cfg(target_os = "macos")]
     for chunk in buf.chunks_mut(256) {
-        unsafe {
-            libc::getentropy(chunk.as_mut_ptr().cast(), chunk.len());
-        }
+        let rc = unsafe { libc::getentropy(chunk.as_mut_ptr().cast(), chunk.len()) };
+        assert_eq!(rc, 0, "kernel randomness unavailable: {}", std::io::Error::last_os_error());
     }
 }
 
