@@ -140,7 +140,7 @@ struct Target {
 
 pub(super) struct PackChoice {
     pub(super) offer: crate::packs::Offer,
-    pub(super) creds: crate::platform::Credentials,
+    pub(super) creds: crate::client::link::Credentials,
     pub(super) plan: Option<crate::packs::Plan>,
 }
 
@@ -1915,12 +1915,12 @@ mod tests {
             "file": "m.gcpack", "manifest_sha256": "a".repeat(64), "size": 100, "sig": {"keyid": "k"}}]}).to_string().into_bytes()
     }
 
-    fn login() -> crate::platform::Credentials {
-        crate::platform::Credentials {
+    fn login() -> crate::client::link::Credentials {
+        crate::client::link::Credentials {
             platform_url: "http://127.0.0.1:1".into(),
             node_id: "n1".into(),
-            workspace: crate::platform::Workspace::default(),
-            token: crate::platform::Secret::new("t".repeat(24)),
+            workspace: crate::client::link::Workspace::default(),
+            token: crate::client::link::Secret::new("t".repeat(24)),
             linked_at: "t".into(),
         }
     }
@@ -1930,7 +1930,7 @@ mod tests {
         Ok(Some(("sm_120a".into(), crate::packs::Plan { entry, prefix: Vec::new(), variants: Vec::new(), variant_ids: Vec::new(), serial: 7 })))
     }
 
-    fn offered(opts: &InstallOpts, creds: Option<crate::platform::Credentials>, archs: &[&str], look: Looked, engine: Result<(), String>) -> (Result<Option<PackChoice>, String>, Vec<&'static str>) {
+    fn offered(opts: &InstallOpts, creds: Option<crate::client::link::Credentials>, archs: &[&str], look: Looked, engine: Result<(), String>) -> (Result<Option<PackChoice>, String>, Vec<&'static str>) {
         let calls = std::cell::RefCell::new(Vec::new());
         let got = offer_for(
             opts,

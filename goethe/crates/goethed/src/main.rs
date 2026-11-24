@@ -78,7 +78,7 @@ fn dispatch(req: Request) -> (bool, i32, String, String, Value) {
             Err((code, msg)) => (false, code, String::new(), msg, Value::Null),
         },
         "platform_changed" => {
-            goethe_core::platform::notify(goethe_core::platform::CHANGE_LINK);
+            goethe_core::client::link::notify(goethe_core::client::link::CHANGE_LINK);
             (true, 0, String::new(), String::new(), Value::Null)
         }
         "shutdown" => {

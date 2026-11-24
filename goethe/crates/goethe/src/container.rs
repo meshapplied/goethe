@@ -88,7 +88,7 @@ fn prepare(home: &Path) -> Result<(), String> {
         let _ = std::fs::remove_file(&to);
         std::os::unix::fs::symlink(&from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
     }
-    goethe_core::platform::ensure_home_machine_id(home)?;
+    goethe_core::client::link::ensure_home_machine_id(home)?;
     goethe_core::nginx::ensure_certs(home)?;
     match goethe_core::hw::profile(home).and_then(|s| goethe_core::hw::write_state(home, &s).map(|_| s)) {
         Ok(s) if !s.gpus.is_empty() => println!("GPUs: {}", s.gpus.iter().map(|g| g.name.as_str()).collect::<Vec<_>>().join(", ")),
@@ -121,10 +121,10 @@ fn link(home: &Path) {
     let Some(key) = std::env::var("GOETHE_AUTHKEY").ok().filter(|s| !s.is_empty()) else {
         return;
     };
-    if goethe_core::platform_cli::is_linked(home) {
+    if goethe_core::client::login::is_linked(home) {
         return;
     }
-    if let Err(e) = goethe_core::platform_cli::login(None, Some(&key)) {
+    if let Err(e) = goethe_core::client::login::login(None, Some(&key)) {
         eprintln!("error: console link with GOETHE_AUTHKEY failed: {e}");
     }
 }

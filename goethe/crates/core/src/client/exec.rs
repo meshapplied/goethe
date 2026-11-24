@@ -128,7 +128,7 @@ pub fn handle_with(home: &Path, signed: &SignedCommand, engines: &Engines, now_m
     emit(progress.clone());
     let done = match run(home, &v, engines, now_ms) {
         Ok(result) => {
-            crate::platform::state_changed();
+            crate::client::link::state_changed();
             CommandEvent::Done { cmd_id: cmd_id.clone(), ok: true, result, code: None, message: None }
         }
         Err(f) => {
@@ -149,7 +149,7 @@ fn finished(events: &[CommandEvent]) -> bool {
 
 fn checked(home: &Path, signed: &SignedCommand, now_ms: u64) -> Result<Verified, (Refusal, String)> {
     // Every stateless check against this node's link and remote.json; a node that is not linked has no workspace, so every command is for another node.
-    let creds = crate::platform::load_credentials(home).ok().flatten().ok_or((Refusal::WrongNode, "this node is not linked".to_string()))?;
+    let creds = crate::client::link::load_credentials(home).ok().flatten().ok_or((Refusal::WrongNode, "this node is not linked".to_string()))?;
     let r = remote::status(home);
     let x = Expect { org_id: &creds.workspace.id, node_id: &creds.node_id, rp_id: RP_ID, origin: CONSOLE_ORIGIN, now_ms, policy: r.policy, trust: &r.trust };
     let v = verify(signed, &x).map_err(|r| (r, String::new()))?;
@@ -348,7 +348,7 @@ fn sealed(browser_pub: &str, cmd_id: &str, key_id: &str, token: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{Credentials, Secret, Workspace};
+    use crate::client::link::{Credentials, Secret, Workspace};
     use goethe_proto::testkit::{Browser, Passkey};
     use goethe_proto::{Command, Sealed, COMMAND_SCHEMA};
 
@@ -376,7 +376,7 @@ mod tests {
             token: Secret::new("mesh_node_0123456789abcdef0123456789abcdef"),
             linked_at: "2026-11-11T10:00:00Z".into(),
         };
-        crate::platform::save_credentials(h.path(), &c).unwrap();
+        crate::client::link::save_credentials(h.path(), &c).unwrap();
         for k in Kind::ALL {
             remote::set_allowed(h.path(), k, true).unwrap();
         }

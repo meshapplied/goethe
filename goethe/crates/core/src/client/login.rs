@@ -1,8 +1,8 @@
 // goethe login, goethe logout and the platform lines of goethe status and the home screen.
 
 use crate::paths::goethe_home;
-use crate::platform::{self, Credentials, Secret};
-use crate::platform_api::{Approved, ApiError, Client, Poll, Started};
+use crate::client::link::{self, Credentials, Secret};
+use crate::client::api::{Approved, ApiError, Client, Poll, Started};
 use crate::term::{command, paint, Color};
 use std::io::BufRead;
 use std::path::Path;
@@ -130,7 +130,7 @@ fn read_authkey(raw: &str) -> Result<Secret, String> {
 
 fn check_home_writable(home: &Path) -> Result<(), String> {
     // Fail before contacting the platform when the credentials could not be stored safely.
-    platform::check_home(home)?;
+    link::check_home(home)?;
     if home.exists() && !crate::paths::is_writable(home) {
         return Err(format!("{} is not writable", home.display()));
     }
@@ -138,7 +138,7 @@ fn check_home_writable(home: &Path) -> Result<(), String> {
 }
 
 fn existing_link(home: &Path) -> Option<Credentials> {
-    match platform::load_credentials(home) {
+    match link::load_credentials(home) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("note: the saved link is not used ({e}); logging in replaces it");
@@ -152,7 +152,7 @@ fn logout_remote(c: &Credentials, timeout: Duration) -> Result<(), String> {
 }
 
 fn is_revoked(home: &Path, c: &Credentials) -> bool {
-    platform::load_state(home, &platform::link_key(c)).revoked_at.is_some()
+    link::load_state(home, &link::link_key(c)).revoked_at.is_some()
 }
 
 fn relink_intro(workspace: &str, revoked: bool) -> String {
@@ -166,23 +166,23 @@ fn relink_intro(workspace: &str, revoked: bool) -> String {
 fn replace_old_link(home: &Path, old: Option<Credentials>, same_node: Option<&str>) -> Result<(), String> {
     // A new login replaces the old link: log a live old node out (best effort; a revoked one is already gone, and the same node linked again needs none), then drop its credentials.
     let Some(old) = old.filter(|o| !is_revoked(home, o) && Some(o.node_id.as_str()) != same_node) else {
-        return platform::remove_credentials(home).map(|_| ());
+        return link::remove_credentials(home).map(|_| ());
     };
-    let ws = platform::clean_text(&old.workspace.name, 64);
+    let ws = link::clean_text(&old.workspace.name, 64);
     match logout_remote(&old, REQUEST_TIMEOUT) {
         Ok(()) => println!("Logged out the previous link (workspace {ws})."),
         Err(e) => println!("Could not log out the previous link (workspace {ws}): {e}. It will show offline on the console."),
     }
-    platform::remove_credentials(home).map(|_| ())
+    link::remove_credentials(home).map(|_| ())
 }
 
 fn finish(home: &Path, approved: Approved, url: &str) -> Result<(), String> {
     // Store the credentials, tell goethed, and report the first heartbeat when goethed is up.
     let creds = approved.into_credentials(url);
-    platform::save_credentials(home, &creds)?;
-    let ws = platform::clean_text(&creds.workspace.name, 64);
+    link::save_credentials(home, &creds)?;
+    let ws = link::clean_text(&creds.workspace.name, 64);
     println!("{} this node to workspace {ws} on {url}.", paint("Linked", Color::Green));
-    if !platform::poke_daemon() {
+    if !link::poke_daemon() {
         if crate::service::goethed_running() {
             println!("goethed is running an older version without console support; it starts sending heartbeats after goethe update.");
         } else {
@@ -192,7 +192,7 @@ fn finish(home: &Path, approved: Approved, url: &str) -> Result<(), String> {
     }
     let end = Instant::now() + Duration::from_secs(6);
     while Instant::now() < end {
-        let st = platform::load_state(home, &platform::link_key(&creds));
+        let st = link::load_state(home, &link::link_key(&creds));
         if st.revoked_at.is_some() {
             return Err("the console refused the new token right away; run goethe login again".into());
         }
@@ -214,15 +214,15 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
     // goethe login: the device flow in a browser, or an auth key (a console passkey), which links at once even over a live link; the key is redeemed before the old link is logged out, so a bad key changes nothing.
     let home = goethe_home();
     let url = match platform_url {
-        Some(u) => platform::check_url(u)?,
-        None => platform::platform_url()?,
+        Some(u) => link::check_url(u)?,
+        None => link::platform_url()?,
     };
     check_home_writable(&home)?;
     let key = authkey.map(read_authkey).transpose()?;
     let old = existing_link(&home);
     if let Some(o) = &old {
         let revoked = is_revoked(&home, o);
-        let ws = platform::clean_text(&o.workspace.name, 64);
+        let ws = link::clean_text(&o.workspace.name, 64);
         if revoked || key.is_none() {
             println!("{}", relink_intro(&ws, revoked));
         }
@@ -231,7 +231,7 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
         }
     }
     let client = Client::new(&url, REQUEST_TIMEOUT)?;
-    let (hostname, fingerprint, install_key) = (platform::hostname(), platform::fingerprint(), platform::install_key(&home)?);
+    let (hostname, fingerprint, install_key) = (link::hostname(), link::fingerprint(), link::install_key(&home)?);
     let _ctrl_c = CtrlC::catch();
     if let Some(key) = key {
         let approved = with_retries(|| client.enroll(&key, &hostname, &fingerprint, &install_key)).map_err(|e| match e {
@@ -272,10 +272,10 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
 pub fn logout() -> Result<(), String> {
     // goethe logout: tell the platform when it answers, and always remove the local link.
     let home = goethe_home();
-    let creds = match platform::load_credentials(&home) {
+    let creds = match link::load_credentials(&home) {
         Ok(Some(c)) => Some(c),
         Ok(None) => {
-            if platform::remove_credentials(&home)? {
+            if link::remove_credentials(&home)? {
                 println!("Removed the local link.");
             } else {
                 println!("This node is not linked to the console.");
@@ -291,9 +291,9 @@ pub fn logout() -> Result<(), String> {
         Some(c) => logout_remote(c, REQUEST_TIMEOUT),
         None => Err("the credentials could not be read".into()),
     };
-    platform::remove_credentials(&home)?;
-    platform::poke_daemon();
-    let ws = creds.as_ref().map(|c| platform::clean_text(&c.workspace.name, 64)).unwrap_or_default();
+    link::remove_credentials(&home)?;
+    link::poke_daemon();
+    let ws = creds.as_ref().map(|c| link::clean_text(&c.workspace.name, 64)).unwrap_or_default();
     match remote {
         Ok(()) => println!("Logged out of workspace {ws}. The console keeps this node offline; goethe login links it again as the same node."),
         Err(e) => println!(
@@ -327,7 +327,7 @@ pub fn token_lifetime(raw: &str) -> Result<(), String> {
     // goethe login --lifetime: limit how long this node's login lasts (the workspace's setting still applies).
     let ttl = parse_lifetime(raw)?;
     let home = goethe_home();
-    let c = platform::load_credentials(&home)?.ok_or("this node is not logged in (goethe login)")?;
+    let c = link::load_credentials(&home)?.ok_or("this node is not logged in (goethe login)")?;
     let client = Client::new(&c.platform_url, REQUEST_TIMEOUT)?;
     let expires = client.token_lifetime(&c.token, ttl).map_err(|e| match e {
         ApiError::Unauthorized => "the console did not accept this node's login (revoked or expired); run goethe login".to_string(),
@@ -342,17 +342,17 @@ pub fn token_lifetime(raw: &str) -> Result<(), String> {
 
 pub fn uninstall_logout(home: &Path) {
     // Best effort for goethe uninstall: log the node out quickly; the credentials go with the home.
-    if let Ok(Some(c)) = platform::load_credentials(home) {
+    if let Ok(Some(c)) = link::load_credentials(home) {
         match logout_remote(&c, Duration::from_secs(5)) {
             Ok(()) => println!("logged this node out of the console"),
             Err(e) => println!("could not log this node out of the console ({e}); it will show offline there"),
         }
     }
-    let _ = platform::remove_credentials(home);
+    let _ = link::remove_credentials(home);
 }
 
 pub fn is_linked(home: &Path) -> bool {
-    platform::credentials_path(home).exists() || home.join("credentials").exists()
+    link::credentials_path(home).exists() || home.join("credentials").exists()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -373,13 +373,13 @@ fn lifetime(seconds: u64) -> String {
 
 pub fn link_state(home: &Path, daemon_running: bool) -> Link {
     // The saved link and the last heartbeat goethed recorded for it.
-    let creds = match platform::load_credentials(home) {
+    let creds = match link::load_credentials(home) {
         Ok(Some(c)) => c,
         Ok(None) => return Link::NotLinked,
         Err(e) => return Link::Unreadable(e),
     };
-    let st = platform::load_state(home, &platform::link_key(&creds));
-    let workspace = platform::clean_text(&creds.workspace.name, 64);
+    let st = link::load_state(home, &link::link_key(&creds));
+    let workspace = link::clean_text(&creds.workspace.name, 64);
     let (heartbeat, ok) = heartbeat_text(&st, daemon_running, chrono::Utc::now());
     Link::Linked { workspace, revoked: st.revoked_at.is_some(), heartbeat, ok }
 }
@@ -396,7 +396,7 @@ fn ago(secs: i64) -> String {
     }
 }
 
-pub fn heartbeat_text(st: &platform::PlatformState, daemon_running: bool, now: chrono::DateTime<chrono::Utc>) -> (String, bool) {
+pub fn heartbeat_text(st: &link::PlatformState, daemon_running: bool, now: chrono::DateTime<chrono::Utc>) -> (String, bool) {
     // OK with its age, failing with the reason, or why none is sent.
     if st.revoked_at.is_some() {
         return ("stopped: the console revoked this node".into(), false);
@@ -450,8 +450,8 @@ mod tests {
             assert!(parse_lifetime(bad).is_err(), "{bad}");
         }
     }
-    use crate::platform::{PlatformState, Workspace};
-    use crate::platform_api::mock;
+    use crate::client::link::{PlatformState, Workspace};
+    use crate::client::api::mock;
 
     fn started(interval: u64, expires: u64) -> Started {
         Started { device_code: Secret::new("dc"), user_code: "ABCD-1234".into(), verification_uri_complete: "https://p/device".into(), expires_in: expires, interval }
@@ -564,24 +564,24 @@ mod tests {
             token: Secret::new("mesh_node_gggggggggggggggggggg"),
             linked_at: "t".into(),
         };
-        platform::save_credentials(home, &c).unwrap();
+        link::save_credentials(home, &c).unwrap();
         assert!(!is_revoked(home, &c));
         assert!(relink_intro("Personal", false).starts_with("Already logged in"));
-        let st = PlatformState { link: platform::link_key(&c), revoked_at: Some("t".into()), ..Default::default() };
-        platform::save_state(home, &st).unwrap();
+        let st = PlatformState { link: link::link_key(&c), revoked_at: Some("t".into()), ..Default::default() };
+        link::save_state(home, &st).unwrap();
         assert!(is_revoked(home, &c));
         assert_eq!(relink_intro("Personal", true), "The previous link (workspace Personal) was revoked or expired on the console; linking again.");
         replace_old_link(home, Some(c.clone()), None).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(*m.connections.lock().unwrap(), 0, "no logout call for a revoked link");
-        assert_eq!(platform::load_credentials(home).unwrap(), None);
-        platform::save_state(home, &PlatformState { link: platform::link_key(&c), ..Default::default() }).unwrap();
-        platform::save_credentials(home, &c).unwrap();
+        assert_eq!(link::load_credentials(home).unwrap(), None);
+        link::save_state(home, &PlatformState { link: link::link_key(&c), ..Default::default() }).unwrap();
+        link::save_credentials(home, &c).unwrap();
         replace_old_link(home, Some(c.clone()), Some(&c.node_id)).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(*m.connections.lock().unwrap(), 0, "the same node linked again is not logged out");
-        assert_eq!(platform::load_credentials(home).unwrap(), None);
-        platform::save_credentials(home, &c).unwrap();
+        assert_eq!(link::load_credentials(home).unwrap(), None);
+        link::save_credentials(home, &c).unwrap();
         replace_old_link(home, Some(c), Some("another-node")).unwrap();
         assert_eq!(m.seen.lock().unwrap()[0].path, "/api/device/logout", "a live link is logged out");
     }

@@ -324,9 +324,9 @@ pub struct Entry {
 
 pub fn platform_base(home: &Path) -> Result<String, String> {
     // The platform this machine talks to for packs: the one it is linked to, else the configured default.
-    match crate::platform::load_credentials(home) {
+    match crate::client::link::load_credentials(home) {
         Ok(Some(c)) => Ok(c.platform_url),
-        _ => crate::platform::platform_url(),
+        _ => crate::client::link::platform_url(),
     }
 }
 

@@ -1,6 +1,6 @@
 // StateSnapshot (goethe.snapshot.v1) for the platform heartbeat, built from local state only and free of secrets.
 
-use crate::platform::clean_text;
+use crate::client::link::clean_text;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -170,7 +170,7 @@ impl Collector {
             sent_at: now_rfc3339(),
             reason: reason.to_string(),
             node: Node {
-                hostname: crate::platform::hostname(),
+                hostname: crate::client::link::hostname(),
                 goethe_version: env!("CARGO_PKG_VERSION").to_string(),
                 os: clean_text(&os_name(&read), 128),
                 kernel: clean_text(&kernel_release(&read), 128),
@@ -532,7 +532,7 @@ pub fn encode_sent(s: &StateSnapshot) -> Result<(Vec<u8>, Option<i64>), String> 
     let mut stripped = false;
     loop {
         let data = serde_json::to_vec(&s).map_err(|e| e.to_string())?;
-        if data.len() <= crate::platform_api::MAX_SNAPSHOT_BYTES {
+        if data.len() <= crate::client::api::MAX_SNAPSHOT_BYTES {
             return Ok((data, s.usage.as_ref().map(|u| u.to)));
         }
         if !s.models.installed.is_empty() {
@@ -766,7 +766,7 @@ mod tests {
         let one = s.models.installed[0].clone();
         s.models.installed = vec![Installed { id: "x".repeat(200), ..one }; 2000];
         let data = encode(&s).unwrap();
-        assert!(data.len() <= crate::platform_api::MAX_SNAPSHOT_BYTES);
+        assert!(data.len() <= crate::client::api::MAX_SNAPSHOT_BYTES);
         let v: serde_json::Value = serde_json::from_slice(&data).unwrap();
         assert_eq!(v["models"]["installed"], serde_json::json!([]));
         assert_eq!(v["models"]["loaded"].as_array().unwrap().len(), 1);
@@ -782,7 +782,7 @@ mod tests {
             .collect();
         s.usage = Some(crate::usage_log::Report { from: 0, to: 6000, bounds_ms: vec![], models, requests: vec![], gpus: vec![], host: vec![] });
         let (data, to) = encode_sent(&s).unwrap();
-        assert!(data.len() <= crate::platform_api::MAX_SNAPSHOT_BYTES);
+        assert!(data.len() <= crate::client::api::MAX_SNAPSHOT_BYTES);
         let v: serde_json::Value = serde_json::from_slice(&data).unwrap();
         let sent = v["usage"]["models"].as_array().unwrap();
         let to = to.expect("some usage rows still go");

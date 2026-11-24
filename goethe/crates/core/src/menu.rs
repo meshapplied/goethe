@@ -1630,7 +1630,7 @@ impl SharePage {
         let home = goethe_home();
         self.shared = crate::public_share::shared(&home);
         self.url = crate::public_share::active(&home).map(|s| {
-            let ip = crate::platform::lookup_public_ip(&home).map(|i| i.to_string()).unwrap_or_else(|_| "<public IP>".into());
+            let ip = crate::client::link::lookup_public_ip(&home).map(|i| i.to_string()).unwrap_or_else(|_| "<public IP>".into());
             let host = if ip.contains(':') { format!("[{ip}]") } else { ip };
             format!("https://{host}:{}/v1", s.port)
         });

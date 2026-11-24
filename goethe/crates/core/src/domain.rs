@@ -80,7 +80,7 @@ pub fn check(domain: &str) -> Result<String, String> {
 
 pub fn public_ipv4() -> Result<String, String> {
     // The public IPv4 from GOETHE_PUBLIC_IP or the platform's /api/ip (GOETHE_PUBLIC_IP_URL overrides).
-    let ip = crate::platform::lookup_public_ip(&goethe_home()).map_err(|e| format!("public IP lookup failed: {e}"))?;
+    let ip = crate::client::link::lookup_public_ip(&goethe_home()).map_err(|e| format!("public IP lookup failed: {e}"))?;
     parse_public_v4(&ip.to_string())
 }
 

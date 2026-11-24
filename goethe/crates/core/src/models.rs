@@ -89,7 +89,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
         let archs = crate::packs::local_archs(&home);
         crate::packs::catalog(&home).map(|ix| crate::packs::offers_any(&ix, &archs)).unwrap_or_default()
     };
-    let linked = crate::platform::load_credentials(&home).ok().flatten().is_some();
+    let linked = crate::client::link::load_credentials(&home).ok().flatten().is_some();
     let mut rows = Vec::new();
     if !available_only {
         for m in &installed {

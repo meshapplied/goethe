@@ -1265,14 +1265,14 @@ fn main() {
         },
         Commands::Uninstall { keep_models, yes } => goethe_core::uninstall::run(goethe_core::uninstall::UninstallOpts { keep_models, yes }),
         Commands::Login { platform_url, authkey, lifetime } => {
-            let linked = goethe_core::platform_cli::is_linked(&goethe_home());
-            let login = if linked && lifetime.is_some() { Ok(()) } else { goethe_core::platform_cli::login(platform_url.as_deref(), authkey.as_deref()) };
+            let linked = goethe_core::client::login::is_linked(&goethe_home());
+            let login = if linked && lifetime.is_some() { Ok(()) } else { goethe_core::client::login::login(platform_url.as_deref(), authkey.as_deref()) };
             match (login, lifetime) {
-                (Ok(()), Some(l)) if goethe_core::platform_cli::is_linked(&goethe_home()) => goethe_core::platform_cli::token_lifetime(&l),
+                (Ok(()), Some(l)) if goethe_core::client::login::is_linked(&goethe_home()) => goethe_core::client::login::token_lifetime(&l),
                 (r, _) => r,
             }
         }
-        Commands::Logout => goethe_core::platform_cli::logout(),
+        Commands::Logout => goethe_core::client::login::logout(),
         Commands::Remote { cmd } => do_remote(cmd),
         Commands::Setup { pkg_url, from, keep_file_url, platform_url, no_link } => goethe_core::setup::run(goethe_core::setup::Opts {
             pkg: pkg_url.or_else(|| std::env::var("GOETHE_PKG_URL").ok().filter(|v| !v.is_empty())).unwrap_or_else(|| goethe_core::setup::DEFAULT_PKG_URL.to_string()),
@@ -2052,7 +2052,7 @@ fn do_share(
             }
             match share::active(&home) {
                 Some(s) => {
-                    let ip = goethe_core::platform::lookup_public_ip(&home).map(|i| i.to_string()).unwrap_or_else(|_| "<public IP>".into());
+                    let ip = goethe_core::client::link::lookup_public_ip(&home).map(|i| i.to_string()).unwrap_or_else(|_| "<public IP>".into());
                     println!("Public gateway: open until {} ({} left)", share::local_time(s.until), left(s.until - share::now()));
                     println!("URL:  https://{}/v1", host_port(&ip, s.port));
                     for (name, g) in share::shared(&home) {
@@ -2126,7 +2126,7 @@ fn left(secs: i64) -> String {
 
 fn print_platform_lines(home: &std::path::Path, running: bool) {
     // The platform link and the last heartbeat, after the rest of goethe status.
-    println!("{}", goethe_core::platform_cli::status_lines(home, running).join("\n"));
+    println!("{}", goethe_core::client::login::status_lines(home, running).join("\n"));
 }
 
 fn status_text(api: Option<&str>, keys: &[(String, String)]) -> String {

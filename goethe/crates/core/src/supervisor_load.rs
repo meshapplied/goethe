@@ -268,7 +268,7 @@ pub(super) fn mark_running(s: &Starting) -> Result<bool, String> {
         autostart::mark_desired(&tx, &s.params).map_err(|e| format!("desired load: {e}"))?;
     }
     tx.commit().map_err(|e| e.to_string())?;
-    crate::platform::state_changed();
+    crate::client::link::state_changed();
     Ok(changed == 1)
 }
 
@@ -312,7 +312,7 @@ pub(super) fn settle(con: &Connection, s: &Starting, status: &str) {
     };
     let _ = con.execute("DELETE FROM watchdog_probe_state WHERE instance_id = ?1", [&s.instance_id]);
     load_slot::clear_instance_notices(&s.instance_id);
-    crate::platform::state_changed();
+    crate::client::link::state_changed();
 }
 
 pub(super) fn stop_one(home: &Path, id: &Identity) -> bool {

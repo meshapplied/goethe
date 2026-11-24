@@ -1,7 +1,7 @@
 // goethed heartbeat task: runs each step on the blocking pool, waits on a timer or a change signal, never on the request path.
 
-use goethe_core::heartbeat::{Outcome, Reason, Worker, DEBOUNCE, MIN_GAP};
-use goethe_core::platform::{self, CHANGE_LINK};
+use goethe_core::client::heartbeat::{Outcome, Reason, Worker, DEBOUNCE, MIN_GAP};
+use goethe_core::client::link::{self, CHANGE_LINK};
 use goethe_core::snapshot::{self, Collector};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ pub fn spawn(home: PathBuf) {
     // Install the change hook (a Notify permit, never blocking) and start the loop.
     let notify = Arc::new(Notify::new());
     let hook = notify.clone();
-    platform::set_change_hook(Box::new(move || hook.notify_one()));
+    link::set_change_hook(Box::new(move || hook.notify_one()));
     let started_at = snapshot::now_rfc3339();
     tokio::spawn(run(home, notify, started_at));
 }
@@ -49,13 +49,13 @@ async fn run(home: PathBuf, notify: Arc<Notify>, started_at: String) {
             tokio::select! {
                 _ = sleep_until(next) => break Reason::Interval,
                 _ = notify.notified() => {
-                    let kinds = platform::take_pending();
+                    let kinds = link::take_pending();
                     if kinds == 0 {
                         continue;
                     }
                     let wait = if kinds & CHANGE_LINK != 0 { not_before } else { (Instant::now() + DEBOUNCE).max(not_before) };
                     sleep_until(wait).await;
-                    let kinds = kinds | platform::take_pending();
+                    let kinds = kinds | link::take_pending();
                     break if kinds & CHANGE_LINK != 0 { Reason::Start } else { Reason::Change };
                 }
             }

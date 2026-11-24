@@ -9,11 +9,11 @@ pub(super) type Looked = Result<Option<(String, crate::packs::Plan)>, String>;
 
 pub(super) struct OfferDeps<'a> {
 
-    pub(super) creds: Result<Option<crate::platform::Credentials>, String>,
+    pub(super) creds: Result<Option<crate::client::link::Credentials>, String>,
     pub(super) archs: Vec<String>,
     pub(super) index: &'a dyn Fn() -> Option<Vec<u8>>,
     pub(super) ensure_engine: &'a dyn Fn() -> Result<(), String>,
-    pub(super) by_structure: &'a dyn Fn(&crate::platform::Credentials) -> Looked,
+    pub(super) by_structure: &'a dyn Fn(&crate::client::link::Credentials) -> Looked,
     pub(super) may_match: &'a dyn Fn(&[u8]) -> bool,
 }
 
@@ -22,7 +22,7 @@ pub(super) fn structure_offer(home: &Path, opts: &InstallOpts, dir: &Path) -> Re
     let archs = crate::packs::local_archs(home);
     let run = crate::packs::python_runner(home);
     let deps = OfferDeps {
-        creds: crate::platform::load_credentials(home),
+        creds: crate::client::link::load_credentials(home),
         index: &|| crate::packs::catalog(home),
         ensure_engine: &|| crate::pyenv::ensure(home, crate::pyenv::Layer::Engine),
         by_structure: &|creds| {
@@ -110,14 +110,14 @@ pub(super) fn pack_decision(home: &Path, opts: &InstallOpts) -> Result<PackDecis
         }
         return Ok(PackDecision::None);
     };
-    let linked = || crate::platform::load_credentials(home).ok().flatten();
+    let linked = || crate::client::link::load_credentials(home).ok().flatten();
     if let Some(creds) = linked() {
         return Ok(PackDecision::Use(Box::new(PackChoice { offer, creds, plan: None })));
     }
     if !ask_login(&offer, opts)? {
         return Ok(PackDecision::Declined);
     }
-    if let Err(e) = crate::platform_cli::login(None, None) {
+    if let Err(e) = crate::client::login::login(None, None) {
         crate::step::note(&format!("note: {e}; continuing without the optimised kernels"));
         return Ok(PackDecision::Declined);
     }

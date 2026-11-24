@@ -1,6 +1,6 @@
 // Platform device API client: the five documented calls, strict response parsing and errors without secrets.
 
-use crate::platform::{clean_text, valid_id, valid_token, Credentials, Secret, Workspace};
+use crate::client::link::{clean_text, valid_id, valid_token, Credentials, Secret, Workspace};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::Read;
@@ -50,7 +50,7 @@ pub struct Client {
 impl Client {
     pub fn new(base: &str, timeout: Duration) -> Result<Client, String> {
         // TLS verification stays on (ureq's default); no redirects, so a token never follows one elsewhere.
-        let base = crate::platform::check_url(base)?;
+        let base = crate::client::link::check_url(base)?;
         let agent = crate::net::agent_builder()
             .redirects(0)
             .timeout_read(timeout)
@@ -155,7 +155,7 @@ pub fn same_site_move(base: &str, path: &str, status: u16, location: Option<&str
     let old = base.strip_prefix("https://")?;
     let bare = |h: &str| h.to_ascii_lowercase().strip_prefix("www.").map(str::to_string).unwrap_or_else(|| h.to_ascii_lowercase());
     let twins = !host.eq_ignore_ascii_case(old) && bare(host) == bare(old) && !bare(host).is_empty();
-    (twins && tail == path).then(|| format!("https://{host}")).and_then(|u| crate::platform::check_url(&u).ok())
+    (twins && tail == path).then(|| format!("https://{host}")).and_then(|u| crate::client::link::check_url(&u).ok())
 }
 
 pub fn retry_after(header: Option<&str>) -> Duration {
@@ -266,7 +266,7 @@ pub fn parse_started(v: &Value, base: &str) -> Result<Started, ApiError> {
     if r.user_code.is_empty() || r.user_code.len() > 32 || !r.user_code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err(malformed("the user code is not valid"));
     }
-    let check = if base.starts_with("http://") { crate::platform::check_dev_link } else { crate::platform::check_link };
+    let check = if base.starts_with("http://") { crate::client::link::check_dev_link } else { crate::client::link::check_link };
     let uri = check(&r.verification_uri_complete).map_err(|_| malformed("the verification link is not a valid https URL"))?;
     if !verification_on_base(base, &uri) {
         return Err(malformed("the verification link is not on the console"));

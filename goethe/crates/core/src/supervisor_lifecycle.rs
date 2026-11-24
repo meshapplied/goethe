@@ -219,7 +219,7 @@ fn unload(target: Target, force: bool) -> Result<Value, (i32, String)> {
         }
     }
     teardown(&con, &home, &list);
-    crate::platform::state_changed();
+    crate::client::link::state_changed();
     append_goethed_log(
         &home,
         &format!("unload done ms={} instances={}\n", t0.elapsed().as_millis(), list.len()),

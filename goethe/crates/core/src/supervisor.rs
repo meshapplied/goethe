@@ -512,7 +512,7 @@ fn start_engine(req: &LoadReq, con: &Connection, plan: &LoadPlan, fit: FitSpawn)
         stop_one(&req.home, &identity);
         return Err(err1(format!("record instance: {e}; engine stopped")));
     }
-    crate::platform::state_changed();
+    crate::client::link::state_changed();
     let hold = coordinator::reserve(&instance_id, &plan.gpus, budget);
     if let Err(e) = crate::logs::append_spawn_index(&req.home, &instance_id, model_id, &log_path) {
         eprintln!("append_spawn_index({instance_id}): {e}");
@@ -921,7 +921,7 @@ fn retire(con: &Connection, home: &Path, i: &Inst, from: &str, to: &str) -> bool
     );
     let _ = con.execute("DELETE FROM watchdog_probe_state WHERE instance_id = ?1", [&i.instance_id]);
     load_slot::clear_instance_notices(&i.instance_id);
-    crate::platform::state_changed();
+    crate::client::link::state_changed();
     true
 }
 
