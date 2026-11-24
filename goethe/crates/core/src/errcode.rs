@@ -117,9 +117,9 @@ fn append(home: &Path, t: i64, code: &str, v: &str, detail: &str) -> std::io::Re
     let mut line = format!("{t}\t{code}\t{v}\t{detail}\n");
     if old.len() + line.len() > MAX_BYTES {
         let keep = old.len() / 2;
-        let from = old[keep..].find('\n').map_or(old.len(), |i| keep + i + 1);
+        let from = old.as_bytes()[keep..].iter().position(|&b| b == b'\n').map_or(old.len(), |i| keep + i + 1);
         line = format!("{}{line}", &old[from..]);
-        fs::write(&path, line)?;
+        crate::paths::write_private(&path, line.as_bytes())?;
         return Ok(());
     }
     fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path)?.write_all(line.as_bytes())
@@ -165,14 +165,13 @@ pub fn pending(home: &Path, after: &(i64, String)) -> Vec<Event> {
 }
 
 pub fn sent_to(con: &rusqlite::Connection) -> (i64, String) {
-    let value: Option<String> = con.query_row("SELECT value FROM goethe_settings WHERE key = ?1", [SENT_KEY], |r| r.get(0)).ok();
-    value.and_then(|v| v.split_once(' ').and_then(|(t, code)| Some((t.parse().ok()?, code.to_string())))).unwrap_or((0, String::new()))
+    crate::db::setting(con, SENT_KEY).and_then(|v| v.split_once(' ').and_then(|(t, code)| Some((t.parse().ok()?, code.to_string())))).unwrap_or((0, String::new()))
 }
 
 pub fn mark_sent(home: &Path, last: &Event) {
     // The console has every row up to and including `last`.
     if let Ok(con) = crate::db::open(home) {
-        let _ = con.execute("INSERT OR REPLACE INTO goethe_settings (key, value) VALUES (?1, ?2)", rusqlite::params![SENT_KEY, format!("{} {}", last.t, last.code)]);
+        let _ = crate::db::set_setting(&con, SENT_KEY, &format!("{} {}", last.t, last.code));
     }
 }
 
@@ -228,6 +227,16 @@ mod tests {
         let text = fs::read_to_string(h.path().join(FILE)).unwrap();
         assert!(text.len() <= MAX_BYTES);
         assert_eq!(rows(&text).last().unwrap().t, 1999 * REPEAT_S);
+    }
+
+    #[test]
+    fn the_cap_cuts_on_a_line_even_inside_non_ascii_text() {
+        let h = tempfile::tempdir().unwrap();
+        for i in 0..2000 {
+            append(h.path(), i * REPEAT_S, "ENV_DEPS", "1.0", &"\u{e9}".repeat(50)).unwrap();
+        }
+        let text = fs::read_to_string(h.path().join(FILE)).unwrap();
+        assert!(text.len() <= MAX_BYTES && rows(&text).all(|e| e.detail.chars().all(|c| c == '\u{e9}')));
     }
 
     #[test]
