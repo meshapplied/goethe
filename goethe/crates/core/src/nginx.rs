@@ -726,10 +726,6 @@ fn read_record(home: &Path) -> Option<MasterRecord> {
     })
 }
 
-fn boot_id() -> String {
-    crate::sys::boot_id()
-}
-
 fn proc_stat(pid: i32) -> Option<(char, i32, u64)> {
     // (state, process group, start ticks) of a process.
     let st = crate::sys::stat(pid)?;
@@ -771,7 +767,7 @@ fn verified_master(home: &Path) -> Option<i32> {
     let from_file = fs::read_to_string(prefix.join("nginx.pid"))
         .ok()
         .and_then(|t| t.trim().parse::<i32>().ok());
-    let boot = boot_id();
+    let boot = crate::sys::boot_id();
     [from_file, record.as_ref().map(|r| r.pid)]
         .into_iter()
         .flatten()
@@ -826,7 +822,7 @@ fn reap_orphans(home: &Path) {
     let Some(rec) = read_record(home) else {
         return;
     };
-    if rec.boot_id != boot_id() {
+    if rec.boot_id != crate::sys::boot_id() {
         let _ = fs::remove_file(record_path(home));
         return;
     }
@@ -913,7 +909,7 @@ fn spawn_private(home: &Path) -> Result<(), String> {
     let pid = child.id() as i32;
     let start_ticks = proc_stat(pid).map(|s| s.2).unwrap_or(0);
     master_slot().replace(child);
-    let record = serde_json::json!({"pid": pid, "start_ticks": start_ticks, "boot_id": boot_id()});
+    let record = serde_json::json!({"pid": pid, "start_ticks": start_ticks, "boot_id": crate::sys::boot_id()});
     write_private(&record_path(home), record.to_string().as_bytes())?;
     let deadline = Instant::now() + Duration::from_secs(4);
     while verified_master(home) != Some(pid) && Instant::now() < deadline && child_alive() {

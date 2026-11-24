@@ -586,10 +586,6 @@ pub fn drafter(e: &Entry) -> Option<Drafter> {
     Some(Drafter { name: d["name"].as_str().unwrap_or("drafter").to_string(), repo, revision: d["revision"].as_str().map(String::from), files })
 }
 
-fn sha256_file(p: &Path) -> Option<String> {
-    crate::update::sha256_file(p).ok()
-}
-
 pub fn safe_name(f: &str) -> bool {
     // A plain file name in the repo root: the download and the model dir never see a path from a pack.
     !f.is_empty() && !f.contains(['/', '\\']) && f != "." && f != ".." && !f.starts_with('.')
@@ -910,7 +906,7 @@ pub fn finish_as(
     }
     let mut ok = verify().map_err(undo)?.1;
     if let Some(d) = drafter(e).filter(|d| dir.join("drafter").join(&d.files[0].0).is_file()) {
-        match d.files.iter().all(|(n, _, h)| sha256_file(&dir.join("drafter").join(n)).as_deref() == Some(h.as_str())) {
+        match d.files.iter().all(|(n, _, h)| crate::update::sha256_file(&dir.join("drafter").join(n)).ok().as_deref() == Some(h.as_str())) {
             true => {
                 let mut v: Value = serde_json::from_str(&ok).map_err(|err| undo(format!("pack verify: {err}")))?;
                 v["drafter"] = d.files.iter().map(|(n, ..)| format!("drafter/{n}")).collect();
