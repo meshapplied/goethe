@@ -443,11 +443,16 @@ fn a_step_repeated_for_each_model_stays_repeated_when_picked_and_answered() {
     assert!(p.is_ready(), "{:?}", cmds(&p.lines));
     let lines = cmds(&p.lines);
     assert!(lines.contains(&"goethe api keys create first --models mistralai/Mistral-7B-Instruct".to_string()) && lines.contains(&"goethe api keys create second --models Qwen/Qwen2.5-7B-Instruct".to_string()), "{lines:?}");
+    let tmp = tempfile::tempdir().unwrap();
     let mut menu = super::MenuAsk::new(Cli::command(), Box::new(validate_cli));
+    menu.home = tmp.path().to_path_buf();
     menu.world = world;
     menu.plan = Some(p);
     menu.sync(&cat);
     assert_eq!(menu.frame.parts[keys].label, "api keys create x2", "the screen says the part runs twice");
+    drop(menu);
+    let log = std::fs::read_to_string(tmp.path().join("errors.log")).unwrap_or_default();
+    assert!(log.contains("ASK_DROPPED") && log.contains("api.keys.create") && log.contains("left") && !log.contains("first"), "a closed screen records the plan's commands, never the request: {log}");
 }
 
 #[test]

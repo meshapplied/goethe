@@ -947,7 +947,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("goethe logout", "unlink it and remove its local credentials"),
         ("goethe remote allow change", "accept signed console commands of a kind (deny refuses them)"),
         ("goethe completion install", "tab completion for your shell"),
-        ("goethe ask REQUEST", "turn a request in plain English into Goethe commands (also Ask on the main menu)"),
+        ("goethe ask REQUEST", "(experimental) turn a request in plain English into Goethe commands (also Ask on the main menu)"),
         ("goethe ?", "same as goethe ask"),
     ]),
 ];

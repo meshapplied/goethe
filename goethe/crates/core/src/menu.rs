@@ -829,7 +829,7 @@ fn main_menu() -> Menu {
     Menu {
         heading: Vec::new(),
         items: vec![
-            Choice { title: "Ask", detail: "describe what you want in plain English", side: None },
+            Choice { title: "Ask", detail: "(experimental) describe what you want in plain English", side: None },
             Choice { title: "Quick setup", detail: "install a model, serve it and open the API", side: None },
             Choice { title: "Load/Unload", detail: "load an installed model, unload loaded ones", side: Some(Side::Models) },
             Choice { title: "Install models", detail: "pick models that fit your GPUs", side: None },
