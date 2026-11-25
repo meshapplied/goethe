@@ -134,7 +134,7 @@ auth_conf() {
 }
 
 get() {
-  curl -fsSL --retry 3 --retry-delay 2 -K <(auth_conf) "${BASE}/$1" -o "$2"
+  curl -fsSL --proto-redir -all,https --retry 3 --retry-delay 2 -K <(auth_conf) "${BASE}/$1" -o "$2"
 }
 
 check_pkg_url() {
@@ -165,8 +165,8 @@ pick_base() {
     return
   fi
   BASE="${CDN}"
-  latest="$(curl -fsSL --retry 3 -K <(auth_conf) "${CDN}/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
-  if [[ "${latest}" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] && curl -fsSL -K <(auth_conf) -o /dev/null "${CDN}/v/${latest}/SHA256SUMS" 2>/dev/null; then
+  latest="$(curl -fsSL --proto-redir -all,https --retry 3 -K <(auth_conf) "${CDN}/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ "${latest}" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] && curl -fsSL --proto-redir -all,https -K <(auth_conf) -o /dev/null "${CDN}/v/${latest}/SHA256SUMS" 2>/dev/null; then
     BASE="${CDN}/v/${latest}"
   fi
 }

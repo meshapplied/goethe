@@ -283,7 +283,7 @@ fn minimax_sparse(lm: &Value, cfg: &Value, layers: u64) -> MemorySpec {
     MemorySpec {
         kv_bytes_per_token: mul(&[layers, 2, kv_heads, head, BF16]),
         kv_heads,
-        kv_replicated_bytes_per_token: (2 * index_kv + k_only) * index_dim * BF16,
+        kv_replicated_bytes_per_token: mul(&[mul(&[2, index_kv]).saturating_add(k_only), index_dim, BF16]),
         ..MemorySpec::default()
     }
 }

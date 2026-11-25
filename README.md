@@ -111,7 +111,7 @@ Supported [model families and quantization formats](docs/user-guide.md#supported
 
 - Gated models need the license accepted on Hugging Face and a read token (install with `--hf-token`).
 - Optimised kernel packs need `goethe login` on the node. If optimised kernels are not available for a given model, goethe defaults to SGlang, if SGlang does not support it either, it checks llama.cpp, displays model unsupported otherwise.
-- If a model's kernel pack cannot run on your GPU, install or load stops with the reason. Add `--fallback` (or set `GOETHE_ALLOW_FALLBACK=1`) to serve it with the plain runtime instead.
+- If a model's kernel pack cannot run on your GPU, or the pack store cannot be reached, install or load says why in one line and serves the model with its plain runtime instead; `GOETHE_ALLOW_FALLBACK=0` makes that an error, and `--fallback` overrides it for one command. A pack index that fails its signature check is always refused.
 
 ## Documentation
 

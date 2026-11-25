@@ -316,8 +316,8 @@ def require_cli(name: str) -> Path:
 
 
 def test_gpus() -> list[int]:
-    """Physical GPU indices allowed for tests."""
-    raw = os.environ.get("GOETHE_TEST_GPUS", "2,3")
+    """Physical GPU indices allowed for tests: only those GOETHE_TEST_GPUS names, none by default on a shared host."""
+    raw = os.environ.get("GOETHE_TEST_GPUS", "")
     return [int(x.strip()) for x in raw.split(",") if x.strip()]
 
 

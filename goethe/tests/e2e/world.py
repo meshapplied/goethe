@@ -117,6 +117,7 @@ class World:
     serial: int = 7
     bad_sig: bool = False
     pack_401: bool = False
+    store_down: bool = False
     polls: int = 0
     heartbeats: int = 0
     requests: list[str] = field(default_factory=list)
@@ -299,6 +300,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, f.read_bytes(), "application/octet-stream") if f.is_file() else self.reply(404)
         if path == "/packs/v2/index.json":
             return self.reply(200, w.index())
+        if w.store_down and path == "/packs/v2/index.sig":
+            return self.reply(503, {"error": "store_unavailable"})
         if path == "/packs/v2/index.sig":
             return self.reply(200, (b"0" * 64 if w.bad_sig else sha(w.index()).encode()), "text/plain")
         if w.pack_401 and path.startswith("/packs/v2/pack/"):

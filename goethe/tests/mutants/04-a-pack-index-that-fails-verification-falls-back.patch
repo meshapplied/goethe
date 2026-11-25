@@ -1,0 +1,13 @@
+diff --git a/goethe/crates/core/src/install.rs b/goethe/crates/core/src/install.rs
+--- a/goethe/crates/core/src/install.rs
++++ b/goethe/crates/core/src/install.rs
+@@ -282,8 +282,7 @@
+             let plan = match crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home)) {
+                 Ok(Some(plan)) => plan,
+                 Ok(None) => return Err(format!("the signed pack index has no pack for {} on {}", opts.model_id, choice.offer.arch)),
+-                Err(crate::packs::PlanError::Refused(e)) => return Err(e),
+-                Err(crate::packs::PlanError::Unreachable(why)) => {
++                Err(crate::packs::PlanError::Refused(why) | crate::packs::PlanError::Unreachable(why)) => {
+                     crate::step::note(&packs_unreachable(&why, fallback_allowed(opts.fallback))?);
+                     packs_down = true;
+                     break 'packed false;

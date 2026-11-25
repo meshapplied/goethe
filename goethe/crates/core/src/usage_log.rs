@@ -1,4 +1,4 @@
-// Usage log, linked or not: per-model request counts and 5 s hardware samples as clock-minute rows (48 h) rolled into hourly rows (90 days); counts and timings only, never text; a linked node sends new minutes with its heartbeat.
+// Usage log, linked or not: request counts per model, per API key and per dimension tuple, and 5 s hardware samples, as clock-minute rows (48 h) rolled into hourly rows (90 days); counts and timings only, never text; a linked node sends new minutes with its heartbeat.
 
 use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection};
@@ -17,6 +17,9 @@ const SENT_KEY: &str = "usage_sent_t";
 const REPORT_ROWS: usize = 400;
 const MAX_PENDING: usize = 2880;
 const MAX_MODEL_ID: usize = 200;
+const MAX_DIM: usize = 64;
+const MAX_TUPLES: usize = 512;
+const OTHER: &str = "_other";
 const KEY_SEP: char = '\u{1f}';
 pub const RATE_LIMITED: &str = "_rate_limited";
 
@@ -38,6 +41,112 @@ pub struct Requests {
     pub ttft_n: i64,
     pub latency_hist: Vec<i64>,
     pub ttft_hist: Vec<i64>,
+    pub reasoning_tokens: i64,
+    pub cached_tokens: i64,
+    pub generation_ms_sum: i64,
+    pub generation_hist: Vec<i64>,
+    pub router_ms_sum: i64,
+    pub router_n: i64,
+    pub router_hist: Vec<i64>,
+    pub total_ttft_hist: Vec<i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Sample {
+    pub code: u16,
+    pub cancelled: bool,
+    pub duration_s: f64,
+    pub ttft_s: Option<f64>,
+    pub prompt: i64,
+    pub completion: i64,
+    pub reasoning: i64,
+    pub cached: i64,
+    pub router_ms: Option<f64>,
+}
+
+impl Sample {
+    pub fn new(code: u16, cancelled: bool, duration_s: f64, ttft_s: Option<f64>, prompt: i64, completion: i64) -> Sample {
+        Sample { code, cancelled, duration_s, ttft_s, prompt, completion, ..Sample::default() }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Dims {
+    pub model: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub engine: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub variant: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub api_key_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub user_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub modality: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub network_path: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub finish_reason: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub context_length_bucket: String,
+}
+
+impl Dims {
+    fn parts(&self) -> [&str; 9] {
+        [
+            &self.model, &self.engine, &self.variant, &self.api_key_id, &self.user_id, &self.modality, &self.network_path,
+            &self.finish_reason, &self.context_length_bucket,
+        ]
+    }
+
+    fn key(&self) -> String {
+        // The row key: every dimension, each cut to MAX_DIM characters (the model to MAX_MODEL_ID) and stripped of the separator.
+        let cut = |i: usize, v: &str| v.chars().filter(|&c| c != KEY_SEP).take(if i == 0 { MAX_MODEL_ID } else { MAX_DIM }).collect::<String>();
+        self.parts().iter().enumerate().map(|(i, v)| cut(i, v)).collect::<Vec<_>>().join(&KEY_SEP.to_string())
+    }
+
+    fn from_key(k: &str) -> Dims {
+        let mut p = k.split(KEY_SEP).map(str::to_string);
+        let mut next = || p.next().unwrap_or_default();
+        Dims {
+            model: next(),
+            engine: next(),
+            variant: next(),
+            api_key_id: next(),
+            user_id: next(),
+            modality: next(),
+            network_path: next(),
+            finish_reason: next(),
+            context_length_bucket: next(),
+        }
+    }
+
+    fn other(&self) -> Dims {
+        // The tuple a minute's overflow counts into: the model kept, every other dimension "_other".
+        let o = || OTHER.to_string();
+        Dims {
+            model: self.model.clone(),
+            engine: o(),
+            variant: o(),
+            api_key_id: o(),
+            user_id: o(),
+            modality: o(),
+            network_path: o(),
+            finish_reason: o(),
+            context_length_bucket: o(),
+        }
+    }
+}
+
+pub fn context_bucket(prompt: i64) -> &'static str {
+    // Prompt size tier by token count: up to 1K, 10K, 32K, 128K, then above.
+    match prompt {
+        i64::MIN..=1024 => "1k",
+        1025..=10240 => "10k",
+        10241..=32768 => "32k",
+        32769..=131072 => "128k",
+        _ => "128k+",
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -107,8 +216,9 @@ fn hit(h: &mut Vec<i64>, ms: f64) {
 }
 
 impl Requests {
-    pub fn add(&mut self, code: u16, cancelled: bool, duration_s: f64, ttft_s: Option<f64>, prompt: i64, completion: i64) {
-        // One finished request; decode speed is the tokens after the first over the time after the first (the gateway streams every generation request from the engine).
+    pub fn add(&mut self, s: &Sample) {
+        // One finished request; decode speed and generation time are the tokens and time after the first token (the gateway streams every generation request from the engine); the router hop counts only for requests goethe-server routed.
+        let Sample { code, cancelled, duration_s, ttft_s, prompt, completion, reasoning, cached, router_ms } = *s;
         self.requests += 1;
         match code {
             _ if cancelled => self.cancelled += 1,
@@ -119,12 +229,25 @@ impl Requests {
         }
         self.prompt_tokens += prompt.max(0);
         self.completion_tokens += completion.max(0);
+        self.reasoning_tokens += reasoning.max(0);
+        self.cached_tokens += cached.max(0);
         hit(&mut self.latency_hist, duration_s * 1000.0);
+        let router = router_ms.filter(|r| r.is_finite() && *r >= 0.0);
+        if let Some(r) = router {
+            self.router_n += 1;
+            self.router_ms_sum += r.round() as i64;
+            hit(&mut self.router_hist, r);
+        }
         if let Some(t) = ttft_s.filter(|t| t.is_finite() && *t >= 0.0) {
             self.ttft_n += 1;
             self.ttft_ms_sum += (t * 1000.0).round() as i64;
             hit(&mut self.ttft_hist, t * 1000.0);
+            hit(&mut self.total_ttft_hist, t * 1000.0 + router.unwrap_or(0.0));
             let decode = duration_s - t;
+            if decode >= 0.0 {
+                self.generation_ms_sum += (decode * 1000.0).round() as i64;
+                hit(&mut self.generation_hist, decode * 1000.0);
+            }
             if completion >= 2 && decode > 0.001 {
                 self.decode_tps_sum += (completion - 1) as f64 / decode;
                 self.decode_n += 1;
@@ -182,7 +305,8 @@ impl Row for Requests {
     const KIND: &'static str = "usage";
     const COLS: &'static [&'static str] = &[
         "requests", "ok", "client_errors", "server_errors", "rate_limited", "cancelled", "prompt_tokens", "completion_tokens",
-        "decode_tps_sum", "decode_n", "ttft_ms_sum", "ttft_n", "latency_hist", "ttft_hist",
+        "decode_tps_sum", "decode_n", "ttft_ms_sum", "ttft_n", "latency_hist", "ttft_hist", "reasoning_tokens", "cached_tokens",
+        "generation_ms_sum", "generation_hist", "router_ms_sum", "router_n", "router_hist", "total_ttft_hist",
     ];
     fn values(&self) -> Vec<Value> {
         vec![
@@ -200,6 +324,14 @@ impl Row for Requests {
             int(self.ttft_n),
             hist(&self.latency_hist),
             hist(&self.ttft_hist),
+            int(self.reasoning_tokens),
+            int(self.cached_tokens),
+            int(self.generation_ms_sum),
+            hist(&self.generation_hist),
+            int(self.router_ms_sum),
+            int(self.router_n),
+            hist(&self.router_hist),
+            hist(&self.total_ttft_hist),
         ]
     }
     fn from_values(v: &[Value]) -> Self {
@@ -218,6 +350,14 @@ impl Row for Requests {
             ttft_n: get_i(&v[11]),
             latency_hist: get_hist(&v[12]),
             ttft_hist: get_hist(&v[13]),
+            reasoning_tokens: get_i(&v[14]),
+            cached_tokens: get_i(&v[15]),
+            generation_ms_sum: get_i(&v[16]),
+            generation_hist: get_hist(&v[17]),
+            router_ms_sum: get_i(&v[18]),
+            router_n: get_i(&v[19]),
+            router_hist: get_hist(&v[20]),
+            total_ttft_hist: get_hist(&v[21]),
         }
     }
     fn merge(&mut self, o: &Self) {
@@ -235,6 +375,14 @@ impl Row for Requests {
         self.ttft_n += o.ttft_n;
         add_hist(&mut self.latency_hist, &o.latency_hist);
         add_hist(&mut self.ttft_hist, &o.ttft_hist);
+        self.reasoning_tokens += o.reasoning_tokens;
+        self.cached_tokens += o.cached_tokens;
+        self.generation_ms_sum += o.generation_ms_sum;
+        add_hist(&mut self.generation_hist, &o.generation_hist);
+        self.router_ms_sum += o.router_ms_sum;
+        self.router_n += o.router_n;
+        add_hist(&mut self.router_hist, &o.router_hist);
+        add_hist(&mut self.total_ttft_hist, &o.total_ttft_hist);
     }
 }
 
@@ -360,6 +508,23 @@ impl Row for KeyRequests {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Traffic(pub Requests);
+
+impl Row for Traffic {
+    const KIND: &'static str = "req";
+    const COLS: &'static [&'static str] = Requests::COLS;
+    fn values(&self) -> Vec<Value> {
+        self.0.values()
+    }
+    fn from_values(v: &[Value]) -> Self {
+        Traffic(Requests::from_values(v))
+    }
+    fn merge(&mut self, o: &Self) {
+        self.0.merge(&o.0);
+    }
+}
+
 fn ddl<R: Row>() -> String {
     // One minute and one hour table per kind, keyed by the bucket start (unix seconds) and the model id, GPU index or "" for the host.
     ["minute", "hour"]
@@ -368,9 +533,33 @@ fn ddl<R: Row>() -> String {
         .collect()
 }
 
+fn add_columns<R: Row>(con: &Connection) -> rusqlite::Result<()> {
+    // Columns a newer goethe added to an existing table; old rows read them as 0 or empty, and an older goethe never selects them.
+    for g in ["minute", "hour"] {
+        let table = format!("{}_{g}", R::KIND);
+        let have: HashSet<String> =
+            con.prepare(&format!("PRAGMA table_info({table})"))?.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<_>>()?;
+        for c in R::COLS.iter().filter(|c| !have.contains(**c)) {
+            add_column(con, &table, c)?;
+        }
+    }
+    Ok(())
+}
+
+fn add_column(con: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
+    // Another process (goethed and the CLI after an upgrade) may add the same column first; that is not an error.
+    con.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column};")).or_else(|e| {
+        let added = con.prepare(&format!("SELECT {column} FROM {table} LIMIT 0")).is_ok();
+        if added { Ok(()) } else { Err(e) }
+    })
+}
+
 pub fn ensure_tables(con: &Connection) -> rusqlite::Result<()> {
-    // New tables need no schema version bump: an older goethe opens the database and never looks at them.
-    con.execute_batch(&format!("{}{}{}{}", ddl::<Requests>(), ddl::<KeyRequests>(), ddl::<Gpu>(), ddl::<Host>()))
+    // New tables and columns need no schema version bump: an older goethe opens the database and never looks at them.
+    con.execute_batch(&format!("{}{}{}{}{}", ddl::<Requests>(), ddl::<KeyRequests>(), ddl::<Traffic>(), ddl::<Gpu>(), ddl::<Host>()))?;
+    add_columns::<Requests>(con)?;
+    add_columns::<KeyRequests>(con)?;
+    add_columns::<Traffic>(con)
 }
 
 fn select<R: Row>(con: &Connection, table: &str, filter: &str, args: &[Value]) -> rusqlite::Result<Vec<(i64, String, R)>> {
@@ -407,13 +596,27 @@ struct Minute {
     t: i64,
     models: BTreeMap<String, Requests>,
     keys: BTreeMap<String, KeyRequests>,
+    tuples: BTreeMap<String, Traffic>,
     gpus: BTreeMap<u32, Gpu>,
     host: Host,
 }
 
 impl Minute {
+    fn count(&mut self, d: &Dims, s: &Sample) {
+        let model: String = d.model.chars().take(MAX_MODEL_ID).collect();
+        self.models.entry(model.clone()).or_default().add(s);
+        if !d.api_key_id.is_empty() {
+            self.keys.entry(format!("{}{KEY_SEP}{model}", d.api_key_id)).or_default().0.add(s);
+        }
+        let mut k = d.key();
+        if !self.tuples.contains_key(&k) && self.tuples.len() >= MAX_TUPLES {
+            k = d.other().key();
+        }
+        self.tuples.entry(k).or_default().0.add(s);
+    }
+
     fn is_empty(&self) -> bool {
-        self.models.is_empty() && self.keys.is_empty() && self.gpus.is_empty() && self.host.samples == 0
+        self.models.is_empty() && self.keys.is_empty() && self.tuples.is_empty() && self.gpus.is_empty() && self.host.samples == 0
     }
 }
 
@@ -454,19 +657,14 @@ fn rotate(l: &mut Live, minute: i64) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn record_request(key_id: &str, model: &str, code: u16, cancelled: bool, duration_s: f64, ttft_s: Option<f64>, prompt: i64, completion: i64) {
-    // Counted into the minute the request finished in, per model and per API key and model; requests without a model (the model list) are not usage.
-    if model.is_empty() {
+pub fn record(d: &Dims, s: &Sample) {
+    // Counted into the minute the request finished in, per model, per API key and model, and per dimension tuple (past MAX_TUPLES tuples in a minute, into the model's "_other" tuple); requests without a model (the model list) are not usage.
+    if d.model.is_empty() {
         return;
     }
-    let model: String = model.chars().take(MAX_MODEL_ID).collect();
     let mut l = live();
     rotate(&mut l, minute_of(now_s()));
-    l.cur.models.entry(model.clone()).or_default().add(code, cancelled, duration_s, ttft_s, prompt, completion);
-    if !key_id.is_empty() {
-        l.cur.keys.entry(format!("{key_id}{KEY_SEP}{model}")).or_default().0.add(code, cancelled, duration_s, ttft_s, prompt, completion);
-    }
+    l.cur.count(d, s);
 }
 
 fn take_finished(now: i64, all: bool) -> (Vec<Minute>, i64) {
@@ -517,6 +715,9 @@ fn write(con: &Connection, minutes: &[Minute]) -> rusqlite::Result<()> {
             for (k, r) in &m.keys {
                 put(con, "minute", m.t, k, r, true)?;
             }
+            for (k, r) in &m.tuples {
+                put(con, "minute", m.t, k, r, true)?;
+            }
             for (i, g) in &m.gpus {
                 put(con, "minute", m.t, &i.to_string(), g, true)?;
             }
@@ -559,6 +760,7 @@ fn roll(con: &Connection, now: i64) -> rusqlite::Result<()> {
     immediate(con, || {
         roll_kind::<Requests>(con, before, now)?;
         roll_kind::<KeyRequests>(con, before, now)?;
+        roll_kind::<Traffic>(con, before, now)?;
         roll_kind::<Gpu>(con, before, now)?;
         roll_kind::<Host>(con, before, now)
     })
@@ -713,6 +915,15 @@ pub struct ModelRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TupleRow {
+    pub t: i64,
+    #[serde(flatten)]
+    pub dims: Dims,
+    #[serde(flatten)]
+    pub stats: Requests,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct GpuRow {
     pub t: i64,
     pub gpu: u32,
@@ -733,6 +944,7 @@ pub struct Report {
     pub to: i64,
     pub bounds_ms: Vec<u32>,
     pub models: Vec<ModelRow>,
+    pub requests: Vec<TupleRow>,
     pub gpus: Vec<GpuRow>,
     pub host: Vec<HostRow>,
 }
@@ -740,7 +952,14 @@ pub struct Report {
 impl Report {
     pub fn halve(&mut self) -> bool {
         // Keep the older half of the minutes, so a report too big for one heartbeat still moves the send cursor; false when one minute is all it holds.
-        let mut ts: Vec<i64> = self.models.iter().map(|r| r.t).chain(self.gpus.iter().map(|r| r.t)).chain(self.host.iter().map(|r| r.t)).collect();
+        let mut ts: Vec<i64> = self
+            .models
+            .iter()
+            .map(|r| r.t)
+            .chain(self.requests.iter().map(|r| r.t))
+            .chain(self.gpus.iter().map(|r| r.t))
+            .chain(self.host.iter().map(|r| r.t))
+            .collect();
         ts.sort_unstable();
         ts.dedup();
         if ts.len() < 2 {
@@ -748,6 +967,7 @@ impl Report {
         }
         let mid = ts[ts.len() / 2];
         self.models.retain(|r| r.t < mid);
+        self.requests.retain(|r| r.t < mid);
         self.gpus.retain(|r| r.t < mid);
         self.host.retain(|r| r.t < mid);
         self.to = mid;
@@ -841,8 +1061,9 @@ pub fn throttle_words(bits: i64) -> Vec<&'static str> {
 #[cfg(test)]
 pub(crate) fn put_minute_for_test(con: &Connection, t: i64, model: &str, completion: i64) {
     let mut r = Requests::default();
-    r.add(200, false, 1.0, Some(0.1), 1, completion);
+    r.add(&Sample::new(200, false, 1.0, Some(0.1), 1, completion));
     put(con, "minute", t, model, &r, true).unwrap();
+    put(con, "minute", t, &Dims { model: model.into(), modality: "chat".into(), ..Dims::default() }.key(), &Traffic(r), true).unwrap();
 }
 
 fn report_at(con: &Connection, now: i64, written_to: i64) -> Option<Report> {
@@ -853,7 +1074,7 @@ fn report_at(con: &Connection, now: i64, written_to: i64) -> Option<Report> {
         return None;
     }
     let mut per_t: BTreeMap<i64, usize> = BTreeMap::new();
-    for kind in ["usage", "gpu", "host"] {
+    for kind in [Requests::KIND, Traffic::KIND, Gpu::KIND, Host::KIND] {
         let mut st = con.prepare_cached(&format!("SELECT t, COUNT(*) FROM {kind}_minute WHERE t >= ?1 AND t < ?2 GROUP BY t")).ok()?;
         let rows = st.query_map([from, end], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as usize))).ok()?;
         for (t, n) in rows.flatten() {
@@ -876,6 +1097,11 @@ fn report_at(con: &Connection, now: i64, written_to: i64) -> Option<Report> {
         to,
         bounds_ms: BOUNDS_MS.to_vec(),
         models: select::<Requests>(con, "minute", filter, &range).ok()?.into_iter().map(|(t, model, stats)| ModelRow { t, model, stats }).collect(),
+        requests: select::<Traffic>(con, "minute", filter, &range)
+            .ok()?
+            .into_iter()
+            .map(|(t, k, stats)| TupleRow { t, dims: Dims::from_key(&k), stats: stats.0 })
+            .collect(),
         gpus: select::<Gpu>(con, "minute", filter, &range)
             .ok()?
             .into_iter()
@@ -906,11 +1132,11 @@ mod tests {
     #[test]
     fn requests_in_one_minute_add_up_exactly() {
         let mut r = Requests::default();
-        r.add(200, false, 2.0, Some(0.5), 40, 132);
-        r.add(200, false, 60.0, Some(1.0), 900, 14712);
-        r.add(429, false, 0.01, None, 0, 0);
-        r.add(500, false, 0.2, None, 0, 0);
-        r.add(200, true, 3.0, Some(0.2), 10, 7);
+        r.add(&Sample::new(200, false, 2.0, Some(0.5), 40, 132));
+        r.add(&Sample::new(200, false, 60.0, Some(1.0), 900, 14712));
+        r.add(&Sample::new(429, false, 0.01, None, 0, 0));
+        r.add(&Sample::new(500, false, 0.2, None, 0, 0));
+        r.add(&Sample::new(200, true, 3.0, Some(0.2), 10, 7));
         assert_eq!((r.requests, r.ok, r.rate_limited, r.server_errors, r.cancelled), (5, 2, 1, 1, 1));
         assert_eq!(r.completion_tokens, 132 + 14712 + 7);
         assert_eq!(r.prompt_tokens, 950);
@@ -923,10 +1149,10 @@ mod tests {
     #[test]
     fn speed_needs_a_first_token_and_two_tokens() {
         let mut r = Requests::default();
-        r.add(200, false, 3.0, Some(1.0), 10, 101);
+        r.add(&Sample::new(200, false, 3.0, Some(1.0), 10, 101));
         assert_eq!((r.decode_n, r.decode_tps_sum, r.ttft_n), (1, 50.0, 1), "first to last token only");
-        r.add(200, false, 2.0, None, 10, 100);
-        r.add(200, false, 2.0, Some(0.5), 10, 1);
+        r.add(&Sample::new(200, false, 2.0, None, 10, 100));
+        r.add(&Sample::new(200, false, 2.0, Some(0.5), 10, 1));
         assert_eq!((r.decode_n, r.ttft_n), (1, 2), "no first token or a single token gives no speed");
     }
 
@@ -949,7 +1175,7 @@ mod tests {
     fn rows_round_trip_and_a_second_write_of_a_minute_adds_to_it() {
         let con = mem();
         let mut r = Requests::default();
-        r.add(200, false, 1.0, Some(0.1), 5, 50);
+        r.add(&Sample::new(200, false, 1.0, Some(0.1), 5, 50));
         put(&con, "minute", 600, "m", &r, true).unwrap();
         put(&con, "minute", 600, "m", &r, true).unwrap();
         let rows = select::<Requests>(&con, "minute", "", &[]).unwrap();
@@ -967,7 +1193,7 @@ mod tests {
         let now = 100 * 86400 + 3 * 3600 + 120;
         let h = hour_of(now) - 3600;
         let mut r = Requests::default();
-        r.add(200, false, 1.0, None, 1, 10);
+        r.add(&Sample::new(200, false, 1.0, None, 1, 10));
         for m in 0..3 {
             put(&con, "minute", h + m * 60, "m", &r, true).unwrap();
             put(&con, "minute", h + m * 60, "", &Host { samples: 12, cpu_pct: Some(10.0 * (m + 1) as f64), ..Host::default() }, true).unwrap();
@@ -1001,7 +1227,7 @@ mod tests {
         let now = 1_000_000 * 60 + 30;
         let base = minute_of(now) - 10 * 60;
         let mut r = Requests::default();
-        r.add(200, false, 1.0, None, 1, 3);
+        r.add(&Sample::new(200, false, 1.0, None, 1, 3));
         for m in 0..10 {
             put(&con, "minute", base + m * 60, "0", &Gpu { samples: 12, ..Gpu::default() }, false).unwrap();
         }
@@ -1015,6 +1241,82 @@ mod tests {
         assert_eq!((rep.from, rep.gpus.len(), rep.models.len()), (base + 300, 5, 0));
         let json = serde_json::to_value(&rep).unwrap();
         assert!(json["gpus"][0].get("samples").is_some() && json["gpus"][0].get("stats").is_none(), "rows are flat");
+    }
+
+    #[test]
+    fn new_counters_split_generation_and_the_router_hop() {
+        let mut r = Requests::default();
+        r.add(&Sample { reasoning: 30, cached: 900, router_ms: Some(40.0), ..Sample::new(200, false, 3.0, Some(0.5), 1000, 120) });
+        r.add(&Sample::new(200, false, 1.0, Some(0.25), 10, 20));
+        assert_eq!((r.reasoning_tokens, r.cached_tokens), (30, 900));
+        assert_eq!((r.generation_ms_sum, r.router_ms_sum, r.router_n), (3250, 40, 1));
+        assert_eq!(r.total_ttft_hist.iter().sum::<i64>(), 2);
+        assert_eq!(r.total_ttft_hist[bucket(540.0)] + r.total_ttft_hist[bucket(250.0)], 2, "a routed request waits engine time plus the hop");
+        let back = Requests::from_values(&r.values());
+        assert_eq!(back, Requests { decode_tps_sum: back.decode_tps_sum, ..r }, "every column round-trips (speed is kept to one decimal)");
+    }
+
+    #[test]
+    fn tuples_keep_every_dimension_and_overflow_into_other() {
+        let mut m = Minute::default();
+        let d = |i: usize| Dims { model: "m".into(), api_key_id: format!("k{i}"), network_path: "lan".into(), finish_reason: "stop".into(), ..Dims::default() };
+        for i in 0..MAX_TUPLES + 3 {
+            m.count(&d(i), &Sample::new(200, false, 1.0, None, 5, 5));
+        }
+        assert_eq!(m.tuples.len(), MAX_TUPLES + 1);
+        assert_eq!(m.models["m"].requests, MAX_TUPLES as i64 + 3);
+        let other = m.tuples.get(&d(0).other().key()).expect("overflow tuple");
+        assert_eq!((other.0.requests, Dims::from_key(&d(0).other().key()).api_key_id.as_str()), (3, OTHER));
+        let first = Dims::from_key(&d(0).key());
+        assert_eq!(first, d(0));
+        let weird = Dims { model: format!("a{KEY_SEP}b"), user_id: "u".repeat(200), ..Dims::default() };
+        let back = Dims::from_key(&weird.key());
+        assert_eq!((back.model.as_str(), back.user_id.len()), ("ab", MAX_DIM));
+    }
+
+    #[test]
+    fn an_older_usage_table_gains_the_new_columns_and_keeps_its_rows() {
+        let con = Connection::open_in_memory().unwrap();
+        for g in ["minute", "hour"] {
+            con.execute_batch(&format!(
+                "CREATE TABLE usage_{g} (t INTEGER NOT NULL, k TEXT NOT NULL, requests, ok, client_errors, server_errors, rate_limited, cancelled, prompt_tokens, completion_tokens, decode_tps_sum, decode_n, ttft_ms_sum, ttft_n, latency_hist, ttft_hist, PRIMARY KEY (t, k)) WITHOUT ROWID;"
+            ))
+            .unwrap();
+        }
+        con.execute_batch("INSERT INTO usage_minute (t, k, requests, prompt_tokens, latency_hist) VALUES (60, 'm', 2, 7, '0,2');").unwrap();
+        ensure_tables(&con).unwrap();
+        ensure_tables(&con).unwrap();
+        add_column(&con, "usage_minute", "cached_tokens").expect("a column another process added first is not an error");
+        assert!(add_column(&con, "no_such_table", "x").is_err());
+        let rows = select::<Requests>(&con, "minute", "", &[]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].2.requests, rows[0].2.prompt_tokens, rows[0].2.cached_tokens, rows[0].2.latency_hist.clone()), (2, 7, 0, vec![0, 2]));
+        let mut r = Requests::default();
+        r.add(&Sample { cached: 3, ..Sample::new(200, false, 1.0, Some(0.1), 4, 4) });
+        put(&con, "minute", 60, "m", &r, true).unwrap();
+        assert_eq!(select::<Requests>(&con, "minute", "", &[]).unwrap()[0].2.cached_tokens, 3);
+    }
+
+    #[test]
+    fn a_report_carries_the_tuple_rows_flat() {
+        let con = mem();
+        let now = 1_000_000 * 60 + 30;
+        let t = minute_of(now) - 120;
+        let d = Dims { model: "m".into(), engine: "sglang".into(), modality: "chat".into(), ..Dims::default() };
+        let mut r = Traffic::default();
+        r.0.add(&Sample::new(200, false, 1.0, Some(0.1), 3, 4));
+        put(&con, "minute", t, &d.key(), &r, true).unwrap();
+        let rep = report_at(&con, now, minute_of(now)).unwrap();
+        assert_eq!(rep.requests.len(), 1);
+        let json = serde_json::to_value(&rep.requests[0]).unwrap();
+        assert_eq!((json["model"].as_str(), json["engine"].as_str(), json["completion_tokens"].as_i64()), (Some("m"), Some("sglang"), Some(4)));
+        assert!(json.get("api_key_id").is_none() && json.get("dims").is_none(), "unset dimensions are left out and rows are flat");
+    }
+
+    #[test]
+    fn context_buckets_follow_the_prompt_size() {
+        let got: Vec<&str> = [0, 1024, 1025, 10240, 30000, 100_000, 200_000].iter().map(|&p| context_bucket(p)).collect();
+        assert_eq!(got, ["1k", "1k", "10k", "10k", "32k", "128k", "128k+"]);
     }
 
     #[test]
@@ -1037,7 +1339,7 @@ mod tests {
         let now = now_s();
         let m = minute_of(now) - 120;
         let mut r = Requests::default();
-        r.add(200, false, 1.0, Some(0.2), 5, 100);
+        r.add(&Sample::new(200, false, 1.0, Some(0.2), 5, 100));
         put(&con, "minute", m, "a", &r, true).unwrap();
         put(&con, "minute", m, "0", &Gpu { samples: 12, util_pct: Some(50.0), throttle: 4, ..Gpu::default() }, false).unwrap();
         put(&con, "hour", hour_of(now) - 5 * 86400, "a", &r, false).unwrap();

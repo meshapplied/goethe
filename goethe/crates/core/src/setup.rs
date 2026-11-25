@@ -49,7 +49,7 @@ pub fn write_env_file(home: &Path, text: &str) -> Result<(), String> {
             _ => Ok(()),
         };
     }
-    crate::platform::write_private(&path, text.as_bytes())
+    crate::client::link::write_private(&path, text.as_bytes())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -216,13 +216,13 @@ fn link_step(home: &Path, macos: bool) {
 
 fn heartbeat_check(home: &Path) {
     // A linked node with goethed up: wait up to 20 s for the platform to accept a heartbeat, and say plainly when it refuses one.
-    if !crate::platform_cli::is_linked(home) || !crate::service::goethed_running() {
+    if !crate::client::login::is_linked(home) || !crate::service::goethed_running() {
         return;
     }
-    let path = crate::platform::platform_dir(home).join("platform_state.json");
+    let path = crate::client::link::platform_dir(home).join("platform_state.json");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while std::time::Instant::now() < deadline {
-        let state: crate::platform::PlatformState = fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let state: crate::client::link::PlatformState = fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         if state.last_ok_at.is_some() && state.last_error.is_none() {
             say("the console accepted this node's heartbeat");
             return;
@@ -235,9 +235,9 @@ fn heartbeat_check(home: &Path) {
     }
 }
 
-pub fn login_question(link: &crate::platform_cli::Link) -> Option<&'static str> {
+pub fn login_question(link: &crate::client::login::Link) -> Option<&'static str> {
     // Asked when the node is not linked, or its login was revoked or expired (uninstall logs out, so a reinstall lands here); a working link is left alone.
-    use crate::platform_cli::Link;
+    use crate::client::login::Link;
     match link {
         Link::Linked { revoked: false, .. } | Link::Unreadable(_) => None,
         Link::Linked { revoked: true, .. } => Some("\nThis node's console login was revoked or has expired. Log in again now?"),
@@ -266,7 +266,7 @@ fn login_step(home: &Path, platform_url: Option<&str>) {
         }
         return;
     }
-    let Some(question) = login_question(&crate::platform_cli::link_state(home, false)) else {
+    let Some(question) = login_question(&crate::client::login::link_state(home, false)) else {
         return;
     };
     let later = "run goethe login any time to link this node to the Goethe console (logged-in nodes get optimised kernels for supported models)";
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn login_is_offered_unless_the_link_works() {
-        use crate::platform_cli::Link;
+        use crate::client::login::Link;
         let linked = |revoked| Link::Linked { workspace: "w".into(), revoked, heartbeat: String::new(), ok: true };
         assert!(login_question(&Link::NotLinked).unwrap().contains("Log in to the Goethe console now?"));
         assert!(login_question(&linked(true)).unwrap().contains("revoked or has expired"), "a token uninstall revoked");
@@ -444,7 +444,7 @@ mod tests {
         fs::create_dir_all(home).unwrap();
         #[cfg(unix)]
         fs::set_permissions(home, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
-        crate::platform::write_private(&home.join("goethe.env"), b"GOETHE_PKG_URL=https://pkg.meshapplied.com\nGOETHE_PKG_TOKEN=tok\n").unwrap();
+        crate::client::link::write_private(&home.join("goethe.env"), b"GOETHE_PKG_URL=https://pkg.meshapplied.com\nGOETHE_PKG_TOKEN=tok\n").unwrap();
         migrate_retired_pkg_env(home).unwrap();
         let text = fs::read_to_string(home.join("goethe.env")).unwrap_or_default();
         assert!(!text.contains("pkg.meshapplied.com"), "{text}");

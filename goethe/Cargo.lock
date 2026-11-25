@@ -274,7 +274,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -407,6 +407,10 @@ version = "0.3.6"
 dependencies = [
  "chrono",
  "flate2",
+ "goethe-proto",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "nvml-wrapper",
  "ring",
@@ -414,8 +418,11 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+ "tokio-rustls",
  "toml",
  "ureq",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -433,6 +440,7 @@ name = "goethed"
 version = "0.3.6"
 dependencies = [
  "goethe-core",
+ "goethe-proto",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -960,7 +968,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1167,7 +1175,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1225,6 +1233,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "tokio-rustls"
+version = "0.26.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
+dependencies = [
+ "rustls",
+ "tokio",
 ]
 
 [[package]]

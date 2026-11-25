@@ -165,7 +165,7 @@ Releases come from GitHub, never from a laptop:
 
 ## Tests
 
-    GOETHE_TEST_GPUS=2,3 bash tests/gate.sh <0..6|all> [--only <file>]
+    GOETHE_TEST_GPUS=<gpus> bash tests/gate.sh <0..6|all> [--only <file>]
 
 The gate first builds, runs `cargo test` and clippy, and uses those fresh binaries. Each test runs in its own session with a timeout and may only clean up processes it started. A pending test, a timeout, or zero collected tests fail the run; skipped opt-in tests are listed. Opt-in: `GOETHE_TEST_REAL=1` (real engines on the GPUs in `GOETHE_TEST_GPUS`). The installer is tested in VMs (`tests/vm/run.sh`) and the package by `package-smoke` in CI.
 

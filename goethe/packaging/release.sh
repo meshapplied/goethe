@@ -4,8 +4,8 @@
 set -euo pipefail
 
 REPO="$(git rev-parse --show-toplevel)"
-CRATES=(core goethe goethed)
-PACKAGES=(goethe-core goethe goethed)
+CRATES=(core goethe goethed proto)
+PACKAGES=(goethe-core goethe goethed goethe-proto)
 
 usage() {
   cat >&2 <<'EOF'

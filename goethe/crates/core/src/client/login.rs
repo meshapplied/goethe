@@ -1,8 +1,9 @@
 // goethe login, goethe logout and the platform lines of goethe status and the home screen.
 
 use crate::paths::goethe_home;
-use crate::platform::{self, Credentials, Secret};
-use crate::platform_api::{Approved, ApiError, Client, Poll, Started};
+use crate::client::link::{self, Credentials, Secret};
+use crate::client::api::{Approved, ApiError, Client, Poll, Started, TrustRoot};
+use goethe_proto::{InstallKey, TrustEntry};
 use crate::term::{command, paint, Color};
 use std::io::BufRead;
 use std::path::Path;
@@ -85,7 +86,7 @@ pub fn wait_for_approval(
             Ok(Poll::SlowDown) => interval = (interval + Duration::from_secs(5)).min(Duration::from_secs(60)),
             Ok(Poll::Expired) => return Err(WaitError::Failed("the code expired before it was approved; run goethe login again".into())),
             Ok(Poll::Denied) => return Err(WaitError::Failed("the login was denied on the console; nothing was linked".into())),
-            Ok(Poll::Approved(a)) => return Ok(a),
+            Ok(Poll::Approved(a)) => return Ok(*a),
             Err(ApiError::Status(404, code)) if code == "invalid_device_code" => {
                 return Err(WaitError::Failed("the console no longer knows this code (already used or unknown); run goethe login again".into()))
             }
@@ -130,7 +131,7 @@ fn read_authkey(raw: &str) -> Result<Secret, String> {
 
 fn check_home_writable(home: &Path) -> Result<(), String> {
     // Fail before contacting the platform when the credentials could not be stored safely.
-    platform::check_home(home)?;
+    link::check_home(home)?;
     if home.exists() && !crate::paths::is_writable(home) {
         return Err(format!("{} is not writable", home.display()));
     }
@@ -138,7 +139,7 @@ fn check_home_writable(home: &Path) -> Result<(), String> {
 }
 
 fn existing_link(home: &Path) -> Option<Credentials> {
-    match platform::load_credentials(home) {
+    match link::load_credentials(home) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("note: the saved link is not used ({e}); logging in replaces it");
@@ -152,7 +153,7 @@ fn logout_remote(c: &Credentials, timeout: Duration) -> Result<(), String> {
 }
 
 fn is_revoked(home: &Path, c: &Credentials) -> bool {
-    platform::load_state(home, &platform::link_key(c)).revoked_at.is_some()
+    link::load_state(home, &link::link_key(c)).revoked_at.is_some()
 }
 
 fn relink_intro(workspace: &str, revoked: bool) -> String {
@@ -166,23 +167,42 @@ fn relink_intro(workspace: &str, revoked: bool) -> String {
 fn replace_old_link(home: &Path, old: Option<Credentials>, same_node: Option<&str>) -> Result<(), String> {
     // A new login replaces the old link: log a live old node out (best effort; a revoked one is already gone, and the same node linked again needs none), then drop its credentials.
     let Some(old) = old.filter(|o| !is_revoked(home, o) && Some(o.node_id.as_str()) != same_node) else {
-        return platform::remove_credentials(home).map(|_| ());
+        return link::remove_credentials(home).map(|_| ());
     };
-    let ws = platform::clean_text(&old.workspace.name, 64);
+    let ws = link::clean_text(&old.workspace.name, 64);
     match logout_remote(&old, REQUEST_TIMEOUT) {
         Ok(()) => println!("Logged out the previous link (workspace {ws})."),
         Err(e) => println!("Could not log out the previous link (workspace {ws}): {e}. It will show offline on the console."),
     }
-    platform::remove_credentials(home).map(|_| ())
+    link::remove_credentials(home).map(|_| ())
 }
 
-fn finish(home: &Path, approved: Approved, url: &str) -> Result<(), String> {
-    // Store the credentials, tell goethed, and report the first heartbeat when goethed is up.
+fn pin_root(home: &Path, root: &TrustRoot, device_code: &Secret, node: &InstallKey) -> Result<String, String> {
+    // The approver's passkey, pinned only when it signed this device code for this install key at the console's origin (CONTRACTS 11.3).
+    let challenge = goethe_proto::link_challenge(&crate::security::token_hash(device_code.expose()), &node.hash());
+    if root.assertion.key_id != root.key_id || !goethe_proto::verify_assertion(&root.assertion, &root.public_key, &challenge, goethe_proto::RP_ID, goethe_proto::CONSOLE_ORIGIN) {
+        return Err("the console's approval signature does not verify, so no passkey was pinned".into());
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let entry = TrustEntry { key_id: root.key_id.clone(), public_key: root.public_key.clone(), user_id: root.user_id.clone(), cap: root.cap, added_by: root.user_id.clone(), added_ms: now };
+    crate::client::remote::pin(home, entry, "login")?;
+    Ok(goethe_proto::key_fingerprint(&root.public_key))
+}
+
+fn finish(home: &Path, approved: Approved, url: &str, linked: Option<(&Secret, &InstallKey)>) -> Result<(), String> {
+    // Store the credentials, pin the approver's passkey when the console sent one, tell goethed, and report the first heartbeat when goethed is up.
+    let root = approved.trust_root.clone();
     let creds = approved.into_credentials(url);
-    platform::save_credentials(home, &creds)?;
-    let ws = platform::clean_text(&creds.workspace.name, 64);
+    link::save_credentials(home, &creds)?;
+    let ws = link::clean_text(&creds.workspace.name, 64);
     println!("{} this node to workspace {ws} on {url}.", paint("Linked", Color::Green));
-    if !platform::poke_daemon() {
+    if let (Some(root), Some((code, node))) = (root, linked) {
+        match pin_root(home, &root, code, node) {
+            Ok(fp) => println!("Pinned the approver's passkey ({}); check the console shows the same fingerprint: {}", link::clean_text(&root.user_id, 64), paint(&fp, Color::Bold)),
+            Err(e) => println!("{e}; remote changes from the console stay off until a passkey is paired (goethe remote trust add)."),
+        }
+    }
+    if !link::poke_daemon() {
         if crate::service::goethed_running() {
             println!("goethed is running an older version without console support; it starts sending heartbeats after goethe update.");
         } else {
@@ -192,7 +212,7 @@ fn finish(home: &Path, approved: Approved, url: &str) -> Result<(), String> {
     }
     let end = Instant::now() + Duration::from_secs(6);
     while Instant::now() < end {
-        let st = platform::load_state(home, &platform::link_key(&creds));
+        let st = link::load_state(home, &link::link_key(&creds));
         if st.revoked_at.is_some() {
             return Err("the console refused the new token right away; run goethe login again".into());
         }
@@ -214,15 +234,15 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
     // goethe login: the device flow in a browser, or an auth key (a console passkey), which links at once even over a live link; the key is redeemed before the old link is logged out, so a bad key changes nothing.
     let home = goethe_home();
     let url = match platform_url {
-        Some(u) => platform::check_url(u)?,
-        None => platform::platform_url()?,
+        Some(u) => link::check_url(u)?,
+        None => link::platform_url()?,
     };
     check_home_writable(&home)?;
     let key = authkey.map(read_authkey).transpose()?;
     let old = existing_link(&home);
     if let Some(o) = &old {
         let revoked = is_revoked(&home, o);
-        let ws = platform::clean_text(&o.workspace.name, 64);
+        let ws = link::clean_text(&o.workspace.name, 64);
         if revoked || key.is_none() {
             println!("{}", relink_intro(&ws, revoked));
         }
@@ -231,17 +251,17 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
         }
     }
     let client = Client::new(&url, REQUEST_TIMEOUT)?;
-    let (hostname, fingerprint, install_key) = (platform::hostname(), platform::fingerprint(), platform::install_key(&home)?);
+    let (hostname, fingerprint, install_key, node) = (link::hostname(), link::fingerprint(), link::install_key(&home)?, link::node_key(&home)?);
     let _ctrl_c = CtrlC::catch();
     if let Some(key) = key {
-        let approved = with_retries(|| client.enroll(&key, &hostname, &fingerprint, &install_key)).map_err(|e| match e {
+        let approved = with_retries(|| client.enroll(&key, &hostname, &fingerprint, &install_key, &node)).map_err(|e| match e {
             ApiError::Unauthorized => "the console did not accept the auth key (wrong, used or expired); nothing was changed".to_string(),
             e => format!("{e}; nothing was changed"),
         })?;
         replace_old_link(&home, old, Some(&approved.node_id))?;
-        return finish(&home, approved, &client.base());
+        return finish(&home, approved, &client.base(), None);
     }
-    let started = with_retries(|| client.auth_start(&hostname, &fingerprint, &install_key)).map_err(|e| format!("{e}; nothing was changed"))?;
+    let started = with_retries(|| client.auth_start(&hostname, &fingerprint, &install_key, &node)).map_err(|e| format!("{e}; nothing was changed"))?;
     replace_old_link(&home, old, None)?;
     println!(
         "\nTo link this node ({hostname}), open:\n\n{}\n\nand enter the code {} (it is valid for {})\n",
@@ -263,7 +283,7 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
         },
     );
     match result {
-        Ok(approved) => finish(&home, approved, &client.base()),
+        Ok(approved) => finish(&home, approved, &client.base(), Some((&started.device_code, &node))),
         Err(WaitError::Cancelled) => Err("login cancelled; this node is not linked".into()),
         Err(WaitError::Failed(e)) => Err(e),
     }
@@ -272,10 +292,10 @@ pub fn login(platform_url: Option<&str>, authkey: Option<&str>) -> Result<(), St
 pub fn logout() -> Result<(), String> {
     // goethe logout: tell the platform when it answers, and always remove the local link.
     let home = goethe_home();
-    let creds = match platform::load_credentials(&home) {
+    let creds = match link::load_credentials(&home) {
         Ok(Some(c)) => Some(c),
         Ok(None) => {
-            if platform::remove_credentials(&home)? {
+            if link::remove_credentials(&home)? {
                 println!("Removed the local link.");
             } else {
                 println!("This node is not linked to the console.");
@@ -291,9 +311,9 @@ pub fn logout() -> Result<(), String> {
         Some(c) => logout_remote(c, REQUEST_TIMEOUT),
         None => Err("the credentials could not be read".into()),
     };
-    platform::remove_credentials(&home)?;
-    platform::poke_daemon();
-    let ws = creds.as_ref().map(|c| platform::clean_text(&c.workspace.name, 64)).unwrap_or_default();
+    link::remove_credentials(&home)?;
+    link::poke_daemon();
+    let ws = creds.as_ref().map(|c| link::clean_text(&c.workspace.name, 64)).unwrap_or_default();
     match remote {
         Ok(()) => println!("Logged out of workspace {ws}. The console keeps this node offline; goethe login links it again as the same node."),
         Err(e) => println!(
@@ -327,7 +347,7 @@ pub fn token_lifetime(raw: &str) -> Result<(), String> {
     // goethe login --lifetime: limit how long this node's login lasts (the workspace's setting still applies).
     let ttl = parse_lifetime(raw)?;
     let home = goethe_home();
-    let c = platform::load_credentials(&home)?.ok_or("this node is not logged in (goethe login)")?;
+    let c = link::load_credentials(&home)?.ok_or("this node is not logged in (goethe login)")?;
     let client = Client::new(&c.platform_url, REQUEST_TIMEOUT)?;
     let expires = client.token_lifetime(&c.token, ttl).map_err(|e| match e {
         ApiError::Unauthorized => "the console did not accept this node's login (revoked or expired); run goethe login".to_string(),
@@ -342,17 +362,17 @@ pub fn token_lifetime(raw: &str) -> Result<(), String> {
 
 pub fn uninstall_logout(home: &Path) {
     // Best effort for goethe uninstall: log the node out quickly; the credentials go with the home.
-    if let Ok(Some(c)) = platform::load_credentials(home) {
+    if let Ok(Some(c)) = link::load_credentials(home) {
         match logout_remote(&c, Duration::from_secs(5)) {
             Ok(()) => println!("logged this node out of the console"),
             Err(e) => println!("could not log this node out of the console ({e}); it will show offline there"),
         }
     }
-    let _ = platform::remove_credentials(home);
+    let _ = link::remove_credentials(home);
 }
 
 pub fn is_linked(home: &Path) -> bool {
-    platform::credentials_path(home).exists() || home.join("credentials").exists()
+    link::credentials_path(home).exists() || home.join("credentials").exists()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -373,13 +393,13 @@ fn lifetime(seconds: u64) -> String {
 
 pub fn link_state(home: &Path, daemon_running: bool) -> Link {
     // The saved link and the last heartbeat goethed recorded for it.
-    let creds = match platform::load_credentials(home) {
+    let creds = match link::load_credentials(home) {
         Ok(Some(c)) => c,
         Ok(None) => return Link::NotLinked,
         Err(e) => return Link::Unreadable(e),
     };
-    let st = platform::load_state(home, &platform::link_key(&creds));
-    let workspace = platform::clean_text(&creds.workspace.name, 64);
+    let st = link::load_state(home, &link::link_key(&creds));
+    let workspace = link::clean_text(&creds.workspace.name, 64);
     let (heartbeat, ok) = heartbeat_text(&st, daemon_running, chrono::Utc::now());
     Link::Linked { workspace, revoked: st.revoked_at.is_some(), heartbeat, ok }
 }
@@ -396,7 +416,7 @@ fn ago(secs: i64) -> String {
     }
 }
 
-pub fn heartbeat_text(st: &platform::PlatformState, daemon_running: bool, now: chrono::DateTime<chrono::Utc>) -> (String, bool) {
+pub fn heartbeat_text(st: &link::PlatformState, daemon_running: bool, now: chrono::DateTime<chrono::Utc>) -> (String, bool) {
     // OK with its age, failing with the reason, or why none is sent.
     if st.revoked_at.is_some() {
         return ("stopped: the console revoked this node".into(), false);
@@ -434,6 +454,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_approvers_passkey_is_pinned_only_for_this_device_code_and_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let node = link::node_key(&home).unwrap();
+        let code = Secret::new("device-code-1");
+        let pk = goethe_proto::testkit::Passkey::new("k1");
+        let sign = |code: &str, install: &str| {
+            let challenge = goethe_proto::link_challenge(&crate::security::token_hash(code), install);
+            pk.assert(&challenge, goethe_proto::RP_ID, goethe_proto::CONSOLE_ORIGIN, true)
+        };
+        let root = |assertion| TrustRoot { key_id: "k1".into(), public_key: pk.public_key_b64(), user_id: "u1".into(), cap: goethe_proto::Kind::Network, assertion };
+        assert!(pin_root(&home, &root(sign("device-code-2", &node.hash())), &code, &node).is_err(), "another device code");
+        assert!(pin_root(&home, &root(sign("device-code-1", "other-install")), &code, &node).is_err(), "another install");
+        assert!(crate::client::remote::status(&home).trust.is_empty());
+        let fp = pin_root(&home, &root(sign("device-code-1", &node.hash())), &code, &node).unwrap();
+        assert_eq!(fp, goethe_proto::key_fingerprint(&pk.public_key_b64()));
+        let pinned = crate::client::remote::status(&home).trust;
+        assert_eq!((pinned.len(), pinned[0].cap, pinned[0].user_id.as_str()), (1, goethe_proto::Kind::Network, "u1"));
+    }
+
+    #[test]
     fn the_login_code_says_how_long_it_lives() {
         assert_eq!(lifetime(900), "15 minutes");
         assert_eq!(lifetime(90), "1 minute");
@@ -450,15 +491,15 @@ mod tests {
             assert!(parse_lifetime(bad).is_err(), "{bad}");
         }
     }
-    use crate::platform::{PlatformState, Workspace};
-    use crate::platform_api::mock;
+    use crate::client::link::{PlatformState, Workspace};
+    use crate::client::api::mock;
 
     fn started(interval: u64, expires: u64) -> Started {
         Started { device_code: Secret::new("dc"), user_code: "ABCD-1234".into(), verification_uri_complete: "https://p/device".into(), expires_in: expires, interval }
     }
 
     fn approved() -> Approved {
-        Approved { node_id: "n1".into(), node_token: Secret::new("mesh_node_cccccccccccccccc"), workspace: Workspace { id: "w".into(), name: "Lab".into() } }
+        Approved { node_id: "n1".into(), node_token: Secret::new("mesh_node_cccccccccccccccc"), workspace: Workspace { id: "w".into(), name: "Lab".into() }, trust_root: None }
     }
 
     fn run(replies: Vec<Result<Poll, ApiError>>, s: &Started, cancel_after: Option<usize>) -> (Result<Approved, WaitError>, Vec<Duration>, usize) {
@@ -479,7 +520,7 @@ mod tests {
 
     #[test]
     fn polls_at_the_interval_and_slows_down_when_told() {
-        let (r, slept, _) = run(vec![Ok(Poll::Pending), Ok(Poll::SlowDown), Ok(Poll::Pending), Ok(Poll::Approved(approved()))], &started(3, 900), None);
+        let (r, slept, _) = run(vec![Ok(Poll::Pending), Ok(Poll::SlowDown), Ok(Poll::Pending), Ok(Poll::Approved(Box::new(approved())))], &started(3, 900), None);
         assert_eq!(r.unwrap().node_id, "n1");
         let secs: Vec<u64> = slept.iter().map(|d| d.as_secs()).collect();
         assert_eq!(secs, [3, 3, 8, 8]);
@@ -487,7 +528,7 @@ mod tests {
 
     #[test]
     fn network_blips_are_retried_and_hard_errors_stop() {
-        let (r, _, blips) = run(vec![Err(ApiError::Network("reset".into())), Err(ApiError::Status(503, String::new())), Ok(Poll::Approved(approved()))], &started(1, 900), None);
+        let (r, _, blips) = run(vec![Err(ApiError::Network("reset".into())), Err(ApiError::Status(503, String::new())), Ok(Poll::Approved(Box::new(approved())))], &started(1, 900), None);
         assert!(r.is_ok());
         assert_eq!(blips, 2);
         let (r, _, _) = run(vec![Err(ApiError::Status(400, "bad_code".into()))], &started(1, 900), None);
@@ -495,9 +536,9 @@ mod tests {
         let (r, slept, _) = run(vec![Ok(Poll::Pending), Err(ApiError::Status(404, "invalid_device_code".into()))], &started(3, 900), None);
         assert!(matches!(r, Err(WaitError::Failed(e)) if e.contains("goethe login again")));
         assert_eq!(slept.len(), 2, "a used or unknown code stops the polling");
-        let (r, _, blips) = run(vec![Err(ApiError::RateLimited(Duration::from_secs(2))), Ok(Poll::Approved(approved()))], &started(3, 900), None);
+        let (r, _, blips) = run(vec![Err(ApiError::RateLimited(Duration::from_secs(2))), Ok(Poll::Approved(Box::new(approved())))], &started(3, 900), None);
         assert!(r.is_ok() && blips == 1);
-        let (r, _, blips) = run(vec![Err(ApiError::Status(404, String::new())), Ok(Poll::Pending), Ok(Poll::Approved(approved()))], &started(1, 900), None);
+        let (r, _, blips) = run(vec![Err(ApiError::Status(404, String::new())), Ok(Poll::Pending), Ok(Poll::Approved(Box::new(approved())))], &started(1, 900), None);
         assert!(r.is_ok() && blips == 1, "a 404 page without the console's own code (a deploy or a proxy) is only a blip");
     }
 
@@ -526,7 +567,7 @@ mod tests {
             (200, r#"{"status":"approved","node_id":"n7","node_token":"mesh_node_dddddddddddddddd","workspace":{"id":"w7","name":"Prod"}}"#.into()),
         ]);
         let c = Client::new(&m.url, Duration::from_secs(5)).unwrap();
-        let s = c.auth_start("h", "f", &Secret::new("gik_install")).unwrap();
+        let s = c.auth_start("h", "f", &Secret::new("gik_install"), &InstallKey::from_pkcs8(&InstallKey::generate().unwrap()).unwrap()).unwrap();
         let mut blips = 0;
         let a = wait_for_approval(&s, &mut || c.auth_poll(&s.device_code), &mut |_| true, &mut |_| blips += 1).unwrap();
         assert_eq!((a.node_id.as_str(), a.workspace.name.as_str(), blips), ("n7", "Prod", 1));
@@ -564,24 +605,24 @@ mod tests {
             token: Secret::new("mesh_node_gggggggggggggggggggg"),
             linked_at: "t".into(),
         };
-        platform::save_credentials(home, &c).unwrap();
+        link::save_credentials(home, &c).unwrap();
         assert!(!is_revoked(home, &c));
         assert!(relink_intro("Personal", false).starts_with("Already logged in"));
-        let st = PlatformState { link: platform::link_key(&c), revoked_at: Some("t".into()), ..Default::default() };
-        platform::save_state(home, &st).unwrap();
+        let st = PlatformState { link: link::link_key(&c), revoked_at: Some("t".into()), ..Default::default() };
+        link::save_state(home, &st).unwrap();
         assert!(is_revoked(home, &c));
         assert_eq!(relink_intro("Personal", true), "The previous link (workspace Personal) was revoked or expired on the console; linking again.");
         replace_old_link(home, Some(c.clone()), None).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(*m.connections.lock().unwrap(), 0, "no logout call for a revoked link");
-        assert_eq!(platform::load_credentials(home).unwrap(), None);
-        platform::save_state(home, &PlatformState { link: platform::link_key(&c), ..Default::default() }).unwrap();
-        platform::save_credentials(home, &c).unwrap();
+        assert_eq!(link::load_credentials(home).unwrap(), None);
+        link::save_state(home, &PlatformState { link: link::link_key(&c), ..Default::default() }).unwrap();
+        link::save_credentials(home, &c).unwrap();
         replace_old_link(home, Some(c.clone()), Some(&c.node_id)).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(*m.connections.lock().unwrap(), 0, "the same node linked again is not logged out");
-        assert_eq!(platform::load_credentials(home).unwrap(), None);
-        platform::save_credentials(home, &c).unwrap();
+        assert_eq!(link::load_credentials(home).unwrap(), None);
+        link::save_credentials(home, &c).unwrap();
         replace_old_link(home, Some(c), Some("another-node")).unwrap();
         assert_eq!(m.seen.lock().unwrap()[0].path, "/api/device/logout", "a live link is logged out");
     }

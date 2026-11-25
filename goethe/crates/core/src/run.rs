@@ -340,7 +340,7 @@ impl Api {
             let body = json!({"model": model, "messages": [{"role": "user", "content": part}], "stream": false});
             return Ok(self.call("POST", "/chat/completions", Some(body))?["choices"][0]["message"]["content"].as_str().unwrap_or_default().trim().to_string());
         }
-        let (b, name) = ("goethe-run-boundary", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        let (b, name) = ("goethe-run-boundary", form_filename(path));
         let mut body = format!("--{b}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").into_bytes();
         body.extend(audio);
         body.extend(format!("\r\n--{b}--\r\n").as_bytes());
@@ -356,7 +356,10 @@ impl Api {
         for line in BufReader::new(r.into_reader()).lines() {
             let line = line.map_err(|e| e.to_string())?;
             let Some(data) = line.strip_prefix("data:").map(str::trim).filter(|d| *d != "[DONE]") else { continue };
-            let v = serde_json::from_str::<Value>(data).unwrap_or_default();
+            let v = serde_json::from_str::<Value>(data).map_err(|e| format!("the gateway sent a reply that is not JSON: {e}"))?;
+            if let Some(err) = v.get("error") {
+                return Err(err["message"].as_str().map_or_else(|| err.to_string(), str::to_string));
+            }
             usage = v["usage"]["completion_tokens"].as_u64().or(usage);
             let piece = v["choices"][0]["delta"]["content"].as_str().unwrap_or_default();
             chunks += u64::from(!piece.is_empty());
@@ -367,6 +370,12 @@ impl Api {
         }
         Ok((out, usage.unwrap_or(chunks)))
     }
+}
+
+fn form_filename(path: &std::path::Path) -> String {
+    // The audio file's name as a multipart filename: quotes, backslashes and control characters cannot end the header or add one.
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    name.chars().map(|c| if c == '"' || c == '\\' || c.is_control() { '_' } else { c }).collect()
 }
 
 pub(crate) fn embed_line(e: &[f64]) -> String {
@@ -408,6 +417,12 @@ fn fail(e: ureq::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_audio_file_name_cannot_break_the_form() {
+        assert_eq!(form_filename(std::path::Path::new("/a/talk.wav")), "talk.wav");
+        assert_eq!(form_filename(std::path::Path::new("/a/x\"\r\nContent-Type: y.wav")), "x___Content-Type: y.wav");
+    }
 
     #[test]
     fn a_signal_unloads_what_this_run_loaded_and_leaves_with_the_shell_code() {
