@@ -336,10 +336,12 @@ fn plain_output_says_what_a_plan_still_needs() {
     let cat = build_catalog(&Cli::command());
     let ret = HybridRetriever::build(&cat, StaticModel::load_default());
     let world = fixture_world();
-    let need = |q: &str| super::needs(&PlanState::build(q, &cat, &ret, &world, &validate_cli).next_decision(&cat, &world));
+    let need = |q: &str| super::not_ready(&PlanState::build(q, &cat, &ret, &world, &validate_cli).next_decision(&cat, &world));
     let qwen = need("load some qwen");
-    assert!(qwen.contains("Qwen/Qwen2.5-7B-Instruct") && qwen.contains("Qwen/Qwen2.5-14B-Instruct"), "{qwen}");
+    assert!(qwen.starts_with("needs which ") && qwen.contains("Qwen/Qwen2.5-7B-Instruct") && qwen.contains("Qwen/Qwen2.5-14B-Instruct"), "{qwen}");
     assert!(need("load mistral with 8").contains('8'), "{}", need("load mistral with 8"));
+    assert_eq!(need("load mistral on gpu7"), "cannot run: there is no gpu7 on this machine; goethe gpu lists them", "a step that cannot run says why, not what it needs");
+    assert!(!need("open youtube").contains("needs"), "{}", need("open youtube"));
 }
 
 #[test]
