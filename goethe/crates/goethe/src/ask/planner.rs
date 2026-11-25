@@ -1,7 +1,7 @@
 // One request (one or more parts) to an ordered list of clap commands: rank each part, read the live state, ask for what is missing, validate.
 
 use super::embed::{ScoredIntent, ShortlistBackend};
-use super::parse::{find_hf_or_path, find_shell_metachar, is_obvious_ood, negation, number, split_parts, split_words, without_wish};
+use super::parse::{find_hf_or_path, find_shell_metachar, is_obvious_ood, negation, number, question, split_parts, split_words, without_wish};
 use super::schema::{CliCatalog, IntentCard, Kind, Risk};
 use super::slots::{extract_slots, slot_candidates, World};
 use crate::spec::{Asked, Fact};
@@ -100,7 +100,7 @@ impl PlanState {
         world: &World,
         validate: &Validate,
     ) -> Self {
-        // A request is one or more parts; each part is one command ranked on what to do (a written model id is a value, shared by the parts), then what the live state needs first.
+        // A request is one or more parts; each part is one command ranked on what to do (a written model id is a value, shared by the parts), then what the live state needs first; a question's changes are only offered.
         let trimmed = query.trim();
         if trimmed.is_empty() {
             return Self::abstained(trimmed, "Type what you want Goethe to do, such as: load qwen and give me an API.", world);
@@ -147,6 +147,11 @@ impl PlanState {
         if goals.is_empty() {
             let reason = negated.map_or_else(|| "No Goethe command matches that request closely enough; goethe help lists the commands.".to_string(), |w| format!("Ask plans what to do, not what not to do ('{w}'); say what you want done."));
             return Self::abstained(trimmed, &reason, world);
+        }
+        if question(trimmed) {
+            for g in goals.iter_mut().filter(|g| catalog.get(&g.intent_id).is_some_and(super::embed::gated)) {
+                g.needs_intent_pick = true;
+            }
         }
         let mut plan = PlanState { raw_query: trimmed.to_string(), parts, goals, lines: Vec::new(), abstain: None, model_ref, world: world.clone() };
         plan.refresh(catalog, validate);

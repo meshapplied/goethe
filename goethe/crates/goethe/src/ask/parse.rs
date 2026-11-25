@@ -101,6 +101,16 @@ pub fn split_parts(s: &str) -> Vec<(String, bool)> {
     parts.into_iter().map(|(p, step)| (p.trim().to_string(), step)).filter(|(p, _)| !p.is_empty()).collect()
 }
 
+pub fn question(s: &str) -> bool {
+    // A question asks about the state, not for a change: it starts with a question word ("do" only before i, we or you), or ends with "?" unless it opens politely ("could you load it?" is a request).
+    let low = s.trim().to_ascii_lowercase();
+    let mut words = low.split_whitespace();
+    let first = words.next().unwrap_or("").trim_end_matches(['?', ',']);
+    let asks = matches!(first, "what" | "what's" | "whats" | "which" | "who" | "why" | "where" | "when" | "how" | "is" | "are" | "does")
+        || (first == "do" && words.next().is_some_and(|w| matches!(w, "i" | "we" | "you")));
+    asks || (low.ends_with('?') && !matches!(first, "can" | "could" | "would" | "will" | "please"))
+}
+
 pub fn without_wish(s: &str) -> String {
     // "I want you to", "can you please": a wish before the verb says nothing about the command and drowns the verb.
     const WISH: [&str; 14] = ["i", "i'd", "want", "would", "like", "need", "you", "to", "can", "could", "will", "please", "pls", "kindly"];

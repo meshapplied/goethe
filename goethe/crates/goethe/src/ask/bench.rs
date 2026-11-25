@@ -253,6 +253,24 @@ fn no_step_or_value_is_dropped() {
 }
 
 #[test]
+fn a_question_only_reads() {
+    // The owner's rule: a question never plans a change; it asks back before one ("what can i run here" started goethe and a chat).
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let shown = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
+    for q in ["what can i run here", "is it possible to load mistral?", "load mistral now?", "why not unload mistral"] {
+        let p = plan(q);
+        assert!(!p.is_ready() || p.all_readonly(), "{q} changes something: {:?}", shown(&p));
+    }
+    for q in ["could you load mistral?", "can you load mistral", "please can you load mistral?", "load mistral"] {
+        let p = plan(q);
+        assert!(p.is_ready() && shown(&p).last().is_some_and(|l| l == "goethe load mistralai/Mistral-7B-Instruct"), "{q}: {:?}", shown(&p));
+    }
+}
+
+#[test]
 fn a_request_of_many_steps_binds_each_value_to_its_own_step() {
     // The owner's request: two models on two GPUs, a third GPU blocked, a key scoped to each model; a step without a command word continues the one before, and "each" repeats over the models bound earlier.
     let cat = build_catalog(&Cli::command());
