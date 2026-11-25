@@ -665,7 +665,7 @@ fn plan_build_never_panics_on_unicode_junk() {
         "load ./\u{6A21}\u{578B}/foo".into(),
         "api allow add 203.0.113.7/32 \u{2026} please".to_string(),
         long,
-        "".into(),
+        String::new(),
         "   ".into(),
         "\n\t".into(),
         "a && b || c; d | e > f < g `h` $(i)".into(),
@@ -876,10 +876,9 @@ fn eval_system(name: &'static str, report_misses: bool, ret: &dyn ShortlistBacke
         let ok = match p.next_decision(cat, live) {
             PendingDecision::PickIntent { options, .. } => expected_in_top3
                 .as_ref()
-                .map(|want| options.iter().take(3).any(|o| want.contains(&o.id)))
-                .unwrap_or(true),
+                .is_none_or(|want| options.iter().take(3).any(|o| want.contains(&o.id))),
             PendingDecision::PickSlot { missing, .. } | PendingDecision::PromptSlot { missing, .. } => {
-                expected_slot.map(|w| w == missing.name).unwrap_or(true)
+                expected_slot.is_none_or(|w| w == missing.name)
             }
             _ => false,
         };
@@ -914,7 +913,7 @@ fn eval_system(name: &'static str, report_misses: bool, ret: &dyn ShortlistBacke
                 q,
                 primary(&p).map(|s| (&s.intent_id, &s.argv, s.verified)),
                 p.abstain,
-                primary(&p).map(|s| s.needs_intent_pick).unwrap_or(false)
+                primary(&p).is_some_and(|s| s.needs_intent_pick)
             );
         }
     }
@@ -956,7 +955,7 @@ fn eval_system(name: &'static str, report_misses: bool, ret: &dyn ShortlistBacke
             }
         }
     }
-    latencies_ms.sort_by(|a, b| a.total_cmp(b));
+    latencies_ms.sort_by(f64::total_cmp);
     let p95_ms = latencies_ms[(latencies_ms.len() * 95 / 100).min(latencies_ms.len().saturating_sub(1))];
     EvalSummary {
         name,

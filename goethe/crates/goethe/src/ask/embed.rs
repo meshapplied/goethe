@@ -212,7 +212,7 @@ impl HybridRetriever {
     }
 
     pub fn dense_dim(&self) -> usize {
-        self.model.as_ref().map(StaticModel::dim).unwrap_or(0)
+        self.model.as_ref().map_or(0, StaticModel::dim)
     }
 
     pub fn build(catalog: &CliCatalog, model: Option<StaticModel>) -> Self {
@@ -230,7 +230,7 @@ impl HybridRetriever {
         let mut exact_phrases = Vec::with_capacity(catalog.intents.len());
         for card in &catalog.intents {
             ids.push(card.id.clone());
-            cmd_tokens.push(card.id.split('.').map(|s| s.to_ascii_lowercase()).collect());
+            cmd_tokens.push(card.id.split('.').map(str::to_ascii_lowercase).collect());
             let mut phrases = vec![card.id.replace('.', " ")];
             if card.argv_prefix.len() > 1 {
                 phrases.push(card.argv_prefix[1..].join(" "));
@@ -317,7 +317,7 @@ impl ShortlistBackend for HybridRetriever {
 
     fn rank(&self, query: &str, top_k: usize) -> Vec<ScoredIntent> {
         // BM25 and embedding similarity, fused by reciprocal rank and blended with both scores.
-        let head = query.split_once(" -- ").map(|(l, _)| l).unwrap_or(query);
+        let head = query.split_once(" -- ").map_or(query, |(l, _)| l);
         let q_lower = head.trim().to_ascii_lowercase();
         let q_toks = lex_tokens(&q_lower);
         let n = self.ids.len();
@@ -368,7 +368,7 @@ pub(super) fn gated(card: &super::schema::IntentCard) -> bool {
 }
 
 pub(super) fn names(card: &super::schema::IntentCard) -> Vec<String> {
-    card.id.rsplit('.').next().into_iter().map(str::to_string).chain(card.aliases.iter().map(|a| a.to_ascii_lowercase())).chain(card.does.says.iter().map(|w| w.to_string())).collect()
+    card.id.rsplit('.').next().into_iter().map(str::to_string).chain(card.aliases.iter().map(|a| a.to_ascii_lowercase())).chain(card.does.says.iter().map(ToString::to_string)).collect()
 }
 
 pub(super) fn same_word(a: &str, b: &str) -> bool {
@@ -449,7 +449,7 @@ pub fn lex_tokens(text: &str) -> Vec<String> {
     // Normalized lexical tokens for BM25, dropping tiny stop words and paths/URLs.
     const STOP: &[&str] = &["the", "and", "for", "with", "that", "this", "from", "into", "your", "please", "can", "you"];
     text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .map(|s| s.to_ascii_lowercase())
+        .map(str::to_ascii_lowercase)
         .filter(|s| s.len() >= 2 && !STOP.contains(&s.as_str()))
         .collect()
 }

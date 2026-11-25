@@ -15,7 +15,7 @@ fn parse_explicit_flags(card: &IntentCard, tokens: &[String], out: &mut HashMap<
     while i < tokens.len() {
         let tok = &tokens[i];
         if let Some(rest) = tok.strip_prefix("--") {
-            let (name, inline_val) = rest.split_once('=').map(|(a, b)| (a, Some(b))).unwrap_or((rest, None));
+            let (name, inline_val) = rest.split_once('=').map_or((rest, None), |(a, b)| (a, Some(b)));
             if let Some(f) = card.flags.iter().find(|f| f.long == name) {
                 if !f.takes_value {
                     out.entry(f.long.clone()).or_default();
@@ -119,7 +119,7 @@ fn cand_pairs(cands: Vec<clap_complete::engine::CompletionCandidate>) -> Vec<(St
         .into_iter()
         .map(|c| {
             let val = c.get_value().to_string_lossy().into_owned();
-            let help = c.get_help().map(|h| h.to_string()).unwrap_or_default();
+            let help = c.get_help().map(ToString::to_string).unwrap_or_default();
             (val, help)
         })
         .collect()
@@ -223,7 +223,7 @@ pub enum PosMatch {
 
 pub fn find_kind(kind: Kind, possible: &[String], text: &str, tokens: &[String], world: &World) -> PosMatch {
     // The value of one kind in a request, from typed spans and the live state.
-    let one = |v: Option<String>| v.map(|x| PosMatch::Values(vec![x])).unwrap_or(PosMatch::None);
+    let one = |v: Option<String>| v.map_or(PosMatch::None, |x| PosMatch::Values(vec![x]));
     let many = |vs: Vec<String>| if vs.is_empty() { PosMatch::None } else { PosMatch::Values(vs) };
     match kind {
         Kind::Model | Kind::InstalledModel | Kind::ModelOrAll => match find_hf_or_path(tokens) {

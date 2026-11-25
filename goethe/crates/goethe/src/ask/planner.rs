@@ -744,10 +744,10 @@ fn without(text: &str, model_ref: Option<&str>) -> String {
     // The words that say what to do; the model id is a value, not part of what to do.
     let text = &without_wish(text);
     let Some(m) = model_ref else {
-        return text.to_string();
+        return text.clone();
     };
     let rest = split_words(text).into_iter().filter(|t| !t.contains(m)).collect::<Vec<_>>().join(" ");
-    if rest.trim().is_empty() { text.to_string() } else { rest }
+    if rest.trim().is_empty() { text.clone() } else { rest }
 }
 
 pub(crate) fn order_lines(goals: &[PlanStep], world: &World, catalog: &CliCatalog) -> Vec<PlanLine> {
@@ -788,7 +788,7 @@ pub(crate) fn needs_install(model: &str, world: &World) -> bool {
     if !world.installed_known {
         return true;
     }
-    let target = world.aliases.iter().find(|(a, _)| a == model).map(|(_, id)| id.as_str()).unwrap_or(model);
+    let target = world.aliases.iter().find(|(a, _)| a == model).map_or(model, |(_, id)| id.as_str());
     !world.installed.iter().any(|id| id == target || id == model)
 }
 

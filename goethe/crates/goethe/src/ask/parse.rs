@@ -387,7 +387,7 @@ mod tests {
     fn odd_inputs_do_not_panic() {
         let long = "a".repeat(10_000);
         let cases = [
-            "".to_string(),
+            String::new(),
             "\u{2026}".to_string(),
             "\u{2014}".to_string(),
             "\u{1F525}\u{1F525}\u{1F525}".to_string(),

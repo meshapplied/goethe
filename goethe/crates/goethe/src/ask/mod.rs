@@ -360,7 +360,7 @@ fn push_line(log: &Mutex<RunLog>, step: usize, line: &str) {
     let Some(s) = l.steps.get_mut(step) else {
         return;
     };
-    if clean.is_empty() && s.out.last().is_none_or(|l| l.is_empty()) {
+    if clean.is_empty() && s.out.last().is_none_or(String::is_empty) {
         return;
     }
     s.out.push(clean);
@@ -690,7 +690,9 @@ fn parse_args(args: &[String]) -> Result<AskFlags, String> {
     let mut rest = Vec::new();
     let mut in_utterance = false;
     for tok in args.iter().skip(2) {
-        if !in_utterance {
+        if in_utterance {
+            rest.push(tok.clone());
+        } else {
             match tok.as_str() {
                 "-h" | "--help" => flags.help = true,
                 "-y" | "--yes" => flags.opts.yes = true,
@@ -706,8 +708,6 @@ fn parse_args(args: &[String]) -> Result<AskFlags, String> {
                     rest.push(tok.clone());
                 }
             }
-        } else {
-            rest.push(tok.clone());
         }
     }
     flags.utterance = rest.join(" ");
