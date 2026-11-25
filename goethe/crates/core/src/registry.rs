@@ -260,6 +260,12 @@ fn fetch_http_uncached(home: &Path, url: &str) -> Result<Registry, String> {
     }
 }
 
+pub fn known_ids() -> Vec<String> {
+    // The models of the last registry fetched (cached only after its signature checked), else the catalog built into goethe; no network.
+    let cached = std::fs::read_to_string(goethe_home().join("registry.cache.json")).ok().and_then(|t| serde_json::from_str::<RegistryCache>(&t).ok()).and_then(|c| parse_registry(&c.body).ok());
+    cached.or_else(|| bundled().ok()).map(|r| r.models.into_iter().filter(|m| !m.manual_download.unwrap_or(false)).map(|m| m.id).collect()).unwrap_or_default()
+}
+
 pub fn find_model<'a>(reg: &'a Registry, model_id: &str) -> Option<&'a RegistryModel> {
     reg.models.iter().find(|m| m.id == model_id)
 }

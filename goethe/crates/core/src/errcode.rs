@@ -1,4 +1,4 @@
-// Error codes: stable labels (cdn/install.sh writes the INSTALL_ ones itself; a test keeps both equal), the log at <home>/errors.log, and the rows a linked node sends.
+// Error codes and ask's outcomes: stable labels (cdn/install.sh writes the INSTALL_ ones itself; a test keeps both equal), the log at <home>/errors.log, and the rows a linked node sends.
 
 use serde::Serialize;
 use std::fs;
@@ -80,6 +80,9 @@ codes! {
     RemoteExpired = "REMOTE_EXPIRED",
     RemoteReplay = "REMOTE_REPLAY",
     RemoteBusy = "REMOTE_BUSY",
+    AskRan = "ASK_RAN",
+    AskChanged = "ASK_CHANGED",
+    AskDropped = "ASK_DROPPED",
 }
 
 impl Code {

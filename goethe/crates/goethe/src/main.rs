@@ -5,7 +5,7 @@ mod complete;
 mod container;
 mod spec;
 use clap::{CommandFactory, Parser, Subcommand};
-use spec::{ArgMeta, CmdMeta, Fact::{Daemon, Installed, Key, Loaded}};
+use spec::{ArgMeta, CmdMeta, Fact::{Daemon, Gpu, Installed, Key, Loaded}};
 use goethe_core::alias;
 use goethe_core::config::{self, ConfigOpts};
 use goethe_core::db;
@@ -143,7 +143,7 @@ enum Commands {
     Status,
     #[command(add = CmdMeta::read(), display_order = 3, about = "Requests, tokens, speed and GPU use per model and API key over a chosen range, from the local usage log.")]
     Metrics,
-    #[command(add = CmdMeta::read(), display_order = 4, about = "Running models in detail: GPUs, port, memory, requests and speed.")]
+    #[command(add = CmdMeta::read().shows(&[Loaded]), display_order = 4, about = "Running models in detail: GPUs, port, memory, requests and speed.")]
     Ps {
         #[arg(long, help = "JSON rows with instance_id, slot_key, status, restarts.")]
         json: bool,
@@ -251,7 +251,7 @@ enum Commands {
         #[arg(long, help = "Show the model's reasoning (dimmed) with the answer.")]
         thinking: bool,
     },
-    #[command(add = CmdMeta::read(), display_order = 10,
+    #[command(add = CmdMeta::read().shows(&[Installed]), display_order = 10,
         about = "Installed and catalog models; also recommend, scan and alias.",
         visible_alias = "list",
         args_conflicts_with_subcommands = true
@@ -291,7 +291,7 @@ enum Commands {
     Learn(LearnArgs),
     #[command(add = CmdMeta::change().says(&["record"]), display_order = 14, about = "Record requests and replies as training traces: on or off, per API key, and the size.", after_help = TRACE_HELP)]
     Trace(TraceArgs),
-    #[command(add = CmdMeta::read(), args_conflicts_with_subcommands = true, display_order = 15, about = "GPUs with memory, processes and bandwidth, live; allow or deny one.")]
+    #[command(add = CmdMeta::read().shows(&[Gpu]), args_conflicts_with_subcommands = true, display_order = 15, about = "GPUs with memory, processes and bandwidth, live; allow or deny one.")]
     Gpu {
         #[arg(long, help = "Emit JSON.")]
         json: bool,
@@ -377,7 +377,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ApiCommands {
-    #[command(add = CmdMeta::read(), about = "List API keys, create or revoke one; on a terminal without arguments, a menu.", after_help = KEY_HELP)]
+    #[command(add = CmdMeta::read().shows(&[Key]), about = "List API keys, create or revoke one; on a terminal without arguments, a menu.", after_help = KEY_HELP)]
     Keys(KeyArgs),
     #[command(add = CmdMeta::network(), about = "Who can reach the API: local, vpn, public, or one address or interface.", after_help = EXPOSE_HELP)]
     Expose(ExposeArgs),
@@ -411,12 +411,12 @@ enum ModelsCommands {
 
 #[derive(Subcommand)]
 enum GpuCommands {
-    #[command(add = CmdMeta::change(), about = "Let new models use these GPUs again.")]
+    #[command(add = CmdMeta::change().gives(&[Gpu]), about = "Let new models use these GPUs again.")]
     Allow {
         #[arg(add = ArgMeta::of(spec::Value::Gpu), value_name = "GPU", required = true, value_parser = parse_gpu_name, help = "GPUs as goethe gpu lists them, for example gpu0 gpu1.")]
         gpus: Vec<u32>,
     },
-    #[command(add = CmdMeta::change().says(&["exclude", "block", "forbid", "off"]), about = "Keep new models off these GPUs; running ones stay.")]
+    #[command(add = CmdMeta::change().undoes(&[Gpu]).says(&["exclude", "block", "forbid", "off"]), about = "Keep new models off these GPUs; running ones stay.")]
     Deny {
         #[arg(add = ArgMeta::of(spec::Value::Gpu), value_name = "GPU", required = true, value_parser = parse_gpu_name, help = "GPUs as goethe gpu lists them, for example gpu0 gpu1.")]
         gpus: Vec<u32>,
@@ -947,7 +947,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("goethe logout", "unlink it and remove its local credentials"),
         ("goethe remote allow change", "accept signed console commands of a kind (deny refuses them)"),
         ("goethe completion install", "tab completion for your shell"),
-        ("goethe ask REQUEST", "turn a request in plain English into Goethe commands (also Ask on the main menu)"),
+        ("goethe ask REQUEST", "(experimental) turn a request in plain English into Goethe commands (also Ask on the main menu)"),
         ("goethe ?", "same as goethe ask"),
     ]),
 ];

@@ -1,5 +1,29 @@
 // Refusals before ranking (shell characters, requests Goethe has nothing for) and the parsers for typed values in a request.
 
+fn quotes(s: &str) -> Vec<(usize, usize)> {
+    // Quoted spans as byte ranges of their two quote marks: a quote opens at the start of a word and closes at the end of one, so "let's" is no quote and an opener that never closes is none either.
+    let ends_word = |i: usize| s[i + 1..].chars().next().is_none_or(|c| c.is_whitespace() || ",.;:!?)".contains(c));
+    let mut spans = Vec::new();
+    let mut open: Option<(usize, char)> = None;
+    let mut prev = ' ';
+    for (i, ch) in s.char_indices() {
+        match open {
+            Some((at, q)) if ch == q && ends_word(i) => {
+                spans.push((at, i));
+                open = None;
+            }
+            None if (ch == '"' || ch == '\'') && prev.is_whitespace() => open = Some((i, ch)),
+            _ => {}
+        }
+        prev = ch;
+    }
+    spans
+}
+
+fn quoted(spans: &[(usize, usize)], i: usize) -> bool {
+    spans.iter().any(|(a, b)| (*a..=*b).contains(&i))
+}
+
 pub fn find_shell_metachar(s: &str) -> Option<&'static str> {
     // Reject shell chaining, piping, command substitution, and redirection outside quotes (and $( or ` anywhere).
     for always in ["$(", "`", "\n", "\r"] {
@@ -7,22 +31,8 @@ pub fn find_shell_metachar(s: &str) -> Option<&'static str> {
             return Some(always);
         }
     }
-    let mut quote: Option<char> = None;
-    for (i, ch) in s.char_indices() {
-        match quote {
-            Some(q) if ch == q => quote = None,
-            Some(_) => {}
-            None if ch == '"' || ch == '\'' => quote = Some(ch),
-            None => {
-                for pat in ["&&", "||", ";", "|", ">", "<"] {
-                    if s[i..].starts_with(pat) {
-                        return Some(pat);
-                    }
-                }
-            }
-        }
-    }
-    None
+    let spans = quotes(s);
+    s.char_indices().filter(|(i, _)| !quoted(&spans, *i)).find_map(|(i, _)| ["&&", "||", ";", "|", ">", "<"].into_iter().find(|p| s[i..].starts_with(p)))
 }
 
 pub fn is_obvious_ood(query: &str) -> bool {
@@ -50,27 +60,36 @@ pub fn is_obvious_ood(query: &str) -> bool {
     REJECT.iter().any(|p| l.contains(p))
 }
 
-pub fn split_parts(s: &str) -> Vec<String> {
-    // A request in parts: cut at the words "and" / "then" / "also" and after a word ending in a comma, all outside quotes ("X, Y and then Z").
+pub fn split_parts(s: &str) -> Vec<(String, bool)> {
+    // A request in parts, cut outside quotes at "and", "also", "but", "plus", after a word ending in a comma, and at the sequence words "then", "next", "finally", "afterwards", "after that", "before" ("X, Y and then Z"); a part a sequence word cut begins a step of its own (true), any other may be a detail of the part before; "before B, A" puts A first.
+    let spans = quotes(s);
+    let words: Vec<&str> = s.split_whitespace().collect();
     let mut parts = Vec::new();
-    let mut cur = String::new();
-    let mut quote: Option<char> = None;
-    for word in s.split_whitespace() {
-        if quote.is_none() && matches!(word.to_ascii_lowercase().as_str(), "and" | "then" | "also") {
-            parts.push(std::mem::take(&mut cur));
+    let (mut cur, mut step) = (String::new(), false);
+    let mut i = 0;
+    while i < words.len() {
+        let word = words[i];
+        let outside = !quoted(&spans, word.as_ptr() as usize - s.as_ptr() as usize);
+        let low = word.to_ascii_lowercase();
+        let after_that = low == "after" && words.get(i + 1).is_some_and(|w| w.trim_end_matches(',').eq_ignore_ascii_case("that"));
+        if outside && (after_that || matches!(low.trim_end_matches(','), "then" | "next" | "finally" | "afterwards" | "before")) {
+            parts.push((std::mem::take(&mut cur), step));
+            step = true;
+            i += if after_that { 2 } else { 1 };
             continue;
         }
-        for ch in word.chars() {
-            match quote {
-                Some(q) if ch == q => quote = None,
-                None if ch == '"' || ch == '\'' => quote = Some(ch),
-                _ => {}
-            }
+        i += 1;
+        if outside && matches!(low.as_str(), "and" | "also" | "but" | "plus") {
+            parts.push((std::mem::take(&mut cur), step));
+            step = false;
+            continue;
         }
+        let end = word.as_ptr() as usize - s.as_ptr() as usize + word.len() - 1;
         match word.strip_suffix(',') {
-            Some(head) if quote.is_none() => {
+            Some(head) if !quoted(&spans, end) => {
                 cur.push_str(head);
-                parts.push(std::mem::take(&mut cur));
+                parts.push((std::mem::take(&mut cur), step));
+                step = false;
             }
             _ => {
                 cur.push_str(word);
@@ -78,8 +97,22 @@ pub fn split_parts(s: &str) -> Vec<String> {
             }
         }
     }
-    parts.push(cur);
-    parts.into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()
+    parts.push((cur, step));
+    let mut parts: Vec<(String, bool)> = parts.into_iter().map(|(p, step)| (p.trim().to_string(), step)).filter(|(p, _)| !p.is_empty()).collect();
+    if words.first().is_some_and(|w| w.eq_ignore_ascii_case("before")) && parts.len() > 1 {
+        parts.swap(0, 1);
+    }
+    parts
+}
+
+pub fn question(s: &str) -> bool {
+    // A question asks about the state, not for a change: it starts with a question word ("do" only before i, we or you), or ends with "?" unless it opens politely ("could you load it?" is a request).
+    let low = s.trim().to_ascii_lowercase();
+    let mut words = low.split_whitespace();
+    let first = words.next().unwrap_or("").trim_end_matches(['?', ',']);
+    let asks = matches!(first, "what" | "what's" | "whats" | "which" | "who" | "why" | "where" | "when" | "how" | "is" | "are" | "does")
+        || (first == "do" && words.next().is_some_and(|w| matches!(w, "i" | "we" | "you")));
+    asks || (low.ends_with('?') && !matches!(first, "can" | "could" | "would" | "will" | "please"))
 }
 
 pub fn without_wish(s: &str) -> String {
@@ -97,20 +130,19 @@ pub fn without_wish(s: &str) -> String {
 
 pub fn split_words(s: &str) -> Vec<String> {
     // Shell-like quote-preserving word splitter without running a shell.
+    let spans = quotes(s);
     let mut out = Vec::new();
     let mut cur = String::new();
-    let mut quote: Option<char> = None;
-    for ch in s.chars() {
-        match quote {
-            Some(q) if ch == q => quote = None,
-            Some(_) => cur.push(ch),
-            None if ch == '"' || ch == '\'' => quote = Some(ch),
-            None if ch.is_whitespace() => {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
+    for (i, ch) in s.char_indices() {
+        if spans.iter().any(|(a, b)| i == *a || i == *b) {
+            continue;
+        }
+        if (ch.is_whitespace() || matches!(ch, '(' | ')')) && !quoted(&spans, i) {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
             }
-            None => cur.push(ch),
+        } else {
+            cur.push(ch);
         }
     }
     if !cur.is_empty() {
@@ -120,17 +152,7 @@ pub fn split_words(s: &str) -> Vec<String> {
 }
 
 pub fn find_quoted(text: &str) -> Option<String> {
-    for q in ['"', '\''] {
-        if let Some(a) = text.find(q) {
-            if let Some(b) = text[a + 1..].find(q) {
-                let inner = text[a + 1..a + 1 + b].trim();
-                if !inner.is_empty() {
-                    return Some(inner.to_string());
-                }
-            }
-        }
-    }
-    None
+    quotes(text).into_iter().map(|(a, b)| text[a + 1..b].trim()).find(|inner| !inner.is_empty()).map(str::to_string)
 }
 
 pub fn is_local_path(t: &str) -> bool {
@@ -205,9 +227,10 @@ fn is_gpu_tok(t: &str) -> bool {
 }
 
 pub fn find_cidrs(tokens: &[String]) -> Vec<String> {
+    // Addresses and ranges, also one that ends a sentence ("allow 203.0.113.5.").
     let mut out = Vec::new();
     for t in tokens {
-        let c = t.trim_matches(|ch: char| matches!(ch, ',' | ';' | ')'));
+        let c = t.trim_matches(|ch: char| matches!(ch, ',' | ';' | ')' | '(' | '.'));
         if is_cidr(c) || c.parse::<std::net::IpAddr>().is_ok() {
             out.push(c.to_string());
         }
@@ -272,6 +295,17 @@ pub fn find_domain(tokens: &[String]) -> Option<String> {
     None
 }
 
+pub fn number(token: &str) -> Option<u64> {
+    // 8192, 32k (32768), or a small count in words.
+    const WORDS: [&str; 10] = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+    let t = token.to_ascii_lowercase();
+    let (digits, scale) = t.strip_suffix('k').map_or((t.as_str(), 1), |d| (d, 1024));
+    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+        return digits.parse::<u64>().ok().and_then(|n| n.checked_mul(scale));
+    }
+    WORDS.iter().position(|w| *w == t).map(|i| i as u64 + 1)
+}
+
 pub fn find_named_token(text: &str, tokens: &[String], cues: &[&str]) -> Option<String> {
     if let Some(q) = find_quoted(text) {
         return Some(q);
@@ -281,10 +315,11 @@ pub fn find_named_token(text: &str, tokens: &[String], cues: &[&str]) -> Option<
         if cues.contains(&l.as_str()) && i + 1 < tokens.len() {
             let next = tokens[i + 1].trim_matches(|c: char| matches!(c, ',' | '.'));
             if !next.starts_with('-')
+                && number(next).is_none()
                 && !cues.contains(&next.to_ascii_lowercase().as_str())
                 && !matches!(
                     next.to_ascii_lowercase().as_str(),
-                    "key" | "api" | "a" | "an" | "new" | "my" | "the" | "for" | "with" | "alias" | "model"
+                    "key" | "keys" | "token" | "tokens" | "api" | "a" | "an" | "at" | "to" | "of" | "on" | "new" | "my" | "the" | "for" | "with" | "alias" | "model"
                 )
             {
                 return Some(next.to_string());
@@ -319,21 +354,40 @@ mod tests {
     }
 
     #[test]
+    fn a_quote_opens_at_a_word_start_and_closes_at_a_word_end() {
+        // An apostrophe inside a word ("let's") is no quote, and an opener that never closes is none either.
+        assert_eq!(split_parts("let's load qwen and share it").into_iter().map(|(p, _)| p).collect::<Vec<_>>(), ["let's load qwen", "share it"]);
+        assert_eq!(split_words("name it 'demo key', don't wait"), ["name", "it", "demo key,", "don't", "wait"]);
+        assert_eq!(find_quoted("let's call it 'demo key'").as_deref(), Some("demo key"));
+        assert_eq!(find_shell_metachar("let's go; rm x"), Some(";"));
+        assert_eq!(find_shell_metachar("call it 'a; b'"), None);
+        assert_eq!(split_words("'open never closes"), ["'open", "never", "closes"]);
+        assert_eq!(split_words("say 'it's fine' ok"), ["say", "it's fine", "ok"]);
+        assert_eq!(split_parts("load qwen but don't share it").into_iter().map(|(p, _)| p).collect::<Vec<_>>(), ["load qwen", "don't share it"]);
+    }
+
+    #[test]
     fn a_request_splits_at_and_or_then_outside_quotes() {
-        assert_eq!(split_parts("install x, and then load it"), ["install x", "load it"]);
-        assert_eq!(split_parts("run m \"salt and pepper\" then show status"), ["run m \"salt and pepper\"", "show status"]);
-        assert_eq!(split_parts("allow addresses or ranges"), ["allow addresses or ranges"]);
-        assert_eq!(split_parts("and"), Vec::<String>::new());
-        assert_eq!(split_parts("show status, show gpus and also list models"), ["show status", "show gpus", "list models"]);
-        assert_eq!(split_parts("allow 1.2.3.4,5.6.7.8 then show status"), ["allow 1.2.3.4,5.6.7.8", "show status"]);
-        assert_eq!(split_parts("run m \"a, b\" and stop"), ["run m \"a, b\"", "stop"]);
+        let texts = |s: &str| split_parts(s).into_iter().map(|(p, _)| p).collect::<Vec<_>>();
+        assert_eq!(texts("install x, and then load it"), ["install x", "load it"]);
+        assert_eq!(texts("run m \"salt and pepper\" then show status"), ["run m \"salt and pepper\"", "show status"]);
+        assert_eq!(texts("allow addresses or ranges"), ["allow addresses or ranges"]);
+        assert_eq!(texts("and"), Vec::<String>::new());
+        assert_eq!(texts("show status, show gpus and also list models"), ["show status", "show gpus", "list models"]);
+        assert_eq!(texts("allow 1.2.3.4,5.6.7.8 then show status"), ["allow 1.2.3.4,5.6.7.8", "show status"]);
+        assert_eq!(texts("run m \"a, b\" and stop"), ["run m \"a, b\"", "stop"]);
+        assert_eq!(texts("load x next api, after that show gpus finally status plus logs"), ["load x", "api", "show gpus", "status", "logs"]);
+        assert_eq!(split_parts("load x then get the endpoint and at boot"), [("load x".to_string(), false), ("get the endpoint".to_string(), true), ("at boot".to_string(), false)]);
+        assert_eq!(split_words("load x (max conc 8)"), ["load", "x", "max", "conc", "8"]);
+        assert_eq!(texts("before you load x, block gpu2"), ["block gpu2", "you load x"]);
+        assert_eq!(texts("block gpu2 before you load x"), ["block gpu2", "you load x"]);
     }
 
     #[test]
     fn odd_inputs_do_not_panic() {
         let long = "a".repeat(10_000);
         let cases = [
-            "".to_string(),
+            String::new(),
             "\u{2026}".to_string(),
             "\u{2014}".to_string(),
             "\u{1F525}\u{1F525}\u{1F525}".to_string(),

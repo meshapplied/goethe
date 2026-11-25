@@ -13,12 +13,14 @@ mod bench;
 use clap::Command;
 use embed::{HybridRetriever, StaticModel};
 use parse::split_words;
-use planner::PlanState;
+use planner::{PendingDecision, PlanState};
 use schema::CliCatalog;
 use slots::World;
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use goethe_core::errcode::Code;
 use goethe_core::menu::StepState;
+use std::path::Path;
 use std::io::BufRead;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -125,6 +127,19 @@ pub fn run(args: &[String], root: Command, validate: fn(&[String]) -> Result<(),
     run_once(&parsed.utterance, &root, &validate, &parsed.opts)
 }
 
+fn needs(decision: &PendingDecision) -> String {
+    // What a plan that is not ready still needs, in one line for plain output.
+    let few = |v: Vec<String>| v.into_iter().take(3).collect::<Vec<_>>().join(", ");
+    match decision {
+        PendingDecision::PickIntent { clause, options } => format!("which command \"{clause}\" means ({})", few(options.iter().map(|o| o.id.replace('.', " ")).collect())),
+        PendingDecision::PickSlot { missing, options } => format!("which {} ({})", missing.label, few(options.iter().map(|(v, _)| v.clone()).collect())),
+        PendingDecision::PromptSlot { missing } => format!("the {}", missing.label),
+        PendingDecision::Unused { values, .. } => format!("what to do with {}", values.join(", ")),
+        PendingDecision::Invalid { message } | PendingDecision::Abstain { reason: message } => message.clone(),
+        PendingDecision::ReadyToConfirm => "a confirmation".into(),
+    }
+}
+
 fn run_once(query: &str, root: &Command, validate: &planner::Validate, opts: &AskOpts) -> i32 {
     // No screen: plan once from the live state, then print it or run it. Never prompts.
     let (catalog, retriever) = load_engine(root);
@@ -143,12 +158,15 @@ fn run_once(query: &str, root: &Command, validate: &planner::Validate, opts: &As
         println!("{}", serde_json::to_string_pretty(&plan.to_json(&catalog, &world)).expect("a JSON value serializes"));
         return if plan.abstain.is_some() { 2 } else if plan.is_ready() { 0 } else { 3 };
     }
+    let home = goethe_core::paths::goethe_home();
     if let Some(reason) = &plan.abstain {
+        outcome(&home, Code::AskDropped, &plan, "refused");
         ui::print_abstain(reason);
         return 2;
     }
     if !plan.is_ready() {
-        eprintln!("ask: this needs a detail first; run goethe ask on a terminal, or pass --json to see what");
+        outcome(&home, Code::AskDropped, &plan, "asked");
+        eprintln!("ask: needs {}; answer it on the Ask screen (goethe ask on a terminal, no flags), or see it with --json", needs(&plan.next_decision(&catalog, &world)));
         return 3;
     }
     if opts.dry_run {
@@ -159,9 +177,11 @@ fn run_once(query: &str, root: &Command, validate: &planner::Validate, opts: &As
     }
     ui::print_plan(&plan);
     if !opts.yes && !plan.all_readonly() {
+        outcome(&home, Code::AskDropped, &plan, "unconfirmed");
         eprintln!("ask: these commands change things; pass --yes to run them, or --dry-run to only print them");
         return 3;
     }
+    outcome(&home, Code::AskRan, &plan, "");
     run_list(&plan_argvs(&plan), &Watch::Terminal { input: !opts.no_input })
 }
 
@@ -184,6 +204,8 @@ struct MenuAsk {
     catalog: Option<Arc<CliCatalog>>,
     retriever: Option<Arc<HybridRetriever>>,
     run: Option<Run>,
+    changed: bool,
+    home: PathBuf,
 }
 
 #[derive(Clone, Default)]
@@ -223,6 +245,15 @@ impl MenuAsk {
             catalog: None,
             retriever: None,
             run: None,
+            changed: false,
+            home: goethe_core::paths::goethe_home(),
+        }
+    }
+
+    fn left(&self, why: &str) {
+        // A request on the screen that never ran: rewritten, or the screen closed.
+        if let Some(plan) = self.plan.as_ref().filter(|_| self.run.is_none()) {
+            outcome(&self.home, Code::AskDropped, plan, why);
         }
     }
 
@@ -259,7 +290,7 @@ impl MenuAsk {
                 chosen: settled.and_then(|g| part.options.iter().position(|o| o.id == g.intent_id)),
                 unsure: !part.left_out && settled.is_none(),
                 left_out: part.left_out,
-                label: settled.and_then(|g| catalog.get(&g.intent_id)).map_or_else(|| short(&part.text), |c| c.argv_prefix[1..].join(" ")),
+                label: settled.and_then(|g| catalog.get(&g.intent_id)).map_or_else(|| short(&part.text), |c| times(&c.argv_prefix[1..].join(" "), plan.goals.iter().filter(|g| g.part == i && g.reason.is_none()).count())),
                 ..AskPart::default()
             };
             view.unused = plan.unused(i, &self.world);
@@ -294,12 +325,18 @@ impl MenuAsk {
 
     fn act(&mut self, part: usize, action: planner::PlanAction) -> goethe_core::menu::AskFrame {
         let (catalog, _) = self.engine();
+        self.changed = true;
         if let Some(plan) = self.plan.as_mut() {
             plan.apply_to(part, action, &catalog, &self.world, self.validate.as_ref());
         }
         self.sync(&catalog);
         self.frame.clone()
     }
+}
+
+fn times(label: &str, n: usize) -> String {
+    // A part that runs its command once per model ("each") says how many times.
+    if n > 1 { format!("{label} x{n}") } else { label.to_string() }
 }
 
 fn short(text: &str) -> String {
@@ -355,7 +392,7 @@ fn push_line(log: &Mutex<RunLog>, step: usize, line: &str) {
     let Some(s) = l.steps.get_mut(step) else {
         return;
     };
-    if clean.is_empty() && s.out.last().is_none_or(|l| l.is_empty()) {
+    if clean.is_empty() && s.out.last().is_none_or(String::is_empty) {
         return;
     }
     s.out.push(clean);
@@ -443,7 +480,9 @@ impl goethe_core::menu::AskDriver for MenuAsk {
 
     fn submit(&mut self, request: &str) -> goethe_core::menu::AskFrame {
         let (catalog, retriever) = self.engine();
+        self.left("rewritten");
         self.run = None;
+        self.changed = false;
         self.world = World::from_host();
         self.plan = Some(PlanState::build(request, &catalog, retriever.as_ref(), &self.world, self.validate.as_ref()));
         self.sync(&catalog);
@@ -514,6 +553,7 @@ impl goethe_core::menu::AskDriver for MenuAsk {
         let Some(plan) = self.plan.as_ref().filter(|p| p.is_ready() && self.run.is_none()) else {
             return self.frame.clone();
         };
+        outcome(&self.home, if self.changed { Code::AskChanged } else { Code::AskRan }, plan, "");
         let lines: Vec<&planner::PlanLine> = plan.lines.iter().filter(|l| l.argv.len() >= 2).collect();
         let argvs: Vec<Vec<String>> = lines.iter().map(|l| run_argv(l, &catalog)).collect();
         let log = Arc::new(Mutex::new(RunLog { steps: vec![StepLog::default(); argvs.len()], finished: None, group: None }));
@@ -669,10 +709,17 @@ fn stop_group(leader: u32) {
 impl Drop for MenuAsk {
     fn drop(&mut self) {
         // Leaving goethe while a run goes on (Ctrl-C) stops its current command instead of leaving it behind without a screen.
+        self.left("left");
         if let Some(group) = self.run.as_ref().and_then(|r| r.log.lock().ok().and_then(|l| l.group)) {
             stop_group(group);
         }
     }
+}
+
+fn outcome(home: &Path, code: Code, plan: &PlanState, why: &str) {
+    // What became of one request, in the node's code log (sent only by a linked node): the plan's commands and why, never the request's words.
+    let ids: Vec<&str> = plan.lines.iter().map(|l| l.intent_id.as_str()).collect();
+    goethe_core::errcode::record_at(home, code, format!("{} {why}", ids.join(" ")).trim());
 }
 
 fn plan_argvs(plan: &PlanState) -> Vec<Vec<String>> {
@@ -690,7 +737,9 @@ fn parse_args(args: &[String]) -> Result<AskFlags, String> {
     let mut rest = Vec::new();
     let mut in_utterance = false;
     for tok in args.iter().skip(2) {
-        if !in_utterance {
+        if in_utterance {
+            rest.push(tok.clone());
+        } else {
             match tok.as_str() {
                 "-h" | "--help" => flags.help = true,
                 "-y" | "--yes" => flags.opts.yes = true,
@@ -706,8 +755,6 @@ fn parse_args(args: &[String]) -> Result<AskFlags, String> {
                     rest.push(tok.clone());
                 }
             }
-        } else {
-            rest.push(tok.clone());
         }
     }
     flags.utterance = rest.join(" ");
@@ -716,7 +763,7 @@ fn parse_args(args: &[String]) -> Result<AskFlags, String> {
 
 fn print_help() {
     println!(
-        "Turn a request in plain English into Goethe commands, check them with the CLI, and run them (never a shell).\n\n\
+        "(experimental) Turn a request in plain English into Goethe commands, check them with the CLI, and run them (never a shell).\n\n\
          Usage: goethe ask [OPTIONS] [REQUEST...]\n\
          Also: goethe ? REQUEST, or Ask on the main menu (goethe with no arguments).\n\n\
          Options:\n\

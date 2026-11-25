@@ -1,7 +1,7 @@
 // One request (one or more parts) to an ordered list of clap commands: rank each part, read the live state, ask for what is missing, validate.
 
 use super::embed::{ScoredIntent, ShortlistBackend};
-use super::parse::{find_hf_or_path, find_shell_metachar, is_obvious_ood, negation, split_parts, split_words, without_wish};
+use super::parse::{find_hf_or_path, find_shell_metachar, is_obvious_ood, negation, number, question, split_parts, split_words, without_wish};
 use super::schema::{CliCatalog, IntentCard, Kind, Risk};
 use super::slots::{extract_slots, slot_candidates, World};
 use crate::spec::{Asked, Fact};
@@ -11,6 +11,7 @@ use std::collections::HashMap;
 pub const TAU_OOD: f32 = 0.30;
 pub const TAU_HI: f32 = 0.56;
 pub const DELTA_MARGIN: f32 = 0.08;
+pub(super) const NO_MATCH_EXAMPLE: &str = "show the status";
 
 pub type Validate<'a> = dyn Fn(&[String]) -> Result<(), clap::Error> + 'a;
 
@@ -100,7 +101,7 @@ impl PlanState {
         world: &World,
         validate: &Validate,
     ) -> Self {
-        // A request is one or more parts; each part is one command ranked on what to do (a written model id is a value, shared by the parts), then what the live state needs first.
+        // A request is one or more parts; each part is one command ranked on what to do (a written model id is a value, shared by the parts), then what the live state needs first; a question's changes are only offered.
         let trimmed = query.trim();
         if trimmed.is_empty() {
             return Self::abstained(trimmed, "Type what you want Goethe to do, such as: load qwen and give me an API.", world);
@@ -108,15 +109,12 @@ impl PlanState {
         if let Some(meta) = find_shell_metachar(trimmed) {
             return Self::abstained(trimmed, &format!("Shell characters such as '{meta}' are not allowed; say it in words."), world);
         }
-        if let Some(word) = negation(trimmed) {
-            return Self::abstained(trimmed, &format!("Ask plans what to do, not what not to do ('{word}'); say what you want done."), world);
-        }
         if is_obvious_ood(trimmed) {
-            return Self::abstained(trimmed, "That is not something Goethe does; goethe help lists what it does.", world);
+            return Self::abstained(trimmed, &no_match(), world);
         }
         let model_ref = written_model(trimmed, catalog);
-        let rank = |text: &str| retriever.rank(&without(text, model_ref.as_deref()), catalog.intents.len());
-        let mut texts = request_parts(trimmed, &rank);
+        let rank = |text: &str| retriever.rank(&without(&present(text, catalog), model_ref.as_deref()), catalog.intents.len());
+        let mut texts = request_parts(trimmed, &rank, catalog, world);
         if texts.len() < 2 {
             texts = vec![(trimmed.to_string(), rank(trimmed))];
         }
@@ -124,24 +122,40 @@ impl PlanState {
         let model_used = texts.iter().any(|(_, open)| open.first().is_some_and(|t| takes_model(catalog, &t.id)));
         let mut parts = Vec::new();
         let mut goals = Vec::new();
+        let mut negated = None;
         for (i, (text, open)) in texts.into_iter().enumerate() {
-            let (options, about_model) = part_options(&text, open, model_ref.as_deref(), model_used, catalog);
+            let (options, about_model) = part_options(&text, open, model_ref.as_deref(), model_used, catalog, world);
+            if let Some(word) = negation(&text) {
+                negated.get_or_insert(word);
+                parts.push(PlanPart { text, options, left_out: true, ignored: Vec::new() });
+                continue;
+            }
+            let shown = shown_state(&text, catalog);
+            let options = with_first(options, shown);
             let Some(top) = options.first().cloned() else {
                 continue;
             };
-            if !about_model && !several && top.score < TAU_OOD {
+            let named = shown.is_some() || named_alone(&top.id, &present(&text, catalog), catalog, world);
+            if !about_model && !several && top.score < TAU_OOD && !named {
                 continue;
             }
-            let needs_intent_pick = !clear(&options, if about_model { TAU_OOD } else { TAU_HI }) || changes_beside_a_stray_word(&top.id, &text, catalog, retriever, world);
+            let needs_intent_pick = !(named || clear(&options, if about_model { TAU_OOD } else { TAU_HI })) || risky_by_word_alone(&top, catalog) || changes_beside_a_stray_word(&top.id, &text, catalog, retriever, world);
             let input = StepBuildInput { clause: &text, intent_id: &top.id, alternatives: options.clone(), needs_intent_pick };
             let mut goal = build_step(input, catalog, world, validate);
             goal.part = i;
             share_model(&mut goal, model_ref.as_deref(), catalog, world, validate);
             goals.push(goal);
-            parts.push(PlanPart { text, options, left_out: false, ignored: Vec::new() });
+            let ignored = if shown.is_some() { asked_about(&text, world) } else { Vec::new() };
+            parts.push(PlanPart { text, options, left_out: false, ignored });
         }
         if goals.is_empty() {
-            return Self::abstained(trimmed, "No Goethe command matches that request closely enough; goethe help lists the commands.", world);
+            let reason = negated.map_or_else(no_match, |w| format!("Ask plans what to do, not what not to do ('{w}'); say what you want done."));
+            return Self::abstained(trimmed, &reason, world);
+        }
+        if question(trimmed) {
+            for g in goals.iter_mut().filter(|g| catalog.get(&g.intent_id).is_some_and(super::embed::gated)) {
+                g.needs_intent_pick = true;
+            }
         }
         let mut plan = PlanState { raw_query: trimmed.to_string(), parts, goals, lines: Vec::new(), abstain: None, model_ref, world: world.clone() };
         plan.refresh(catalog, validate);
@@ -187,7 +201,7 @@ impl PlanState {
     }
 
     pub fn unused(&self, part: usize, world: &World) -> Vec<String> {
-        // Values written in a part that no command of the plan takes and that were not left out, and a model it names when none of its settled commands acts on one ("uninstall llama" never uninstalls Goethe); Ask never runs something other than what was said.
+        // Values written in a part that no command of the plan takes and that were not left out, a model it names when none of its settled commands acts on one ("uninstall llama" never uninstalls Goethe), and a number no command took that is not a matching count ("two keys"); Ask never runs something other than what was said.
         let Some(p) = self.parts.get(part).filter(|p| !p.left_out) else {
             return Vec::new();
         };
@@ -198,6 +212,16 @@ impl PlanState {
         if settled && !mine.iter().any(|g| g.argv.iter().any(|a| super::slots::is_model_value(a, world))) {
             let named: Vec<String> = super::slots::named_models(&p.text, world).into_iter().filter(|m| !p.ignored.contains(m) && !out.contains(m)).collect();
             out.extend(named);
+        }
+        let tokens = split_words(&p.text);
+        let took = |t: &str, n: u64| mine.iter().flat_map(|g| &g.argv).any(|a| super::slots::uses(a, t, n));
+        let counts = |i: usize, n: u64| mine.len() as u64 == n && tokens[i + 1..(i + 1 + super::slots::REACH).min(tokens.len())].iter().any(|w| w.len() > super::slots::SHORT && w.ends_with('s'));
+        for (i, t) in tokens.iter().enumerate() {
+            if let Some(n) = super::parse::number(t) {
+                if n != 1 && !took(t, n) && !counts(i, n) && !p.ignored.contains(t) {
+                    out.push(t.clone());
+                }
+            }
         }
         out
     }
@@ -215,13 +239,14 @@ impl PlanState {
         if let Some((slot_name, cands)) = &step.ambiguous {
             let opts: Vec<(String, String)> = cands
                 .iter()
-                .map(|c| (c.clone(), world.aliases.iter().find(|(a, _)| a == c).map_or_else(|| "installed model".to_string(), |(_, m)| format!("alias for {m}"))))
+                .map(|c| (c.clone(), world.aliases.iter().find(|(a, _)| a == c).map_or_else(|| if world.installed.contains(c) { "installed model" } else { "to download" }.to_string(), |(_, m)| format!("alias for {m}"))))
                 .collect();
             let pos = catalog.get(&step.intent_id).and_then(|c| c.positionals.iter().find(|p| &p.id == slot_name));
+            let flag = catalog.get(&step.intent_id).and_then(|c| c.flags.iter().find(|f| &f.long == slot_name)).filter(|_| pos.is_none());
             let missing = MissingSlot {
-                is_flag: false,
+                is_flag: flag.is_some(),
                 name: slot_name.clone(),
-                label: pos.map_or_else(|| slot_name.clone(), |p| p.value_name.clone()),
+                label: pos.map(|p| p.value_name.clone()).or_else(|| flag.map(|f| f.value_name.clone())).unwrap_or_else(|| slot_name.clone()),
                 kind: pos.map_or(Kind::InstalledModel, |p| p.kind),
                 possible: Vec::new(),
                 shown: format!("<{}>", pos.map_or_else(|| slot_name.to_uppercase(), |p| p.value_name.clone())),
@@ -303,6 +328,9 @@ impl PlanState {
                 };
                 let goal = &mut self.goals[at];
                 if is_flag {
+                    if goal.ambiguous.as_ref().is_some_and(|(n, _)| n == &name) {
+                        goal.ambiguous = None;
+                    }
                     match goal.flags.iter_mut().find(|(k, _)| k == &name) {
                         Some(entry) => entry.1 = values,
                         None => goal.flags.push((name, values)),
@@ -337,15 +365,19 @@ impl PlanState {
             return Err(format!("Ask plans what to do, not what not to do ('{word}'); say what you want done."));
         }
         let model_ref = self.model_ref.clone().or_else(|| written_model(text, catalog));
-        let open = retriever.rank(&without(text, model_ref.as_deref()), catalog.intents.len());
+        let open = retriever.rank(&without(&present(text, catalog), model_ref.as_deref()), catalog.intents.len());
         let model_used = self.goals.iter().any(|g| g.part != part && takes_model(catalog, &g.intent_id));
-        let (options, about_model) = part_options(text, open, model_ref.as_deref(), model_used, catalog);
+        let (options, about_model) = part_options(text, open, model_ref.as_deref(), model_used, catalog, &self.world);
+        let shown = shown_state(text, catalog);
+        let options = with_first(options, shown);
         let Some(top) = options.first().cloned() else {
-            return Err("No Goethe command matches those words.".into());
+            return Err(no_match());
         };
         self.model_ref = model_ref;
-        self.parts[part] = PlanPart { text: text.to_string(), options: options.clone(), left_out: false, ignored: Vec::new() };
-        let needs_intent_pick = !clear(&options, if about_model { TAU_OOD } else { TAU_HI }) || changes_beside_a_stray_word(&top.id, text, catalog, retriever, &self.world);
+        let ignored = if shown.is_some() { asked_about(text, &self.world) } else { Vec::new() };
+        self.parts[part] = PlanPart { text: text.to_string(), options: options.clone(), left_out: false, ignored };
+        let named = shown.is_some() || clear(&options, if about_model { TAU_OOD } else { TAU_HI }) || named_alone(&top.id, &present(text, catalog), catalog, &self.world);
+        let needs_intent_pick = !named || risky_by_word_alone(&top, catalog) || changes_beside_a_stray_word(&top.id, text, catalog, retriever, &self.world);
         let input = StepBuildInput { clause: text, intent_id: &top.id, alternatives: options.clone(), needs_intent_pick };
         let mut goal = build_step(input, catalog, &self.world, validate);
         goal.part = part;
@@ -402,17 +434,23 @@ impl PlanState {
     }
 
     fn refresh(&mut self, catalog: &CliCatalog, validate: &Validate) {
-        // Steps Goethe's state needs come first: each part's command, after the giver of every fact it needs that is not true yet (recursively). An auto step keeps the values already given to it.
-        let (old_auto, user): (Vec<PlanStep>, Vec<PlanStep>) = std::mem::take(&mut self.goals).into_iter().partition(|g| g.reason.is_some());
+        // Steps Goethe's state needs come first: each part's command (repeated for "each", given its model for "it"), after the giver of every fact it needs that is not true yet (recursively). An auto step keeps the values already given to it.
+        let (old_auto, mut user): (Vec<PlanStep>, Vec<PlanStep>) = std::mem::take(&mut self.goals).into_iter().partition(|g| g.reason.is_some());
+        refer_back(&mut user, catalog, &self.world, validate);
+        repeat_counts(&mut user, catalog);
         let mut have: Vec<(Fact, Option<String>)> = Vec::new();
+        let mut lost: Vec<(Fact, Option<String>)> = Vec::new();
+        let mut denied = self.world.denied.clone();
         let mut goals = Vec::new();
-        for goal in user {
+        for mut goal in user {
             if let Some(card) = catalog.get(&goal.intent_id).filter(|_| !goal.needs_intent_pick) {
                 let model = step_model(&goal, card).or_else(|| self.model_ref.clone().filter(|_| card.model_arg().is_none()));
                 for need in card.does.needs {
-                    self.satisfy(*need, model.as_deref(), goal.part, catalog, validate, &old_auto, &mut have, &mut goals);
+                    self.satisfy(*need, model.as_deref(), goal.part, catalog, validate, &old_auto, &lost, &mut have, &mut goals);
                 }
+                check_gpus(&mut goal, card, &self.world, &mut denied);
                 have.extend(card.does.gives.iter().map(|f| (*f, model.clone())));
+                lost.extend(card.does.undoes.iter().map(|f| (*f, model.clone())));
             }
             goals.push(goal);
         }
@@ -430,18 +468,20 @@ impl PlanState {
         catalog: &CliCatalog,
         validate: &Validate,
         old_auto: &[PlanStep],
+        lost: &[(Fact, Option<String>)],
         have: &mut Vec<(Fact, Option<String>)>,
         goals: &mut Vec<PlanStep>,
     ) {
         let model = model.filter(|_| matches!(fact, Fact::Installed | Fact::Loaded));
-        if self.world.has(fact, model) || have.iter().any(|(f, m)| *f == fact && m.as_deref() == model) {
+        let undone = lost.iter().any(|(f, m)| *f == fact && (m.is_none() || m.as_deref() == model));
+        if (self.world.has(fact, model) && !undone) || have.iter().any(|(f, m)| *f == fact && m.as_deref() == model) {
             return;
         }
         let Some(giver) = catalog.giver(fact) else {
             return;
         };
         for need in giver.does.needs {
-            self.satisfy(*need, model, part, catalog, validate, old_auto, have, goals);
+            self.satisfy(*need, model, part, catalog, validate, old_auto, lost, have, goals);
         }
         let kept = old_auto.iter().find(|s| s.intent_id == giver.id && s.part == part && step_model(s, giver).as_deref() == model);
         let step = kept.cloned().unwrap_or_else(|| {
@@ -460,20 +500,55 @@ impl PlanState {
     }
 }
 
+fn check_gpus(goal: &mut PlanStep, card: &IntentCard, world: &World, denied: &mut Vec<String>) {
+    // A GPU a step names must exist on this machine and, unless the step is the one allowing or denying it, not be denied there or by an earlier step; allowing and denying change that for the steps after.
+    let gpu_args = card.positionals.iter().filter(|p| p.kind == Kind::Gpu).map(|p| &p.id).chain(card.flags.iter().filter(|f| f.kind == Some(Kind::Gpu)).map(|f| &f.long));
+    let gpus: Vec<String> = gpu_args.flat_map(|id| goal.positionals.get(id).cloned().or_else(|| goal.flags.iter().find(|(k, _)| k == id).map(|(_, v)| v.clone())).unwrap_or_default()).collect();
+    let (allows, denies) = (card.does.gives.contains(&Fact::Gpu), card.does.undoes.contains(&Fact::Gpu));
+    let unknown = gpus.iter().find(|g| !world.gpus.is_empty() && !world.gpus.iter().any(|(id, _)| id == *g));
+    let blocked = gpus.iter().find(|g| !allows && !denies && denied.contains(g));
+    if let Some(err) = unknown.map(|g| format!("there is no {g} on this machine; goethe gpu lists them")).or_else(|| blocked.map(|g| format!("{g} is denied; goethe gpu allow {g} first"))) {
+        goal.verified = false;
+        goal.verify_err = Some(err);
+    }
+    if allows {
+        denied.retain(|g| !gpus.contains(g));
+    }
+    if denies {
+        denied.extend(gpus);
+    }
+}
+
 fn step_model(step: &PlanStep, card: &IntentCard) -> Option<String> {
     card.model_arg().and_then(|p| step.positionals.get(&p.id)).and_then(|v| v.first()).cloned()
 }
 
-fn request_parts(request: &str, rank: &dyn Fn(&str) -> Vec<ScoredIntent>) -> Vec<(String, Vec<ScoredIntent>)> {
-    // Each piece that is a request on its own is a part; a piece that is not (a detail such as "at every boot") joins the part before it, or the next one.
+fn request_parts(request: &str, rank: &dyn Fn(&str) -> Vec<ScoredIntent>, catalog: &CliCatalog, world: &World) -> Vec<(String, Vec<ScoredIntent>)> {
+    // Each piece with a command word, or one a sequence word began ("then get the endpoint"), is a part; a piece that names its own model but no command word ("and qwen on gpu1"), or one a sequence word began that only gives values ("then frontend with rpm 4"), repeats the part before with them, since the verb is shared; any other piece (a detail such as "at every boot", or one more address) joins the part before it, or the next one.
     let mut parts: Vec<(String, Vec<ScoredIntent>)> = Vec::new();
     let mut lead = String::new();
-    for piece in split_parts(request) {
-        let open = rank(&piece);
-        let request_like = open.first().is_some_and(|t| t.score >= TAU_OOD);
+    for (piece, step) in split_parts(request) {
+        let named = names_a_command(&present(&piece, catalog), catalog);
+        let commanded = named || step;
+        let gives_values = step && (!super::slots::typed_values(&piece, world).is_empty() || split_words(&piece).iter().any(|w| number(w).is_some()));
+        if !named && (names_a_model(&piece, world) || gives_values) {
+            if let Some((last, open)) = parts.last() {
+                let verb = match open.first() {
+                    Some(top) if gives_values && !names_a_model(&piece, world) => top.id.replace('.', " "),
+                    _ => without_values(last, world),
+                };
+                let text = format!("{verb} {piece}");
+                let open = rank(&text);
+                parts.push((text, open));
+                continue;
+            }
+        }
         match parts.last_mut() {
-            _ if request_like && lead.is_empty() => parts.push((piece, open)),
-            _ if request_like => {
+            _ if commanded && lead.is_empty() => {
+                let open = rank(&piece);
+                parts.push((piece, open));
+            }
+            _ if commanded => {
                 let text = format!("{} {piece}", std::mem::take(&mut lead));
                 let open = rank(&text);
                 parts.push((text, open));
@@ -488,8 +563,140 @@ fn request_parts(request: &str, rank: &dyn Fn(&str) -> Vec<ScoredIntent>) -> Vec
     parts
 }
 
-fn part_options(text: &str, mut open: Vec<ScoredIntent>, model_ref: Option<&str>, model_used: bool, catalog: &CliCatalog) -> (Vec<ScoredIntent>, bool) {
-    // The commands one part can be: only model commands when the part is about the written model (it names it and no other part uses it, or its best guess takes a model), and only commands that take every --flag written out.
+fn refer_back(goals: &mut Vec<PlanStep>, catalog: &CliCatalog, world: &World, validate: &Validate) {
+    // "it" is the model the step before bound; "each", "both", "them", "all" repeat the step once per model the steps before bound, and a list of as many other values pairs up with them in order ("load them on gpu0 and gpu1"); either goes on a step's model argument or flag when it binds none.
+    let mut i = 0;
+    while i < goals.len() {
+        let words = split_words(&goals[i].clause.to_ascii_lowercase());
+        let says_each = words.iter().any(|w| matches!(w.as_str(), "each" | "both" | "them" | "all"));
+        let says_it = words.iter().any(|w| w == "it");
+        let binds = |g: &PlanStep| g.argv.iter().filter(|a| super::slots::is_model_value(a, world)).cloned().collect::<Vec<_>>();
+        let mut before: Vec<String> = Vec::new();
+        goals[..i].iter().flat_map(binds).for_each(|m| if !before.contains(&m) { before.push(m) });
+        if !says_each {
+            before = goals[..i].iter().rev().find_map(|g| binds(g).last().cloned()).filter(|_| says_it).into_iter().collect();
+        }
+        let card = catalog.get(&goals[i].intent_id);
+        let flag = card.and_then(|c| c.flags.iter().find(|f| matches!(f.kind, Some(Kind::Model | Kind::InstalledModel | Kind::ModelOrAll))));
+        let slot = card.and_then(|c| c.model_arg()).map(|p| p.id.clone());
+        if !binds(&goals[i]).is_empty() || before.is_empty() || (slot.is_none() && flag.is_none()) {
+            i += 1;
+            continue;
+        }
+        let template = goals.remove(i);
+        let n = before.len();
+        for (k, m) in before.iter().enumerate() {
+            let mut g = template.clone();
+            g.flags.iter_mut().map(|(_, v)| v).chain(g.positionals.values_mut()).filter(|v| v.len() == n && n > 1).for_each(|v| *v = vec![v[k].clone()]);
+            match &slot {
+                Some(id) => {
+                    g.positionals.insert(id.clone(), vec![m.clone()]);
+                }
+                None => g.flags.push((flag.map(|f| f.long.clone()).unwrap_or_default(), vec![m.clone()])),
+            }
+            g.ambiguous = None;
+            recompile_step(&mut g, catalog, validate);
+            goals.insert(i + k, g);
+        }
+        i += before.len();
+    }
+}
+
+fn shown_state<'a>(text: &str, catalog: &'a CliCatalog) -> Option<&'a IntentCard> {
+    // A question that names a state by the past form of a verb that makes it true ("loaded", "installed") is answered by the command that shows that state.
+    let words = super::embed::lex_tokens(text);
+    let past = |n: &String| words.iter().any(|w| w.strip_prefix(n.strip_suffix('e').unwrap_or(n)) == Some("ed"));
+    let fact = catalog.intents.iter().find_map(|c| c.does.gives.first().filter(|_| super::embed::names(c).iter().any(past)))?;
+    catalog.intents.iter().find(|c| c.does.shows.contains(fact)).filter(|_| question(text))
+}
+
+fn asked_about(text: &str, world: &World) -> Vec<String> {
+    // The values a question about the state names ("is qwen loaded"): what it asks about, not values for the command that answers it.
+    super::slots::typed_values(text, world).into_iter().chain(super::slots::named_models(text, world)).collect()
+}
+
+fn with_first(mut options: Vec<ScoredIntent>, first: Option<&IntentCard>) -> Vec<ScoredIntent> {
+    if let Some(c) = first {
+        options.retain(|o| o.id != c.id);
+        options.insert(0, ScoredIntent { id: c.id.clone(), score: 1.0 });
+    }
+    options
+}
+
+fn repeat_counts(goals: &mut Vec<PlanStep>, catalog: &CliCatalog) {
+    // "two api keys": a step that makes something and names no value yet, said with a small count before a plural, runs that many times, each asking its own values (a larger number is an amount, "32768 tokens").
+    let mut i = 0;
+    while i < goals.len() {
+        let words = split_words(&goals[i].clause.to_ascii_lowercase());
+        let plural_after = |k: usize| words[k + 1..].iter().take(super::slots::REACH).any(|x| x.len() > super::slots::SHORT && x.ends_with('s'));
+        let n = words.iter().enumerate().find_map(|(k, w)| number(w).filter(|n| (2..10).contains(n) && plural_after(k))).unwrap_or(1) as usize;
+        let makes = catalog.get(&goals[i].intent_id).is_some_and(|c| !c.does.gives.is_empty());
+        if n > 1 && makes && !goals[i].needs_intent_pick && goals[i].positionals.is_empty() && goals[i].flags.is_empty() {
+            let g = goals[i].clone();
+            goals.splice(i..=i, std::iter::repeat_n(g, n));
+        }
+        i += n;
+    }
+}
+
+fn named_by<'a>(word: &str, catalog: &'a CliCatalog) -> Vec<&'a IntentCard> {
+    // The commands whose names a word says, singular or plural alike ("key" names api keys).
+    catalog.intents.iter().filter(|c| super::embed::names(c).iter().any(|n| super::embed::says(word, n) || super::embed::same_word(word, n))).collect()
+}
+
+fn present(text: &str, catalog: &CliCatalog) -> String {
+    // After a wish ("I want qwen loaded") a past form says what to do, so it reads as its command's word; a question ("is qwen loaded") keeps it.
+    if without_wish(text) == text.trim_start() {
+        return text.to_string();
+    }
+    let word_of = |w: &str| catalog.intents.iter().flat_map(super::embed::names).find(|n| w.strip_prefix(n.strip_suffix('e').unwrap_or(n)) == Some("ed"));
+    text.split_whitespace().map(|w| word_of(&w.to_ascii_lowercase()).unwrap_or_else(|| w.to_string())).collect::<Vec<_>>().join(" ")
+}
+
+fn named_here<'a>(word: &str, text: &str, catalog: &'a CliCatalog, world: &World) -> Vec<&'a IntentCard> {
+    // The commands a word names, only those that take a value of a known shape the request gives, when some do ("deny gpu2" names gpu deny, not remote deny, whose kinds hold no GPU); a guessed name ("remove goethe" as an alias) is no such value.
+    let named = named_by(word, catalog);
+    let given = super::slots::typed_values(text, world);
+    let fit: Vec<&IntentCard> = named.iter().copied().filter(|c| {
+        let s = extract_slots(c, text, world);
+        s.positionals.values().chain(s.flags.iter().map(|(_, v)| v)).flatten().any(|a| given.iter().any(|v| a == v || *a == world.key_id(v)))
+    }).collect();
+    if fit.is_empty() { named } else { fit }
+}
+
+fn named_alone(id: &str, text: &str, catalog: &CliCatalog, world: &World) -> bool {
+    // Named, not guessed: a word gives the CLI this command alone, and every word that names commands names it or a parent ("stop" in "stop allowing" keeps it a question; a short word like "on" names nothing).
+    let words = split_words(&text.to_ascii_lowercase());
+    let named: Vec<(&String, Vec<&IntentCard>)> = words.iter().map(|w| (w, named_here(w, text, catalog, world))).filter(|(_, cs)| !cs.is_empty()).collect();
+    let mine = |c: &&IntentCard| c.id == id || id.starts_with(&format!("{}.", c.id));
+    let alone: Vec<&IntentCard> = named.iter().filter(|(_, cs)| cs.len() == 1).map(|(_, cs)| cs[0]).collect();
+    let counts = |w: &str, cs: &[&IntentCard]| w.len() > super::slots::SHORT || cs.iter().any(|c| !c.id.contains('.'));
+    alone.iter().any(|c| c.id == id) && alone.iter().all(mine) && named.iter().filter(|(w, cs)| counts(w, cs)).all(|(_, cs)| cs.iter().any(mine))
+}
+
+fn names_a_command(piece: &str, catalog: &CliCatalog) -> bool {
+    // A word that names a command: longer than a short word ("on" names trace on, yet is a preposition), or a top-level command's ("up").
+    split_words(&piece.to_ascii_lowercase()).iter().any(|w| {
+        let named = named_by(w, catalog);
+        !named.is_empty() && (w.len() > super::slots::SHORT || named.iter().any(|c| !c.id.contains('.')))
+    })
+}
+
+fn names_a_model(piece: &str, world: &World) -> bool {
+    !super::slots::named_models(piece, world).is_empty() || find_hf_or_path(&split_words(piece)).is_some()
+}
+
+fn holds_values(piece: &str, world: &World) -> bool {
+    names_a_model(piece, world) || !super::slots::typed_values(piece, world).is_empty()
+}
+
+fn without_values(text: &str, world: &World) -> String {
+    // A part's words with its values taken out: what a continuation repeats.
+    split_words(text).into_iter().filter(|t| !holds_values(t, world) && !super::slots::is_size(t)).collect::<Vec<_>>().join(" ")
+}
+
+fn part_options(text: &str, mut open: Vec<ScoredIntent>, model_ref: Option<&str>, model_used: bool, catalog: &CliCatalog, world: &World) -> (Vec<ScoredIntent>, bool) {
+    // The commands one part can be: only model commands when the part is about the written model (it names it and no other part uses it, or its best guess takes a model), only commands that take every --flag written out, and no command a word names whose namesake takes the part's value instead.
     let top_takes_model = open.first().is_some_and(|t| takes_model(catalog, &t.id));
     let names_it = model_ref.is_some_and(|m| text.contains(m));
     let about_model = model_ref.is_some() && (top_takes_model || (names_it && !model_used));
@@ -500,6 +707,10 @@ fn part_options(text: &str, mut open: Vec<ScoredIntent>, model_ref: Option<&str>
     let takes_all = |id: &str| catalog.get(id).is_some_and(|c| typed.iter().all(|f| c.flags.iter().any(|g| g.long == *f)));
     if !typed.is_empty() && open.iter().any(|r| takes_all(&r.id)) {
         open.retain(|r| takes_all(&r.id));
+    }
+    for w in split_words(&text.to_ascii_lowercase()) {
+        let here = named_here(&w, text, catalog, world);
+        open.retain(|o| here.iter().any(|c| c.id == o.id) || !named_by(&w, catalog).iter().any(|c| c.id == o.id));
     }
     prefer_named_child(&mut open, text);
     open.truncate(5);
@@ -531,15 +742,25 @@ fn prefer_named_child(open: &mut Vec<ScoredIntent>, text: &str) {
 }
 
 fn changes_beside_a_stray_word(id: &str, text: &str, catalog: &CliCatalog, retriever: &dyn ShortlistBackend, world: &World) -> bool {
-    // A command that changes something is asked, never taken, while a word means nothing to any command and is no value or model: "start the car" is not "goethe start".
-    if !catalog.get(id).is_some_and(super::embed::gated) {
+    // A command that changes something and takes no values is asked, never taken, while a word means nothing to any command and is no value, model or filler: "start the car" is not "goethe start"; so is one that deletes and takes no positional value even with flags ("uninstall the auto-complete feature" is not goethe uninstall); a command that takes values has the unused-value rule instead.
+    const FILLER: [&str; 6] = ["all", "everything", "now", "it", "my", "goethe"];
+    if !catalog.get(id).is_some_and(|c| super::embed::gated(c) && c.positionals.is_empty() && (c.flags.is_empty() || c.risk == Risk::Destructive)) {
         return false;
     }
     let mut rest = text.to_string();
     for v in super::slots::typed_values(text, world) {
         rest = rest.replace(&v, " ");
     }
-    super::embed::lex_tokens(&rest).iter().any(|t| !t.chars().all(|c| c.is_ascii_digit()) && !retriever.knows(t) && super::slots::named_models(t, world).is_empty())
+    super::embed::lex_tokens(&rest).iter().any(|t| !t.chars().all(|c| c.is_ascii_digit()) && !FILLER.contains(&t.as_str()) && !retriever.knows(t) && super::slots::named_models(t, world).is_empty())
+}
+
+fn no_match() -> String {
+    format!("No Goethe command fits that. Say what Goethe should do, such as: {NO_MATCH_EXAMPLE}; goethe alone opens a guided menu.")
+}
+
+fn risky_by_word_alone(top: &ScoredIntent, catalog: &CliCatalog) -> bool {
+    // A command that deletes or exposes, named by its word while the request's meaning is far from it, is offered, never taken ("kill all processes" asks before goethe down).
+    top.score < TAU_OOD && catalog.get(&top.id).is_some_and(|c| matches!(c.risk, Risk::Destructive | Risk::Network))
 }
 
 fn clear(ranked: &[ScoredIntent], bar: f32) -> bool {
@@ -593,14 +814,14 @@ fn without(text: &str, model_ref: Option<&str>) -> String {
     // The words that say what to do; the model id is a value, not part of what to do.
     let text = &without_wish(text);
     let Some(m) = model_ref else {
-        return text.to_string();
+        return text.clone();
     };
     let rest = split_words(text).into_iter().filter(|t| !t.contains(m)).collect::<Vec<_>>().join(" ");
-    if rest.trim().is_empty() { text.to_string() } else { rest }
+    if rest.trim().is_empty() { text.clone() } else { rest }
 }
 
 pub(crate) fn order_lines(goals: &[PlanStep], world: &World, catalog: &CliCatalog) -> Vec<PlanLine> {
-    // The steps in order as commands to run; a command already listed is not repeated.
+    // The steps in order as commands to run; a command already listed is not repeated, unless it still asks for a value (two keys, each named).
     let mut lines: Vec<PlanLine> = Vec::new();
     for goal in goals {
         let line = PlanLine {
@@ -612,7 +833,7 @@ pub(crate) fn order_lines(goals: &[PlanStep], world: &World, catalog: &CliCatalo
             part: goal.part,
             placeholders: goal.missing.iter().map(|m| m.shown.clone()).collect(),
         };
-        if goal.needs_intent_pick || goal.argv.is_empty() || !lines.iter().any(|l| l.argv == line.argv) {
+        if goal.needs_intent_pick || goal.argv.is_empty() || !goal.missing.is_empty() || !lines.iter().any(|l| l.argv == line.argv) {
             lines.push(line);
         }
     }
@@ -620,14 +841,12 @@ pub(crate) fn order_lines(goals: &[PlanStep], world: &World, catalog: &CliCatalo
 }
 
 fn primary_why(step: &PlanStep, world: &World, catalog: &CliCatalog) -> String {
-    // What the command does, from its own help, so it never drifts from the CLI; a model it would load that already serves says so.
+    // What the command does, from its own help, so it never drifts from the CLI; a model it would install or load that already is says so.
     let Some(card) = catalog.get(&step.intent_id) else {
         return String::new();
     };
-    match step_model(step, card) {
-        Some(m) if card.does.gives.contains(&Fact::Loaded) && world.has(Fact::Loaded, Some(&m)) => format!("{m} is already loaded"),
-        _ => card.summary(),
-    }
+    let done = step_model(step, card).and_then(|m| [(Fact::Loaded, "loaded"), (Fact::Installed, "installed")].into_iter().find(|(f, _)| card.does.gives.contains(f) && world.has(*f, Some(&m))).map(|(_, w)| format!("{m} is already {w}")));
+    done.unwrap_or_else(|| card.summary())
 }
 
 pub(crate) fn needs_install(model: &str, world: &World) -> bool {
@@ -637,7 +856,7 @@ pub(crate) fn needs_install(model: &str, world: &World) -> bool {
     if !world.installed_known {
         return true;
     }
-    let target = world.aliases.iter().find(|(a, _)| a == model).map(|(_, id)| id.as_str()).unwrap_or(model);
+    let target = world.aliases.iter().find(|(a, _)| a == model).map_or(model, |(_, id)| id.as_str());
     !world.installed.iter().any(|id| id == target || id == model)
 }
 
