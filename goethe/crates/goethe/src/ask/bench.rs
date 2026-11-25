@@ -271,6 +271,20 @@ fn a_question_only_reads() {
 }
 
 #[test]
+fn a_step_said_with_before_runs_after_the_next() {
+    // "before you load llama, block gpu3" loaded first: a step said with "before" comes after the step it names first.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let shown = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
+    for q in ["before you load mistral, block gpu2", "block gpu2 before you load mistral", "block gpu2, then load mistral"] {
+        let p = plan(q);
+        assert_eq!(shown(&p), ["goethe gpu deny gpu2", "goethe load mistralai/Mistral-7B-Instruct"], "{q}");
+    }
+}
+
+#[test]
 fn a_request_of_many_steps_binds_each_value_to_its_own_step() {
     // The owner's request: two models on two GPUs, a third GPU blocked, a key scoped to each model; a step without a command word continues the one before, and "each" repeats over the models bound earlier.
     let cat = build_catalog(&Cli::command());

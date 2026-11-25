@@ -61,7 +61,7 @@ pub fn is_obvious_ood(query: &str) -> bool {
 }
 
 pub fn split_parts(s: &str) -> Vec<(String, bool)> {
-    // A request in parts, cut outside quotes at "and", "also", "but", "plus", after a word ending in a comma, and at the sequence words "then", "next", "finally", "afterwards", "after that" ("X, Y and then Z"); a part a sequence word cut begins a step of its own (true), any other may be a detail of the part before.
+    // A request in parts, cut outside quotes at "and", "also", "but", "plus", after a word ending in a comma, and at the sequence words "then", "next", "finally", "afterwards", "after that", "before" ("X, Y and then Z"); a part a sequence word cut begins a step of its own (true), any other may be a detail of the part before; "before B, A" puts A first.
     let spans = quotes(s);
     let words: Vec<&str> = s.split_whitespace().collect();
     let mut parts = Vec::new();
@@ -72,7 +72,7 @@ pub fn split_parts(s: &str) -> Vec<(String, bool)> {
         let outside = !quoted(&spans, word.as_ptr() as usize - s.as_ptr() as usize);
         let low = word.to_ascii_lowercase();
         let after_that = low == "after" && words.get(i + 1).is_some_and(|w| w.trim_end_matches(',').eq_ignore_ascii_case("that"));
-        if outside && (after_that || matches!(low.trim_end_matches(','), "then" | "next" | "finally" | "afterwards")) {
+        if outside && (after_that || matches!(low.trim_end_matches(','), "then" | "next" | "finally" | "afterwards" | "before")) {
             parts.push((std::mem::take(&mut cur), step));
             step = true;
             i += if after_that { 2 } else { 1 };
@@ -98,7 +98,11 @@ pub fn split_parts(s: &str) -> Vec<(String, bool)> {
         }
     }
     parts.push((cur, step));
-    parts.into_iter().map(|(p, step)| (p.trim().to_string(), step)).filter(|(p, _)| !p.is_empty()).collect()
+    let mut parts: Vec<(String, bool)> = parts.into_iter().map(|(p, step)| (p.trim().to_string(), step)).filter(|(p, _)| !p.is_empty()).collect();
+    if words.first().is_some_and(|w| w.eq_ignore_ascii_case("before")) && parts.len() > 1 {
+        parts.swap(0, 1);
+    }
+    parts
 }
 
 pub fn question(s: &str) -> bool {
@@ -375,6 +379,8 @@ mod tests {
         assert_eq!(texts("load x next api, after that show gpus finally status plus logs"), ["load x", "api", "show gpus", "status", "logs"]);
         assert_eq!(split_parts("load x then get the endpoint and at boot"), [("load x".to_string(), false), ("get the endpoint".to_string(), true), ("at boot".to_string(), false)]);
         assert_eq!(split_words("load x (max conc 8)"), ["load", "x", "max", "conc", "8"]);
+        assert_eq!(texts("before you load x, block gpu2"), ["block gpu2", "you load x"]);
+        assert_eq!(texts("block gpu2 before you load x"), ["block gpu2", "you load x"]);
     }
 
     #[test]
