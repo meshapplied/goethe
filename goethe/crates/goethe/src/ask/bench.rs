@@ -285,6 +285,18 @@ fn a_step_said_with_before_runs_after_the_next() {
 }
 
 #[test]
+fn plain_output_says_what_a_plan_still_needs() {
+    // Without a screen, a plan that is not ready names the detail it waits for, so a script knows what to add.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let need = |q: &str| super::needs(&PlanState::build(q, &cat, &ret, &world, &validate_cli).next_decision(&cat, &world));
+    let qwen = need("load some qwen");
+    assert!(qwen.contains("Qwen/Qwen2.5-7B-Instruct") && qwen.contains("Qwen/Qwen2.5-14B-Instruct"), "{qwen}");
+    assert!(need("load mistral with 8").contains('8'), "{}", need("load mistral with 8"));
+}
+
+#[test]
 fn a_request_of_many_steps_binds_each_value_to_its_own_step() {
     // The owner's request: two models on two GPUs, a third GPU blocked, a key scoped to each model; a step without a command word continues the one before, and "each" repeats over the models bound earlier.
     let cat = build_catalog(&Cli::command());

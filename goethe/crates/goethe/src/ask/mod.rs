@@ -13,7 +13,7 @@ mod bench;
 use clap::Command;
 use embed::{HybridRetriever, StaticModel};
 use parse::split_words;
-use planner::PlanState;
+use planner::{PendingDecision, PlanState};
 use schema::CliCatalog;
 use slots::World;
 use std::io::IsTerminal;
@@ -125,6 +125,19 @@ pub fn run(args: &[String], root: Command, validate: fn(&[String]) -> Result<(),
     run_once(&parsed.utterance, &root, &validate, &parsed.opts)
 }
 
+fn needs(decision: &PendingDecision) -> String {
+    // What a plan that is not ready still needs, in one line for plain output.
+    let few = |v: Vec<String>| v.into_iter().take(3).collect::<Vec<_>>().join(", ");
+    match decision {
+        PendingDecision::PickIntent { clause, options } => format!("which command \"{clause}\" means ({})", few(options.iter().map(|o| o.id.replace('.', " ")).collect())),
+        PendingDecision::PickSlot { missing, options } => format!("which {} ({})", missing.label, few(options.iter().map(|(v, _)| v.clone()).collect())),
+        PendingDecision::PromptSlot { missing } => format!("the {}", missing.label),
+        PendingDecision::Unused { values, .. } => format!("what to do with {}", values.join(", ")),
+        PendingDecision::Invalid { message } | PendingDecision::Abstain { reason: message } => message.clone(),
+        PendingDecision::ReadyToConfirm => "a confirmation".into(),
+    }
+}
+
 fn run_once(query: &str, root: &Command, validate: &planner::Validate, opts: &AskOpts) -> i32 {
     // No screen: plan once from the live state, then print it or run it. Never prompts.
     let (catalog, retriever) = load_engine(root);
@@ -148,7 +161,7 @@ fn run_once(query: &str, root: &Command, validate: &planner::Validate, opts: &As
         return 2;
     }
     if !plan.is_ready() {
-        eprintln!("ask: this needs a detail first; run goethe ask on a terminal, or pass --json to see what");
+        eprintln!("ask: needs {}; answer it on the Ask screen (goethe ask on a terminal, no flags), or see it with --json", needs(&plan.next_decision(&catalog, &world)));
         return 3;
     }
     if opts.dry_run {
