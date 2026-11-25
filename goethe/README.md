@@ -6,9 +6,9 @@ This README is for building and releasing Goethe. To install and use it, see the
 
 ## Install
 
-    curl -fsSL https://pkg.goethe.sh/install.sh | bash
+    curl -fsSL https://goethe.sh/install | bash
 
-On Windows (elevated PowerShell), `irm https://pkg.goethe.sh/install.ps1 | iex` enables WSL2 if needed and runs that same `install.sh` inside Ubuntu.
+On Windows (elevated PowerShell), `irm https://goethe.sh/install | iex` enables WSL2 if needed and runs that same `install.sh` inside Ubuntu.
 
 The installer verifies a signed manifest, creates a Python environment with SGLang, installs `goethe` and `goethed` and links `goethe` into `/usr/local/bin` (or `~/.local/bin`), then ends with `goethe`. It does not start goethed or turn on start at boot; `goethe` or `goethe up` does. Re-running it over a running goethed applies the new binaries to it and keeps engines serving. No root needed. State lives in `$GOETHE_HOME`, else in the home whose `bin/` holds the running binary (links are followed, so the linked `goethe` finds a custom home), else `/workspace/.goethe`, else `/var/lib/goethe`, else `~/.goethe`.
 
@@ -159,7 +159,7 @@ Releases come from GitHub, never from a laptop:
 - Every pull request into `dev` or `main` runs `.github/workflows/ci.yml`: Rust build, tests and clippy, the style lint and the CPU gates (`gate.sh 0`, `stage6_integrity`). The unsigned x86_64 package build (`package-smoke`) runs on pushes to `main`, the nightly schedule and manual runs.
 - To release: `goethe/packaging/release.sh prepare X.Y.Z` opens the version bump PR from `main` (the three crates, `Cargo.lock`, and the `## Unreleased` changelog section dated); after it is merged, `goethe/packaging/release.sh tag X.Y.Z` tags that `main` commit and starts the release workflow. Approve the `merge` job when it waits (that is when the signing key is available). By hand: set the version in `crates/*/Cargo.toml` through a pull request, then push a tag `vX.Y.Z` on that `main` commit (or run the release workflow by hand on `main`).
 - `.github/workflows/release.yml` then checks the commit is on `main` and the tag matches the version, reruns CI, and builds both architectures with `--release` unsigned (`GOETHE_ALLOW_UNSIGNED=1`, fingerprint check only). After approval on the `release` environment, the `merge` job signs with the environment secret `GOETHE_SIGN_KEY`, verifies the checksums and embedded key fingerprint, and the workflow installs the package in a clean Ubuntu 22.04 container.
-- It then publishes the GitHub release and deploys the package tree to GitHub Pages, which serves it at `https://pkg.goethe.sh/` (DNS: `CNAME pkg -> meshapplied.github.io`). `https://goethe.sh/install.sh` redirects there from the website.
+- It then publishes the GitHub release and deploys the package tree to GitHub Pages, which serves it at `https://pkg.goethe.sh/` (DNS: `CNAME pkg -> meshapplied.github.io`). `https://goethe.sh/install` redirects there from the website.
 - The `image` job builds the container image from the same signed package (after checking its signature), for linux/amd64 and linux/arm64, pushes `ghcr.io/meshapplied/goethe:X.Y.Z`, `:X.Y` and `:latest` with an SBOM and provenance, signs the digest with cosign (keyless), and `image-smoke` runs `tests/image_smoke.sh` on both architectures. Pull requests that touch the image build it from their own binaries (`packaging/build_image_tree.sh`) and run the same smoke test.
 - Existing installs then pick the release up with `goethe update`.
 

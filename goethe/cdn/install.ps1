@@ -1,5 +1,5 @@
 # Goethe on Windows: enable WSL2, install Ubuntu, then run the same install.sh as Linux/macOS.
-# Usage:  irm https://pkg.goethe.sh/install.ps1 | iex
+# Usage:  irm https://goethe.sh/install | iex
 # Or:    powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 [--authkey ...]
 # Safe to re-run. Never installs a Linux NVIDIA driver inside WSL.
 # ASCII only: Windows PowerShell 5.1 mis-parses UTF-8 without a BOM.
@@ -181,7 +181,7 @@ function Register-ResumeAfterReboot {
     param([string[]]$LinuxArgs)
     $self = Persist-Self
     if (-not (Test-Path -LiteralPath $self)) {
-        Die "could not save installer to $self for reboot resume; re-run after reboot with: irm https://pkg.goethe.sh/install.ps1 | iex"
+        Die "could not save installer to $self for reboot resume; re-run after reboot with: irm https://goethe.sh/install | iex"
     }
     # Quote each arg for RunOnce (auth keys must survive the reboot command line).
     $parts = New-Object System.Collections.Generic.List[string]

@@ -10,7 +10,7 @@ index fdc6c3a..a24f0ad 100644
 +RUN npm install -g opencode-ai@1.19.3
  
  RUN mkdir -p /workspace \
-     && mkdir -p /home/ubuntu/.config/opencode /home/ubuntu/.local/share/opencode \
+     && mkdir -p /home/user/.config/opencode /home/user/.local/share/opencode \
 diff --git a/src/staminabench/agents/docker/opencode.json b/src/staminabench/agents/docker/opencode.json
 index 2f35d76..218fb87 100644
 --- a/src/staminabench/agents/docker/opencode.json
