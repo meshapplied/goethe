@@ -615,12 +615,13 @@ fn named_here<'a>(word: &str, text: &str, catalog: &'a CliCatalog, world: &World
 }
 
 fn named_alone(id: &str, text: &str, catalog: &CliCatalog, world: &World) -> bool {
-    // A word the CLI gives to this command alone, and every other such word gives it to this one or a parent of it ("block" is only gpu deny's, "api" is api's): the command is named, not guessed; a parent's word alone names no child, and words for two unrelated commands stay a question.
-    let alone: Vec<String> = split_words(&text.to_ascii_lowercase()).iter().filter_map(|w| match named_here(w, text, catalog, world)[..] {
-        [c] => Some(c.id.clone()),
-        _ => None,
-    }).collect();
-    alone.iter().any(|a| a == id) && alone.iter().all(|a| a == id || id.starts_with(&format!("{a}.")))
+    // Named, not guessed: a word gives the CLI this command alone, and every word that names commands names it or a parent ("stop" in "stop allowing" keeps it a question; a short word like "on" names nothing).
+    let words = split_words(&text.to_ascii_lowercase());
+    let named: Vec<(&String, Vec<&IntentCard>)> = words.iter().map(|w| (w, named_here(w, text, catalog, world))).filter(|(_, cs)| !cs.is_empty()).collect();
+    let mine = |c: &&IntentCard| c.id == id || id.starts_with(&format!("{}.", c.id));
+    let alone: Vec<&IntentCard> = named.iter().filter(|(_, cs)| cs.len() == 1).map(|(_, cs)| cs[0]).collect();
+    let counts = |w: &str, cs: &[&IntentCard]| w.len() > super::slots::SHORT || cs.iter().any(|c| !c.id.contains('.'));
+    alone.iter().any(|c| c.id == id) && alone.iter().all(mine) && named.iter().filter(|(w, cs)| counts(w, cs)).all(|(_, cs)| cs.iter().any(mine))
 }
 
 fn names_a_command(piece: &str, catalog: &CliCatalog) -> bool {
