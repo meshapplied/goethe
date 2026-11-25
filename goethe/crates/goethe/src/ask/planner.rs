@@ -129,10 +129,12 @@ impl PlanState {
                 parts.push(PlanPart { text, options, left_out: true, ignored: Vec::new() });
                 continue;
             }
+            let shown = shown_state(&text, catalog);
+            let options = with_first(options, shown);
             let Some(top) = options.first().cloned() else {
                 continue;
             };
-            let named = named_alone(&top.id, &present(&text, catalog), catalog, world);
+            let named = shown.is_some() || named_alone(&top.id, &present(&text, catalog), catalog, world);
             if !about_model && !several && top.score < TAU_OOD && !named {
                 continue;
             }
@@ -142,7 +144,8 @@ impl PlanState {
             goal.part = i;
             share_model(&mut goal, model_ref.as_deref(), catalog, world, validate);
             goals.push(goal);
-            parts.push(PlanPart { text, options, left_out: false, ignored: Vec::new() });
+            let ignored = if shown.is_some() { asked_about(&text, world) } else { Vec::new() };
+            parts.push(PlanPart { text, options, left_out: false, ignored });
         }
         if goals.is_empty() {
             let reason = negated.map_or_else(|| "No Goethe command matches that request closely enough; goethe help lists the commands.".to_string(), |w| format!("Ask plans what to do, not what not to do ('{w}'); say what you want done."));
@@ -235,13 +238,14 @@ impl PlanState {
         if let Some((slot_name, cands)) = &step.ambiguous {
             let opts: Vec<(String, String)> = cands
                 .iter()
-                .map(|c| (c.clone(), world.aliases.iter().find(|(a, _)| a == c).map_or_else(|| "installed model".to_string(), |(_, m)| format!("alias for {m}"))))
+                .map(|c| (c.clone(), world.aliases.iter().find(|(a, _)| a == c).map_or_else(|| if world.installed.contains(c) { "installed model" } else { "to download" }.to_string(), |(_, m)| format!("alias for {m}"))))
                 .collect();
             let pos = catalog.get(&step.intent_id).and_then(|c| c.positionals.iter().find(|p| &p.id == slot_name));
+            let flag = catalog.get(&step.intent_id).and_then(|c| c.flags.iter().find(|f| &f.long == slot_name)).filter(|_| pos.is_none());
             let missing = MissingSlot {
-                is_flag: false,
+                is_flag: flag.is_some(),
                 name: slot_name.clone(),
-                label: pos.map_or_else(|| slot_name.clone(), |p| p.value_name.clone()),
+                label: pos.map(|p| p.value_name.clone()).or_else(|| flag.map(|f| f.value_name.clone())).unwrap_or_else(|| slot_name.clone()),
                 kind: pos.map_or(Kind::InstalledModel, |p| p.kind),
                 possible: Vec::new(),
                 shown: format!("<{}>", pos.map_or_else(|| slot_name.to_uppercase(), |p| p.value_name.clone())),
@@ -323,6 +327,9 @@ impl PlanState {
                 };
                 let goal = &mut self.goals[at];
                 if is_flag {
+                    if goal.ambiguous.as_ref().is_some_and(|(n, _)| n == &name) {
+                        goal.ambiguous = None;
+                    }
                     match goal.flags.iter_mut().find(|(k, _)| k == &name) {
                         Some(entry) => entry.1 = values,
                         None => goal.flags.push((name, values)),
@@ -360,12 +367,15 @@ impl PlanState {
         let open = retriever.rank(&without(&present(text, catalog), model_ref.as_deref()), catalog.intents.len());
         let model_used = self.goals.iter().any(|g| g.part != part && takes_model(catalog, &g.intent_id));
         let (options, about_model) = part_options(text, open, model_ref.as_deref(), model_used, catalog, &self.world);
+        let shown = shown_state(text, catalog);
+        let options = with_first(options, shown);
         let Some(top) = options.first().cloned() else {
             return Err("No Goethe command matches those words.".into());
         };
         self.model_ref = model_ref;
-        self.parts[part] = PlanPart { text: text.to_string(), options: options.clone(), left_out: false, ignored: Vec::new() };
-        let named = clear(&options, if about_model { TAU_OOD } else { TAU_HI }) || named_alone(&top.id, &present(text, catalog), catalog, &self.world);
+        let ignored = if shown.is_some() { asked_about(text, &self.world) } else { Vec::new() };
+        self.parts[part] = PlanPart { text: text.to_string(), options: options.clone(), left_out: false, ignored };
+        let named = shown.is_some() || clear(&options, if about_model { TAU_OOD } else { TAU_HI }) || named_alone(&top.id, &present(text, catalog), catalog, &self.world);
         let needs_intent_pick = !named || risky_by_word_alone(&top, catalog) || changes_beside_a_stray_word(&top.id, text, catalog, retriever, &self.world);
         let input = StepBuildInput { clause: text, intent_id: &top.id, alternatives: options.clone(), needs_intent_pick };
         let mut goal = build_step(input, catalog, &self.world, validate);
@@ -426,6 +436,7 @@ impl PlanState {
         // Steps Goethe's state needs come first: each part's command (repeated for "each", given its model for "it"), after the giver of every fact it needs that is not true yet (recursively). An auto step keeps the values already given to it.
         let (old_auto, mut user): (Vec<PlanStep>, Vec<PlanStep>) = std::mem::take(&mut self.goals).into_iter().partition(|g| g.reason.is_some());
         refer_back(&mut user, catalog, &self.world, validate);
+        repeat_counts(&mut user, catalog);
         let mut have: Vec<(Fact, Option<String>)> = Vec::new();
         let mut lost: Vec<(Fact, Option<String>)> = Vec::new();
         let mut denied = self.world.denied.clone();
@@ -552,11 +563,11 @@ fn request_parts(request: &str, rank: &dyn Fn(&str) -> Vec<ScoredIntent>, catalo
 }
 
 fn refer_back(goals: &mut Vec<PlanStep>, catalog: &CliCatalog, world: &World, validate: &Validate) {
-    // "it" is the model the step before bound; "each", "both", "them" repeat the step once per model the steps before bound, and a list of as many other values pairs up with them in order ("load them on gpu0 and gpu1"); either goes on a step's model argument or flag when it binds none.
+    // "it" is the model the step before bound; "each", "both", "them", "all" repeat the step once per model the steps before bound, and a list of as many other values pairs up with them in order ("load them on gpu0 and gpu1"); either goes on a step's model argument or flag when it binds none.
     let mut i = 0;
     while i < goals.len() {
         let words = split_words(&goals[i].clause.to_ascii_lowercase());
-        let says_each = words.iter().any(|w| matches!(w.as_str(), "each" | "both" | "them"));
+        let says_each = words.iter().any(|w| matches!(w.as_str(), "each" | "both" | "them" | "all"));
         let says_it = words.iter().any(|w| w == "it");
         let binds = |g: &PlanStep| g.argv.iter().filter(|a| super::slots::is_model_value(a, world)).cloned().collect::<Vec<_>>();
         let mut before: Vec<String> = Vec::new();
@@ -590,8 +601,46 @@ fn refer_back(goals: &mut Vec<PlanStep>, catalog: &CliCatalog, world: &World, va
     }
 }
 
+fn shown_state<'a>(text: &str, catalog: &'a CliCatalog) -> Option<&'a IntentCard> {
+    // A question that names a state by the past form of a verb that makes it true ("loaded", "installed") is answered by the command that shows that state.
+    let words = super::embed::lex_tokens(text);
+    let past = |n: &String| words.iter().any(|w| w.strip_prefix(n.strip_suffix('e').unwrap_or(n)) == Some("ed"));
+    let fact = catalog.intents.iter().find_map(|c| c.does.gives.first().filter(|_| super::embed::names(c).iter().any(past)))?;
+    catalog.intents.iter().find(|c| c.does.shows.contains(fact)).filter(|_| question(text))
+}
+
+fn asked_about(text: &str, world: &World) -> Vec<String> {
+    // The values a question about the state names ("is qwen loaded"): what it asks about, not values for the command that answers it.
+    super::slots::typed_values(text, world).into_iter().chain(super::slots::named_models(text, world)).collect()
+}
+
+fn with_first(mut options: Vec<ScoredIntent>, first: Option<&IntentCard>) -> Vec<ScoredIntent> {
+    if let Some(c) = first {
+        options.retain(|o| o.id != c.id);
+        options.insert(0, ScoredIntent { id: c.id.clone(), score: 1.0 });
+    }
+    options
+}
+
+fn repeat_counts(goals: &mut Vec<PlanStep>, catalog: &CliCatalog) {
+    // "two api keys": a step that makes something and names no value yet, said with a small count before a plural, runs that many times, each asking its own values (a larger number is an amount, "32768 tokens").
+    let mut i = 0;
+    while i < goals.len() {
+        let words = split_words(&goals[i].clause.to_ascii_lowercase());
+        let plural_after = |k: usize| words[k + 1..].iter().take(super::slots::REACH).any(|x| x.len() > super::slots::SHORT && x.ends_with('s'));
+        let n = words.iter().enumerate().find_map(|(k, w)| number(w).filter(|n| (2..10).contains(n) && plural_after(k))).unwrap_or(1) as usize;
+        let makes = catalog.get(&goals[i].intent_id).is_some_and(|c| !c.does.gives.is_empty());
+        if n > 1 && makes && !goals[i].needs_intent_pick && goals[i].positionals.is_empty() && goals[i].flags.is_empty() {
+            let g = goals[i].clone();
+            goals.splice(i..=i, std::iter::repeat_n(g, n));
+        }
+        i += n;
+    }
+}
+
 fn named_by<'a>(word: &str, catalog: &'a CliCatalog) -> Vec<&'a IntentCard> {
-    catalog.intents.iter().filter(|c| super::embed::names(c).iter().any(|n| super::embed::says(word, n))).collect()
+    // The commands whose names a word says, singular or plural alike ("key" names api keys).
+    catalog.intents.iter().filter(|c| super::embed::names(c).iter().any(|n| super::embed::says(word, n) || super::embed::same_word(word, n))).collect()
 }
 
 fn present(text: &str, catalog: &CliCatalog) -> String {
@@ -642,7 +691,7 @@ fn holds_values(piece: &str, world: &World) -> bool {
 
 fn without_values(text: &str, world: &World) -> String {
     // A part's words with its values taken out: what a continuation repeats.
-    split_words(text).into_iter().filter(|t| !holds_values(t, world)).collect::<Vec<_>>().join(" ")
+    split_words(text).into_iter().filter(|t| !holds_values(t, world) && !super::slots::is_size(t)).collect::<Vec<_>>().join(" ")
 }
 
 fn part_options(text: &str, mut open: Vec<ScoredIntent>, model_ref: Option<&str>, model_used: bool, catalog: &CliCatalog, world: &World) -> (Vec<ScoredIntent>, bool) {
@@ -767,7 +816,7 @@ fn without(text: &str, model_ref: Option<&str>) -> String {
 }
 
 pub(crate) fn order_lines(goals: &[PlanStep], world: &World, catalog: &CliCatalog) -> Vec<PlanLine> {
-    // The steps in order as commands to run; a command already listed is not repeated.
+    // The steps in order as commands to run; a command already listed is not repeated, unless it still asks for a value (two keys, each named).
     let mut lines: Vec<PlanLine> = Vec::new();
     for goal in goals {
         let line = PlanLine {
@@ -779,7 +828,7 @@ pub(crate) fn order_lines(goals: &[PlanStep], world: &World, catalog: &CliCatalo
             part: goal.part,
             placeholders: goal.missing.iter().map(|m| m.shown.clone()).collect(),
         };
-        if goal.needs_intent_pick || goal.argv.is_empty() || !lines.iter().any(|l| l.argv == line.argv) {
+        if goal.needs_intent_pick || goal.argv.is_empty() || !goal.missing.is_empty() || !lines.iter().any(|l| l.argv == line.argv) {
             lines.push(line);
         }
     }
@@ -787,14 +836,12 @@ pub(crate) fn order_lines(goals: &[PlanStep], world: &World, catalog: &CliCatalo
 }
 
 fn primary_why(step: &PlanStep, world: &World, catalog: &CliCatalog) -> String {
-    // What the command does, from its own help, so it never drifts from the CLI; a model it would load that already serves says so.
+    // What the command does, from its own help, so it never drifts from the CLI; a model it would install or load that already is says so.
     let Some(card) = catalog.get(&step.intent_id) else {
         return String::new();
     };
-    match step_model(step, card) {
-        Some(m) if card.does.gives.contains(&Fact::Loaded) && world.has(Fact::Loaded, Some(&m)) => format!("{m} is already loaded"),
-        _ => card.summary(),
-    }
+    let done = step_model(step, card).and_then(|m| [(Fact::Loaded, "loaded"), (Fact::Installed, "installed")].into_iter().find(|(f, _)| card.does.gives.contains(f) && world.has(*f, Some(&m))).map(|(_, w)| format!("{m} is already {w}")));
+    done.unwrap_or_else(|| card.summary())
 }
 
 pub(crate) fn needs_install(model: &str, world: &World) -> bool {

@@ -48,6 +48,7 @@ pub struct World {
     pub daemon_up: bool,
     pub installed_known: bool,
     pub installed: Vec<String>,
+    pub available: Vec<String>,
     pub loaded: Vec<String>,
     pub aliases: Vec<(String, String)>,
     pub gpus: Vec<(String, String)>,
@@ -72,7 +73,8 @@ impl World {
         let log_targets = cand_pairs(complete::log_targets());
         let denied = goethe_core::db::open(&home).ok().and_then(|c| goethe_core::gpu_policy::denied_set(&c).ok()).unwrap_or_default();
         let denied = denied.iter().map(|i| format!("gpu{i}")).collect();
-        World { daemon_up, installed_known, installed, loaded, aliases, gpus, interfaces, keys, log_targets, denied }
+        let available = goethe_core::registry::known_ids();
+        World { daemon_up, installed_known, installed, available, loaded, aliases, gpus, interfaces, keys, log_targets, denied }
     }
 }
 
@@ -169,10 +171,10 @@ pub fn extract_slots(card: &IntentCard, clause: &str, world: &World) -> SlotExtr
         if card.flags.iter().filter(|g| g.kind == Some(kind)).count() > 1 {
             continue;
         }
-        if let PosMatch::Values(vs) = find_kind(kind, &f.possible_values, main_text, &tokens, world) {
-            if !vs.is_empty() && !vs.iter().any(|v| taken.contains(v)) {
-                out.flags.push((f.long.clone(), vs));
-            }
+        match find_kind(kind, &f.possible_values, main_text, &tokens, world) {
+            PosMatch::Values(vs) if !vs.is_empty() && !vs.iter().any(|v| taken.contains(v)) => out.flags.push((f.long.clone(), vs)),
+            PosMatch::Ambiguous(cands) if model_flag(kind) && out.ambiguous.is_none() => out.ambiguous = Some((f.long.clone(), cands)),
+            _ => {}
         }
     }
     let bound: Vec<String> = out.positionals.values().chain(out.flags.iter().map(|(_, v)| v)).flatten().cloned().collect();
@@ -296,7 +298,7 @@ fn extract_expose_target(tokens: &[String], world: &World) -> PosMatch {
 }
 
 pub fn named_models(text: &str, world: &World) -> Vec<String> {
-    // The installed models or aliases a request's words name (words of three or more characters with a letter, so "gpu 1" names none).
+    // The models or aliases a request's words name, installed or in the registry (words of three or more characters with a letter, so "gpu 1" names none).
     let words: Vec<String> = split_words(text).into_iter().filter(|t| t.len() >= 3 && t.chars().any(|c| c.is_ascii_alphabetic())).collect();
     match match_installed_model(&words, world) {
         PosMatch::Values(v) | PosMatch::Ambiguous(v) => v,
@@ -318,28 +320,41 @@ pub fn takes_model_value(card: &IntentCard, kind: Kind, value: &str, world: &Wor
 }
 
 fn match_installed_model(tokens: &[String], world: &World) -> PosMatch {
-    // An alias or id written out wins; else the installed models whose name holds the most of the request's words with a letter (a tie is a pick; "5 rpm" names no Qwen2.5).
+    // An alias or id wins; else the models, installed or in the registry, whose family (the letters of the name's first word) the request says and whose size fits it, most words first; one to download is always a pick, so its exact id is seen.
     for (alias, _) in &world.aliases {
         if tokens.iter().any(|t| t.eq_ignore_ascii_case(alias)) {
             return PosMatch::Values(vec![alias.clone()]);
         }
     }
-    for m in &world.installed {
-        if tokens.iter().any(|t| t.eq_ignore_ascii_case(m)) {
-            return PosMatch::Values(vec![m.clone()]);
-        }
+    let models: Vec<&String> = world.installed.iter().chain(world.available.iter().filter(|m| !world.installed.contains(m))).collect();
+    if let Some(m) = models.iter().find(|m| tokens.iter().any(|t| t.eq_ignore_ascii_case(m))) {
+        return PosMatch::Values(vec![(*m).clone()]);
     }
     let words: Vec<String> = tokens.iter().filter(|t| !t.starts_with('-')).flat_map(|t| name_parts(t)).filter(|w| w.chars().any(|c| c.is_ascii_alphabetic())).collect();
+    let letters = |w: &str| w.chars().take_while(char::is_ascii_alphabetic).collect::<String>();
     let score = |id: &str| {
+        let name = id.rsplit('/').next().unwrap_or(id);
         let parts = name_parts(id);
-        words.iter().filter(|w| parts.iter().any(|p| p == *w || (w.len() >= 3 && p.starts_with(w.as_str())))).count()
+        let family = name_parts(name).first().map(|f| letters(f)).unwrap_or_default();
+        let named = !family.is_empty() && words.iter().any(|w| letters(w) == family);
+        let sized = words.iter().filter(|w| is_size(w)).all(|w| parts.contains(w));
+        if named && sized { words.iter().filter(|w| parts.iter().any(|p| p == *w || (w.len() >= 3 && p.starts_with(w.as_str())))).count() } else { 0 }
     };
-    let best = world.installed.iter().map(|m| score(m)).max().unwrap_or(0);
+    let best = models.iter().map(|m| score(m)).max().unwrap_or(0);
     if best == 0 {
         return PosMatch::None;
     }
-    let hits: Vec<String> = world.installed.iter().filter(|m| score(m) == best).cloned().collect();
-    if hits.len() == 1 { PosMatch::Values(hits) } else { PosMatch::Ambiguous(hits) }
+    let mut hits: Vec<String> = models.iter().filter(|m| score(m) == best).map(|m| (*m).clone()).collect();
+    let on_disk = hits.iter().any(|m| world.installed.contains(m));
+    if on_disk {
+        hits.retain(|m| world.installed.contains(m));
+    }
+    if hits.len() == 1 && on_disk { PosMatch::Values(hits) } else { PosMatch::Ambiguous(hits) }
+}
+
+pub fn is_size(w: &str) -> bool {
+    // A model's size as people write it: 7b, 70B, 1.5b.
+    w.len() > 1 && w.to_ascii_lowercase().ends_with('b') && w[..w.len() - 1].chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
 fn name_parts(s: &str) -> Vec<String> {

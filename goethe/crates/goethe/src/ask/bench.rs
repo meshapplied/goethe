@@ -253,6 +253,43 @@ fn no_step_or_value_is_dropped() {
 }
 
 #[test]
+fn models_are_named_by_family_and_lists_and_counts_make_one_step_each() {
+    // A model is named by its family ("qwen 7b", never "7b" alone), installed or installable; a list of models or a count makes one step each; a step's own model wins; what already holds says so.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, None);
+    let mut world = fixture_world();
+    world.installed = vec!["mistralai/Mistral-7B-Instruct".into()];
+    world.loaded = world.installed.clone();
+    world.available = vec!["Qwen/Qwen2.5-7B-Instruct".into(), "meta-llama/Llama-3.1-8B-Instruct".into()];
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let lines = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
+    let picked = |p: &PlanState| p.goals.iter().map(|g| g.ambiguous.as_ref().map_or_else(|| g.argv.join(" "), |(_, o)| o.join("|"))).collect::<Vec<_>>();
+    let p = plan("install mistral, qwen 7b and llama 8b");
+    assert_eq!(picked(&p), ["goethe install mistralai/Mistral-7B-Instruct", "Qwen/Qwen2.5-7B-Instruct", "meta-llama/Llama-3.1-8B-Instruct"], "a model to download is a pick of its exact id");
+    assert_eq!(p.lines[0].why, "mistralai/Mistral-7B-Instruct is already installed");
+    let mut p = plan("load qwen 7b");
+    let slot = p.goals.iter().find_map(|g| g.ambiguous.as_ref().map(|(n, _)| n.clone())).expect("load asks which qwen");
+    p.apply(PlanAction::SetSlot { is_flag: false, name: slot, values: vec!["Qwen/Qwen2.5-7B-Instruct".into()] }, &cat, &world, &validate_cli);
+    assert_eq!(lines(&p), ["goethe install Qwen/Qwen2.5-7B-Instruct", "goethe load Qwen/Qwen2.5-7B-Instruct"]);
+    assert!(picked(&plan("create a key named customer1 for qwen 7b")).contains(&"Qwen/Qwen2.5-7B-Instruct".to_string()));
+    assert!(!lines(&plan("create a key named customer1 for 7b")).iter().any(|l| l.contains("Mistral")), "a size alone names no model");
+    assert_eq!(lines(&plan("create two api keys")).len(), 2);
+    assert_eq!(lines(&plan("load mistral with 32k tokens")).len(), 1, "a large number is an amount, not a count");
+}
+
+#[test]
+fn a_question_about_the_state_runs_what_shows_it() {
+    // "what is loaded" is answered by goethe ps, "what is installed" by goethe models; a model it names is what it asks about, not a value.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, None);
+    let world = fixture_world();
+    for (q, want) in [("what models are currently loaded?", "goethe ps"), ("is qwen 7b loaded", "goethe ps"), ("which models are installed", "goethe models"), ("load qwen 7b", "goethe load Qwen/Qwen2.5-7B-Instruct")] {
+        let p = PlanState::build(q, &cat, &ret, &world, &validate_cli);
+        assert!(p.is_ready() && p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>() == [want], "{q}: {:?}", p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>());
+    }
+}
+
+#[test]
 fn a_question_only_reads() {
     // The owner's rule: a question never plans a change; it asks back before one ("what can i run here" started goethe and a chat).
     let cat = build_catalog(&Cli::command());

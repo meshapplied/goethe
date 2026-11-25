@@ -70,13 +70,15 @@ pub struct CmdMeta {
     pub says: &'static [&'static str],
     #[serde(skip)]
     pub undoes: &'static [Fact],
+    #[serde(skip)]
+    pub shows: &'static [Fact],
 }
 
 impl CommandExt for CmdMeta {}
 
 impl CmdMeta {
     const fn of(risk: Risk) -> Self {
-        CmdMeta { risk, needs: &[], gives: &[], confirms: false, terminal: false, says: &[], undoes: &[] }
+        CmdMeta { risk, needs: &[], gives: &[], confirms: false, terminal: false, says: &[], undoes: &[], shows: &[] }
     }
 
     pub const fn read() -> Self {
@@ -110,6 +112,11 @@ impl CmdMeta {
     pub const fn undoes(self, undoes: &'static [Fact]) -> Self {
         // What this command takes away again; one request may not give a fact and undo it on the same model.
         CmdMeta { undoes, ..self }
+    }
+
+    pub const fn shows(self, shows: &'static [Fact]) -> Self {
+        // The state this command reports; Ask answers a question about that state with it ("what is loaded" runs goethe ps).
+        CmdMeta { shows, ..self }
     }
 
     pub const fn says(self, says: &'static [&'static str]) -> Self {

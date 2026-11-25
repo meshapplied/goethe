@@ -143,7 +143,7 @@ enum Commands {
     Status,
     #[command(add = CmdMeta::read(), display_order = 3, about = "Requests, tokens, speed and GPU use per model and API key over a chosen range, from the local usage log.")]
     Metrics,
-    #[command(add = CmdMeta::read(), display_order = 4, about = "Running models in detail: GPUs, port, memory, requests and speed.")]
+    #[command(add = CmdMeta::read().shows(&[Loaded]), display_order = 4, about = "Running models in detail: GPUs, port, memory, requests and speed.")]
     Ps {
         #[arg(long, help = "JSON rows with instance_id, slot_key, status, restarts.")]
         json: bool,
@@ -251,7 +251,7 @@ enum Commands {
         #[arg(long, help = "Show the model's reasoning (dimmed) with the answer.")]
         thinking: bool,
     },
-    #[command(add = CmdMeta::read(), display_order = 10,
+    #[command(add = CmdMeta::read().shows(&[Installed]), display_order = 10,
         about = "Installed and catalog models; also recommend, scan and alias.",
         visible_alias = "list",
         args_conflicts_with_subcommands = true
@@ -291,7 +291,7 @@ enum Commands {
     Learn(LearnArgs),
     #[command(add = CmdMeta::change().says(&["record"]), display_order = 14, about = "Record requests and replies as training traces: on or off, per API key, and the size.", after_help = TRACE_HELP)]
     Trace(TraceArgs),
-    #[command(add = CmdMeta::read(), args_conflicts_with_subcommands = true, display_order = 15, about = "GPUs with memory, processes and bandwidth, live; allow or deny one.")]
+    #[command(add = CmdMeta::read().shows(&[Gpu]), args_conflicts_with_subcommands = true, display_order = 15, about = "GPUs with memory, processes and bandwidth, live; allow or deny one.")]
     Gpu {
         #[arg(long, help = "Emit JSON.")]
         json: bool,
@@ -377,7 +377,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ApiCommands {
-    #[command(add = CmdMeta::read(), about = "List API keys, create or revoke one; on a terminal without arguments, a menu.", after_help = KEY_HELP)]
+    #[command(add = CmdMeta::read().shows(&[Key]), about = "List API keys, create or revoke one; on a terminal without arguments, a menu.", after_help = KEY_HELP)]
     Keys(KeyArgs),
     #[command(add = CmdMeta::network(), about = "Who can reach the API: local, vpn, public, or one address or interface.", after_help = EXPOSE_HELP)]
     Expose(ExposeArgs),
