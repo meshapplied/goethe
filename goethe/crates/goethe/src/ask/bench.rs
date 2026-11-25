@@ -200,7 +200,7 @@ fn nothing_is_deleted_or_stopped_beside_words_about_something_else() {
     let world = fixture_world();
     let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
     let shown = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
-    for q in ["remove fast", "please remove fast", "kill all processes", "open youtube", "uninstall the auto-complete feature"] {
+    for q in ["remove fast", "please remove fast", "remove goethe", "kill all processes", "open youtube", "uninstall the auto-complete feature"] {
         let p = plan(q);
         assert!(!p.is_ready(), "{q} is ready: {:?}", shown(&p));
     }

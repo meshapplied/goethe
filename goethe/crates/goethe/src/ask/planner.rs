@@ -123,7 +123,7 @@ impl PlanState {
         let mut goals = Vec::new();
         let mut negated = None;
         for (i, (text, open)) in texts.into_iter().enumerate() {
-            let (options, about_model) = part_options(&text, open, model_ref.as_deref(), model_used, catalog);
+            let (options, about_model) = part_options(&text, open, model_ref.as_deref(), model_used, catalog, world);
             if let Some(word) = negation(&text) {
                 negated.get_or_insert(word);
                 parts.push(PlanPart { text, options, left_out: true, ignored: Vec::new() });
@@ -132,7 +132,7 @@ impl PlanState {
             let Some(top) = options.first().cloned() else {
                 continue;
             };
-            let named = named_alone(&top.id, &present(&text, catalog), catalog);
+            let named = named_alone(&top.id, &present(&text, catalog), catalog, world);
             if !about_model && !several && top.score < TAU_OOD && !named {
                 continue;
             }
@@ -359,13 +359,13 @@ impl PlanState {
         let model_ref = self.model_ref.clone().or_else(|| written_model(text, catalog));
         let open = retriever.rank(&without(&present(text, catalog), model_ref.as_deref()), catalog.intents.len());
         let model_used = self.goals.iter().any(|g| g.part != part && takes_model(catalog, &g.intent_id));
-        let (options, about_model) = part_options(text, open, model_ref.as_deref(), model_used, catalog);
+        let (options, about_model) = part_options(text, open, model_ref.as_deref(), model_used, catalog, &self.world);
         let Some(top) = options.first().cloned() else {
             return Err("No Goethe command matches those words.".into());
         };
         self.model_ref = model_ref;
         self.parts[part] = PlanPart { text: text.to_string(), options: options.clone(), left_out: false, ignored: Vec::new() };
-        let named = clear(&options, if about_model { TAU_OOD } else { TAU_HI }) || named_alone(&top.id, &present(text, catalog), catalog);
+        let named = clear(&options, if about_model { TAU_OOD } else { TAU_HI }) || named_alone(&top.id, &present(text, catalog), catalog, &self.world);
         let needs_intent_pick = !named || risky_by_word_alone(&top, catalog) || changes_beside_a_stray_word(&top.id, text, catalog, retriever, &self.world);
         let input = StepBuildInput { clause: text, intent_id: &top.id, alternatives: options.clone(), needs_intent_pick };
         let mut goal = build_step(input, catalog, &self.world, validate);
@@ -603,9 +603,20 @@ fn present(text: &str, catalog: &CliCatalog) -> String {
     text.split_whitespace().map(|w| word_of(&w.to_ascii_lowercase()).unwrap_or_else(|| w.to_string())).collect::<Vec<_>>().join(" ")
 }
 
-fn named_alone(id: &str, text: &str, catalog: &CliCatalog) -> bool {
+fn named_here<'a>(word: &str, text: &str, catalog: &'a CliCatalog, world: &World) -> Vec<&'a IntentCard> {
+    // The commands a word names, only those that take a value of a known shape the request gives, when some do ("deny gpu2" names gpu deny, not remote deny, whose kinds hold no GPU); a guessed name ("remove goethe" as an alias) is no such value.
+    let named = named_by(word, catalog);
+    let given = super::slots::typed_values(text, world);
+    let fit: Vec<&IntentCard> = named.iter().copied().filter(|c| {
+        let s = extract_slots(c, text, world);
+        s.positionals.values().chain(s.flags.iter().map(|(_, v)| v)).flatten().any(|a| given.iter().any(|v| a == v || *a == world.key_id(v)))
+    }).collect();
+    if fit.is_empty() { named } else { fit }
+}
+
+fn named_alone(id: &str, text: &str, catalog: &CliCatalog, world: &World) -> bool {
     // A word the CLI gives to this command alone, and every other such word gives it to this one or a parent of it ("block" is only gpu deny's, "api" is api's): the command is named, not guessed; a parent's word alone names no child, and words for two unrelated commands stay a question.
-    let alone: Vec<String> = split_words(&text.to_ascii_lowercase()).iter().filter_map(|w| match named_by(w, catalog)[..] {
+    let alone: Vec<String> = split_words(&text.to_ascii_lowercase()).iter().filter_map(|w| match named_here(w, text, catalog, world)[..] {
         [c] => Some(c.id.clone()),
         _ => None,
     }).collect();
@@ -633,8 +644,8 @@ fn without_values(text: &str, world: &World) -> String {
     split_words(text).into_iter().filter(|t| !holds_values(t, world)).collect::<Vec<_>>().join(" ")
 }
 
-fn part_options(text: &str, mut open: Vec<ScoredIntent>, model_ref: Option<&str>, model_used: bool, catalog: &CliCatalog) -> (Vec<ScoredIntent>, bool) {
-    // The commands one part can be: only model commands when the part is about the written model (it names it and no other part uses it, or its best guess takes a model), and only commands that take every --flag written out.
+fn part_options(text: &str, mut open: Vec<ScoredIntent>, model_ref: Option<&str>, model_used: bool, catalog: &CliCatalog, world: &World) -> (Vec<ScoredIntent>, bool) {
+    // The commands one part can be: only model commands when the part is about the written model (it names it and no other part uses it, or its best guess takes a model), only commands that take every --flag written out, and no command a word names whose namesake takes the part's value instead.
     let top_takes_model = open.first().is_some_and(|t| takes_model(catalog, &t.id));
     let names_it = model_ref.is_some_and(|m| text.contains(m));
     let about_model = model_ref.is_some() && (top_takes_model || (names_it && !model_used));
@@ -645,6 +656,10 @@ fn part_options(text: &str, mut open: Vec<ScoredIntent>, model_ref: Option<&str>
     let takes_all = |id: &str| catalog.get(id).is_some_and(|c| typed.iter().all(|f| c.flags.iter().any(|g| g.long == *f)));
     if !typed.is_empty() && open.iter().any(|r| takes_all(&r.id)) {
         open.retain(|r| takes_all(&r.id));
+    }
+    for w in split_words(&text.to_ascii_lowercase()) {
+        let here = named_here(&w, text, catalog, world);
+        open.retain(|o| here.iter().any(|c| c.id == o.id) || !named_by(&w, catalog).iter().any(|c| c.id == o.id));
     }
     prefer_named_child(&mut open, text);
     open.truncate(5);
