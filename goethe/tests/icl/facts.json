@@ -1,0 +1,66 @@
+[
+ {
+  "id": "billing",
+  "question": "Who is the billing contact for this project?",
+  "versions": [
+   {
+    "marker": "Marisol Ortega",
+    "answer": "Marisol Ortega"
+   },
+   {
+    "marker": "Tomasz Wren",
+    "answer": "Tomasz Wren"
+   }
+  ]
+ },
+ {
+  "id": "ticket",
+  "question": "What ticket is this work tracked under?",
+  "versions": [
+   {
+    "marker": "PRJ-90817",
+    "answer": "PRJ-90817"
+   }
+  ]
+ },
+ {
+  "id": "host",
+  "question": "What is the staging host named?",
+  "versions": [
+   {
+    "marker": "kestrel-14",
+    "answer": "kestrel-14"
+   }
+  ]
+ },
+ {
+  "id": "fastapi",
+  "question": "Which audit ticket was the reason we decided against FastAPI?",
+  "versions": [
+   {
+    "marker": "AUD-4471",
+    "answer": "AUD-4471"
+   }
+  ]
+ },
+ {
+  "id": "sqlite",
+  "question": "Which retention policy was the reason we rejected SQLite?",
+  "versions": [
+   {
+    "marker": "RP-233",
+    "answer": "RP-233"
+   }
+  ]
+ },
+ {
+  "id": "codename",
+  "question": "What is the release codename?",
+  "versions": [
+   {
+    "marker": "BLUE HERON",
+    "answer": "BLUE HERON"
+   }
+  ]
+ }
+]

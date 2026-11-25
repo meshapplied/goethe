@@ -158,7 +158,11 @@ pub fn install(dirs: &Dirs, shell: Shell, script: &str) -> Result<Installed, Str
     match dirs.rc(shell) {
         None => Ok(Installed::Loaded(path)),
         Some(rc) => {
-            let text = std::fs::read_to_string(&rc).unwrap_or_default();
+            let text = match std::fs::read_to_string(&rc) {
+                Ok(t) => t,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(e) => return Err(format!("{} could not be read ({e}), so it was left as it is", rc.display())),
+            };
             write(&rc, &with_block(&text, &rc_block(shell, &path)))?;
             Ok(Installed::Sourced(path, rc))
         }
@@ -249,6 +253,16 @@ mod tests {
         assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
         let names: Vec<String> = std::fs::read_dir(real.parent().unwrap()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["zshrc"], "no temp file left behind");
+    }
+
+    #[test]
+    fn an_rc_file_that_is_not_utf8_is_left_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        let latin1 = b"# caf\xe9\nexport A=1\n";
+        std::fs::write(&rc, latin1).unwrap();
+        assert!(install(&dirs(tmp.path(), true), Shell::Zsh, "zsh script").is_err());
+        assert_eq!(std::fs::read(&rc).unwrap(), latin1);
     }
 
     #[test]

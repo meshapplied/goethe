@@ -70,6 +70,16 @@ codes! {
     DoctorFfmpeg = "DOCTOR_FFMPEG",
     DoctorAskModel = "DOCTOR_ASK_MODEL",
     DoctorLlamaCpp = "DOCTOR_LLAMA_CPP",
+    RemoteActionUnknown = "REMOTE_ACTION_UNKNOWN",
+    RemoteArgs = "REMOTE_ARGS",
+    RemoteWrongNode = "REMOTE_WRONG_NODE",
+    RemoteSig = "REMOTE_SIG",
+    RemoteKeyUnknown = "REMOTE_KEY_UNKNOWN",
+    RemoteKeyCap = "REMOTE_KEY_CAP",
+    RemotePolicy = "REMOTE_POLICY",
+    RemoteExpired = "REMOTE_EXPIRED",
+    RemoteReplay = "REMOTE_REPLAY",
+    RemoteBusy = "REMOTE_BUSY",
 }
 
 impl Code {
@@ -90,10 +100,14 @@ pub struct Event {
 
 pub fn record(code: Code, detail: &str) {
     // Best effort and never fatal: a failure that cannot be logged is still reported to the user as before.
+    record_at(&crate::paths::goethe_home(), code, detail);
+}
+
+pub fn record_at(home: &Path, code: Code, detail: &str) {
+    // The same row in a named home, for goethed acting on a command.
     RECORDED.store(true, Ordering::Relaxed);
-    let home = crate::paths::goethe_home();
     let t = chrono::Utc::now().timestamp();
-    let _ = append(&home, t, code.label(), env!("CARGO_PKG_VERSION"), &scrub(detail));
+    let _ = append(home, t, code.label(), env!("CARGO_PKG_VERSION"), &scrub(detail));
 }
 
 pub fn coded(code: Code, msg: String) -> String {

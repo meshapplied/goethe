@@ -141,6 +141,7 @@ pub enum Value {
     KeyName,
     KeyId,
     Key,
+    TrustKey,
     Alias,
     NewAlias,
     Domain,
@@ -164,6 +165,7 @@ impl Value {
             Value::LogTarget => c::log_targets,
             Value::Gpu => c::gpus,
             Value::KeyId => c::key_ids,
+            Value::TrustKey => c::trust_keys,
             Value::Key => c::key_names,
             Value::Alias => c::aliases,
             Value::Interface => c::interfaces,
@@ -577,6 +579,7 @@ mod tests {
             (&["trace", "on"][..], "key"),
             (&["trace", "off"][..], "key"),
             (&["learn", "on"][..], "model"),
+            (&["remote", "trust", "remove"][..], "key_id"),
         ] {
             assert!(arg(path, id), "{path:?} {id} lost its completer");
         }

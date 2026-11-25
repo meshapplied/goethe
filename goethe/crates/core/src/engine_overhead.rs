@@ -37,11 +37,16 @@ pub fn parse_shortfall_gb(log_text: &str) -> Option<f64> {
 }
 
 fn size_gb_after(line: &str, key: &str) -> Option<f64> {
-    // "2.00 GiB" / "272.00 MiB" / "3.00 GB" → GB. Unknown unit kept as today (GiB).
+    // "2.00 GiB" / "272.00 MiB" / "512.00 KiB" / "3.00 GB" / "20 bytes" → GB; a missing unit counts as GiB.
     let mut words = line.split(key).nth(1)?.split_whitespace();
     let n: f64 = words.next()?.trim_end_matches(['.', ',']).parse().ok()?;
     let unit = words.next().unwrap_or("GiB").to_ascii_lowercase();
-    Some(if unit.starts_with("mi") { n / 1024.0 } else { n })
+    Some(match unit.as_bytes().first() {
+        Some(b'm') => n / 1024.0,
+        Some(b'k') => n / (1024.0 * 1024.0),
+        Some(b'b') => n / (1024.0 * 1024.0 * 1024.0),
+        _ => n,
+    })
 }
 
 fn torch_oom_gap_gb(line: &str) -> Option<f64> {
@@ -191,6 +196,15 @@ mod tests {
         let log = "Not enough GPU memory for hybrid ... total_rest_memory=-3.72 GB";
         let gb = parse_shortfall_gb(log).unwrap();
         assert!((gb - 4.72).abs() < 0.01);
+    }
+
+    #[test]
+    fn torch_sizes_are_read_in_their_own_unit() {
+        let gap = |l: &str| torch_oom_gap_gb(l).unwrap();
+        assert!((gap("Tried to allocate 2.00 GiB. GPU 0 has 79 GiB of which 1.00 GiB is free") - 1.0).abs() < 1e-9);
+        assert!((gap("Tried to allocate 512.00 MiB. of which 256.00 MiB is free") - 0.25).abs() < 1e-9);
+        assert!(gap("Tried to allocate 512.00 KiB. of which 300.00 KiB is free") < 0.001, "KiB is not GiB");
+        assert!(gap("Tried to allocate 20 bytes. of which 0 bytes is free") < 1e-6);
     }
 
     #[test]

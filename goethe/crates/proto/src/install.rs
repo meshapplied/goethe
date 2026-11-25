@@ -4,6 +4,9 @@ use crate::{b64, hex, sha256, unb64};
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 
+pub const CONNECT_UPGRADE: &str = "goethe-node/1";
+pub const PROOF_HEADER: &str = "goethe-proof";
+
 pub struct InstallKey(Ed25519KeyPair);
 
 impl InstallKey {

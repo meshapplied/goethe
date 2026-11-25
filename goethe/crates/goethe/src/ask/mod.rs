@@ -162,7 +162,7 @@ fn run_once(query: &str, root: &Command, validate: &planner::Validate, opts: &As
         eprintln!("ask: these commands change things; pass --yes to run them, or --dry-run to only print them");
         return 3;
     }
-    run_list(&plan_argvs(&plan), &Watch::Terminal)
+    run_list(&plan_argvs(&plan), &Watch::Terminal { input: !opts.no_input })
 }
 
 pub fn menu_driver(
@@ -540,7 +540,7 @@ impl goethe_core::menu::AskDriver for MenuAsk {
         let Some(plan) = self.plan.as_ref().filter(|p| p.is_ready()) else {
             return;
         };
-        let code = run_list(&plan_argvs(plan), &Watch::Terminal);
+        let code = run_list(&plan_argvs(plan), &Watch::Terminal { input: true });
         self.world = World::from_host();
         self.frame.can_run = false;
         self.frame.done = code == 0;
@@ -561,7 +561,7 @@ impl goethe_core::menu::AskDriver for MenuAsk {
 }
 
 enum Watch {
-    Terminal,
+    Terminal { input: bool },
     Screen { log: Arc<Mutex<RunLog>>, stop: Arc<AtomicBool> },
 }
 
@@ -582,7 +582,7 @@ impl Watch {
 
     fn say(&self, step: usize, text: &str) {
         match self {
-            Watch::Terminal => eprintln!("error: {text}"),
+            Watch::Terminal { .. } => eprintln!("error: {text}"),
             Watch::Screen { log, .. } => push_line(log, step, text),
         }
     }
@@ -600,14 +600,19 @@ fn run_list(argvs: &[Vec<String>], watch: &Watch) -> i32 {
     for (i, argv) in argvs.iter().enumerate() {
         let shown = ui::format_argv(argv);
         watch.mark(i, StepState::Running);
-        if let Watch::Terminal = watch {
-            eprintln!("==> {shown}");
-        }
         let mut cmd = ProcessCommand::new(&exe);
         cmd.args(&argv[1..]);
-        if let Watch::Screen { .. } = watch {
-            cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-            std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+        match watch {
+            Watch::Terminal { input } => {
+                eprintln!("==> {shown}");
+                if !input {
+                    cmd.stdin(Stdio::null());
+                }
+            }
+            Watch::Screen { .. } => {
+                cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+                std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+            }
         }
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -624,7 +629,7 @@ fn run_list(argvs: &[Vec<String>], watch: &Watch) -> i32 {
                 let err = child.stderr.take().map(|e| read_lines(Box::new(e), log.clone(), i));
                 [out, err].into_iter().flatten().collect()
             }
-            Watch::Terminal => Vec::new(),
+            Watch::Terminal { .. } => Vec::new(),
         };
         let code = loop {
             if let Watch::Screen { stop, .. } = watch {
@@ -644,10 +649,10 @@ fn run_list(argvs: &[Vec<String>], watch: &Watch) -> i32 {
         }
         if code != 0 {
             watch.mark(i, StepState::Failed);
-            if let Watch::Terminal = watch {
+            if let Watch::Terminal { .. } = watch {
                 eprintln!("ask: {shown} failed (exit {code})");
             }
-            return 1;
+            return if code == 3 { 3 } else { 1 };
         }
         watch.mark(i, StepState::Done);
     }

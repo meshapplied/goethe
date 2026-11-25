@@ -313,7 +313,7 @@ fn share_allow(cli: &[String], reuse_keys: bool, kept: &[String]) -> Vec<String>
 
 fn need_client_allow(home: &Path) -> String {
     // Who may connect is the client's public IP, not this machine's (that one is only the URL).
-    let here = crate::platform::lookup_public_ip(home)
+    let here = crate::client::link::lookup_public_ip(home)
         .ok()
         .map(|ip| format!(" this machine's public address is {ip} (that becomes the URL, not --allow);"))
         .unwrap_or_default();
@@ -323,7 +323,7 @@ fn need_client_allow(home: &Path) -> String {
 }
 
 fn reject_bad_share_cidrs(home: &Path, allow: &[String]) -> Result<(), String> {
-    let machine = crate::platform::lookup_public_ip(home).ok();
+    let machine = crate::client::link::lookup_public_ip(home).ok();
     for c in allow {
         if c.ends_with("/0") {
             return Err(
@@ -442,7 +442,7 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
     if !ours && !port_free(port) {
         return Err(format!("port {port} is in use; pick another with --port"));
     }
-    let public_ip = crate::platform::lookup_public_ip(home).ok();
+    let public_ip = crate::client::link::lookup_public_ip(home).ok();
     if public_ip.is_none() {
         warnings.push("could not look up this machine's public address; set GOETHE_PUBLIC_IP to name it".to_string());
     }
@@ -541,7 +541,7 @@ pub fn tick(home: &Path) {
     let now_stamp = stamp(home);
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
     if seen.is_some_and(|s| s != now_stamp) {
-        crate::platform::notify(crate::platform::CHANGE_STATE);
+        crate::client::link::notify(crate::client::link::CHANGE_STATE);
     }
     seen.replace(now_stamp);
 }

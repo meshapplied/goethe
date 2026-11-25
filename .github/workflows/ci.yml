@@ -66,7 +66,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
-      - run: shellcheck -S warning install.sh goethe/tests/accept.sh
+      - name: Shellcheck the installers, packaging and engine scripts (nginx_versions.sh is sourced data)
+        run: |
+          for f in goethe/packaging/*.sh; do [[ "$f" == */nginx_versions.sh ]] || set -- "$@" "$f"; done
+          shellcheck -S warning install.sh goethe/cdn/install.sh goethe/tests/accept.sh goethe/crates/core/src/fix_driver.sh \
+            goethe/pyenv/*.sh goethe/sglang/*.sh goethe/llama-cpp/*.sh "$@"
       - name: Style lint (headers, function comments, no dashes or emojis, leak guard, pinned ruff with the repo rules)
         working-directory: goethe
         run: python3 tests/lint_style.py

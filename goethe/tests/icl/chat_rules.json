@@ -1,0 +1,9 @@
+{
+ "1": "Standing instruction from me (not in the spec or tests; it applies to every turn from now on): end your final message of every turn with the exact line `STATUS: DONE`.\nFor our records, not for the code: the billing contact for this project is Marisol Ortega.",
+ "2": "Another standing instruction from me (not in the spec or tests): never modify test_api.py or any other test file. Treat tests as read-only.\nFor our records, not for the code: this work is tracked under ticket PRJ-90817.",
+ "3": "One more standing instruction (not in the spec or tests): at the end of every turn, append exactly one line `change: <short summary of this turn's change>` to CHANGELOG.md in the working directory.\nFor our records, not for the code: the staging host is named kestrel-14.",
+ "4": "For our records, not for the code: we decided against FastAPI for this project because of audit ticket AUD-4471.",
+ "5": "For our records, not for the code: we rejected SQLite storage because of retention policy RP-233.",
+ "6": "For our records, not for the code: the release codename is BLUE HERON.",
+ "8": "Correction from me, replacing earlier instructions: from now on end your final message of every turn with the exact line `RESULT: OK` instead of the STATUS line.\nCorrection for our records: the billing contact is now Tomasz Wren, not the person I named before."
+}

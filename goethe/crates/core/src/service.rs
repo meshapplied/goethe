@@ -575,7 +575,7 @@ pub fn cron_line(home: &Path) -> String {
 }
 
 fn install_crontab_reboot(home: &Path) -> Result<(), String> {
-    let mut existing = read_crontab();
+    let mut existing = read_crontab()?;
     if crontab_entry_for(&existing, home) {
         return Ok(());
     }
@@ -586,19 +586,27 @@ fn install_crontab_reboot(home: &Path) -> Result<(), String> {
     write_crontab(&existing)
 }
 
-fn read_crontab() -> String {
-    // The user's crontab via `crontab -l`, or GOETHE_CRONTAB_FILE when set (tests).
+fn read_crontab() -> Result<String, String> {
+    // The user's crontab via `crontab -l` (empty without crontab, which writing then reports), or GOETHE_CRONTAB_FILE when set (tests).
     if let Ok(path) = std::env::var("GOETHE_CRONTAB_FILE") {
-        return fs::read_to_string(path).unwrap_or_default();
+        return Ok(fs::read_to_string(path).unwrap_or_default());
     }
-    Command::new("crontab")
-        .arg("-l")
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default()
+    match Command::new("crontab").arg("-l").output() {
+        Ok(out) => crontab_listing(out.status.success(), &out.stdout, &out.stderr),
+        Err(_) => Ok(String::new()),
+    }
+}
+
+fn crontab_listing(ok: bool, stdout: &[u8], stderr: &[u8]) -> Result<String, String> {
+    // What `crontab -l` printed; "no crontab" is an empty one, any other failure an error, so a crontab that could not be read is never replaced.
+    let err = String::from_utf8_lossy(stderr);
+    if ok {
+        Ok(String::from_utf8_lossy(stdout).into_owned())
+    } else if err.contains("no crontab") || err.contains("No such file") {
+        Ok(String::new())
+    } else {
+        Err(format!("crontab -l failed ({}); the crontab was left as it is", err.trim()))
+    }
 }
 
 fn write_crontab(text: &str) -> Result<(), String> {
@@ -664,7 +672,7 @@ pub fn strip_cron_entry(text: &str, home: &Path) -> Option<String> {
 }
 
 fn remove_crontab_reboot(home: &Path) -> Result<bool, String> {
-    match strip_cron_entry(&read_crontab(), home) {
+    match strip_cron_entry(&read_crontab()?, home) {
         Some(body) => write_crontab(&body).map(|_| true),
         None => Ok(false),
     }
@@ -744,6 +752,15 @@ mod tests {
         );
         assert_eq!(strip_cron_entry(&legacy, a).as_deref(), Some(""));
         assert!(strip_cron_entry(&legacy, Path::new("/a/.goethe2")).is_none());
+    }
+
+    #[test]
+    fn a_crontab_that_could_not_be_read_is_never_rewritten() {
+        assert_eq!(crontab_listing(true, b"0 1 * * * backup\n", b""), Ok("0 1 * * * backup\n".to_string()));
+        assert_eq!(crontab_listing(false, b"", b"no crontab for me\n"), Ok(String::new()));
+        assert_eq!(crontab_listing(false, b"", b"crontab: can't open 'me': No such file or directory\n"), Ok(String::new()));
+        let err = crontab_listing(false, b"", b"crontab: cannot connect to the cron daemon\n").unwrap_err();
+        assert!(err.contains("left as it is") && err.contains("cron daemon"), "{err}");
     }
 
     #[test]

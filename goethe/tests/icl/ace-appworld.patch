@@ -1,0 +1,18 @@
+diff --git a/experiments/code/ace/run.py b/experiments/code/ace/run.py
+index c23b1c7..427dd87 100644
+--- a/experiments/code/ace/run.py
++++ b/experiments/code/ace/run.py
+@@ -106,10 +106,11 @@ def run_experiment(
+     else:
+         raise ValueError(f"Unknown run_type: {run_type}")
+ 
++    extra = {"batch_size": batch_size} if run_type == "ace-adaptation" and batch_size > 1 else {}
+     agent.solve_tasks(
+         task_ids=task_ids,
+         experiment_name=experiment_name,
+         num_processes=num_processes,
+         process_index=process_index,
+-        batch_size=batch_size,
++        **extra,
+     )
+\ No newline at end of file
