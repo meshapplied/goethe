@@ -247,9 +247,9 @@ fn check_driver(home: &Path) -> Check {
     }
 }
 
-fn platform_note(link: crate::platform_cli::Link) -> (&'static str, String) {
+fn platform_note(link: crate::client::login::Link) -> (&'static str, String) {
     // Whether this node is linked to the Goethe platform, which also decides whether optimised kernels install.
-    use crate::platform_cli::Link;
+    use crate::client::login::Link;
     match link {
         Link::NotLinked => ("INFO", "not logged in: optional; goethe login links this node and unlocks optimised kernels".to_string()),
         Link::Unreadable(e) => ("WARN", format!("login not usable ({e}); goethe login again")),
@@ -259,7 +259,7 @@ fn platform_note(link: crate::platform_cli::Link) -> (&'static str, String) {
 }
 
 fn check_platform(home: &Path) -> Check {
-    let (status, note) = platform_note(crate::platform_cli::link_state(home, crate::service::goethed_running()));
+    let (status, note) = platform_note(crate::client::login::link_state(home, crate::service::goethed_running()));
     check("console", status, note)
 }
 
@@ -936,7 +936,7 @@ mod tests {
         assert_eq!(driver_note("570.1").0, "WARN");
         assert_eq!(driver_note("525.60").0, "FAIL");
         assert_eq!(driver_note("").0, "WARN");
-        use crate::platform_cli::Link;
+        use crate::client::login::Link;
         assert_eq!(platform_note(Link::NotLinked).0, "INFO");
         assert!(platform_note(Link::NotLinked).1.contains("goethe login"));
         assert_eq!(platform_note(Link::Linked { workspace: "w".into(), revoked: false, heartbeat: "OK".into(), ok: true }).0, "OK");

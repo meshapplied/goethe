@@ -16,6 +16,7 @@ const IMAGE_FILES: [(&str, &str); 5] = [
     ("ask/ask-model-v1.bin", "ask/ask-model-v1.bin"),
 ];
 const SETUP_DONE: &str = "container-setup.done";
+const SECRET_ENV: [&str; 3] = ["GOETHE_API_KEY", "GOETHE_AUTHKEY", "GOETHE_HF_TOKEN"];
 const GOETHED_READY: Duration = Duration::from_secs(60);
 
 pub fn run(check: bool) -> i32 {
@@ -43,7 +44,7 @@ pub fn run(check: bool) -> i32 {
     if let Err(e) = &lines {
         eprintln!("error: GOETHE_SETUP is not run: {e}");
     }
-    let mut goethed = match Command::new(home.join("bin/goethed")).stdin(Stdio::null()).spawn() {
+    let mut goethed = match without_secrets(&mut Command::new(home.join("bin/goethed"))).stdin(Stdio::null()).spawn() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: cannot start goethed: {e}");
@@ -87,7 +88,7 @@ fn prepare(home: &Path) -> Result<(), String> {
         let _ = std::fs::remove_file(&to);
         std::os::unix::fs::symlink(&from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
     }
-    goethe_core::platform::ensure_home_machine_id(home)?;
+    goethe_core::client::link::ensure_home_machine_id(home)?;
     goethe_core::nginx::ensure_certs(home)?;
     match goethe_core::hw::profile(home).and_then(|s| goethe_core::hw::write_state(home, &s).map(|_| s)) {
         Ok(s) if !s.gpus.is_empty() => println!("GPUs: {}", s.gpus.iter().map(|g| g.name.as_str()).collect::<Vec<_>>().join(", ")),
@@ -107,15 +108,23 @@ fn api_key(home: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn without_secrets(cmd: &mut Command) -> &mut Command {
+    // The container's secrets were used at start; goethed, its engines and the GOETHE_SETUP lines never inherit them.
+    for k in SECRET_ENV {
+        cmd.env_remove(k);
+    }
+    cmd
+}
+
 fn link(home: &Path) {
     // GOETHE_AUTHKEY links this node to the Goethe console once; a failure is said and the node serves anyway.
     let Some(key) = std::env::var("GOETHE_AUTHKEY").ok().filter(|s| !s.is_empty()) else {
         return;
     };
-    if goethe_core::platform_cli::is_linked(home) {
+    if goethe_core::client::login::is_linked(home) {
         return;
     }
-    if let Err(e) = goethe_core::platform_cli::login(None, Some(&key)) {
+    if let Err(e) = goethe_core::client::login::login(None, Some(&key)) {
         eprintln!("error: console link with GOETHE_AUTHKEY failed: {e}");
     }
 }
@@ -171,7 +180,7 @@ fn run_setup(home: &Path, text: &str, lines: &[Vec<String>]) {
         println!("GOETHE_SETUP: goethe {}", words.join(" "));
         let token = hf_token.as_deref().filter(|_| words.iter().any(|w| w == "--hf-token"));
         let mut cmd = Command::new(&exe);
-        cmd.args(words).stdin(if token.is_some() { Stdio::piped() } else { Stdio::null() });
+        without_secrets(&mut cmd).args(words).stdin(if token.is_some() { Stdio::piped() } else { Stdio::null() });
         let ok = cmd.spawn().and_then(|mut child| {
             if let (Some(t), Some(mut stdin)) = (token, child.stdin.take()) {
                 writeln!(stdin, "{t}")?;
@@ -194,6 +203,14 @@ fn run_setup(home: &Path, text: &str, lines: &[Vec<String>]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_container_secrets_are_not_passed_on() {
+        let mut cmd = Command::new("true");
+        without_secrets(&mut cmd);
+        let removed: Vec<_> = cmd.get_envs().filter(|(_, v)| v.is_none()).map(|(k, _)| k.to_string_lossy().into_owned()).collect();
+        assert_eq!(removed, SECRET_ENV);
+    }
 
     #[test]
     fn setup_lines_are_goethe_commands_checked_before_any_runs() {

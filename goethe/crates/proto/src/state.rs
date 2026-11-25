@@ -1,8 +1,7 @@
-// What a node reports on its connection (hello, snapshot, live instance load) and the ack the platform sends back.
+// What a node reports on its goethe-server connection (hello, live instance load) and the remote block its console snapshot carries.
 
 use crate::command::{Policy, TrustEntry};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 pub const STATE_SCHEMA: &str = "goethe.state.v1";
 
@@ -16,16 +15,13 @@ pub enum StateEvent {
         goethe_version: String,
         proto: u32,
     },
-    Snapshot {
-        snapshot: Value,
-    },
     Live {
         t_ms: u64,
         instances: Vec<Instance>,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Instance {
     pub instance_id: String,
     pub model_id: String,
@@ -34,19 +30,16 @@ pub struct Instance {
     pub status: String,
     pub in_flight: u64,
     pub max_conc: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_cache_pct: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Remote {
     pub policy: Policy,
     pub trust: Vec<TrustEntry>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Ack {
-    pub usage_to: i64,
-    pub errors_to: i64,
 }
 
 #[cfg(test)]
@@ -59,11 +52,13 @@ mod tests {
             let event: StateEvent = serde_json::from_str(line).unwrap();
             let again: StateEvent = serde_json::from_value(serde_json::to_value(&event).unwrap()).unwrap();
             assert_eq!(event, again);
+            if let StateEvent::Live { instances, .. } = &event {
+                assert_eq!((instances[0].queued, instances[0].kv_cache_pct), (Some(1), Some(42.5)));
+                assert!(instances[1].queued.is_none() && !serde_json::to_string(&instances[1]).unwrap().contains("kv_cache_pct"), "optional gauges stay off the wire");
+            }
         }
-        let ack: Ack = serde_json::from_str(include_str!("../fixtures/ack.json")).unwrap();
-        assert_eq!(ack, Ack { usage_to: 1_795_000_020, errors_to: 1_795_000_000 });
         let remote: Remote = serde_json::from_str(include_str!("../fixtures/remote.json")).unwrap();
         assert!(remote.policy.change && !remote.policy.destructive);
-        assert!(serde_json::from_str::<Ack>(include_str!("../fixtures/bad/ack_extra_field.json")).is_err());
+        assert!(serde_json::from_str::<StateEvent>(r#"{"type":"snapshot","snapshot":{}}"#).is_err(), "telemetry never rides this stream");
     }
 }

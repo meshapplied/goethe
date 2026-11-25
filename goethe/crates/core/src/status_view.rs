@@ -455,7 +455,7 @@ pub fn render(v: &StatusView, width: usize) -> Vec<String> {
     let mut out = vec![String::new(), format!("  {}", summary_line(&v.summary, w)), String::new(), String::new(), String::new(), String::new()];
     out.extend(gpu_lines(&v.gpus, w).into_iter().map(|l| format!("  {l}")));
     out.push(String::new());
-    let half = (w - GAP.len()) / 2;
+    let half = w.saturating_sub(GAP.len()) / 2;
     let (left, right) = (cpu_lines(&v.cpu, half), memory_lines(&v.memory, half));
     for i in 0..left.len().max(right.len()) {
         let l = left.get(i).map(|s| clip(s, half)).unwrap_or_default();
@@ -566,6 +566,9 @@ mod tests {
             assert_eq!(rule.chars().count(), 2 + width_for(w), "the GPU rule spans the table: {rule}");
             let cpu = t.iter().find(|l| l.contains("\u{25a3} CPU")).unwrap();
             assert_eq!(cpu.chars().count(), 2 + width_for(w) - (width_for(w) - GAP.len()) % 2, "CPU and memory together span the same width");
+        }
+        for tiny in 0..12 {
+            render(&v, tiny);
         }
     }
 

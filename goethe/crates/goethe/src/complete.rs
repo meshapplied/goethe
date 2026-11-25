@@ -52,8 +52,8 @@ pub fn interfaces() -> Vec<CompletionCandidate> {
 
 pub fn platform_urls() -> Vec<CompletionCandidate> {
     // The default platform, and the configured one when it differs.
-    let mut out = vec![candidate(goethe_core::platform::DEFAULT_PLATFORM_URL, "Goethe console")];
-    if let Some(u) = goethe_core::paths::setting(goethe_core::platform::URL_SETTING).filter(|u| u != goethe_core::platform::DEFAULT_PLATFORM_URL) {
+    let mut out = vec![candidate(goethe_core::client::link::DEFAULT_PLATFORM_URL, "Goethe console")];
+    if let Some(u) = goethe_core::paths::setting(goethe_core::client::link::URL_SETTING).filter(|u| u != goethe_core::client::link::DEFAULT_PLATFORM_URL) {
         out.push(candidate(&u, "GOETHE_PLATFORM_URL"));
     }
     out
@@ -98,6 +98,10 @@ pub fn key_ids() -> Vec<CompletionCandidate> {
 
 pub fn key_names() -> Vec<CompletionCandidate> {
     keys().iter().map(|(id, name)| candidate(name, id)).collect()
+}
+
+pub fn trust_keys() -> Vec<CompletionCandidate> {
+    goethe_core::client::remote::status(&goethe_home()).trust.iter().map(|t| candidate(&t.key_id, &format!("{} ({})", t.user_id, t.cap.name()))).collect()
 }
 
 fn script(shell: Shell) -> Result<String, String> {
