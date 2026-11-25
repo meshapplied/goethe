@@ -33,7 +33,7 @@ Goethe turns a machine into your own API, compatible with OpenAI, Anthropic and 
 ## Quick install
 
 ```bash
-curl -fsSL https://pkg.goethe.sh/install.sh | bash
+curl -fsSL https://goethe.sh/install | bash
 goethe login
 goethe
 ```
@@ -41,7 +41,7 @@ goethe
 **Windows 10/11 (x64):** elevated PowerShell runs the same installer inside WSL2 Ubuntu:
 
 ```powershell
-irm https://pkg.goethe.sh/install.ps1 | iex
+irm https://goethe.sh/install | iex
 ```
 
 WSL limits to know:

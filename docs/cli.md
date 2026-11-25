@@ -33,7 +33,7 @@ Exit codes:
 - [API access](#api-access): `api`, `api keys`, `api expose`, `api allow`, `api domain`, `api share`
 - [Learning and traces](#learning-and-traces): `learn`, `trace`
 - [GPUs and system](#gpus-and-system): `gpu`, `doctor`, `update`, `uninstall`, `completion`, `--version`
-- [Console](#console): `login`, `logout`
+- [Console](#console): `login`, `logout`, `remote`
 
 ## Start and stop
 
@@ -500,3 +500,20 @@ The credentials and the heartbeat state live in `GOETHE_HOME/platform/` (directo
 ### `goethe logout`
 
 Ends this node's login and deletes the local credentials. The console keeps the node, offline and with its token revoked, so the next `goethe login` to that workspace links the same node again; remove it on the console to delete it and its analytics. When the console cannot be reached, the local link is still removed and the node shows offline on the console.
+
+### `goethe remote`
+
+Which console changes this node accepts, and whose passkeys may sign them. A console command names one action from a fixed catalog (no shell), is signed in the browser with a person's passkey, and is checked on the node: it must be for this node and its workspace, signed by a pinned passkey over `console.goethe.sh` with user verification, unexpired, not a reused command id, of a kind this node allows, and within the cap of the passkey that signed it. Every kind is off until you allow it here; a refusal is logged in `GOETHE_HOME/errors.log` under its `REMOTE_*` code. This release keeps the policy and the pinned passkeys; it does not receive console commands yet.
+
+Kinds, from least to most powerful: `change` (load, unload, GPU allow and deny), `network`, `keys` (create, rotate and revoke API keys; a new secret is encrypted to the browser that asked), `update`, `destructive`, `trust` (pin and remove passkeys).
+
+| Command | Does |
+|---|---|
+| `goethe remote` or `goethe remote status` | Each kind on or off, and the pinned passkeys |
+| `goethe remote allow <kind>` | Accept signed commands of that kind |
+| `goethe remote deny <kind>` | Refuse them again |
+| `goethe remote trust list` | The pinned passkeys: key id, user, cap and fingerprint |
+| `goethe remote trust add <pairing>` | Pin a passkey from the pairing string the console shows; the string is signed by that passkey over its key id, key, user and cap, and is refused when the signature does not verify |
+| `goethe remote trust remove <key-id>` | Stop trusting a passkey |
+
+The policy and the pinned passkeys live in `GOETHE_HOME/remote.json` (0600); a copy other users can read or change is refused, and then nothing is accepted. Each pin and removal is logged in the same file.
