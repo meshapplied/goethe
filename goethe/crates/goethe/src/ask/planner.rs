@@ -136,7 +136,7 @@ impl PlanState {
             if !about_model && !several && top.score < TAU_OOD && !named {
                 continue;
             }
-            let needs_intent_pick = !(named || clear(&options, if about_model { TAU_OOD } else { TAU_HI })) || changes_beside_a_stray_word(&top.id, &text, catalog, retriever, world);
+            let needs_intent_pick = !(named || clear(&options, if about_model { TAU_OOD } else { TAU_HI })) || risky_by_word_alone(&top, catalog) || changes_beside_a_stray_word(&top.id, &text, catalog, retriever, world);
             let input = StepBuildInput { clause: &text, intent_id: &top.id, alternatives: options.clone(), needs_intent_pick };
             let mut goal = build_step(input, catalog, world, validate);
             goal.part = i;
@@ -361,7 +361,7 @@ impl PlanState {
         self.model_ref = model_ref;
         self.parts[part] = PlanPart { text: text.to_string(), options: options.clone(), left_out: false, ignored: Vec::new() };
         let named = clear(&options, if about_model { TAU_OOD } else { TAU_HI }) || named_alone(&top.id, &present(text, catalog), catalog);
-        let needs_intent_pick = !named || changes_beside_a_stray_word(&top.id, text, catalog, retriever, &self.world);
+        let needs_intent_pick = !named || risky_by_word_alone(&top, catalog) || changes_beside_a_stray_word(&top.id, text, catalog, retriever, &self.world);
         let input = StepBuildInput { clause: text, intent_id: &top.id, alternatives: options.clone(), needs_intent_pick };
         let mut goal = build_step(input, catalog, &self.world, validate);
         goal.part = part;
@@ -674,6 +674,11 @@ fn changes_beside_a_stray_word(id: &str, text: &str, catalog: &CliCatalog, retri
         rest = rest.replace(&v, " ");
     }
     super::embed::lex_tokens(&rest).iter().any(|t| !t.chars().all(|c| c.is_ascii_digit()) && !retriever.knows(t) && super::slots::named_models(t, world).is_empty())
+}
+
+fn risky_by_word_alone(top: &ScoredIntent, catalog: &CliCatalog) -> bool {
+    // A command that deletes or exposes, named by its word while the request's meaning is far from it, is offered, never taken ("kill all processes" asks before goethe down).
+    top.score < TAU_OOD && catalog.get(&top.id).is_some_and(|c| matches!(c.risk, Risk::Destructive | Risk::Network))
 }
 
 fn clear(ranked: &[ScoredIntent], bar: f32) -> bool {

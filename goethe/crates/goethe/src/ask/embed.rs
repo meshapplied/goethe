@@ -202,6 +202,7 @@ pub struct HybridRetriever {
     model: Option<StaticModel>,
     card_vecs: Vec<Vec<f32>>,
     witness: Vec<Option<Vec<String>>>,
+    reach: Vec<Option<Vec<String>>>,
     mode: RetrievalMode,
 }
 
@@ -257,7 +258,8 @@ impl HybridRetriever {
             None => Vec::new(),
         };
         let witness = catalog.intents.iter().map(|c| gated(c).then(|| names(c))).collect();
-        HybridRetriever { ids, cmd_tokens, exact_phrases, doc_tf, doc_len, avg_len, idf, model, card_vecs, witness, mode }
+        let reach = catalog.intents.iter().map(|c| (c.risk == super::schema::Risk::Network).then(|| c.id.split('.').map(str::to_string).collect())).collect();
+        HybridRetriever { ids, cmd_tokens, exact_phrases, doc_tf, doc_len, avg_len, idf, model, card_vecs, witness, reach, mode }
     }
 
     fn bm25_score(&self, q_lower: &str, q_toks: &[String], idx: usize) -> f32 {
@@ -347,7 +349,8 @@ impl ShortlistBackend for HybridRetriever {
                     }
                     RetrievalMode::Hybrid => lex,
                 };
-                let said = self.witness[i].as_ref().is_none_or(|w| w.iter().any(|n| if n.contains(' ') { contains_phrase(&q_lower, n) } else { q_toks.iter().any(|t| says(t, n)) }));
+                let said = self.witness[i].as_ref().is_none_or(|w| w.iter().any(|n| if n.contains(' ') { contains_phrase(&q_lower, n) } else { q_toks.iter().any(|t| says(t, n)) }))
+                    && self.reach[i].as_ref().is_none_or(|path| q_toks.iter().any(|t| path.iter().any(|w| says(t, w) || same_word(t, w))));
                 ScoredIntent { id: self.ids[i].clone(), score: if said { score } else { 0.0 } }
             })
             .collect();
@@ -360,7 +363,7 @@ impl ShortlistBackend for HybridRetriever {
 }
 
 pub(super) fn gated(card: &super::schema::IntentCard) -> bool {
-    // Anything that changes something is never a guess: the request must say the command's own word or one of its aliases, because a vector puts "load" beside "unload".
+    // Anything that changes something is never a guess: the request must say the command's own word or one of its aliases, because a vector puts "load" beside "unload"; one that changes who reaches the API must also say a word of its own path ("open youtube" is no api share).
     card.risk != super::schema::Risk::ReadOnly
 }
 

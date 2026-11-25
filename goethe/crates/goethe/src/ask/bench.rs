@@ -193,6 +193,24 @@ fn a_misread_request_is_never_ready_to_change_anything() {
 }
 
 #[test]
+fn nothing_is_deleted_or_stopped_beside_words_about_something_else() {
+    // Found by judging thousands of paraphrased requests: an alias stood for its model in "remove fast" and deleted the model; a changing command's own word beside a word no command knows ("kill all processes", "open youtube") ran the command.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let shown = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
+    for q in ["remove fast", "please remove fast", "kill all processes", "open youtube"] {
+        let p = plan(q);
+        assert!(!p.is_ready(), "{q} is ready: {:?}", shown(&p));
+    }
+    for (q, want) in [("remove mistral", "goethe remove mistralai/Mistral-7B-Instruct"), ("kill goethe", "goethe down"), ("stop sharing", "goethe api share stop"), ("cancel the share", "goethe api share stop"), ("shut everything down", "goethe down")] {
+        let p = plan(q);
+        assert!(p.is_ready() && shown(&p).last().is_some_and(|l| l == want), "{q}: {:?}", shown(&p));
+    }
+}
+
+#[test]
 fn a_request_of_many_steps_binds_each_value_to_its_own_step() {
     // The owner's request: two models on two GPUs, a third GPU blocked, a key scoped to each model; a step without a command word continues the one before, and "each" repeats over the models bound earlier.
     let cat = build_catalog(&Cli::command());

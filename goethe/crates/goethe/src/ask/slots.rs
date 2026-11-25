@@ -308,12 +308,12 @@ pub fn is_model_value(value: &str, world: &World) -> bool {
 }
 
 pub fn takes_model_value(card: &IntentCard, kind: Kind, value: &str, world: &World) -> bool {
-    // A command on an installed model that nothing installs first (remove, not load) takes only one that is installed: "delete the file /tmp/x" is no model to remove.
+    // A command on an installed model that nothing installs first (remove, not load) takes only one that is installed: "delete the file /tmp/x" is no model to remove; one that deletes never takes an alias for its model ("remove fast" may mean the alias).
     !matches!(kind, Kind::InstalledModel | Kind::ModelOrAll)
         || card.does.needs.contains(&Fact::Installed)
         || !world.installed_known
         || world.installed.iter().any(|m| m == value)
-        || world.aliases.iter().any(|(a, _)| a == value)
+        || (card.risk != super::schema::Risk::Destructive && world.aliases.iter().any(|(a, _)| a == value))
 }
 
 fn match_installed_model(tokens: &[String], world: &World) -> PosMatch {
