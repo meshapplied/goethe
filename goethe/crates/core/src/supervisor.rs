@@ -258,7 +258,7 @@ pub fn handle_load(params: LoadParams) -> Result<(Value, String), LoadErr> {
 }
 
 fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
-    // Under the planning lock: slot and replica checks, plan on live VRAM, then fit, notice and gate.
+    // Under the planning lock: slot and replica checks (a copy still starting is waited for like a fresh load, so "already loaded" names an engine that answers; one in crash backoff counts at once), plan on live VRAM, then fit, notice and gate.
     let model_id = &req.params.model_id;
     if let Some(slot) = req.params.slot_key.as_deref() {
         let live = format!("SELECT 1 FROM loaded_instances WHERE slot_key = ?1 AND status IN {LIVE} AND pid > 0");
@@ -271,6 +271,9 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
     }
     let copies = copies_of(con, model_id);
     if let (None, false, Some(first)) = (&req.params.slot_key, req.params.replica, copies.first()) {
+        if first.1 == "STARTING" {
+            return Ok(Step::Wait(parse_gpu_csv(&first.2)));
+        }
         let differs = copy_mismatch(&req.params, &req.pinned, &first.2, first.4);
         let message = if differs.is_empty() {
             format!("already loaded: {} on GPU {} (port {}); use --replica to start another copy", first.0, first.2, first.3)
@@ -1325,6 +1328,22 @@ mod tests {
             let (result, message) = handle_load(user_load(false)).expect("already loaded is not an error");
             assert_eq!(message, "already loaded: i-first on GPU 0 (port 30007); use --replica to start another copy");
             assert_eq!(result, json!({"instance_id": "i-first", "status": "RUNNING", "already_loaded": true}));
+        });
+    }
+
+    #[test]
+    fn a_load_that_finds_a_copy_still_starting_waits_until_it_runs() {
+        // A load returns once the model answers, also when another copy of it is still starting: "already loaded" never points at an engine that is not ready.
+        with_temp_home(|home, con| {
+            install_m(home, con);
+            insert_running(con, "i-boot", i32::MAX, 1, 30009);
+            con.execute("UPDATE loaded_instances SET status = 'STARTING' WHERE instance_id = 'i-boot'", []).unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || tx.send(handle_load(user_load(false))).unwrap());
+            assert!(rx.recv_timeout(Duration::from_millis(1500)).is_err(), "no answer while the copy is still starting");
+            con.execute("UPDATE loaded_instances SET status = 'RUNNING' WHERE instance_id = 'i-boot'", []).unwrap();
+            let (result, _) = rx.recv_timeout(Duration::from_secs(10)).expect("answers once it runs").expect("already loaded");
+            assert_eq!(result, json!({"instance_id": "i-boot", "status": "RUNNING", "already_loaded": true}));
         });
     }
 
