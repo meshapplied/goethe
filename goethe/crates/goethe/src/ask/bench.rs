@@ -211,6 +211,27 @@ fn nothing_is_deleted_or_stopped_beside_words_about_something_else() {
 }
 
 #[test]
+fn every_value_comes_from_the_request() {
+    // Found by judging thousands of paraphrased requests: a bare number matched a model whose name holds it ("4 rpm" scoped a key to Gemma 4, "pull phi-4 mini" installed it), an address ending a sentence was no address, and a word after "key" or "create" became a key's name ("at", "keys").
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let mut world = fixture_world();
+    world.installed.push("google/gemma-4-31b-it".into());
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let shown = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
+    for (q, never) in [("create prod at 4 rpm", "--models"), ("pull phi-4 mini", "gemma"), ("make prod key at 4 rpm", "create at"), ("create keys for ci and laptop", "create keys")] {
+        let p = plan(q);
+        assert!(!shown(&p).iter().any(|l| l.contains(never)), "{q}: {:?}", shown(&p));
+    }
+    let allow = plan("allow 203.0.113.5.");
+    assert!(shown(&allow).iter().any(|l| l == "goethe api allow add 203.0.113.5"), "{:?}", shown(&allow));
+    for (q, want) in [("create prod at 4 rpm", "goethe api keys create prod --rpm 4"), ("load qwen 7b", "goethe load Qwen/Qwen2.5-7B-Instruct")] {
+        let p = plan(q);
+        assert!(p.is_ready() && shown(&p).last().is_some_and(|l| l == want), "{q}: {:?}", shown(&p));
+    }
+}
+
+#[test]
 fn a_request_of_many_steps_binds_each_value_to_its_own_step() {
     // The owner's request: two models on two GPUs, a third GPU blocked, a key scoped to each model; a step without a command word continues the one before, and "each" repeats over the models bound earlier.
     let cat = build_catalog(&Cli::command());

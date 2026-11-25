@@ -317,7 +317,7 @@ pub fn takes_model_value(card: &IntentCard, kind: Kind, value: &str, world: &Wor
 }
 
 fn match_installed_model(tokens: &[String], world: &World) -> PosMatch {
-    // An alias or id written out wins; else the installed models whose name holds the most of the request's words (a tie is a pick).
+    // An alias or id written out wins; else the installed models whose name holds the most of the request's words with a letter (a tie is a pick; "5 rpm" names no Qwen2.5).
     for (alias, _) in &world.aliases {
         if tokens.iter().any(|t| t.eq_ignore_ascii_case(alias)) {
             return PosMatch::Values(vec![alias.clone()]);
@@ -328,7 +328,7 @@ fn match_installed_model(tokens: &[String], world: &World) -> PosMatch {
             return PosMatch::Values(vec![m.clone()]);
         }
     }
-    let words: Vec<String> = tokens.iter().filter(|t| !t.starts_with('-')).flat_map(|t| name_parts(t)).collect();
+    let words: Vec<String> = tokens.iter().filter(|t| !t.starts_with('-')).flat_map(|t| name_parts(t)).filter(|w| w.chars().any(|c| c.is_ascii_alphabetic())).collect();
     let score = |id: &str| {
         let parts = name_parts(id);
         words.iter().filter(|w| parts.iter().any(|p| p == *w || (w.len() >= 3 && p.starts_with(w.as_str())))).count()

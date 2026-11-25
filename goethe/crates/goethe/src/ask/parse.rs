@@ -199,9 +199,10 @@ fn is_gpu_tok(t: &str) -> bool {
 }
 
 pub fn find_cidrs(tokens: &[String]) -> Vec<String> {
+    // Addresses and ranges, also one that ends a sentence ("allow 203.0.113.5.").
     let mut out = Vec::new();
     for t in tokens {
-        let c = t.trim_matches(|ch: char| matches!(ch, ',' | ';' | ')'));
+        let c = t.trim_matches(|ch: char| matches!(ch, ',' | ';' | ')' | '(' | '.'));
         if is_cidr(c) || c.parse::<std::net::IpAddr>().is_ok() {
             out.push(c.to_string());
         }
@@ -290,7 +291,7 @@ pub fn find_named_token(text: &str, tokens: &[String], cues: &[&str]) -> Option<
                 && !cues.contains(&next.to_ascii_lowercase().as_str())
                 && !matches!(
                     next.to_ascii_lowercase().as_str(),
-                    "key" | "api" | "a" | "an" | "new" | "my" | "the" | "for" | "with" | "alias" | "model"
+                    "key" | "keys" | "token" | "tokens" | "api" | "a" | "an" | "at" | "to" | "of" | "on" | "new" | "my" | "the" | "for" | "with" | "alias" | "model"
                 )
             {
                 return Some(next.to_string());
