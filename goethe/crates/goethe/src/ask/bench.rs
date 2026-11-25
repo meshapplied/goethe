@@ -232,6 +232,27 @@ fn every_value_comes_from_the_request() {
 }
 
 #[test]
+fn no_step_or_value_is_dropped() {
+    // Found by judging thousands of paraphrased requests: "next" and "finally" cut no step, so "load qwen 7b next api" lost the api step; "(max conc 8)" lost its number; and a step without a command word after "then" was taken for a detail of the step before and dropped.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let shown = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
+    for (q, want) in [
+        ("load qwen 7b next api", vec!["goethe load Qwen/Qwen2.5-7B-Instruct", "goethe api"]),
+        ("load qwen 7b (max conc 8) finally api", vec!["goethe load Qwen/Qwen2.5-7B-Instruct --max-conc 8", "goethe api"]),
+        ("load mistral, after that show the api", vec!["goethe load mistralai/Mistral-7B-Instruct", "goethe api"]),
+        ("create a key named demo with rpm 4 then frontend with rpm 8", vec!["goethe api keys create demo --rpm 4", "goethe api keys create frontend --rpm 8"]),
+    ] {
+        let p = plan(q);
+        assert!(p.is_ready() && shown(&p) == want, "{q}: {:?}", shown(&p));
+    }
+    let p = plan("load mistral then get the endpoint");
+    assert!(!(p.is_ready() && shown(&p) == ["goethe load mistralai/Mistral-7B-Instruct"]), "a step dropped: {:?}", shown(&p));
+}
+
+#[test]
 fn a_request_of_many_steps_binds_each_value_to_its_own_step() {
     // The owner's request: two models on two GPUs, a third GPU blocked, a key scoped to each model; a step without a command word continues the one before, and "each" repeats over the models bound earlier.
     let cat = build_catalog(&Cli::command());

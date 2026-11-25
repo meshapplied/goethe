@@ -1,7 +1,7 @@
 // One request (one or more parts) to an ordered list of clap commands: rank each part, read the live state, ask for what is missing, validate.
 
 use super::embed::{ScoredIntent, ShortlistBackend};
-use super::parse::{find_hf_or_path, find_shell_metachar, is_obvious_ood, negation, split_parts, split_words, without_wish};
+use super::parse::{find_hf_or_path, find_shell_metachar, is_obvious_ood, negation, number, split_parts, split_words, without_wish};
 use super::schema::{CliCatalog, IntentCard, Kind, Risk};
 use super::slots::{extract_slots, slot_candidates, World};
 use crate::spec::{Asked, Fact};
@@ -507,14 +507,20 @@ fn step_model(step: &PlanStep, card: &IntentCard) -> Option<String> {
 }
 
 fn request_parts(request: &str, rank: &dyn Fn(&str) -> Vec<ScoredIntent>, catalog: &CliCatalog, world: &World) -> Vec<(String, Vec<ScoredIntent>)> {
-    // Each piece with a command word is a part; a piece that names its own model but no command word ("and qwen on gpu1") repeats the part before for that model, since each model is its own command; any other piece (a detail such as "at every boot", or one more address) joins the part before it, or the next one.
+    // Each piece with a command word, or one a sequence word began ("then get the endpoint"), is a part; a piece that names its own model but no command word ("and qwen on gpu1"), or one a sequence word began that only gives values ("then frontend with rpm 4"), repeats the part before with them, since the verb is shared; any other piece (a detail such as "at every boot", or one more address) joins the part before it, or the next one.
     let mut parts: Vec<(String, Vec<ScoredIntent>)> = Vec::new();
     let mut lead = String::new();
-    for piece in split_parts(request) {
-        let commanded = names_a_command(&present(&piece, catalog), catalog);
-        if !commanded && names_a_model(&piece, world) {
-            if let Some((last, _)) = parts.last() {
-                let text = format!("{} {piece}", without_values(last, world));
+    for (piece, step) in split_parts(request) {
+        let named = names_a_command(&present(&piece, catalog), catalog);
+        let commanded = named || step;
+        let gives_values = step && (!super::slots::typed_values(&piece, world).is_empty() || split_words(&piece).iter().any(|w| number(w).is_some()));
+        if !named && (names_a_model(&piece, world) || gives_values) {
+            if let Some((last, open)) = parts.last() {
+                let verb = match open.first() {
+                    Some(top) if gives_values && !names_a_model(&piece, world) => top.id.replace('.', " "),
+                    _ => without_values(last, world),
+                };
+                let text = format!("{verb} {piece}");
                 let open = rank(&text);
                 parts.push((text, open));
                 continue;

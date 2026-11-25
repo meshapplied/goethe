@@ -60,22 +60,36 @@ pub fn is_obvious_ood(query: &str) -> bool {
     REJECT.iter().any(|p| l.contains(p))
 }
 
-pub fn split_parts(s: &str) -> Vec<String> {
-    // A request in parts: cut at the words "and" / "then" / "also" / "but" and after a word ending in a comma, all outside quotes ("X, Y and then Z").
+pub fn split_parts(s: &str) -> Vec<(String, bool)> {
+    // A request in parts, cut outside quotes at "and", "also", "but", "plus", after a word ending in a comma, and at the sequence words "then", "next", "finally", "afterwards", "after that" ("X, Y and then Z"); a part a sequence word cut begins a step of its own (true), any other may be a detail of the part before.
     let spans = quotes(s);
+    let words: Vec<&str> = s.split_whitespace().collect();
     let mut parts = Vec::new();
-    let mut cur = String::new();
-    for word in s.split_whitespace() {
+    let (mut cur, mut step) = (String::new(), false);
+    let mut i = 0;
+    while i < words.len() {
+        let word = words[i];
         let outside = !quoted(&spans, word.as_ptr() as usize - s.as_ptr() as usize);
-        if outside && matches!(word.to_ascii_lowercase().as_str(), "and" | "then" | "also" | "but") {
-            parts.push(std::mem::take(&mut cur));
+        let low = word.to_ascii_lowercase();
+        let after_that = low == "after" && words.get(i + 1).is_some_and(|w| w.trim_end_matches(',').eq_ignore_ascii_case("that"));
+        if outside && (after_that || matches!(low.trim_end_matches(','), "then" | "next" | "finally" | "afterwards")) {
+            parts.push((std::mem::take(&mut cur), step));
+            step = true;
+            i += if after_that { 2 } else { 1 };
+            continue;
+        }
+        i += 1;
+        if outside && matches!(low.as_str(), "and" | "also" | "but" | "plus") {
+            parts.push((std::mem::take(&mut cur), step));
+            step = false;
             continue;
         }
         let end = word.as_ptr() as usize - s.as_ptr() as usize + word.len() - 1;
         match word.strip_suffix(',') {
             Some(head) if !quoted(&spans, end) => {
                 cur.push_str(head);
-                parts.push(std::mem::take(&mut cur));
+                parts.push((std::mem::take(&mut cur), step));
+                step = false;
             }
             _ => {
                 cur.push_str(word);
@@ -83,8 +97,8 @@ pub fn split_parts(s: &str) -> Vec<String> {
             }
         }
     }
-    parts.push(cur);
-    parts.into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()
+    parts.push((cur, step));
+    parts.into_iter().map(|(p, step)| (p.trim().to_string(), step)).filter(|(p, _)| !p.is_empty()).collect()
 }
 
 pub fn without_wish(s: &str) -> String {
@@ -109,7 +123,7 @@ pub fn split_words(s: &str) -> Vec<String> {
         if spans.iter().any(|(a, b)| i == *a || i == *b) {
             continue;
         }
-        if ch.is_whitespace() && !quoted(&spans, i) {
+        if (ch.is_whitespace() || matches!(ch, '(' | ')')) && !quoted(&spans, i) {
             if !cur.is_empty() {
                 out.push(std::mem::take(&mut cur));
             }
@@ -328,25 +342,29 @@ mod tests {
     #[test]
     fn a_quote_opens_at_a_word_start_and_closes_at_a_word_end() {
         // An apostrophe inside a word ("let's") is no quote, and an opener that never closes is none either.
-        assert_eq!(split_parts("let's load qwen and share it"), ["let's load qwen", "share it"]);
+        assert_eq!(split_parts("let's load qwen and share it").into_iter().map(|(p, _)| p).collect::<Vec<_>>(), ["let's load qwen", "share it"]);
         assert_eq!(split_words("name it 'demo key', don't wait"), ["name", "it", "demo key,", "don't", "wait"]);
         assert_eq!(find_quoted("let's call it 'demo key'").as_deref(), Some("demo key"));
         assert_eq!(find_shell_metachar("let's go; rm x"), Some(";"));
         assert_eq!(find_shell_metachar("call it 'a; b'"), None);
         assert_eq!(split_words("'open never closes"), ["'open", "never", "closes"]);
         assert_eq!(split_words("say 'it's fine' ok"), ["say", "it's fine", "ok"]);
-        assert_eq!(split_parts("load qwen but don't share it"), ["load qwen", "don't share it"]);
+        assert_eq!(split_parts("load qwen but don't share it").into_iter().map(|(p, _)| p).collect::<Vec<_>>(), ["load qwen", "don't share it"]);
     }
 
     #[test]
     fn a_request_splits_at_and_or_then_outside_quotes() {
-        assert_eq!(split_parts("install x, and then load it"), ["install x", "load it"]);
-        assert_eq!(split_parts("run m \"salt and pepper\" then show status"), ["run m \"salt and pepper\"", "show status"]);
-        assert_eq!(split_parts("allow addresses or ranges"), ["allow addresses or ranges"]);
-        assert_eq!(split_parts("and"), Vec::<String>::new());
-        assert_eq!(split_parts("show status, show gpus and also list models"), ["show status", "show gpus", "list models"]);
-        assert_eq!(split_parts("allow 1.2.3.4,5.6.7.8 then show status"), ["allow 1.2.3.4,5.6.7.8", "show status"]);
-        assert_eq!(split_parts("run m \"a, b\" and stop"), ["run m \"a, b\"", "stop"]);
+        let texts = |s: &str| split_parts(s).into_iter().map(|(p, _)| p).collect::<Vec<_>>();
+        assert_eq!(texts("install x, and then load it"), ["install x", "load it"]);
+        assert_eq!(texts("run m \"salt and pepper\" then show status"), ["run m \"salt and pepper\"", "show status"]);
+        assert_eq!(texts("allow addresses or ranges"), ["allow addresses or ranges"]);
+        assert_eq!(texts("and"), Vec::<String>::new());
+        assert_eq!(texts("show status, show gpus and also list models"), ["show status", "show gpus", "list models"]);
+        assert_eq!(texts("allow 1.2.3.4,5.6.7.8 then show status"), ["allow 1.2.3.4,5.6.7.8", "show status"]);
+        assert_eq!(texts("run m \"a, b\" and stop"), ["run m \"a, b\"", "stop"]);
+        assert_eq!(texts("load x next api, after that show gpus finally status plus logs"), ["load x", "api", "show gpus", "status", "logs"]);
+        assert_eq!(split_parts("load x then get the endpoint and at boot"), [("load x".to_string(), false), ("get the endpoint".to_string(), true), ("at boot".to_string(), false)]);
+        assert_eq!(split_words("load x (max conc 8)"), ["load", "x", "max", "conc", "8"]);
     }
 
     #[test]
