@@ -26,13 +26,13 @@ Goethe turns a machine into your own API, compatible with OpenAI, Anthropic and 
 For Linux and MacOS systems run this command in the terminal:
 
 ```bash
-curl -fsSL https://pkg.goethe.sh/install.sh | bash
+curl -fsSL https://goethe.sh/install | bash
 ```
 
 For Windows 10/11 (x64), run this in PowerShell:
 
 ```powershell
-irm https://pkg.goethe.sh/install.ps1 | iex
+irm https://goethe.sh/install | iex
 ```
 
 On a Linux GPU server or cloud GPU host with Docker ([setup without a terminal](docs/user-guide.md#docker-and-cloud-gpu-hosts)):
@@ -111,7 +111,7 @@ Supported [model families and quantization formats](docs/user-guide.md#supported
 
 - Gated models need the license accepted on Hugging Face and a read token (install with `--hf-token`).
 - Optimised kernel packs need `goethe login` on the node. If optimised kernels are not available for a given model, goethe defaults to SGlang, if SGlang does not support it either, it checks llama.cpp, displays model unsupported otherwise.
-- If a model's kernel pack cannot run on your GPU, install or load stops with the reason. Add `--fallback` (or set `GOETHE_ALLOW_FALLBACK=1`) to serve it with the plain runtime instead.
+- If a model's kernel pack cannot run on your GPU, or the pack store cannot be reached, install or load says why in one line and serves the model with its plain runtime instead; `GOETHE_ALLOW_FALLBACK=0` makes that an error, and `--fallback` overrides it for one command. A pack index that fails its signature check is always refused.
 
 ## Documentation
 
@@ -125,7 +125,7 @@ Supported [model families and quantization formats](docs/user-guide.md#supported
 |------|------------|
 | [`goethe/`](goethe/) | Goethe: the `goethe` command, the `goethed` service, the gateway, packaging and the installer |
 | [`docs/`](docs/) | User guide, command reference |
-| [`install.sh`](install.sh) | Builds Goethe from source; the normal install is `pkg.goethe.sh/install.sh` above |
+| [`install.sh`](install.sh) | Builds Goethe from source; the normal install is `goethe.sh/install` above |
 | [`AGENTS.md`](AGENTS.md) | Instructions for AI agents |
 
 ## License

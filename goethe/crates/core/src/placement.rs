@@ -44,8 +44,9 @@ pub fn ensure_eligible_for_tp(
             inputs.len()
         ));
     }
-    let mut ids: Vec<String> = denied.iter().map(|i| i.to_string()).collect();
-    ids.sort();
+    let mut sorted: Vec<u32> = denied.iter().copied().collect();
+    sorted.sort_unstable();
+    let ids: Vec<String> = sorted.iter().map(u32::to_string).collect();
     Err(format!(
         "need {tp} eligible GPUs but only {} available; denied GPUs: {}; run `goethe gpu allow gpu<index>`",
         inputs.len(),

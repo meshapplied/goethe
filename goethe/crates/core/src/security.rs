@@ -205,7 +205,16 @@ pub fn key_create(
     models: Option<&str>,
     admin: bool,
 ) -> Result<String, String> {
-    // Create a key with an independent random id; only its SHA-256 and first characters are stored, so the secret is shown once, here.
+    let (key_id, token) = create_key(&goethe_home(), name, rpm, expires, models, admin)?;
+    if raw {
+        Ok(token)
+    } else {
+        Ok(format!("created key {key_id}"))
+    }
+}
+
+pub fn create_key(home: &Path, name: &str, rpm: Option<i64>, expires: Option<&str>, models: Option<&str>, admin: bool) -> Result<(String, String), String> {
+    // Create a key with an independent random id; only its SHA-256 and first characters are stored, so the secret is shown once, by the caller.
     let rpm_limit = rpm.unwrap_or(120);
     if rpm_limit < 0 {
         return Err(format!("rpm must be 0 (unlimited) or positive, got {rpm_limit}"));
@@ -213,33 +222,17 @@ pub fn key_create(
     key_name_check(name)?;
     let model_scope = models.map(model_scope_list).transpose()?;
     let expires_at = expires.map(parse_expires).transpose()?;
-    let home = goethe_home();
-    let con = db::open(&home).map_err(|e| e.to_string())?;
+    let con = db::open(home).map_err(|e| e.to_string())?;
     let token = new_token();
-    let hash = token_hash(&token);
     let key_id = random_hex(6);
-    let raw_prefix = token[..14].to_string();
     con.execute(
         "INSERT INTO api_keys (key_id, name, token_hash, raw_prefix, rpm_limit, expires_at, model_scope, is_admin)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        rusqlite::params![
-            key_id,
-            name,
-            hash,
-            raw_prefix,
-            rpm_limit,
-            expires_at,
-            model_scope,
-            i64::from(admin),
-        ],
+        rusqlite::params![key_id, name, token_hash(&token), &token[..14], rpm_limit, expires_at, model_scope, i64::from(admin)],
     )
     .map_err(|e| e.to_string())?;
-    write_api_keys_best_effort(&home, &con);
-    if raw {
-        Ok(token)
-    } else {
-        Ok(format!("created key {key_id}"))
-    }
+    write_api_keys_best_effort(home, &con);
+    Ok((key_id, token))
 }
 
 pub fn key_name_check(name: &str) -> Result<(), String> {
@@ -294,15 +287,18 @@ pub fn key_set_limits(key_id: &str, rpm: i64, expires: Option<&str>) -> Result<(
 }
 
 pub fn key_revoke(key_id: &str) -> Result<(), String> {
-    let home = goethe_home();
-    let con = db::open(&home).map_err(|e| e.to_string())?;
+    revoke_key(&goethe_home(), key_id)
+}
+
+pub fn revoke_key(home: &Path, key_id: &str) -> Result<(), String> {
+    let con = db::open(home).map_err(|e| e.to_string())?;
     let n = con
         .execute("DELETE FROM api_keys WHERE key_id = ?1", [key_id])
         .map_err(|e| e.to_string())?;
     if n == 0 {
         return Err(format!("key {key_id} not found"));
     }
-    write_api_keys_best_effort(&home, &con);
+    write_api_keys_best_effort(home, &con);
     Ok(())
 }
 

@@ -258,6 +258,7 @@ pub fn find_kind(kind: Kind, possible: &[String], text: &str, tokens: &[String],
         Kind::Choice => one(possible.iter().find(|v| tokens.iter().any(|t| t.eq_ignore_ascii_case(v))).cloned()),
         Kind::Number => one(tokens.iter().find(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit())).cloned()),
         Kind::Text => one(find_quoted(text).filter(|q| !q.starts_with('-'))),
+        Kind::TrustKey => PosMatch::None,
     }
 }
 

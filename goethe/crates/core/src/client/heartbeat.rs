@@ -1,7 +1,7 @@
 // One heartbeat step for goethed: check the link, build and send a snapshot, record the outcome, choose the next delay.
 
-use crate::platform::{self, PlatformState};
-use crate::platform_api::{ApiError, Client};
+use crate::client::link::{self, PlatformState};
+use crate::client::api::{ApiError, Client};
 use crate::snapshot::{self, Collector};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -36,23 +36,29 @@ pub struct Worker {
     failures: u32,
     last_loaded: Option<usize>,
     server_interval: Option<u64>,
+    stream_url: Option<String>,
     last_note: Option<String>,
     seed: u64,
 }
 
 impl Worker {
+    pub fn stream_url(&self) -> Option<&str> {
+        // The goethe-server the console told this node to dial (a paid workspace), as of the last accepted heartbeat.
+        self.stream_url.as_deref()
+    }
+
     pub fn new(home: PathBuf, collector: Collector) -> Worker {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(1)
             ^ ((std::process::id() as u64) << 32);
-        Worker { home, collector, client: None, failures: 0, last_loaded: None, server_interval: None, last_note: None, seed: seed | 1 }
+        Worker { home, collector, client: None, failures: 0, last_loaded: None, server_interval: None, stream_url: None, last_note: None, seed: seed | 1 }
     }
 
     pub fn step(&mut self, reason: Reason) -> (Outcome, Duration) {
         // Without credentials nothing is built or sent; a revoked link waits for a new login.
-        let creds = match platform::load_credentials(&self.home) {
+        let creds = match link::load_credentials(&self.home) {
             Ok(Some(c)) => c,
             Ok(None) => {
                 self.forget();
@@ -64,7 +70,7 @@ impl Worker {
                 return (Outcome::Unreadable(e), MAX_BACKOFF);
             }
         };
-        let mut state = platform::load_state(&self.home, &platform::link_key(&creds));
+        let mut state = link::load_state(&self.home, &link::link_key(&creds));
         if state.revoked_at.is_some() {
             self.client = None;
             return (Outcome::Revoked, INTERVAL);
@@ -88,6 +94,7 @@ impl Worker {
             Ok(reply) => {
                 self.last_loaded = Some(loaded);
                 self.server_interval = reply.interval;
+                self.stream_url = reply.stream_url;
                 if let Some(to) = usage_to {
                     crate::usage_log::mark_sent(&self.home, to);
                 }
@@ -95,7 +102,7 @@ impl Worker {
                     crate::errcode::mark_sent(&self.home, last);
                 }
                 if self.failures > 0 || state.last_ok_at.is_none() {
-                    self.note(&format!("console: heartbeat OK, linked to workspace {}", platform::clean_text(&creds.workspace.name, 64)));
+                    self.note(&format!("console: heartbeat OK, linked to workspace {}", link::clean_text(&creds.workspace.name, 64)));
                 }
                 self.failures = 0;
                 state.last_ok_at = Some(snapshot::now_rfc3339());
@@ -105,7 +112,7 @@ impl Worker {
                 }
                 state.last_error = None;
                 state.failures = 0;
-                let _ = platform::save_state(&self.home, &state);
+                let _ = link::save_state(&self.home, &state);
                 (Outcome::Sent, self.next_interval())
             }
             Err(ApiError::Unauthorized) => {
@@ -113,7 +120,7 @@ impl Worker {
                 state.revoked_at = Some(now.clone());
                 state.last_error = Some(ApiError::Unauthorized.to_string());
                 state.last_error_at = Some(now);
-                let _ = platform::save_state(&self.home, &state);
+                let _ = link::save_state(&self.home, &state);
                 self.note("console: the token was revoked or expired; heartbeats stop until goethe login");
                 self.client = None;
                 (Outcome::Revoked, INTERVAL)
@@ -144,9 +151,9 @@ impl Worker {
     fn failed(&mut self, state: &mut PlatformState, e: String) -> Outcome {
         self.failures = self.failures.saturating_add(1);
         state.failures = self.failures;
-        state.last_error = Some(platform::clean_text(&e, 300));
+        state.last_error = Some(link::clean_text(&e, 300));
         state.last_error_at = Some(snapshot::now_rfc3339());
-        let _ = platform::save_state(&self.home, state);
+        let _ = link::save_state(&self.home, state);
         if self.failures == 1 {
             self.note(&format!("console: heartbeat failing: {e}"));
         }
@@ -195,8 +202,8 @@ pub fn backoff_for(failures: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{Credentials, Secret, Workspace};
-    use crate::platform_api::mock;
+    use crate::client::link::{Credentials, Secret, Workspace};
+    use crate::client::api::mock;
     use std::os::unix::fs::PermissionsExt;
 
     const TOKEN: &str = "mesh_node_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -218,11 +225,11 @@ mod tests {
     }
 
     fn key() -> String {
-        platform::link_key(&creds("x"))
+        link::link_key(&creds("x"))
     }
 
     fn link(home: &std::path::Path, url: &str) {
-        platform::save_credentials(home, &creds(url)).unwrap();
+        link::save_credentials(home, &creds(url)).unwrap();
     }
 
     fn worker(home: &std::path::Path) -> Worker {
@@ -239,7 +246,7 @@ mod tests {
         }
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(*m.connections.lock().unwrap(), 0, "no connection without a link");
-        assert!(!platform::state_path(dir.path()).exists(), "no state file without a link");
+        assert!(!link::state_path(dir.path()).exists(), "no state file without a link");
         assert!(!dir.path().join("logs").exists());
     }
 
@@ -271,7 +278,7 @@ mod tests {
         let (out, next) = w.step(Reason::Start);
         assert_eq!(out, Outcome::Sent);
         assert!(next >= Duration::from_secs(29) && next <= Duration::from_secs(31), "{next:?}");
-        let st = platform::load_state(dir.path(), &key());
+        let st = link::load_state(dir.path(), &key());
         assert_eq!(st.public_ip.as_deref(), Some("198.51.100.9"));
         assert!(st.public_ip_at.is_some());
         let (_, next) = w.step(Reason::Interval);
@@ -281,12 +288,12 @@ mod tests {
         assert_eq!(seen[0].path, "/api/device/heartbeat");
         let second: serde_json::Value = serde_json::from_str(&seen[1].body).unwrap();
         assert!(second["network"]["public_ip"].is_null(), "the reply's address stays off the snapshot while nothing is open publicly");
-        assert_eq!(platform::load_state(dir.path(), &key()).public_ip.as_deref(), Some("198.51.100.9"), "a reply without public_ip keeps the last one");
+        assert_eq!(link::load_state(dir.path(), &key()).public_ip.as_deref(), Some("198.51.100.9"), "a reply without public_ip keeps the last one");
         assert_eq!(seen[0].authorization.as_deref(), Some(format!("Bearer {TOKEN}").as_str()));
         assert!(!seen[0].body.contains(TOKEN));
         let v: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
         assert_eq!((v["schema"].as_u64(), v["reason"].as_str()), (Some(1), Some("start")));
-        let st = platform::load_state(dir.path(), &key());
+        let st = link::load_state(dir.path(), &key());
         assert!(st.last_ok_at.is_some() && st.last_error.is_none() && st.revoked_at.is_none());
     }
 
@@ -308,6 +315,7 @@ mod tests {
             let u = &body(i)["usage"];
             assert_eq!((u["models"][0]["t"].as_i64(), u["models"][0]["completion_tokens"].as_i64()), (Some(t), Some(14844)), "sent until accepted");
             assert!(u["models"][0].get("prompt_tokens").is_some() && body(i)["apis"].is_array());
+            assert_eq!(u["requests"][0]["modality"].as_str(), Some("chat"), "per-dimension rows go to the console with the minute");
         }
         let after = &body(2)["usage"];
         assert!(after.is_null() || after["models"].as_array().unwrap().is_empty(), "an accepted minute is not sent again: {after}");
@@ -323,11 +331,11 @@ mod tests {
         assert!(matches!(out, Outcome::Failed(_)) && next == Duration::from_secs(10));
         let (_, next) = w.step(Reason::Interval);
         assert_eq!(next, Duration::from_secs(20));
-        let st = platform::load_state(dir.path(), &key());
+        let st = link::load_state(dir.path(), &key());
         assert_eq!(st.failures, 2);
         assert!(st.last_error.unwrap().contains("500"));
         assert_eq!(w.step(Reason::Interval).0, Outcome::Sent);
-        assert_eq!(platform::load_state(dir.path(), &key()).failures, 0);
+        assert_eq!(link::load_state(dir.path(), &key()).failures, 0);
         assert_eq!(backoff_for(3), Duration::from_secs(40));
         assert_eq!(backoff_for(4), MAX_BACKOFF);
         assert_eq!(backoff_for(40), MAX_BACKOFF);
@@ -341,7 +349,7 @@ mod tests {
         let mut w = worker(dir.path());
         assert_eq!(w.step(Reason::Start).0, Outcome::Sent);
         assert_eq!(w.step(Reason::Change), (Outcome::RateLimited(Duration::from_secs(2)), Duration::from_secs(2)));
-        let st = platform::load_state(dir.path(), &key());
+        let st = link::load_state(dir.path(), &key());
         assert!(st.failures == 0 && st.last_error.is_none() && st.revoked_at.is_none());
         assert_eq!(w.backoff(), INTERVAL, "no backoff growth");
         assert_eq!(w.step(Reason::Change).0, Outcome::Sent);
@@ -357,8 +365,8 @@ mod tests {
         assert_eq!(w.step(Reason::Change).0, Outcome::Revoked);
         assert_eq!(w.step(Reason::Interval).0, Outcome::Revoked);
         assert_eq!(m.seen.lock().unwrap().len(), 1, "nothing is sent after a 401");
-        assert!(platform::load_state(dir.path(), &key()).revoked_at.is_some());
-        platform::remove_credentials(dir.path()).unwrap();
+        assert!(link::load_state(dir.path(), &key()).revoked_at.is_some());
+        link::remove_credentials(dir.path()).unwrap();
         assert_eq!(w.step(Reason::Interval).0, Outcome::Unlinked);
     }
 
@@ -367,7 +375,7 @@ mod tests {
         let m = mock::serve(vec![(200, r#"{"ok":true}"#.into())]);
         let dir = home();
         link(dir.path(), &m.url);
-        std::fs::set_permissions(platform::credentials_path(dir.path()), std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::fs::set_permissions(link::credentials_path(dir.path()), std::fs::Permissions::from_mode(0o640)).unwrap();
         let mut w = worker(dir.path());
         assert!(matches!(w.step(Reason::Start).0, Outcome::Unreadable(e) if e.contains("chmod 600")));
         assert_eq!(*m.connections.lock().unwrap(), 0);

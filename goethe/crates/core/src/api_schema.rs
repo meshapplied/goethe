@@ -22,7 +22,7 @@ pub fn base_url(home: &std::path::Path) -> String {
         .into_iter()
         .find(|a| a.ip.is_ipv4() && crate::snapshot::scope_of(a.ip, crate::netif::is_tunnel(&a.name)) == "vpn")
         .map(|a| a.ip);
-    let ip = gateway_ip(&crate::nginx::public_bind(home), vpn, || crate::platform::lookup_public_ip(home).ok());
+    let ip = gateway_ip(&crate::nginx::public_bind(home), vpn, || crate::client::link::lookup_public_ip(home).ok());
     format!("https://{}/v1", SocketAddr::new(ip, crate::nginx::public_port_u16(home)))
 }
 

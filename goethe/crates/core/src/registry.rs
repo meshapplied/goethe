@@ -462,7 +462,7 @@ fn warn_unknown_fields(text: &str) {
         "kv_elems_per_token", "min_total_vram_gb", "supported_sm", "default_ctx", "max_ctx",
         "default_max_conc", "default_tp", "num_attention_heads", "num_kv_heads", "attention",
         "kv_cache_dtype", "memory", "extra_sglang_args", "runtime", "env",
-        "pythonpath", "revision", "gated", "manual_download", "download_gb", "description", "family",
+        "pythonpath", "revision", "gated", "manual_download", "pack_only", "download_gb", "description", "family",
         "license", "released", "modalities",
     ];
     let Some(models) = raw.get("models").and_then(|v| v.as_array()) else {

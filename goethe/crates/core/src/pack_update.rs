@@ -244,7 +244,7 @@ pub fn run_all(check_only: bool) -> Result<(), String> {
     if packs.is_empty() {
         return Ok(());
     }
-    let Some(creds) = crate::platform::load_credentials(&home).ok().flatten() else {
+    let Some(creds) = crate::client::link::load_credentials(&home).ok().flatten() else {
         println!("kernel packs: not checked, this node is not logged in (goethe login)");
         return Ok(());
     };

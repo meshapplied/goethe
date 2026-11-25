@@ -1554,7 +1554,13 @@ fn access_page(tty: &mut Tty) -> Result<(), String> {
             None => return Ok(()),
             Some(0) => {
                 match crate::keys_menu::session() {
-                    Ok(session) => tty.quit = session.exit,
+                    Ok(session) => match session.summary() {
+                        Some(text) => tty.inside(|| {
+                            println!("{text}");
+                            Ok(())
+                        })?,
+                        None => tty.quit = session.exit,
+                    },
                     Err(e) => report(Err(e)),
                 }
                 tty.resume()?;
@@ -1627,7 +1633,7 @@ impl SharePage {
         let home = goethe_home();
         self.shared = crate::public_share::shared(&home);
         self.url = crate::public_share::active(&home).map(|s| {
-            let ip = crate::platform::lookup_public_ip(&home).map(|i| i.to_string()).unwrap_or_else(|_| "<public IP>".into());
+            let ip = crate::client::link::lookup_public_ip(&home).map(|i| i.to_string()).unwrap_or_else(|_| "<public IP>".into());
             let host = if ip.contains(':') { format!("[{ip}]") } else { ip };
             format!("https://{host}:{}/v1", s.port)
         });
@@ -2133,6 +2139,7 @@ fn apply_picks(removals: &[String], installs: &[String]) -> Result<(), String> {
             failed.push(id.clone());
         }
     }
+    crate::step::set_compact(false);
     match failed.len() {
         0 => Ok(()),
         _ => Err(format!("not done: {}", failed.join(", "))),

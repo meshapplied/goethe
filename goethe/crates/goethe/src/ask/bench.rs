@@ -83,7 +83,7 @@ fn minimal_argv(card: &IntentCard) -> Vec<String> {
             Kind::Domain => "example.com".into(),
             Kind::Cidr => "203.0.113.7/32".into(),
             Kind::Gpu => "gpu0".into(),
-            Kind::Key | Kind::KeyId | Kind::KeyName => "demo".into(),
+            Kind::Key | Kind::KeyId | Kind::KeyName | Kind::TrustKey => "demo".into(),
             Kind::Alias | Kind::NewAlias => "fast".into(),
             Kind::Folder => "/tmp".into(),
             Kind::LogTarget => "goethed".into(),
@@ -452,6 +452,20 @@ fn filler_in_front_and_the_order_of_values_never_change_the_plan() {
     }
     assert_eq!(plan("load mistral on gpu0 with 32k context"), plan("load mistral with 32k context on gpu0"));
     assert_eq!(plan("share the api for 2 hours with key friend-demo for 203.0.113.7"), plan("share the api with key friend-demo for 203.0.113.7 for 2 hours"));
+}
+
+#[test]
+fn the_catalog_dump_holds_what_ask_reads() {
+    // goethe ask --dump-catalog: each command's own words, what it needs, gives and undoes, and the kind (and help) of every argument, so anything made from it sees the CLI as ask does.
+    let cat = build_catalog(&Cli::command());
+    let dump = cat.to_json();
+    let load = dump["commands"].as_array().and_then(|c| c.iter().find(|c| c["id"] == "load")).expect("load is in the dump");
+    assert!(load["names"].as_array().is_some_and(|n| n.iter().any(|w| w == "load") && n.iter().any(|w| w == "serve")), "{}", load["names"]);
+    assert_eq!(load["gives"], serde_json::json!(["loaded"]));
+    assert_eq!(load["positionals"][0]["kind"], "installed_model");
+    let ctx = load["flags"].as_array().and_then(|f| f.iter().find(|f| f["long"] == "--ctx")).expect("--ctx");
+    assert!(ctx["kind"] == "number" && ctx["help"].as_str().is_some_and(|h| h.contains("Context")), "{ctx}");
+    assert!(dump["schema_hash"].is_string());
 }
 
 #[test]

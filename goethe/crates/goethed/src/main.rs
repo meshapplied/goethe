@@ -63,7 +63,12 @@ fn dispatch(req: Request) -> (bool, i32, String, String, Value) {
                 .get("force")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            match supervisor::handle_unload(model_id, all, force) {
+            let instance = req.params.get("instance_id").and_then(|v| v.as_str());
+            let done = match instance {
+                Some(id) => supervisor::handle_unload_instance(id, force),
+                None => supervisor::handle_unload(model_id, all, force),
+            };
+            match done {
                 Ok(v) => (true, 0, String::new(), String::new(), v),
                 Err((code, msg)) => (false, code, String::new(), msg, Value::Null),
             }
@@ -73,7 +78,7 @@ fn dispatch(req: Request) -> (bool, i32, String, String, Value) {
             Err((code, msg)) => (false, code, String::new(), msg, Value::Null),
         },
         "platform_changed" => {
-            goethe_core::platform::notify(goethe_core::platform::CHANGE_LINK);
+            goethe_core::client::link::notify(goethe_core::client::link::CHANGE_LINK);
             (true, 0, String::new(), String::new(), Value::Null)
         }
         "shutdown" => {
@@ -180,7 +185,10 @@ async fn main() {
     }
     eprintln!("goethed listening on {}", sock.display());
     goethe_core::autostart::spawn_restore_background();
-    heartbeat::spawn(home.clone());
+    let stream = heartbeat::spawn(home.clone());
+    if let Some(m) = mux::running() {
+        tokio::spawn(goethe_core::client::connect::run(home.clone(), mux::gateway(m), stream));
+    }
     goethe_core::usage_log::spawn(home.clone());
     let _ = goethe_core::log_rotation::run_rotation_pass(&home);
     let home_rot = home.clone();

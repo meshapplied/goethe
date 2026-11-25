@@ -3,6 +3,8 @@
 pub const REQUEST_ID_HEADER: &str = "x-goethe-request-id";
 pub const KEY_ID_HEADER: &str = "x-goethe-key-id";
 pub const INSTANCE_HEADER: &str = "x-goethe-instance";
+pub const USER_HEADER: &str = "x-goethe-user";
+pub const DISPATCH_HEADER: &str = "x-goethe-dispatch-ms";
 pub const USAGE_TRAILER: &str = "goethe-usage";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
