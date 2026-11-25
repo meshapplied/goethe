@@ -200,11 +200,11 @@ fn nothing_is_deleted_or_stopped_beside_words_about_something_else() {
     let world = fixture_world();
     let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
     let shown = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
-    for q in ["remove fast", "please remove fast", "kill all processes", "open youtube"] {
+    for q in ["remove fast", "please remove fast", "kill all processes", "open youtube", "uninstall the auto-complete feature"] {
         let p = plan(q);
         assert!(!p.is_ready(), "{q} is ready: {:?}", shown(&p));
     }
-    for (q, want) in [("remove mistral", "goethe remove mistralai/Mistral-7B-Instruct"), ("kill goethe", "goethe down"), ("stop sharing", "goethe api share stop"), ("cancel the share", "goethe api share stop"), ("shut everything down", "goethe down")] {
+    for (q, want) in [("remove mistral", "goethe remove mistralai/Mistral-7B-Instruct"), ("kill goethe", "goethe down"), ("stop sharing", "goethe api share stop"), ("cancel the share", "goethe api share stop"), ("shut everything down", "goethe down"), ("uninstall goethe", "goethe uninstall"), ("logout", "goethe logout")] {
         let p = plan(q);
         assert!(p.is_ready() && shown(&p).last().is_some_and(|l| l == want), "{q}: {:?}", shown(&p));
     }

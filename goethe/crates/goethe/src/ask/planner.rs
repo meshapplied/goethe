@@ -665,15 +665,16 @@ fn prefer_named_child(open: &mut Vec<ScoredIntent>, text: &str) {
 }
 
 fn changes_beside_a_stray_word(id: &str, text: &str, catalog: &CliCatalog, retriever: &dyn ShortlistBackend, world: &World) -> bool {
-    // A command that changes something and takes no values is asked, never taken, while a word means nothing to any command and is no value or model: "start the car" is not "goethe start" (a command that takes values has the unused-value rule instead).
-    if !catalog.get(id).is_some_and(|c| super::embed::gated(c) && c.positionals.is_empty() && c.flags.is_empty()) {
+    // A command that changes something and takes no values is asked, never taken, while a word means nothing to any command and is no value, model or filler: "start the car" is not "goethe start"; so is one that deletes and takes no positional value even with flags ("uninstall the auto-complete feature" is not goethe uninstall); a command that takes values has the unused-value rule instead.
+    const FILLER: [&str; 6] = ["all", "everything", "now", "it", "my", "goethe"];
+    if !catalog.get(id).is_some_and(|c| super::embed::gated(c) && c.positionals.is_empty() && (c.flags.is_empty() || c.risk == Risk::Destructive)) {
         return false;
     }
     let mut rest = text.to_string();
     for v in super::slots::typed_values(text, world) {
         rest = rest.replace(&v, " ");
     }
-    super::embed::lex_tokens(&rest).iter().any(|t| !t.chars().all(|c| c.is_ascii_digit()) && !retriever.knows(t) && super::slots::named_models(t, world).is_empty())
+    super::embed::lex_tokens(&rest).iter().any(|t| !t.chars().all(|c| c.is_ascii_digit()) && !FILLER.contains(&t.as_str()) && !retriever.knows(t) && super::slots::named_models(t, world).is_empty())
 }
 
 fn risky_by_word_alone(top: &ScoredIntent, catalog: &CliCatalog) -> bool {
