@@ -11,6 +11,7 @@ use std::collections::HashMap;
 pub const TAU_OOD: f32 = 0.30;
 pub const TAU_HI: f32 = 0.56;
 pub const DELTA_MARGIN: f32 = 0.08;
+pub(super) const NO_MATCH_EXAMPLE: &str = "show the status";
 
 pub type Validate<'a> = dyn Fn(&[String]) -> Result<(), clap::Error> + 'a;
 
@@ -109,7 +110,7 @@ impl PlanState {
             return Self::abstained(trimmed, &format!("Shell characters such as '{meta}' are not allowed; say it in words."), world);
         }
         if is_obvious_ood(trimmed) {
-            return Self::abstained(trimmed, "That is not something Goethe does; goethe help lists what it does.", world);
+            return Self::abstained(trimmed, &no_match(), world);
         }
         let model_ref = written_model(trimmed, catalog);
         let rank = |text: &str| retriever.rank(&without(&present(text, catalog), model_ref.as_deref()), catalog.intents.len());
@@ -148,7 +149,7 @@ impl PlanState {
             parts.push(PlanPart { text, options, left_out: false, ignored });
         }
         if goals.is_empty() {
-            let reason = negated.map_or_else(|| "No Goethe command matches that request closely enough; goethe help lists the commands.".to_string(), |w| format!("Ask plans what to do, not what not to do ('{w}'); say what you want done."));
+            let reason = negated.map_or_else(no_match, |w| format!("Ask plans what to do, not what not to do ('{w}'); say what you want done."));
             return Self::abstained(trimmed, &reason, world);
         }
         if question(trimmed) {
@@ -370,7 +371,7 @@ impl PlanState {
         let shown = shown_state(text, catalog);
         let options = with_first(options, shown);
         let Some(top) = options.first().cloned() else {
-            return Err("No Goethe command matches those words.".into());
+            return Err(no_match());
         };
         self.model_ref = model_ref;
         let ignored = if shown.is_some() { asked_about(text, &self.world) } else { Vec::new() };
@@ -751,6 +752,10 @@ fn changes_beside_a_stray_word(id: &str, text: &str, catalog: &CliCatalog, retri
         rest = rest.replace(&v, " ");
     }
     super::embed::lex_tokens(&rest).iter().any(|t| !t.chars().all(|c| c.is_ascii_digit()) && !FILLER.contains(&t.as_str()) && !retriever.knows(t) && super::slots::named_models(t, world).is_empty())
+}
+
+fn no_match() -> String {
+    format!("No Goethe command fits that. Say what Goethe should do, such as: {NO_MATCH_EXAMPLE}; goethe alone opens a guided menu.")
 }
 
 fn risky_by_word_alone(top: &ScoredIntent, catalog: &CliCatalog) -> bool {

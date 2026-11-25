@@ -290,6 +290,15 @@ fn a_question_about_the_state_runs_what_shows_it() {
 }
 
 #[test]
+fn a_refusal_names_an_example_that_plans() {
+    // The example a refusal offers is itself a request ask plans, so a newcomer who types it gets an answer.
+    let cat = build_catalog(&Cli::command());
+    let p = PlanState::build(super::planner::NO_MATCH_EXAMPLE, &cat, &HybridRetriever::build(&cat, None), &fixture_world(), &validate_cli);
+    assert!(p.is_ready(), "{:?}", p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>());
+    assert!(PlanState::build("open youtube", &cat, &HybridRetriever::build(&cat, None), &fixture_world(), &validate_cli).abstain.as_deref().is_some_and(|r| r.contains(super::planner::NO_MATCH_EXAMPLE)));
+}
+
+#[test]
 fn a_question_only_reads() {
     // The owner's rule: a question never plans a change; it asks back before one ("what can i run here" started goethe and a chat).
     let cat = build_catalog(&Cli::command());
