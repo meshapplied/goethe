@@ -506,6 +506,21 @@ fn filler_in_front_and_the_order_of_values_never_change_the_plan() {
 }
 
 #[test]
+fn a_model_whose_folder_is_gone_is_not_installed_for_ask() {
+    // Ask plans from what is on disk: a row left behind by a cleaned models folder means the model must be installed again.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let con = goethe_core::db::open(home).unwrap();
+    for id in ["org/here", "org/gone"] {
+        let sql = format!("INSERT INTO installed_models (model_id, local_path, architecture, static_vram_gb, kv_bytes_per_token, default_ctx, default_max_conc, default_tp) VALUES ('{id}', 'models/{}', 'a', 1.0, 1, 4096, 1, 0)", id.replace('/', "__"));
+        con.execute(&sql, []).unwrap();
+    }
+    std::fs::create_dir_all(home.join("models/org__here")).unwrap();
+    let (known, installed, _) = super::slots::read_models(home);
+    assert!(known && installed == ["org/here"], "{installed:?}");
+}
+
+#[test]
 fn the_catalog_dump_holds_what_ask_reads() {
     // goethe ask --dump-catalog: each command's own words, what it needs, gives and undoes, and the kind (and help) of every argument, so anything made from it sees the CLI as ask does.
     let cat = build_catalog(&Cli::command());

@@ -96,13 +96,14 @@ impl World {
     }
 }
 
-fn read_models(home: &std::path::Path) -> (bool, Vec<String>, Vec<String>) {
+pub(super) fn read_models(home: &std::path::Path) -> (bool, Vec<String>, Vec<String>) {
+    // Installed models whose folder is still there (a cleaned disk leaves rows behind), and the live ones.
     let Ok(con) = goethe_core::db::open(home) else {
         return (false, Vec::new(), Vec::new());
     };
-    let installed = match con.prepare("SELECT model_id FROM installed_models") {
-        Ok(mut stmt) => match stmt.query_map([], |r| r.get::<_, String>(0)) {
-            Ok(rows) => rows.flatten().collect(),
+    let installed = match con.prepare("SELECT model_id, local_path FROM installed_models") {
+        Ok(mut stmt) => match stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+            Ok(rows) => rows.flatten().filter(|(_, path)| path.is_empty() || home.join(path).exists()).map(|(id, _)| id).collect(),
             Err(_) => return (false, Vec::new(), Vec::new()),
         },
         Err(_) => return (false, Vec::new(), Vec::new()),
