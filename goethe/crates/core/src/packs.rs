@@ -175,103 +175,6 @@ fn read_exact(r: impl Read, len: u64) -> Result<Vec<u8>, String> {
 
 pub type Runner<'a> = &'a dyn Fn(&[String]) -> Result<(i32, String), String>;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct SkuReq {
-    pub sku: String,
-    pub arch: String,
-    pub sms: u64,
-    pub smem_block: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct Device {
-    pub name: String,
-    pub cc: String,
-    pub sms: Option<u64>,
-    pub smem_block: Option<u64>,
-}
-
-pub fn manifest_of(prefix: &[u8]) -> Option<Value> {
-    // The manifest of a pack from its first bytes (16-byte head, container header, manifest); None when they are not all there.
-    let n = usize::try_from(u64::from_le_bytes(prefix.get(8..16)?.try_into().ok()?)).ok()?;
-    let header: Value = serde_json::from_slice(prefix.get(16..16usize.checked_add(n)?)?).ok()?;
-    let (off, len) = (usize::try_from(header["manifest"][0].as_u64()?).ok()?, usize::try_from(header["manifest"][1].as_u64()?).ok()?);
-    let start = 16usize.checked_add(n)?.checked_add(off)?;
-    serde_json::from_slice(prefix.get(start..start.checked_add(len)?)?).ok()
-}
-
-pub fn sku_reqs(manifest: &Value) -> Vec<SkuReq> {
-    // The variants the manifest builds: per SKU the arch, SM count and shared memory its grid needs (buckets[].requires), once each.
-    let mut out: Vec<SkuReq> = Vec::new();
-    for b in manifest["buckets"].as_array().into_iter().flatten() {
-        let (Some(sku), Some(arch), Some(sms)) = (b["sku"].as_str(), b["requires"]["arch"].as_str(), b["requires"]["sms"].as_u64()) else { continue };
-        if !out.iter().any(|r| r.sku == sku) {
-            out.push(SkuReq { sku: sku.to_string(), arch: arch.to_string(), sms, smem_block: b["requires"]["smem_block"].as_u64().unwrap_or(0) });
-        }
-    }
-    out
-}
-
-fn arch_runs(arch: &str, cc: &str) -> String {
-    // Why code built for `arch` cannot run on compute capability `cc` ("" when it can): sm_XYa only on cc X.Y, sm_XY[f] on X.Z with Z >= Y, compute_XY PTX on any cc >= X.Y.
-    let (kind, digits) = match arch.split_once('_') {
-        Some((k @ ("sm" | "compute"), d)) => (k, d),
-        _ => return format!("bucket arch {arch:?} is not sm_XY[a|f] or compute_XY"),
-    };
-    let (num, suffix) = match digits.strip_suffix(['a', 'f']) {
-        Some(n) => (n, digits.chars().last()),
-        None => (digits, None),
-    };
-    let Some((major, minor)) = (num.len() >= 2 && num.bytes().all(|b| b.is_ascii_digit())).then(|| num.split_at(num.len() - 1)) else {
-        return format!("bucket arch {arch:?} is not sm_XY[a|f] or compute_XY");
-    };
-    let (Ok(w0), Ok(w1)) = (major.parse::<u64>(), minor.parse::<u64>()) else {
-        return format!("bucket arch {arch:?} is not sm_XY[a|f] or compute_XY");
-    };
-    let Some(have) = cc.split_once('.').and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?))) else {
-        return format!("cannot read compute capability {cc:?}");
-    };
-    let want = (w0, w1);
-    match (kind, suffix) {
-        ("compute", _) if have >= want => String::new(),
-        ("compute", _) => format!("PTX {arch} needs cc >= {}.{}", want.0, want.1),
-        ("sm", Some('a')) if have == want => String::new(),
-        ("sm", Some('a')) => format!("{arch} SASS runs only on cc {}.{} (arch-specific targets are not forward compatible)", want.0, want.1),
-        ("sm", _) if have.0 == want.0 && have.1 >= want.1 => String::new(),
-        _ => format!("{arch} SASS runs only on cc {}.Z with Z >= {}", want.0, want.1),
-    }
-}
-
-fn sku_why(dev: &Device, req: &SkuReq) -> String {
-    // Why one GPU cannot run one variant ("" when it can): arch, SM count, shared memory. Unknown device limits refuse when the pack asks for any.
-    let why = arch_runs(&req.arch, &dev.cc);
-    if !why.is_empty() {
-        return format!("device cc {}: {why}", dev.cc);
-    }
-    match (dev.sms, dev.smem_block) {
-        (None, _) if req.sms > 0 => format!("the plan's grid needs {} SMs co-resident; this device's SM count is unknown", req.sms),
-        (_, None) if req.smem_block > 0 => format!("the plan needs {} B shared memory per block; this device's shared-memory limit is unknown", req.smem_block),
-        (Some(have), _) if req.sms > have => format!("the plan's grid needs {} SMs co-resident, the device has {have}", req.sms),
-        (_, Some(have)) if req.smem_block > have => format!("the plan needs {} B shared memory per block, the device allows {have}", req.smem_block),
-        _ => String::new(),
-    }
-}
-
-pub fn sku_refusal(reqs: &[SkuReq], devices: &[Device]) -> Option<String> {
-    // None when some allowed GPU runs some variant (or there is nothing to compare); else one line: what the pack is built for, what this machine has, and why each variant misses.
-    if reqs.is_empty() || devices.is_empty() || devices.iter().any(|d| reqs.iter().any(|r| sku_why(d, r).is_empty())) {
-        return None;
-    }
-    let built: Vec<String> = reqs.iter().map(|r| format!("{} ({}, {} SMs)", r.sku, r.arch, r.sms)).collect();
-    let have: Vec<String> = devices
-        .iter()
-        .map(|d| format!("{} (cc {}{})", d.name, d.cc, d.sms.map_or(String::new(), |s| format!(", {s} SMs"))))
-        .collect();
-    let first = &devices[0];
-    let reasons: Vec<String> = reqs.iter().map(|r| format!("{}: {}", r.sku, sku_why(first, r))).collect();
-    Some(format!("the kernel pack is built for {}; none runs on {} ({})", built.join(", "), have.join(", "), reasons.join("; ")))
-}
-
 pub fn python_runner(home: &Path) -> impl Fn(&[String]) -> Result<(i32, String), String> {
     // The interpreter is looked up on every call: a runner made before the engine layer is installed uses the py-env python once it exists.
     let home = home.to_path_buf();
@@ -516,13 +419,22 @@ pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> 
                 size: e["size"].as_u64().unwrap_or(0),
                 sig: e["sig"].clone(),
                 aux: e["aux"].clone(),
-                drafter: e["drafter"].clone(),
+                drafter: drafter_of(e),
                 min_engine,
                 overlays: overlays_of(e),
             });
         }
     }
     out
+}
+
+fn drafter_of(e: &Value) -> Value {
+    // The entry's drafter: its `drafter` object, else the first drafter under `model.with` (in the same names), else Null.
+    if e["drafter"].is_object() {
+        return e["drafter"].clone();
+    }
+    let with = e["model"]["with"].as_array().into_iter().flatten().find(|w| w["role"] == "drafter");
+    with.map_or(Value::Null, |w| serde_json::json!({"name": w["variant"], "repo": w["hf_repo"], "revision": w["revision"], "files": w["files"]}))
 }
 
 fn overlays_of(e: &Value) -> Vec<Overlay> {
@@ -578,7 +490,7 @@ pub fn drafter(e: &Entry) -> Option<Drafter> {
     let repo = d["repo"].as_str().filter(|r| crate::paths::validate_model_id(r).is_ok())?.to_string();
     let files = d["files"].as_array()?.iter().map(|f| Some((f["name"].as_str().filter(|n| safe_name(n))?.to_string(), f["bytes"].as_u64()?, f["sha256"].as_str().filter(|h| is_sha256(h))?.to_string())));
     let files: Vec<(String, u64, String)> = files.collect::<Option<_>>().filter(|f: &Vec<_>| !f.is_empty())?;
-    Some(Drafter { name: d["name"].as_str().unwrap_or("drafter").to_string(), repo, revision: d["revision"].as_str().map(String::from), files })
+    Some(Drafter { name: d["name"].as_str().unwrap_or("drafter").to_string(), repo, revision: d["revision"].as_str().filter(|r| !r.is_empty()).map(String::from), files })
 }
 
 fn safe_name(f: &str) -> bool {
@@ -653,18 +565,21 @@ fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Variant {
+    pub id: String,
+    pub quant: String,
+    pub files: Vec<String>,
+    pub max_ctx: Option<u64>,
+    pub why: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub entry: Entry,
     pub prefix: Vec<u8>,
-    pub variants: Vec<Vec<String>>,
-    pub variant_ids: Vec<String>,
+    pub variants: Vec<Variant>,
     pub serial: u64,
-}
-
-pub fn variant_max_ctx(prefix: &[u8], variant: &str) -> Option<u64> {
-    // The longest context any bucket of `variant` serves (what `pack show` lists as maxctx), from the manifest in the pack's first bytes: the card's context cap.
-    manifest_of(prefix)?["buckets"].as_array()?.iter().filter(|b| b["variant"].as_str() == Some(variant)).filter_map(|b| b["maxctx"].as_u64()).max()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -719,16 +634,8 @@ fn fetch_prefix(broker: &impl Broker, entry: &Entry) -> Result<(Vec<u8>, usize),
     Ok(([head, header, body].concat(), at))
 }
 
-pub fn unverified_prefix(model_id: &str, arch: &str, broker: &impl Broker) -> Result<Option<(Entry, Vec<u8>)>, String> {
-    // The pack's first bytes by the index as the platform serves it, before goethe-engine exists to verify the index: only for refusing early; anything installed is checked by plan() again.
-    let raw = broker.index()?;
-    let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().find(runnable) else { return Ok(None) };
-    let (prefix, _) = fetch_prefix(broker, &entry)?;
-    Ok(Some((entry, prefix)))
-}
-
 pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &impl Broker, run: Runner) -> Result<Option<Plan>, PlanError> {
-    // The signed index's pack for this model and arch, and its manifest's weight files per variant (what to download), only the variant a quant names (id, desc.quant or desc.format, any case). None: no pack. A store that does not answer is Unreachable; an index or pack that does not verify is Refused.
+    // The signed index's pack for this model and arch, and per target variant of this repo what goethe-engine `pack plan` reads from its manifest (files to download, longest context, why this GPU runs none of it); only the variant a quant names (id or quant, any case). None: no pack. A store that does not answer is Unreachable; an index or pack that does not verify is Refused.
     let work = home.join("packs");
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let (ix, sg) = (work.join("index.json"), work.join("index.sig"));
@@ -739,22 +646,27 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
     let verified = run(&[v("index"), v("verify"), v("--index"), s(&ix), v("--sig"), s(&sg), v("--last-serial"), last_serial(home).to_string()])?.1;
     let serial = serde_json::from_str::<Value>(&verified).map_err(|e| format!("index verify: {e}"))?["serial"].as_u64().ok_or("index verify: no serial")?;
     let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().find(runnable) else { return Ok(None) };
-    let (prefix, at) = fetch_prefix(broker, &entry)?;
-    let manifest = &prefix[at..];
-    let m: Value = serde_json::from_slice(manifest).map_err(|e| format!("{}: manifest: {e}", entry.file))?;
-    let names: Vec<String> = m["model"]["weights"].as_array().into_iter().flatten().map(|w| w["file"].as_str().unwrap_or_default().to_string()).collect();
-    let (mut variants, mut all): (Vec<Vec<String>>, Vec<&str>) = (Vec::new(), Vec::new());
-    let mut variant_ids: Vec<String> = Vec::new();
-    for (id, var) in m["variants"].as_object().into_iter().flatten() {
-        let d = &var["desc"];
-        all.push(d["quant"].as_str().unwrap_or(id));
-        if quant.is_some_and(|q| ![Some(id.as_str()), d["quant"].as_str(), d["format"].as_str()].into_iter().flatten().any(|t| t.eq_ignore_ascii_case(q))) {
+    let (prefix, _) = fetch_prefix(broker, &entry)?;
+    let tmp = crate::paths::private_dir_in(&work, "plan")?;
+    let pre = tmp.join("pack.prefix");
+    let out = std::fs::write(&pre, &prefix).map_err(|e| e.to_string()).and_then(|()| run(&[v("pack"), v("plan"), s(&pre)]));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let p: Value = serde_json::from_str(&out?.1).map_err(|e| format!("pack plan: {e}"))?;
+    let (mut variants, mut all): (Vec<Variant>, Vec<String>) = (Vec::new(), Vec::new());
+    for x in p["variants"].as_array().into_iter().flatten().filter(|x| x["role"] == "target") {
+        if x["source"]["hf_repo"].as_str().is_some_and(|r| !r.eq_ignore_ascii_case(&entry.offer.hf_repo)) {
             continue;
         }
-        let files: Vec<String> = var["weights"].as_array().into_iter().flatten().filter_map(|i| names.get(i.as_u64()? as usize).cloned()).collect();
-        if !files.is_empty() && files.iter().all(|f| safe_name(f)) && !variants.contains(&files) {
-            variants.push(files);
-            variant_ids.push(id.clone());
+        let id = x["id"].as_str().unwrap_or_default();
+        let q = x["quant"].as_str().unwrap_or(id);
+        all.push(q.to_string());
+        if quant.is_some_and(|w| !w.eq_ignore_ascii_case(id) && !w.eq_ignore_ascii_case(q)) {
+            continue;
+        }
+        let files: Vec<String> = x["files"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str().map(String::from)).collect();
+        if !files.is_empty() && files.iter().all(|f| safe_name(f)) && !variants.iter().any(|v| v.files == files) {
+            let why = (x["runs"] == false).then(|| x["why"].as_str().unwrap_or("this GPU runs none of its kernels").to_string());
+            variants.push(Variant { id: id.to_string(), quant: q.to_string(), files, max_ctx: x["max_ctx"].as_u64(), why });
         }
     }
     if variants.is_empty() {
@@ -764,7 +676,13 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
         }
         .into());
     }
-    Ok(Some(Plan { entry, prefix, variants, variant_ids, serial }))
+    Ok(Some(Plan { entry, prefix, variants, serial }))
+}
+
+pub fn pick(variants: &[Variant], in_repo: impl Fn(&str) -> bool, fits: impl Fn(&[String]) -> bool) -> Result<&Variant, Option<String>> {
+    // The variant to download: among those this GPU runs with every file in the repo, the first that fits disk and VRAM, else the first. Err(Some(why)): this GPU runs none; Err(None): no runnable variant's files are in the repo. O(variants x files).
+    let ok: Vec<&Variant> = variants.iter().filter(|v| v.why.is_none() && v.files.iter().all(|f| in_repo(f))).collect();
+    ok.iter().find(|v| fits(&v.files)).or(ok.first()).copied().ok_or_else(|| variants.iter().find_map(|v| v.why.clone()))
 }
 
 pub fn by_structure(home: &Path, dir: &Path, archs: &[String], broker: &impl Broker, run: Runner) -> Result<Option<(String, Plan)>, String> {
@@ -1046,11 +964,18 @@ mod tests {
                 "pack match" => r#"{"file": "m.gcpack", "variant": "q8", "model": {"hf_repo": "org/M-GGUF"}}"#.to_string(),
                 "pack need" => serde_json::json!({"manifest_sha256": msha, "ranges": [{"off": off, "len": BLOB.len(), "sha256": sha(BLOB)}]}).to_string(),
                 "pack show" => "a q8 K1 ncol 1 maxctx 4096 3 files\nb q4 K1 ncol 1 maxctx 8192 3 files\n".to_string(),
+                "pack plan" => PLANNED.to_string(),
                 _ => r#"{"ok": true, "weights": ["m-Q8_0.gguf"]}"#.to_string(),
             };
             Ok((code, out))
         }
     }
+
+    const PLANNED: &str = r#"{"variants": [
+        {"id": "q4", "role": "target", "quant": "q4_0", "source": {"hf_repo": "org/M-GGUF"}, "files": [{"name": "m-Q4_0.gguf"}], "max_ctx": 8192, "runs": true},
+        {"id": "q8", "role": "target", "quant": null, "source": null, "files": [{"name": "m-Q8_0.gguf"}], "max_ctx": 4096, "runs": null},
+        {"id": "st", "role": "target", "quant": "nvfp4", "source": {"hf_repo": "org/M"}, "files": [{"name": "model.safetensors"}], "max_ctx": 4096, "runs": true},
+        {"id": "d", "role": "drafter", "quant": "bf16", "source": {"hf_repo": "org/M-GGUF"}, "files": [{"name": "d.gguf"}], "max_ctx": 4096, "runs": null}]}"#;
 
     fn dirs() -> (tempfile::TempDir, tempfile::TempDir) {
         (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap())
@@ -1112,86 +1037,70 @@ mod tests {
         assert_eq!((code, out.trim()), (0, "py-env python: -m goethe_engine pack match"));
     }
 
-    fn bucket(sku: &str, arch: &str, sms: u64) -> Value {
-        serde_json::json!({"sku": sku, "requires": {"arch": arch, "sms": sms, "name": sku, "smem_block": 99_000}})
-    }
-
-    fn gpu(name: &str, cc: &str, sms: Option<u64>) -> Device {
-        Device { name: name.into(), cc: cc.into(), sms, smem_block: Some(101_376) }
-    }
-
     #[test]
-    fn a_pack_built_for_a_bigger_card_is_refused_before_a_byte_on_a_smaller_one_of_the_same_arch() {
-        let m = serde_json::json!({"buckets": [bucket("rtx_pro_6000_maxq", "sm_120a", 188), bucket("rtx_pro_6000_maxq", "sm_120a", 188)]});
-        let reqs = sku_reqs(&m);
-        assert_eq!(reqs.len(), 1, "one entry per SKU");
-        let line = sku_refusal(&reqs, &[gpu("NVIDIA GeForce RTX 5090", "12.0", Some(170))]).unwrap();
-        assert_eq!(line, "the kernel pack is built for rtx_pro_6000_maxq (sm_120a, 188 SMs); none runs on NVIDIA GeForce RTX 5090 (cc 12.0, 170 SMs) (rtx_pro_6000_maxq: the plan's grid needs 188 SMs co-resident, the device has 170)");
-        assert_eq!(sku_refusal(&reqs, &[gpu("NVIDIA RTX PRO 6000 Blackwell Max-Q", "12.0", Some(188))]), None, "the card it was built for runs it");
-        assert!(sku_refusal(&reqs, &[gpu("a card CUDA does not show", "12.0", None)]).unwrap().contains("SM count is unknown"));
-        assert!(sku_refusal(&reqs, &[gpu("an Ada card", "8.9", Some(128))]).unwrap().contains("sm_120a SASS runs only on cc 12.0"));
-    }
-
-    #[test]
-    fn a_variant_for_this_card_is_found_among_others_and_any_allowed_gpu_may_run_it() {
-        let m = serde_json::json!({"buckets": [bucket("rtx_pro_6000_maxq", "sm_120a", 188), bucket("rtx_5090", "sm_120a", 170)]});
-        let reqs = sku_reqs(&m);
-        assert_eq!(sku_refusal(&reqs, &[gpu("NVIDIA GeForce RTX 5090", "12.0", Some(170))]), None);
-        let two = [gpu("NVIDIA GeForce RTX 5080", "12.0", Some(84)), gpu("NVIDIA GeForce RTX 5090", "12.0", Some(170))];
-        assert_eq!(sku_refusal(&reqs, &two), None, "one GPU that runs a variant is enough");
-        assert!(sku_refusal(&reqs, &two[..1]).is_some());
-        assert_eq!((arch_runs("sm_90", "9.0"), arch_runs("sm_90", "8.9").is_empty(), arch_runs("compute_80", "9.0")), (String::new(), false, String::new()));
-        assert_eq!(arch_runs("sm_100f", "10.3"), "");
-        assert!(arch_runs("ptx", "9.0").contains("not sm_XY"));
-    }
-
-    #[test]
-    fn the_pack_manifest_is_known_before_any_engine_exists_and_a_wrong_hash_is_refused() {
-        let manifest = serde_json::json!({"model": {"weights": [{"file": "m-Q8_0.gguf"}]}, "buckets": [bucket("rtx_pro_6000_maxq", "sm_120a", 188)], "variants": {"q8": {"weights": [0]}}}).to_string().into_bytes();
-        let header = serde_json::json!({"manifest": [0, manifest.len()]}).to_string().into_bytes();
-        let mut bytes = b"GCPACK3\n".to_vec();
-        bytes.extend((header.len() as u64).to_le_bytes());
-        bytes.extend(&header);
-        bytes.extend(&manifest);
-        let pack = Pack { bytes, manifest, blob_off: 0 };
-        let index = index_of(&pack, &sha(&pack.manifest));
-        let mut b = Fake { pack, index, tamper: false, refuse: false, ranges: RefCell::new(Vec::new()) };
-        let (entry, prefix) = unverified_prefix("org/m-gguf", "sm_120a", &b).unwrap().unwrap();
-        assert_eq!(entry.file, "m.gcpack");
-        assert_eq!(sku_reqs(&manifest_of(&prefix).unwrap())[0].sms, 188, "the variants come from the first bytes of the pack, no weight fetched");
-        assert!(unverified_prefix("org/other", "sm_120a", &b).unwrap().is_none() && unverified_prefix("org/m-gguf", "sm_90a", &b).unwrap().is_none());
-        b.index = index_of(&b.pack, &"0".repeat(64));
-        assert!(unverified_prefix("org/m-gguf", "sm_120a", &b).unwrap_err().contains("manifest differs"));
-    }
-
-    #[test]
-    fn the_manifest_is_read_from_the_first_bytes_of_a_pack() {
-        let manifest = serde_json::json!({"buckets": [bucket("rtx_5090", "sm_120a", 170)]}).to_string();
-        let header = serde_json::json!({"manifest": [3, manifest.len()]}).to_string();
-        let mut pack = b"GCPACK3\n".to_vec();
-        pack.extend((header.len() as u64).to_le_bytes());
-        pack.extend(header.as_bytes());
-        pack.extend(b"xyz");
-        pack.extend(manifest.as_bytes());
-        assert_eq!(sku_reqs(&manifest_of(&pack).unwrap())[0].sms, 170);
-        assert!(manifest_of(&pack[..pack.len() - 5]).is_none() && manifest_of(b"short").is_none());
-    }
-
-    #[test]
-    fn a_plan_reads_the_manifest_and_names_the_files_of_each_variant() {
+    fn a_plan_lists_the_target_variants_of_this_repo_the_engine_reads_from_the_manifest() {
         let (home, _) = dirs();
         let b = fake();
         let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap().unwrap();
-        assert_eq!(p.variants, vec![vec!["m-Q4_0.gguf".to_string()], vec!["m-Q8_0.gguf".to_string()]]);
+        let ids: Vec<(&str, &str, &[String], Option<u64>)> = p.variants.iter().map(|v| (v.id.as_str(), v.quant.as_str(), &v.files[..], v.max_ctx)).collect();
+        assert_eq!(ids, [("q4", "q4_0", &["m-Q4_0.gguf".to_string()][..], Some(8192)), ("q8", "q8", &["m-Q8_0.gguf".to_string()][..], Some(4096))], "no drafter, no other repo's variant");
+        assert!(p.variants.iter().all(|v| v.why.is_none()), "runs null (the engine saw no GPU) is not a refusal");
+        assert!(!home.path().join("packs").read_dir().unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("plan")), "the prefix copy is removed");
         assert_eq!(p.prefix, b.pack.bytes[..p.prefix.len()]);
         let files = vec!["config.json".to_string(), "tokenizer.json".to_string()];
         assert_eq!(aux(&p.entry), Some(("org/M".to_string(), Some("def".to_string()), files)), "a path in aux files is dropped");
         let q8 = plan(home.path(), "org/m-gguf", "sm_120a", Some("Q8"), &b, &engine(&b.pack, &[])).unwrap().unwrap();
-        assert_eq!(q8.variants, vec![vec!["m-Q8_0.gguf".to_string()]], "a quant names one variant by id");
+        assert_eq!(q8.variants.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), ["q8"], "a quant names one variant by id");
+        let q4 = plan(home.path(), "org/m-gguf", "sm_120a", Some("Q4_0"), &b, &engine(&b.pack, &[])).unwrap().unwrap();
+        assert_eq!(q4.variants.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), ["q4"], "or by its quant");
         let e = plan(home.path(), "org/m-gguf", "sm_120a", Some("q5"), &b, &engine(&b.pack, &[])).unwrap_err();
-        assert_eq!(e, PlanError::Refused("org/m-gguf: its kernel pack has no variant q5 (available: q4, q8)".into()));
+        assert_eq!(e, PlanError::Refused("org/m-gguf: its kernel pack has no variant q5 (available: q4_0, q8)".into()));
         assert!(plan(home.path(), "org/other", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap().is_none());
         assert!(plan(home.path(), "org/m-gguf", "sm_90a", None, &b, &engine(&b.pack, &[])).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_variant_this_gpu_runs_none_of_says_why() {
+        let (home, _) = dirs();
+        let b = fake();
+        let base = engine(&b.pack, &[]);
+        let refused = PLANNED.replacen(r#""max_ctx": 8192, "runs": true"#, r#""max_ctx": 8192, "runs": false, "why": "no SKU for cc 8.9""#, 1);
+        let run = |a: &[String]| if a[1] == "plan" { Ok((0, refused.clone())) } else { base(a) };
+        let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &run).unwrap().unwrap();
+        assert_eq!(p.variants.iter().map(|v| v.why.as_deref()).collect::<Vec<_>>(), [Some("no SKU for cc 8.9"), None]);
+    }
+
+    #[test]
+    fn the_download_is_a_variant_this_gpu_runs_with_its_files_in_the_repo_and_the_first_that_fits() {
+        // Each row: the variants, the file missing from the repo, the variant that fits, the pick.
+        let v = |id: &str, why: Option<&str>| Variant { id: id.into(), quant: id.into(), files: vec![format!("{id}.gguf")], max_ctx: None, why: why.map(String::from) };
+        let (big, small, cold) = (v("big", None), v("small", None), v("cold", Some("no SKU for cc 8.9")));
+        let table = [
+            (vec![big.clone(), small.clone()], "", "small", Ok("small")),
+            (vec![big.clone(), small.clone()], "", "none", Ok("big")),
+            (vec![cold.clone(), small.clone()], "", "small", Ok("small")),
+            (vec![cold, small], "small.gguf", "small", Err(Some("no SKU for cc 8.9"))),
+            (vec![big], "big.gguf", "big", Err(None)),
+        ];
+        for (vs, missing, fit, want) in table {
+            let got = pick(&vs, |f| f != missing, |files| files[0] == format!("{fit}.gguf"));
+            assert_eq!(got.map(|v| v.id.as_str()), want.map_err(|e| e.map(String::from)));
+        }
+    }
+
+    #[test]
+    fn the_drafter_comes_from_the_entry_or_from_model_with() {
+        let b = fake();
+        let old = entries(&b.index, &["sm_120a".to_string()], |_| true).remove(0);
+        assert_eq!(drafter(&old).map(|d| (d.name, d.repo, d.revision)), Some(("DFlash2".into(), "org/D".into(), Some("r".into()))));
+        let mut ix: Value = serde_json::from_slice(&b.index).unwrap();
+        let e = &mut ix["entries"][0];
+        e["model"]["with"] = serde_json::json!([{"role": "drafter", "variant": "mtp", "hf_repo": "org/D2", "revision": "",
+                                                 "files": [{"name": "mtp.safetensors", "bytes": 3, "sha256": sha(b"abc")}]}]);
+        e.as_object_mut().unwrap().remove("drafter");
+        let new = entries(&serde_json::to_vec(&ix).unwrap(), &["sm_120a".to_string()], |_| true).remove(0);
+        let d = drafter(&new).unwrap();
+        assert_eq!((d.name.as_str(), d.repo.as_str(), d.revision, d.files), ("mtp", "org/D2", None, vec![("mtp.safetensors".into(), 3, sha(b"abc"))]));
     }
 
     #[test]
