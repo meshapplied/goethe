@@ -304,7 +304,7 @@ pub fn facts(dir: &Path, gguf: &Path) -> Result<crate::model_facts::ModelFacts, 
         architecture: if max("expert_count") > 0 { "moe" } else { "dense" }.into(),
         static_vram_gb: bytes as f64 / crate::model_facts::GIB,
         kv_elems_per_token: full.max(1),
-        max_ctx: max("context_length"),
+        max_ctx: Some(max("context_length")),
         num_attention_heads: heads,
         num_kv_heads: kv.iter().copied().max().unwrap_or(0),
         attention: "gqa".into(),
@@ -731,7 +731,7 @@ mod tests {
         std::fs::create_dir(d.path().join("Q4_K_M")).unwrap();
         write_test_gguf(&d.path().join("Q4_K_M/m.gguf"));
         let f = facts(d.path(), &gguf_in(d.path(), &toml::Value::Table(Default::default()), None).unwrap()).unwrap();
-        assert_eq!((f.kv_elems_per_token, f.max_ctx, f.num_attention_heads, f.num_kv_heads), ((2 + 4) * 128, 4096, 8, 4));
+        assert_eq!((f.kv_elems_per_token, f.max_ctx, f.num_attention_heads, f.num_kv_heads), ((2 + 4) * 128, Some(4096), 8, 4));
         assert_eq!(f.architecture, "dense");
         let names = ["m-Q8_0.gguf", "Q4_K_M/m-Q4_K_M-00002-of-00002.gguf", "Q4_K_M/m-Q4_K_M-00001-of-00002.gguf", "mmproj-m.gguf", "m.mmproj-f16.gguf", "README.md"];
         let split = ["Q4_K_M/m-Q4_K_M-00001-of-00002.gguf", "Q4_K_M/m-Q4_K_M-00002-of-00002.gguf"];

@@ -755,6 +755,13 @@ pub struct VramEstimate {
     pub kv_bytes_per_token: u64,
 }
 
+pub(crate) fn ctx_limit(facts: &model_facts::ModelFacts, entry: Option<&RegistryModel>, pin: Option<u64>) -> Result<u64, String> {
+    // The context ceiling install writes (model_facts::ctx_ceiling), refused under MODEL_FILES when nothing states one.
+    model_facts::ctx_ceiling(facts.max_ctx, entry.and_then(|e| e.effective_max_ctx()), pin).ok_or_else(|| {
+        crate::errcode::coded(crate::errcode::Code::ModelFiles, "config.json states no context length (max_position_embeddings); pass --ctx N to set one".into())
+    })
+}
+
 pub fn vram_estimate(dir: &Path, cfg: &Value, facts: &model_facts::ModelFacts, extra: &[String], kv_dtype: &str) -> VramEstimate {
     // Weights left on the GPU after host offload, per-request state for 4 requests, and KV bytes per token.
     let kv_elem_bytes = kv_element_bytes(kv_dtype, cfg);
@@ -1088,7 +1095,7 @@ fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, S
         architecture: entry.map(|e| e.architecture.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "dense".into()),
         static_vram_gb: entry.map(|e| e.static_vram_gb).filter(|v| *v > 0.0).unwrap_or(23.566),
         kv_elems_per_token: entry.and_then(|e| e.effective_kv_elems()).unwrap_or(32_768),
-        max_ctx: entry.and_then(|e| e.effective_max_ctx()).unwrap_or(262_144),
+        max_ctx: Some(entry.and_then(|e| e.effective_max_ctx()).unwrap_or(262_144)),
         num_attention_heads: entry.and_then(|e| e.num_attention_heads).unwrap_or(24),
         num_kv_heads: entry.and_then(|e| e.num_kv_heads).unwrap_or(4),
         attention: entry.and_then(|e| e.attention.clone()).unwrap_or_else(|| "hybrid".into()),
@@ -1131,7 +1138,8 @@ fn plan_engine(
     // The card of an engine that takes no SGLang arguments: the model's facts, its KV dtype, 4 parallel requests by default.
     let dir = &t.card_dir;
     let entry = t.entry.as_ref();
-    let ctx = opts.ctx.unwrap_or(facts.max_ctx).min(facts.max_ctx);
+    let max_ctx = ctx_limit(&facts, entry, opts.ctx)?;
+    let ctx = opts.ctx.unwrap_or(max_ctx).min(max_ctx);
     let max_conc = opts.max_conc.unwrap_or(crate::chooser::DEFAULT_CONC);
     let card = GoetheCard {
         model_id: t.model_id.clone(),
@@ -1190,7 +1198,9 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         return plan_gguf(home, opts, t);
     }
     let cfg = model_facts::read_config(dir)?;
-    let facts = model_facts::facts_from_install_dir(dir, t.entry.as_ref().map(|e| e.architecture.as_str()))?;
+    let mut facts = model_facts::facts_from_install_dir(dir, t.entry.as_ref().map(|e| e.architecture.as_str()))?;
+    let max_ctx = ctx_limit(&facts, t.entry.as_ref(), opts.ctx)?;
+    facts.max_ctx = Some(max_ctx);
     let existing = if opts.reset { None } else { read_card_table(dir) };
     let old = |k: &str| existing.as_ref().and_then(|c| c.get(k));
     let (cli_args, cli_kv) = sgl::take_flag(&opts.sglang_args, "--kv-cache-dtype")?;
@@ -1252,7 +1262,7 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
             .unwrap_or(default)
     };
     let entry = t.entry.as_ref();
-    let ctx = pick(opts.ctx, "context_length", None, entry.and_then(|e| e.effective_max_ctx()).unwrap_or(facts.max_ctx).min(facts.max_ctx));
+    let ctx = pick(opts.ctx, "context_length", None, entry.and_then(|e| e.effective_max_ctx()).unwrap_or(max_ctx).min(max_ctx));
     let max_conc = pick(opts.max_conc, "max_running_requests", entry.and_then(|e| e.default_max_conc), crate::chooser::DEFAULT_CONC);
     let tp = pick(opts.tp, "tp_size", entry.and_then(|e| e.default_tp), 0);
     let ep = pick(None, "ep_size", None, 1);
@@ -1323,7 +1333,7 @@ pub fn commit(home: &Path, p: &Planned, verb: &str, out: &mut dyn Write) -> Resu
             p.max_conc as i64,
             p.tp as i64,
             p.facts.kv_elems_per_token as i64,
-            p.facts.max_ctx as i64,
+            p.facts.max_ctx.unwrap_or(p.ctx) as i64,
             p.facts.num_attention_heads as i64,
             p.facts.num_kv_heads as i64,
             p.facts.attention,

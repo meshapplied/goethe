@@ -165,7 +165,7 @@ pub fn from_config(cfg: &Value, kv_dtype: Option<&str>) -> Result<MemorySpec, St
     } else if lm.pointer("/sparse_attention_config/use_sparse_attention").and_then(|v| v.as_bool()) == Some(true) {
         minimax_sparse(lm, cfg, layers)
     } else {
-        mha(lm, cfg, plan)
+        mha(lm, cfg, plan)?
     };
     spec.load_peak_bytes = fp4_expert_load_peak(cfg, lm, model_type);
     let state = model_facts::linear_state_bytes(lm, plan);
@@ -288,7 +288,7 @@ fn minimax_sparse(lm: &Value, cfg: &Value, layers: u64) -> MemorySpec {
     }
 }
 
-fn mha(lm: &Value, cfg: &Value, plan: model_facts::LayerPlan) -> MemorySpec {
+fn mha(lm: &Value, cfg: &Value, plan: model_facts::LayerPlan) -> Result<MemorySpec, String> {
     // K and V per KV head on full layers; window layers in their own pool (Gemma 4 full layers use the global shape).
     let heads = read_u64(lm, cfg, &["num_key_value_heads", "multi_query_group_num"])
         .or_else(|| read_u64(lm, cfg, &["num_attention_heads"]))
@@ -311,10 +311,10 @@ fn mha(lm: &Value, cfg: &Value, plan: model_facts::LayerPlan) -> MemorySpec {
         let swa_v = read_u64(lm, cfg, &["swa_v_head_dim"]).unwrap_or(if lm.get("swa_head_dim").is_some() { v_head } else { head });
         spec.swa_bytes_per_token = mul(&[swa_heads, swa_head + swa_v, BF16, plan.swa]);
         spec.swa_heads = swa_heads;
-        spec.swa_window = read_u64(lm, cfg, &["sliding_window", "sliding_window_size"]).unwrap_or(4096);
+        spec.swa_window = model_facts::swa_window(lm, cfg, "model")?;
         spec.chunked_prefill = CHUNKED_PREFILL;
     }
-    spec
+    Ok(spec)
 }
 
 #[cfg(test)]

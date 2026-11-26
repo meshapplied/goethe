@@ -20,7 +20,7 @@ pub struct ModelFacts {
     pub architecture: String,
     pub static_vram_gb: f64,
     pub kv_elems_per_token: u64,
-    pub max_ctx: u64,
+    pub max_ctx: Option<u64>,
     pub num_attention_heads: u64,
     pub num_kv_heads: u64,
     pub attention: String,
@@ -34,6 +34,8 @@ pub struct LayerPlan {
     pub swa: u64,
     pub linear: u64,
 }
+
+const CTX_KEYS: &[&str] = &["max_position_embeddings", "n_positions"];
 
 const LM_KEYS: &[&str] = &[
     "text_config",
@@ -104,9 +106,9 @@ pub fn facts_from_config(
         Some(n) => n,
         None => require_u64(lm, cfg, &["num_hidden_layers", "n_layer"], model_id)?,
     };
-    let max_ctx = read_u64(lm, cfg, &["max_position_embeddings", "n_positions"]).unwrap_or(4096);
+    let max_ctx = read_u64(lm, cfg, CTX_KEYS);
     let plan = layer_plan(lm, layers);
-    let kv = attention_kv(cfg, lm, layers, plan, max_ctx, num_attention_heads, model_id)?;
+    let kv = attention_kv(cfg, lm, layers, plan, num_attention_heads, model_id)?;
     let architecture = registry_arch
         .map(String::from)
         .unwrap_or_else(|| infer_architecture(cfg, lm, model_id));
@@ -178,12 +180,25 @@ struct KvShape {
     swa_elems: u64,
 }
 
+pub fn ctx_ceiling(config: Option<u64>, registry: Option<u64>, pin: Option<u64>) -> Option<u64> {
+    // A model's context ceiling: config.json's, else the registry's, else a --ctx pin; None (refuse) rather than a guessed default.
+    config.or(registry).or(pin)
+}
+
+pub fn swa_window(lm: &Value, cfg: &Value, model_id: &str) -> Result<u64, String> {
+    // Tokens a sliding-window layer keeps: its window capped by the context, the whole context when no window is stated, refused when neither is.
+    let max = read_u64(lm, cfg, CTX_KEYS);
+    match read_u64(lm, cfg, &["sliding_window", "sliding_window_size"]).or(max) {
+        Some(w) => Ok(w.min(max.unwrap_or(w))),
+        None => Err(format!("{model_id}: sliding-window layers, but config.json states neither sliding_window nor max_position_embeddings")),
+    }
+}
+
 fn attention_kv(
     cfg: &Value,
     lm: &Value,
     layers: u64,
     plan: LayerPlan,
-    max_ctx: u64,
     num_attention_heads: u64,
     model_id: &str,
 ) -> Result<KvShape, String> {
@@ -219,7 +234,7 @@ fn attention_kv(
     }
     let full_heads = read_u64(lm, cfg, &["num_global_key_value_heads"]).unwrap_or(kv_heads);
     let full_dim = read_u64(lm, cfg, &["global_head_dim"]).unwrap_or(head_dim);
-    let window = read_u64(lm, cfg, &["sliding_window"]).unwrap_or(max_ctx).min(max_ctx);
+    let window = if plan.swa > 0 { swa_window(lm, cfg, model_id)? } else { 0 };
     Ok(KvShape {
         elems: mul(&[2, plan.full, full_heads, full_dim]),
         heads: full_heads,
@@ -423,7 +438,35 @@ mod tests {
         let f = facts_from_config(&gpt2, 0.0, None, "gpt2").unwrap();
         assert_eq!(f.kv_elems_per_token, 2 * 12 * 12 * 64);
         assert_eq!(f.num_kv_heads, 12);
-        assert_eq!(f.max_ctx, 1024);
+        assert_eq!(f.max_ctx, Some(1024));
+    }
+
+    #[test]
+    fn ctx_ceiling_never_guesses() {
+        for (config, registry, pin, want) in [
+            (Some(131072), Some(1 << 20), Some(8192), Some(131072)),
+            (None, Some(1 << 20), Some(8192), Some(1 << 20)),
+            (None, None, Some(8192), Some(8192)),
+            (None, None, None, None),
+        ] {
+            assert_eq!(ctx_ceiling(config, registry, pin), want, "{config:?} {registry:?} {pin:?}");
+        }
+        let no_ctx = json!({"num_hidden_layers": 2, "num_attention_heads": 4, "head_dim": 64});
+        assert_eq!(facts_from_config(&no_ctx, 0.0, None, "m").unwrap().max_ctx, None);
+    }
+
+    #[test]
+    fn swa_window_is_stated_or_refused() {
+        let swa = |extra: Value| {
+            let mut cfg = json!({"num_hidden_layers": 2, "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 64,
+                "layer_types": ["sliding_attention", "full_attention"]});
+            cfg.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            facts_from_config(&cfg, 0.0, None, "m").map(|f| f.swa_kv_elems_per_request)
+        };
+        assert_eq!(swa(json!({"sliding_window": 1024, "max_position_embeddings": 512})), Ok(2 * 2 * 64 * 512));
+        assert_eq!(swa(json!({"sliding_window": 1024})), Ok(2 * 2 * 64 * 1024));
+        assert_eq!(swa(json!({"max_position_embeddings": 4096})), Ok(2 * 2 * 64 * 4096));
+        assert!(swa(json!({})).unwrap_err().contains("neither sliding_window"));
     }
 
     #[test]
@@ -439,7 +482,7 @@ mod tests {
         assert_eq!((f.num_attention_heads, f.num_kv_heads), (24, 4));
         assert_eq!(f.attention, "hybrid");
         assert_eq!(f.architecture, "dense");
-        assert_eq!(f.max_ctx, 262144);
+        assert_eq!(f.max_ctx, Some(262144));
         let per_layer = 48 * 128 * 128 * 4 + (2 * 16 * 128 + 48 * 128) * 3 * 2;
         assert_eq!(f.linear_state_bytes_per_request, 48 * per_layer);
     }

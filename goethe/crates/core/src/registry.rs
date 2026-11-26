@@ -656,7 +656,7 @@ fn infer_one_entry(
         min_total_vram_gb: None,
         supported_sm: crate::gpu_arch::supported_list(),
         default_ctx: None,
-        max_ctx: Some(facts.max_ctx),
+        max_ctx: facts.max_ctx,
         default_max_conc: None,
         default_tp: None,
         num_attention_heads: Some(facts.num_attention_heads),
