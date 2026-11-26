@@ -129,35 +129,34 @@ fn finish_ninfer(path: PathBuf, digest: &str) -> Result<PathBuf, String> {
 }
 
 fn fetch_ninfer(dest: &Path) -> Result<PathBuf, String> {
+    // curl the pinned artifact, resuming a partial file first.
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    let status = Command::new("curl")
-        .arg("-fL")
-        .arg("-C")
-        .arg("-")
-        .arg("-o")
-        .arg(dest)
-        .arg(NINFER_URL)
-        .status()
-        .map_err(|e| format!("curl: {e}"))?;
-    if !status.success() {
-        let _ = std::fs::remove_file(dest);
-        return Err(ninfer_reject());
-    }
-    let len = std::fs::metadata(dest).map_err(|e| format!("{}: {e}", dest.display()))?.len();
-    let digest = match sha256_file(dest) {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = std::fs::remove_file(dest);
-            return Err(e);
+    fetch_ninfer_with(dest, |resume| {
+        let mut cmd = Command::new("curl");
+        cmd.arg("-fL");
+        if resume {
+            cmd.args(["-C", "-"]);
         }
-    };
-    if accept_ninfer(len, &digest).is_err() {
+        cmd.arg("-o").arg(dest).arg(NINFER_URL).status().map(|s| s.success()).map_err(|e| format!("curl: {e}"))
+    })
+}
+
+fn fetch_ninfer_with(dest: &Path, mut get: impl FnMut(bool) -> Result<bool, String>) -> Result<PathBuf, String> {
+    // A resumed download that fails or ends with the wrong bytes is deleted and fetched once more from scratch.
+    for resume in [true, false] {
+        if get(resume)? {
+            let len = std::fs::metadata(dest).map_or(0, |m| m.len());
+            if let Ok(digest) = sha256_file(dest) {
+                if accept_ninfer(len, &digest).is_ok() {
+                    return finish_ninfer(dest.to_path_buf(), &digest);
+                }
+            }
+        }
         let _ = std::fs::remove_file(dest);
-        return Err(ninfer_reject());
     }
-    finish_ninfer(dest.to_path_buf(), &digest)
+    Err(ninfer_reject())
 }
 
 fn write_patch_kit() -> Result<PathBuf, String> {
@@ -333,6 +332,22 @@ mod tests {
         assert!(hashed);
         let err = check_ninfer_with(&path, |_| Ok("deadbeef".into())).unwrap_err();
         assert!(err.contains(NINFER_SHA256) && !err.contains("safetensors"), "{err}");
+    }
+
+    #[test]
+    fn a_resumed_download_with_wrong_bytes_is_fetched_once_more_from_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join(NINFER_FILE);
+        let mut calls = Vec::new();
+        let got = fetch_ninfer_with(&dest, |resume| {
+            calls.push(resume);
+            std::fs::write(&dest, b"not the artifact").map(|_| true).map_err(|e| e.to_string())
+        });
+        assert!(got.is_err() && !dest.exists(), "wrong bytes are refused and deleted");
+        assert_eq!(calls, vec![true, false], "resume first, then one download from scratch");
+        let mut tries = 0;
+        assert!(fetch_ninfer_with(&dest, |_| { tries += 1; Ok(false) }).is_err());
+        assert_eq!(tries, 2, "a failed resume is retried from scratch too");
     }
 
     #[test]
