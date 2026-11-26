@@ -183,7 +183,7 @@ fn pin_root(home: &Path, root: &TrustRoot, device_code: &Secret, node: &InstallK
     if root.assertion.key_id != root.key_id || !goethe_proto::verify_assertion(&root.assertion, &root.public_key, &challenge, goethe_proto::RP_ID, goethe_proto::CONSOLE_ORIGIN) {
         return Err("the console's approval signature does not verify, so no passkey was pinned".into());
     }
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let now = crate::sys::unix_ms();
     let entry = TrustEntry { key_id: root.key_id.clone(), public_key: root.public_key.clone(), user_id: root.user_id.clone(), cap: root.cap, added_by: root.user_id.clone(), added_ms: now };
     crate::client::remote::pin(home, entry, "login")?;
     Ok(goethe_proto::key_fingerprint(&root.public_key))

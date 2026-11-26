@@ -241,7 +241,7 @@ mod tests {
         assert!(!profile_since(td.path(), 0), "a missing profile is stale");
         let path = td.path().join("hardware_state.json");
         std::fs::write(&path, "{}").unwrap();
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = crate::sys::unix_secs() as u64;
         assert!(profile_since(td.path(), now - 60));
         let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1000);
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();

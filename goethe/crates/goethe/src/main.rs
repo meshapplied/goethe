@@ -1339,7 +1339,7 @@ fn do_remote(cmd: Option<RemoteCommands>) -> Result<(), String> {
     use goethe_core::client::remote;
     let home = goethe_home();
     let kind = |k: &str| remote::Kind::parse(k).unwrap_or_else(|| usage(format!("{k} is not a kind of change")));
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let now = goethe_core::sys::unix_ms();
     match cmd {
         Some(RemoteCommands::Allow { kind: k }) => remote::set_allowed(&home, kind(&k), true).map(|()| println!("This node now accepts {k} commands signed by a pinned passkey whose cap allows them.")),
         Some(RemoteCommands::Deny { kind: k }) => remote::set_allowed(&home, kind(&k), false).map(|()| println!("This node refuses {k} commands from the console.")),
@@ -1825,9 +1825,7 @@ fn print_ps_table(rows: &[Value]) {
         print!("{}", no_models_text());
         return;
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
+    let now = goethe_core::sys::unix_secs();
     let mut table = goethe_core::term::Table::new(&[
         "INSTANCE", "MODEL", "RUNTIME", "SLOT", "STATUS", "GPUS", "PORT", "VRAM_GB", "RESTARTS", "IN_FLIGHT", "TOK_PER_S", "PREFIX",
     ]);
@@ -2053,11 +2051,11 @@ fn do_share(
             match share::active(&home) {
                 Some(s) => {
                     let ip = goethe_core::client::link::lookup_public_ip(&home).map(|i| i.to_string()).unwrap_or_else(|_| "<public IP>".into());
-                    println!("Public gateway: open until {} ({} left)", share::local_time(s.until), left(s.until - share::now()));
+                    println!("Public gateway: open until {} ({} left)", share::local_time(s.until), left(s.until - goethe_core::sys::unix_secs()));
                     println!("URL:  https://{}/v1", host_port(&ip, s.port));
                     for (name, g) in share::shared(&home) {
                         let from = if g.allow.is_empty() { "no addresses (unreachable)".to_string() } else { g.allow.join(", ") };
-                        println!("Key:  {name} until {} ({} left), from {from}", share::local_time(g.until), left(g.until - share::now()));
+                        println!("Key:  {name} until {} ({} left), from {from}", share::local_time(g.until), left(g.until - goethe_core::sys::unix_secs()));
                     }
                     println!("\nStop one key with: goethe api share stop --key <name>; close it with: goethe api share stop");
                 }
@@ -2079,7 +2077,7 @@ fn do_share(
             )?;
             let ip = o.public_ip.map(|i| i.to_string()).unwrap_or_else(|| "<public IP>".into());
             let url = format!("https://{}/v1", host_port(&ip, o.share.port));
-            println!("Shared until {} ({}); the public gateway is open until {}\n", share::local_time(share::now() + secs), left(secs), share::local_time(o.share.until));
+            println!("Shared until {} ({}); the public gateway is open until {}\n", share::local_time(goethe_core::sys::unix_secs() + secs), left(secs), share::local_time(o.share.until));
             println!("URL:  {url}");
             for k in &o.keys {
                 let models = k.models.as_deref().filter(|m| !m.is_empty()).unwrap_or("every model");

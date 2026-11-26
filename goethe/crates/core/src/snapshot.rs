@@ -450,7 +450,7 @@ fn uptime(read: &dyn Fn(&str) -> String) -> u64 {
     #[cfg(target_os = "macos")]
     {
         let _ = read;
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let now = crate::sys::unix_secs();
         crate::sys::boot_epoch().map_or(0, |boot| u64::try_from(now - boot).unwrap_or(0))
     }
     #[cfg(not(target_os = "macos"))]
@@ -737,7 +737,7 @@ mod tests {
         let (_dir, home) = seeded_home();
         let mut c = Collector::new(String::new());
         assert_eq!(c.build(&home, "interval", None).network.gateway.public, None);
-        let until = crate::public_share::now() + 3600;
+        let until = crate::sys::unix_secs() + 3600;
         std::fs::create_dir_all(home.join("nginx")).unwrap();
         let state = serde_json::json!({"open": true, "until": until, "port": 8444, "keys": ["k1"], "allow": []});
         std::fs::write(home.join("nginx/public_share.json"), state.to_string()).unwrap();

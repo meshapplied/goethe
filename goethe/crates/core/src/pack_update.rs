@@ -297,7 +297,7 @@ pub fn note_if_newer(home: &Path, model_id: &str) {
     // At goethe load: at most once a day, say when the index has a newer pack for this model; the check reads the cached index and never delays a load otherwise.
     let Some((_, dir, arch)) = installed_packs(home).into_iter().find(|(id, ..)| id == model_id) else { return };
     let marker = home.join("packs").join("update-check");
-    let today = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86400);
+    let today = crate::sys::unix_secs() as u64 / 86400;
     if std::fs::read_to_string(&marker).ok().and_then(|t| t.trim().parse::<u64>().ok()) == Some(today) {
         return;
     }

@@ -46,11 +46,7 @@ pub fn run_logs(
     // Prune, or tail a model/instance log, the daemon log, or the gateway's goethe and nginx logs.
     let home = goethe_home();
     if prune {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let n = crate::log_rotation::run_prune_pass(&home, now)?;
+        let n = crate::log_rotation::run_prune_pass(&home, crate::sys::unix_secs())?;
         let _ = crate::log_rotation::run_rotation_pass(&home);
         println!("pruned {n} engine log file(s)");
         return Ok(());

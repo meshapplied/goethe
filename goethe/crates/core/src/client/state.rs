@@ -6,7 +6,7 @@ use hyper::body::Bytes;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
@@ -98,7 +98,7 @@ fn step(home: &Path, mut live: Live) -> (Live, Option<Bytes>) {
     if live.last.as_ref() == Some(&now) {
         return (live, None);
     }
-    let t_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let t_ms = crate::sys::unix_ms();
     let out = line(&StateEvent::Live { t_ms, instances: now.clone() });
     live.last = Some(now);
     (live, Some(out))

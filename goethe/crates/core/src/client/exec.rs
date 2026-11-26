@@ -72,13 +72,9 @@ fn claim(home: &Path, kind: Kind) -> Option<Claim> {
     Some(Claim { home: home.to_path_buf(), kind })
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
-}
-
 pub fn handle(home: &Path, signed: &SignedCommand, emit: &mut dyn FnMut(CommandEvent)) {
     // Blocking: verify, check replay, run, and emit accepted or refused, progress, then done.
-    handle_with(home, signed, &SUPERVISOR, now_ms(), emit)
+    handle_with(home, signed, &SUPERVISOR, crate::sys::unix_ms(), emit)
 }
 
 pub fn handle_with(home: &Path, signed: &SignedCommand, engines: &Engines, now_ms: u64, emit: &mut dyn FnMut(CommandEvent)) {

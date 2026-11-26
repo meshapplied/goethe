@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 pub const ENGINE_LOG_MAX_BYTES: u64 = 256 * 1024 * 1024;
 pub const ENGINE_LOG_KEEP_BYTES: u64 = 64 * 1024 * 1024;
@@ -162,11 +162,7 @@ pub fn run_rotation_pass(home: &Path) -> Result<(), String> {
         }
     }
     rotate_nginx_logs(home, NGINX_LOG_MAX_BYTES);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs() as i64;
-    let _ = run_prune_pass(home, now);
+    let _ = run_prune_pass(home, crate::sys::unix_secs());
     Ok(())
 }
 

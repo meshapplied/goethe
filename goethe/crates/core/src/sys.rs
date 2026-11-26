@@ -24,6 +24,16 @@ pub fn children(pid: i32) -> Vec<i32> {
     pids().into_iter().filter(|p| stat(*p).is_some_and(|s| s.ppid == pid)).collect()
 }
 
+pub fn unix_secs() -> i64 {
+    // Wall clock seconds since the Unix epoch; 0 when the clock reads before 1970.
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+pub fn unix_ms() -> u64 {
+    // Wall clock milliseconds since the Unix epoch; 0 when the clock reads before 1970.
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
 pub fn random_bytes(buf: &mut [u8]) {
     // Kernel randomness: getrandom on Linux, getentropy (256 bytes per call) on macOS; a failure panics, since zeros would still look like a valid key.
     #[cfg(target_os = "linux")]
@@ -398,6 +408,13 @@ mod tests {
     fn our_own_environment_can_be_read_back() {
         let me = std::process::id() as i32;
         assert!(environ(me).is_some_and(|e| e.iter().any(|kv| kv.starts_with("PATH="))));
+    }
+
+    #[test]
+    fn wall_clock_reads_after_boot_in_seconds_and_milliseconds() {
+        let (s, ms) = (unix_secs(), unix_ms());
+        assert!(boot_epoch().is_some_and(|b| b > 0 && b <= s));
+        assert!((ms / 1000).abs_diff(s as u64) <= 1);
     }
 
     #[test]
