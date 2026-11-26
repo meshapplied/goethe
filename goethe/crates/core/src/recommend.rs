@@ -141,10 +141,13 @@ impl View {
     pub fn fit_as(&self, model_id: &str, input: &ChooserInput, pinned_tp: Option<usize>, runtime: &str) -> Result<Fit, String> {
         // The same plan for a model not installed yet: the learned figures are those of `runtime`, never another runtime's rows.
         let plan = chooser::pick_load_plan(input, &self.gpus, Some(&self.hw), pinned_tp, None).map_err(|e| e.message)?;
-        let mut trial = input.clone();
-        trial.ctx = plan.ctx;
-        trial.max_conc = plan.max_conc;
-        trial.overhead_gb = crate::engines::by_id(runtime).map_or(calc::BASE_OVERHEAD_GB, |e| e.overhead_gb);
+        let trial = ChooserInput {
+            ctx: plan.ctx,
+            max_conc: plan.max_conc,
+            marlin_extra_gb: if plan.disable_marlin { 0.0 } else { input.marlin_extra_gb },
+            overhead_gb: crate::engines::by_id(runtime).map_or(calc::BASE_OVERHEAD_GB, |e| e.overhead_gb),
+            ..input.clone()
+        };
         let base = chooser::need(&trial, plan.tp, &plan.cc);
         let learned = self.con.as_ref().map(|c| crate::engine_overhead::read_learned(c, model_id, &self.gpu_name(plan.gpus[0]), plan.tp as u64, runtime));
         let learned = learned.unwrap_or_default();
@@ -578,6 +581,15 @@ mod tests {
         g.vram_used_mb = 607;
         g.compute_capability = cc.into();
         view(vec![g])
+    }
+
+    #[test]
+    fn an_nvfp4_model_that_fits_only_without_its_marlin_copy_fits() {
+        // On SM 12.0 the plan drops the Marlin copy when only that fits; the budget is of that plan, as goethe load runs it.
+        let m = entry("org/m-NVFP4", serde_json::json!({"static_vram_gb": 21.0, "kv_elems_per_token": 32768}));
+        let input = ChooserInput { marlin_extra_gb: 14.0, ..registry_input(&m) };
+        let f = single_gpu("12.0").fit_as(&m.id, &input, None, crate::engine_overhead::PACK_RUNTIME).expect("fits without the Marlin copy");
+        assert!(f.need.weights < 22.0, "{:?}", f.need);
     }
 
     #[test]
