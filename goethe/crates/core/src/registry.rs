@@ -6,6 +6,7 @@ use crate::paths::goethe_home;
 use crate::sglang_infer;
 use crate::sglang_validate;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -548,142 +549,68 @@ pub fn run_entries(
     Ok(())
 }
 
-pub struct AddOpts {
-    pub repo_ids: Vec<String>,
-    pub file: String,
-    pub overlay_path: Option<String>,
-    pub update: bool,
-    pub dry_run: bool,
-    pub strict: bool,
-}
-
-pub fn run_add(opts: &AddOpts) -> Result<(), String> {
-    if opts.repo_ids.is_empty() {
-        return Err("no repo ids".to_string());
+pub fn build(src: &Value, infer: &dyn Fn(&str, &str) -> Result<RegistryModel, String>) -> Result<Registry, String> {
+    // registry.json from registry.src.json: each entry inferred from Hugging Face at its pinned revision with every field the source states laid over it; a gated or manual_download entry, and every GGUF entry, is its source entry as is. O(entries) infers.
+    let list = |k: &str| src[k].as_array().cloned().unwrap_or_default();
+    let mut models = Vec::new();
+    for s in list("models") {
+        let id = s["id"].as_str().ok_or("registry.src.json: an entry has no id")?;
+        let full = if s["gated"] == true || s["manual_download"] == true {
+            s.clone()
+        } else {
+            let rev = s["revision"].as_str().filter(|r| r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit()));
+            let rev = rev.ok_or_else(|| format!("{id}: revision must be the 40-hex commit the entry was checked at"))?;
+            let mut v = serde_json::to_value(infer(id, rev).map_err(|e| format!("{id}: {e}"))?).map_err(|e| e.to_string())?;
+            for (k, x) in s.as_object().into_iter().flatten() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        models.push(serde_json::from_value::<RegistryModel>(full).map_err(|e| format!("{id}: {e}"))?);
     }
-    let path = Path::new(&opts.file);
-    let text = fs_read(path)?;
-    let mut reg = parse_registry(&text)?;
-    let overlay = load_overlay(opts.overlay_path.as_deref())?;
-    let mut added = 0usize;
-    let mut updated = 0usize;
-    let mut skipped = 0usize;
-    let mut failed = 0usize;
-    for repo_id in &opts.repo_ids {
-        match infer_one_entry(repo_id, None, None) {
-            Ok((mut entry, warnings)) => {
-                for w in warnings {
-                    eprintln!("warning: {w}");
-                }
-                if let Some(o) = overlay.get(&entry.id) {
-                    merge_overlay(&mut entry, o).map_err(|e| format!("{}: {e}", entry.id))?;
-                }
-                if let Some(idx) = reg.models.iter().position(|m| m.id == entry.id) {
-                    if !opts.update {
-                        skipped += 1;
-                        continue;
-                    }
-                    merge_measured(&mut reg.models[idx], &entry).map_err(|e| format!("{}: {e}", entry.id))?;
-                    updated += 1;
-                } else {
-                    reg.models.push(entry);
-                    added += 1;
-                }
-            }
-            Err(e) => {
-                failed += 1;
-                eprintln!("warning: failed {repo_id}: {e}");
-            }
+    let gguf_models = list("gguf_models").into_iter().map(serde_json::from_value).collect::<Result<Vec<RegistryModel>, _>>().map_err(|e| format!("gguf_models: {e}"))?;
+    let reg = Registry { version: 1, models, gguf_models };
+    let mut errors = Vec::new();
+    let mut seen = std::collections::HashMap::new();
+    for m in reg.models.iter().chain(&reg.gguf_models) {
+        if seen.insert(m.id.clone(), ()).is_some() {
+            errors.push(format!("{}: listed twice", m.id));
         }
     }
-    let mut errors = Vec::new();
+    let families: std::collections::BTreeSet<&str> = reg.models.iter().chain(&reg.gguf_models).filter_map(|m| m.family.as_deref()).collect();
+    for (a, b) in families.iter().zip(families.iter().skip(1)) {
+        if a.eq_ignore_ascii_case(b) {
+            errors.push(format!("family spelled two ways: {a}, {b}"));
+        }
+    }
     for m in &reg.models {
         validate_entry(m, &mut errors);
     }
-    for e in sglang_validate::validate_registry_sglang(&reg, false) {
-        if e.starts_with("note:") || e.starts_with("warning:") {
-            eprintln!("{e}");
-        } else {
-            errors.push(e);
-        }
+    errors.extend(sglang_validate::validate_registry_sglang(&reg, false).into_iter().filter(|e| !e.starts_with("note:") && !e.starts_with("warning:")));
+    if errors.is_empty() {
+        Ok(reg)
+    } else {
+        Err(format!("registry build refused: {}", errors.join("; ")))
     }
-    if !errors.is_empty() {
-        for e in &errors {
-            eprintln!("error: {e}");
-        }
-        return Err("registry add refused: validation failed".to_string());
-    }
-    if opts.strict && failed > 0 {
-        std::process::exit(1);
-    }
-    if !opts.dry_run && (added > 0 || updated > 0) {
-        write_registry_atomic(path, &reg)?;
-    }
-    if opts.dry_run {
-        println!("dry-run: no file written");
-    }
-    println!("summary: added {added} updated {updated} skipped {skipped} failed {failed}");
-    if added + updated == 0 && failed > 0 && opts.strict {
-        std::process::exit(1);
-    }
+}
+
+pub fn run_build(src: &Path, out: &Path) -> Result<(), String> {
+    // Infer every entry of src from Hugging Face and write out, only when the whole registry builds and validates.
+    let s: Value = serde_json::from_str(&fs_read(src)?).map_err(|e| format!("{}: {e}", src.display()))?;
+    let reg = build(&s, &|id, rev| infer_one_entry(id, None, Some(rev)).map(|(m, warnings)| {
+        warnings.iter().for_each(|w| eprintln!("warning: {w}"));
+        m
+    }))?;
+    write_registry_atomic(out, &reg)?;
+    println!("{}: {} models, {} GGUF models", out.display(), reg.models.len(), reg.gguf_models.len());
     Ok(())
 }
 
 fn write_registry_atomic(path: &Path, reg: &Registry) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(reg).map_err(|e| e.to_string())?;
+    let text = serde_json::to_string_pretty(reg).map_err(|e| e.to_string())? + "\n";
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
-}
-
-fn load_overlay(path: Option<&str>) -> Result<std::collections::HashMap<String, RegistryModel>, String> {
-    let Some(p) = path else {
-        return Ok(std::collections::HashMap::new());
-    };
-    let reg = parse_registry(&fs_read(Path::new(p))?)?;
-    Ok(reg.models.into_iter().map(|m| (m.id.clone(), m)).collect())
-}
-
-fn merge_overlay(dst: &mut RegistryModel, src: &RegistryModel) -> Result<(), String> {
-    if src.description.is_some() {
-        dst.description = src.description.clone();
-    }
-    if src.family.is_some() {
-        dst.family = src.family.clone();
-    }
-    if src.license.is_some() {
-        dst.license = src.license.clone();
-    }
-    if src.released.is_some() {
-        dst.released = src.released.clone();
-    }
-    if src.modalities.is_some() {
-        dst.modalities = src.modalities.clone();
-    }
-    if !src.supported_sm.is_empty() {
-        dst.supported_sm = src.supported_sm.clone();
-    }
-    if src.manual_download.is_some() {
-        dst.manual_download = src.manual_download;
-    }
-    dst.extra_sglang_args = sglang_infer::merge_extra_args(&dst.extra_sglang_args, &src.extra_sglang_args)?;
-    Ok(())
-}
-
-fn merge_measured(dst: &mut RegistryModel, src: &RegistryModel) -> Result<(), String> {
-    dst.static_vram_gb = src.static_vram_gb;
-    dst.memory = src.memory.clone();
-    dst.kv_elems_per_token = src.kv_elems_per_token;
-    dst.max_ctx = src.max_ctx;
-    dst.num_attention_heads = src.num_attention_heads;
-    dst.num_kv_heads = src.num_kv_heads;
-    dst.attention = src.attention.clone();
-    dst.architecture = src.architecture.clone();
-    dst.revision = src.revision.clone();
-    dst.gated = src.gated;
-    dst.download_gb = src.download_gb;
-    dst.extra_sglang_args = sglang_infer::merge_extra_args(&src.extra_sglang_args, &dst.extra_sglang_args)?;
-    Ok(())
 }
 
 fn infer_one_entry(
@@ -758,6 +685,42 @@ fn infer_one_entry(
 #[cfg(test)]
 mod validate_tests {
     use super::*;
+
+    const SRC: &str = include_str!("../../../registry.src.json");
+
+    #[test]
+    fn the_bundled_registry_is_the_build_of_its_source() {
+        // Inference is replaced by the bundled entries themselves: equal only when every source field, id, order and GGUF entry is the bundled one.
+        let reg = parse_registry(BUNDLED_REGISTRY).unwrap();
+        let built = build(&serde_json::from_str(SRC).unwrap(), &|id, _| reg.models.iter().find(|m| m.id == id).cloned().ok_or_else(|| format!("{id} not bundled"))).unwrap();
+        assert_eq!(serde_json::to_value(&built).unwrap(), serde_json::to_value(&reg).unwrap(), "edit registry.src.json and run goethe registry build");
+    }
+
+    #[test]
+    fn build_infers_at_the_pinned_revision_and_the_source_wins() {
+        // A valid bundled entry, renamed, stands in for what Hugging Face infers.
+        let base = parse_registry(BUNDLED_REGISTRY).unwrap().models.into_iter().find(|m| m.gated.is_none() && m.manual_download.is_none()).unwrap();
+        let rev = "a".repeat(40);
+        let infer = |id: &str, r: &str| {
+            assert_eq!(r, "a".repeat(40));
+            if id == "org/gone" {
+                return Err("404".to_string());
+            }
+            Ok(RegistryModel { id: id.into(), description: Some("inferred".into()), family: None, ..base.clone() })
+        };
+        let one = |e: Value| build(&serde_json::json!({"models": [e]}), &infer).map(|r| r.models[0].clone());
+        let m = one(serde_json::json!({"id": "org/m", "revision": rev, "description": "curated"})).unwrap();
+        assert_eq!((m.description.as_deref(), m.static_vram_gb), (Some("curated"), base.static_vram_gb));
+        let hand = RegistryModel { id: "org/gated".into(), gated: Some(true), revision: None, ..base.clone() };
+        assert_eq!(one(serde_json::to_value(&hand).unwrap()).unwrap().id, "org/gated", "a gated entry is kept as written, never inferred");
+        assert!(one(serde_json::json!({"id": "org/m", "revision": "main"})).unwrap_err().contains("40-hex"));
+        assert!(one(serde_json::json!({"id": "org/gone", "revision": rev})).unwrap_err().contains("org/gone: 404"));
+        let two = |a: Value, b: Value| build(&serde_json::json!({"models": [a, b]}), &infer).map(|_| ());
+        let e = |id: &str, fam: &str| serde_json::json!({"id": id, "revision": rev, "family": fam});
+        assert!(two(e("org/m", "Qwen"), e("org/m", "Qwen")).unwrap_err().contains("org/m: listed twice"));
+        assert!(two(e("org/a", "Qwen"), e("org/b", "qwen")).unwrap_err().contains("family spelled two ways"));
+        assert!(two(e("org/a", "Qwen"), e("org/b", "Qwen")).is_ok());
+    }
 
     #[test]
     fn reserved_flags_are_refused() {

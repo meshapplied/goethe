@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 3 registry entry/add/validate offline tests and in-place (unmanaged) local installs."""
+"""Stage 3 registry entry/build/validate offline tests and in-place (unmanaged) local installs."""
 
 from __future__ import annotations
 
@@ -91,31 +91,21 @@ def main() -> None:
             rr_bulk = run(entry_cmd, env=hf_env, timeout=60)
             if rr_bulk.returncode != 0 or len(json.loads(rr_bulk.stdout).get("models", [])) < 1:
                 raise RuntimeError(f"bulk entry produced no models: {rr_bulk.stderr}")
-            reg_file = _write(work / "registry.json", {"version": 1, "models": []})
-            overlay = _write(
-                work / "overlay.json",
-                {"version": 1, "models": [{"id": "stub/moe", "description": "test overlay", "supported_sm": ["12.0"]}]},
-            )
-            add_moe = [str(goethe), "registry", "add", "--repo", "stub/moe"]
-            add = [*add_moe, "--file", str(reg_file), "--overlay", str(overlay)]
-            rr_add = run([*add, "--dry-run"], env=hf_env, timeout=60)
-            if rr_add.returncode != 0:
-                raise RuntimeError(rr_add.stderr or rr_add.stdout)
-            if json.loads(reg_file.read_text(encoding="utf-8"))["models"]:
-                raise RuntimeError("registry add --dry-run modified the registry file")
+            moe = {"id": "stub/moe", "revision": "a" * 40, "description": "test source", "supported_sm": ["12.0"]}
+            src = {"version": 1, "models": [moe]}
+            build = [str(goethe), "registry", "build", "--src", str(_write(work / "registry.src.json", src))]
+            out = work / "registry.json"
+            rr_build = run([*build, "--out", str(out)], env=hf_env, timeout=60)
+            built = json.loads(out.read_text(encoding="utf-8"))["models"] if rr_build.returncode == 0 else []
+            if not built or built[0]["description"] != "test source":
+                raise RuntimeError(f"build must lay the source over inference: {rr_build.stderr}{rr_build.stdout}")
             bad_args = ["--reasoning-parser", "minimax_m3"]
-            bad_overlay = _write(
-                work / "bad_overlay.json",
-                {"version": 1, "models": [{"id": "stub/moe", "extra_sglang_args": bad_args, "supported_sm": ["12.0"]}]},
-            )
-            reg_bad = _write(work / "reg_bad.json", {"version": 1, "models": []})
-            rr_bad = run(
-                [*add_moe, "--file", str(reg_bad), "--overlay", str(bad_overlay)],
-                env=hf_env,
-                timeout=60,
-            )
-            if rr_bad.returncode == 0 or json.loads(reg_bad.read_text(encoding="utf-8"))["models"]:
-                raise RuntimeError("invalid reasoning-parser must refuse the add and leave the file untouched")
+            src["models"][0]["extra_sglang_args"] = bad_args
+            bad_out = work / "bad.json"
+            bad_build = [str(goethe), "registry", "build", "--src", str(_write(work / "bad.src.json", src))]
+            rr_bad = run([*bad_build, "--out", str(bad_out)], env=hf_env, timeout=60)
+            if rr_bad.returncode == 0 or bad_out.exists():
+                raise RuntimeError("an invalid reasoning-parser must refuse the build and write nothing")
             tiny = _write(
                 work / "tmp_reg_validate.json",
                 {

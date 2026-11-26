@@ -746,22 +746,12 @@ enum RegistryCommands {
         #[arg(long, help = "Fail on validation warnings.")]
         strict: bool,
     },
-    #[command(about = "Register models from a registry JSON file.")]
-    Add {
-        #[arg(long = "repo", value_name = "ID", help = "Hugging Face repo id to add from the file (repeatable).")]
-        repo_ids: Vec<String>,
-        #[arg(long, help = "Read repo ids from a file.")]
-        ids_file: Option<String>,
-        #[arg(long, help = "Path or URL to the registry JSON source.")]
-        file: String,
-        #[arg(long, help = "Optional overlay JSON path.")]
-        overlay: Option<String>,
-        #[arg(long, help = "Update existing entries.")]
-        update: bool,
-        #[arg(long, help = "Print merge result without writing.")]
-        dry_run: bool,
-        #[arg(long, help = "Fail on validation warnings.")]
-        strict: bool,
+    #[command(about = "Build the registry from its source: each entry inferred from Hugging Face at its pinned revision, the source's fields over it.")]
+    Build {
+        #[arg(long, value_name = "PATH", help = "registry.src.json: ids, pinned revisions and the fields that are not inferred.")]
+        src: String,
+        #[arg(long, value_name = "PATH", help = "registry.json to write (only when the whole registry builds and validates).")]
+        out: String,
     },
 }
 
@@ -1310,15 +1300,7 @@ fn main() {
                 ids_file,
                 strict,
             } => do_registry_entry(repo_ids, runtime, revision, ids_file, strict),
-            RegistryCommands::Add {
-                repo_ids,
-                ids_file,
-                file,
-                overlay,
-                update,
-                dry_run,
-                strict,
-            } => do_registry_add(repo_ids, ids_file, file, overlay, update, dry_run, strict),
+            RegistryCommands::Build { src, out } => registry::run_build(std::path::Path::new(&src), std::path::Path::new(&out)),
         },
     };
     match result {
@@ -2252,26 +2234,6 @@ fn do_registry_entry(
         revision.as_deref(),
         &registry::EntryOpts { strict },
     )
-}
-
-fn do_registry_add(
-    mut repo_ids: Vec<String>,
-    ids_file: Option<String>,
-    file: String,
-    overlay: Option<String>,
-    update: bool,
-    dry_run: bool,
-    strict: bool,
-) -> Result<(), String> {
-    read_ids_file(&mut repo_ids, ids_file.as_deref())?;
-    registry::run_add(&registry::AddOpts {
-        repo_ids,
-        file,
-        overlay_path: overlay,
-        update,
-        dry_run,
-        strict,
-    })
 }
 
 
