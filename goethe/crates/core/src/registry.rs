@@ -153,7 +153,7 @@ fn fetch_any(url: &str) -> Result<Registry, String> {
         let path = Path::new(rest);
         let text = fs_read(path)?;
         let sig = std::fs::read(format!("{}.sig", path.display())).ok();
-        return finish_registry(url, text, sig.as_deref());
+        return finish_registry(url, &text, sig.as_deref());
     }
     if let Some(why) = crate::update::plain_http_refusal(url) {
         return Err(why);
@@ -164,11 +164,11 @@ fn fetch_any(url: &str) -> Result<Registry, String> {
     Err(format!("unsupported registry URL scheme: {url}"))
 }
 
-fn finish_registry(url: &str, body: String, sig: Option<&[u8]>) -> Result<Registry, String> {
+fn finish_registry(url: &str, body: &str, sig: Option<&[u8]>) -> Result<Registry, String> {
     match sig {
         Some(sig) => {
             verify_registry(body.as_bytes(), sig)?;
-            parse_registry(&body)
+            parse_registry(body)
         }
         None if url == DEFAULT_REGISTRY_URL => bundled(),
         None => Err("registry signature missing".into()),
@@ -239,12 +239,12 @@ fn fetch_http_uncached(home: &Path, url: &str) -> Result<Registry, String> {
         Some(buf)
     };
     match req.call() {
-        Ok(resp) if resp.status() == 304 => finish_registry(url, cached_body()?, sig_bytes(url).as_deref()),
+        Ok(resp) if resp.status() == 304 => finish_registry(url, &cached_body()?, sig_bytes(url).as_deref()),
         Ok(resp) => {
             let etag = resp.header("etag").map(String::from);
             let body = resp.into_string().map_err(|e| format!("registry body: {e}"))?;
             let sig = sig_bytes(url);
-            let reg = finish_registry(url, body.clone(), sig.as_deref())?;
+            let reg = finish_registry(url, &body, sig.as_deref())?;
             let cache = RegistryCache { etag, body };
             let _ = std::fs::write(&cache_path, serde_json::to_string(&cache).unwrap_or_default());
             Ok(reg)
@@ -254,7 +254,7 @@ fn fetch_http_uncached(home: &Path, url: &str) -> Result<Registry, String> {
                 return Err(format!("registry unreachable ({e}) and no registry.cache.json"));
             }
             eprintln!("warning: registry fetch failed ({e}); using the signed catalog");
-            finish_registry(url, cached_body().unwrap_or_default(), None)
+            finish_registry(url, &cached_body().unwrap_or_default(), None)
         }
         Err(e) => Err(format!("registry unreachable at {url}: {e}")),
     }
@@ -839,7 +839,7 @@ mod validate_tests {
 
     #[test]
     fn the_default_url_without_a_signature_uses_the_bundled_catalog() {
-        let reg = finish_registry(DEFAULT_REGISTRY_URL, "{}".into(), None).unwrap();
+        let reg = finish_registry(DEFAULT_REGISTRY_URL, "{}", None).unwrap();
         assert!(reg.models.iter().any(|m| m.id == "nvidia/Llama-3.1-8B-Instruct-NVFP4"));
     }
 
