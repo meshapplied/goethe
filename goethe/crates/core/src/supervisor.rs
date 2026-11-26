@@ -459,6 +459,7 @@ fn start_engine(req: &LoadReq, con: &Connection, plan: &LoadPlan, fit: FitSpawn)
         port,
         ctx: plan.ctx,
         max_conc: plan.max_conc,
+        pool_tokens: chooser::kv_tokens(plan.ctx, plan.max_conc, chooser::card_floor(&card)),
         tp,
         mem_frac,
         gpus: &plan.gpus,
