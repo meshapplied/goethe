@@ -300,12 +300,17 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                     break 'packed false;
                 }
             };
+            let (repo, rev) = plan.source.clone();
+            let foreign = !repo.eq_ignore_ascii_case(&choice.offer.hf_repo);
+            let refuse = |why: String| match foreign {
+                true => Err(crate::errcode::coded(crate::errcode::Code::ModelPack, format!("the weights from {repo} run only with this kernel pack, and {why}; {NOTHING_DOWNLOADED}; without --quant, {} installs its own weights", opts.model_id))),
+                false => refuse(why),
+            };
             if let Some(why) = refused_before_download(home, &plan, &crate::packs::python_runner(home)) {
                 println!("{}", refuse(why)?);
                 break 'packed false;
             }
-            let rev = choice.offer.revision.clone();
-            let pre = hf::preflight_model(&choice.offer.hf_repo, Some(&rev))?;
+            let pre = hf::preflight_model(&repo, Some(&rev))?;
             let size = |f: &str| pre.siblings.iter().find(|s| s.rfilename == f).map(|s| s.size);
             let bytes = |v: &[String]| v.iter().filter_map(|f| size(f)).sum::<u64>();
             let fits = |v: &[String]| hf::disk_preflight(home, bytes(v)).and_then(|_| vram_preflight(home, bytes(v)));
@@ -315,7 +320,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                     println!("{}", refuse(why)?);
                     break 'packed false;
                 }
-                Err(None) => return Err(format!("{}: the model files its kernel pack was built for are not in the repository", choice.offer.hf_repo)),
+                Err(None) => return Err(format!("{}: the model files its kernel pack was built for are not in the repository", repo)),
             };
             let files = chosen.files.clone();
             fits(&files)?;
@@ -332,18 +337,19 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 (Some(d), None) => format!(", speculative decoding {} (+{:.1} GB)", d.name, dgb as f64 / GIB),
                 (Some(d), Some(what)) => format!(", speculative decoding off: {} needs {:.1} GB more {what}", d.name, dgb as f64 / GIB),
             };
-            let (fit_repo, fit_rev) = crate::packs::aux(&plan.entry).map_or((choice.offer.hf_repo.clone(), rev.clone()), |(repo, revision, _)| (repo, revision.unwrap_or_else(|| "main".into())));
+            let (fit_repo, fit_rev) = crate::packs::aux(&plan.entry).map_or((repo.clone(), rev.clone()), |(repo, revision, _)| (repo, revision.unwrap_or_else(|| "main".into())));
             match (hf::fetch_config_json(&fit_repo, &fit_rev), crate::hw::profile(home)) {
                 (Ok(cfg), Ok(hw)) => {
-                    let marlin = pack_marlin_gb(&cfg, &choice.offer.hf_repo, &rev, &files);
+                    let marlin = pack_marlin_gb(&cfg, &repo, &rev, &files);
                     let view = if opts.load { crate::recommend::View::new(home, hw) } else { crate::recommend::View::capacity(home, hw) };
                     crate::step::say(&pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: chosen.max_ctx }, &card_dir)?);
                 }
                 (Err(e), _) | (_, Err(e)) => crate::step::note(&format!("note: the per-GPU fit was not checked before the download: {e}")),
             }
-            confirm(opts, &format!("{} ({}, {:.1} GB) with optimised kernels for {}{spec}", opts.model_id, choice.offer.format, bytes(&files) as f64 / GIB, choice.offer.arch))?;
+            let what = if foreign { format!("{}, weights from {repo}", chosen.quant) } else { choice.offer.format.clone() };
+            confirm(opts, &format!("{} ({what}, {:.1} GB) with optimised kernels for {}{spec}", opts.model_id, bytes(&files) as f64 / GIB, choice.offer.arch))?;
             let pack_dl = DownloadOpts { revision: Some(rev), force: opts.force, no_verify: opts.no_verify, only: Some(files.clone()) };
-            hf::ensure_model(home, &choice.offer.hf_repo, &card_dir, &pack_dl)?;
+            hf::ensure_model(home, &repo, &card_dir, &pack_dl)?;
             if let Some((repo, revision, only)) = crate::packs::aux(&plan.entry) {
                 fetch_aux(home, &repo, &card_dir, DownloadOpts { revision, force: opts.force, no_verify: opts.no_verify, only: Some(only) })?;
             }
@@ -865,6 +871,10 @@ fn register(home: &Path, opts: &InstallOpts, mut t: Target) -> Result<(), String
     };
     if let Some(why) = refused {
         drop_pack(&planned.dir);
+        let foreign = t.pack.as_ref().and_then(|c| c.plan.as_ref().map(|p| (&p.source.0, &c.offer.hf_repo))).filter(|(s, own)| !s.eq_ignore_ascii_case(own));
+        if let Some((repo, _)) = foreign {
+            return Err(crate::errcode::coded(crate::errcode::Code::ModelPack, format!("{why}; the weights from {repo} run only with this kernel pack, so it is not served with the plain runtime")));
+        }
         if !fallback_allowed(opts.fallback) {
             return Err(crate::errcode::coded(crate::errcode::Code::ModelPack, format!("{why}; {FALLBACK_HINT}")));
         }
@@ -1972,7 +1982,8 @@ mod tests {
 
     fn matched() -> Looked {
         let entry = crate::packs::entries(&offer_index(), &["sm_120a".to_string()], |_| true).remove(0);
-        Ok(Some(("sm_120a".into(), crate::packs::Plan { entry, prefix: Vec::new(), variants: Vec::new(), serial: 7 })))
+        let source = (entry.offer.hf_repo.clone(), entry.offer.revision.clone());
+        Ok(Some(("sm_120a".into(), crate::packs::Plan { entry, prefix: Vec::new(), variants: Vec::new(), serial: 7, source })))
     }
 
     fn offered(opts: &InstallOpts, creds: Option<crate::client::link::Credentials>, archs: &[&str], look: Looked, engine: Result<(), String>) -> (Result<Option<PackChoice>, String>, Vec<&'static str>) {
