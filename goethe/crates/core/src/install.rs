@@ -269,15 +269,10 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     let mut packs_down = false;
     let declined = match pack_decision(home, opts)? {
         PackDecision::Use(mut choice) => 'packed: {
-            // Only the files the pack was built for, at its pinned revision; a pack no allowed GPU runs is refused from its manifest before anything is installed, the engine layer once, on first use.
+            // Only the files the pack was built for, at its pinned revision; a pack this GPU runs no variant of is refused before a weight byte is downloaded.
             let token = || Ok(choice.creds.token.expose().to_string());
             let broker = crate::packs::HttpBroker::new(&choice.creds.platform_url, &token);
             let refuse = |why: String| pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why, fallback_allowed(opts.fallback));
-            let early = manifest_refused(home, &opts.model_id, &choice.offer.arch, &broker);
-            if let Some(why) = early {
-                println!("{}", refuse(why)?);
-                break 'packed false;
-            }
             crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
             let plan = match crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home)) {
                 Ok(Some(plan)) => plan,
@@ -295,14 +290,18 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             }
             let rev = choice.offer.revision.clone();
             let pre = hf::preflight_model(&choice.offer.hf_repo, Some(&rev))?;
-            let size = |f: &String| pre.siblings.iter().find(|s| &s.rfilename == f).map(|s| s.size);
-            let bytes = |v: &Vec<String>| v.iter().filter_map(size).sum::<u64>();
-            let fits = |v: &Vec<String>| hf::disk_preflight(home, bytes(v)).and_then(|_| vram_preflight(home, bytes(v)));
-            let present: Vec<&Vec<String>> = plan.variants.iter().filter(|v| v.iter().all(|f| size(f).is_some())).collect();
-            let files = match present.iter().find(|v| fits(v).is_ok()).or(present.first()) {
-                Some(v) => (*v).clone(),
-                None => return Err(format!("{}: the model files its kernel pack was built for are not in the repository", choice.offer.hf_repo)),
+            let size = |f: &str| pre.siblings.iter().find(|s| s.rfilename == f).map(|s| s.size);
+            let bytes = |v: &[String]| v.iter().filter_map(|f| size(f)).sum::<u64>();
+            let fits = |v: &[String]| hf::disk_preflight(home, bytes(v)).and_then(|_| vram_preflight(home, bytes(v)));
+            let chosen = match crate::packs::pick(&plan.variants, |f| size(f).is_some(), |v| fits(v).is_ok()) {
+                Ok(v) => v.clone(),
+                Err(Some(why)) => {
+                    println!("{}", refuse(why)?);
+                    break 'packed false;
+                }
+                Err(None) => return Err(format!("{}: the model files its kernel pack was built for are not in the repository", choice.offer.hf_repo)),
             };
+            let files = chosen.files.clone();
             fits(&files)?;
             let draft = crate::packs::drafter(&plan.entry);
             let dgb = draft.as_ref().map_or(0, |d| d.files.iter().map(|f| f.1).sum::<u64>());
@@ -321,9 +320,8 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             match (hf::fetch_config_json(&fit_repo, &fit_rev), crate::hw::profile(home)) {
                 (Ok(cfg), Ok(hw)) => {
                     let marlin = pack_marlin_gb(&cfg, &choice.offer.hf_repo, &rev, &files);
-                    let cap = plan.variants.iter().position(|v| *v == files).and_then(|i| plan.variant_ids.get(i)).and_then(|id| crate::packs::variant_max_ctx(&plan.prefix, id));
                     let view = if opts.load { crate::recommend::View::new(home, hw) } else { crate::recommend::View::capacity(home, hw) };
-                    crate::step::say(&pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: cap }, &card_dir)?);
+                    crate::step::say(&pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: chosen.max_ctx }, &card_dir)?);
                 }
                 (Err(e), _) | (_, Err(e)) => crate::step::note(&format!("note: the per-GPU fit was not checked before the download: {e}")),
             }
@@ -854,62 +852,19 @@ fn drop_pack(dir: &Path) {
     }
 }
 
-fn local_devices(home: &Path) -> Vec<crate::packs::Device> {
-    // The allowed GPUs as a pack variant sees them: name, compute capability, SMs and shared memory from the CUDA driver (unknown when it cannot say).
-    let Ok(hw) = crate::hw::profile(home) else { return Vec::new() };
-    let denied = db::open(home).ok().and_then(|c| crate::gpu_policy::denied_set(&c).ok()).unwrap_or_default();
-    let info = |uuid: &str| crate::cuda_dev::sm_info(uuid);
-    hw.gpus
-        .iter()
-        .filter(|g| !denied.contains(&g.index))
-        .map(|g| crate::packs::Device { name: g.name.clone(), cc: g.compute_capability.clone(), sms: info(&g.uuid).map(|i| i.0), smem_block: info(&g.uuid).map(|i| i.1).filter(|b| *b > 0) })
-        .collect()
-}
-
-static NO_REQUIREMENTS_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-fn say_once(said: &std::sync::atomic::AtomicBool, line: &str) -> bool {
-    // Print a note the first time only; true when it was printed now.
-    let first = !said.swap(true, std::sync::atomic::Ordering::SeqCst);
-    if first {
-        eprintln!("{line}");
-    }
-    first
-}
-
-fn manifest_refused(home: &Path, model_id: &str, arch: &str, broker: &impl crate::packs::Broker) -> Option<String> {
-    // Why the pack's manifest (its header, fetched before any weight) runs no variant on an allowed GPU; None when one runs or it cannot be fetched.
-    crate::packs::unverified_prefix(model_id, arch, broker).ok().flatten().and_then(|(_, prefix)| sku_refused(home, &prefix))
-}
-
 pub(crate) fn pack_refused_here(home: &Path, model_id: &str) -> Option<String> {
-    // Why no kernel pack of a pack-only model runs on this machine, by the checks install makes before a download: none in the platform's index for these GPUs, no login to fetch one, or its manifest needs another GPU; None when one runs or it cannot be told.
+    // Why no kernel pack of a pack-only model runs on this machine, from the index alone: none for these GPUs, or no login to fetch one; None otherwise (the engine checks the pack itself before a download).
     let index = crate::packs::catalog(home)?;
     let archs = crate::packs::local_archs(home);
-    let Some(offer) = crate::packs::offers_for(&index, model_id, &archs, &crate::packs::pack_engine_version(home)).into_iter().next() else {
+    if crate::packs::offers_for(&index, model_id, &archs, &crate::packs::pack_engine_version(home)).is_empty() {
         return Some(format!("its kernel packs are built for {}, not for this machine's GPUs", crate::packs::pack_archs(&index, model_id).join(", ")));
-    };
-    let Some(creds) = crate::client::link::load_credentials(home).ok().flatten() else {
-        return Some(format!("its kernel pack needs a node logged in to the console: {LOGIN_FIRST}"));
-    };
-    let token = || Ok(creds.token.expose().to_string());
-    manifest_refused(home, model_id, &offer.arch, &crate::packs::HttpBroker::new(&creds.platform_url, &token))
-}
-
-fn sku_refused(home: &Path, prefix: &[u8]) -> Option<String> {
-    // goethe's own check from the pack's manifest (the signed index fixes its hash): no variant runs on any allowed GPU. A manifest that lists no variant requirements is said so once and left to the engine.
-    let reqs = crate::packs::sku_reqs(&crate::packs::manifest_of(prefix)?);
-    if reqs.is_empty() {
-        say_once(&NO_REQUIREMENTS_SAID, "note: this pack's manifest lists no per-variant requirements (buckets[].requires: arch, sms), so this GPU is not checked before the download");
-        return None;
     }
-    crate::packs::sku_refusal(&reqs, &local_devices(home))
+    crate::client::link::load_credentials(home).ok().flatten().is_none().then(|| format!("its kernel pack needs a node logged in to the console: {LOGIN_FIRST}"))
 }
 
-fn refused_here(home: &Path, dir: &Path, run: crate::packs::Runner) -> Option<String> {
-    // Why this device runs no variant of the installed pack, in one line: goethe's check of the manifest, else goethe-engine `pack runs`; None when it runs one or the engine cannot say (older engine).
-    let prefix = crate::pack_update::read_prefix(&dir.join(PACK_FILE)).ok();
-    prefix.as_deref().and_then(|p| sku_refused(home, p)).or_else(|| pack_runs(&dir.join(PACK_FILE), None, run))
+fn refused_here(dir: &Path, run: crate::packs::Runner) -> Option<String> {
+    // Why this device runs no variant of the installed pack, in one line, by goethe-engine `pack runs`; None when it runs one or the engine cannot say.
+    pack_runs(&dir.join(PACK_FILE), None, run)
 }
 
 fn pack_runs(file: &Path, sig: Option<&Path>, run: crate::packs::Runner) -> Option<String> {
@@ -931,10 +886,7 @@ fn pack_runs(file: &Path, sig: Option<&Path>, run: crate::packs::Runner) -> Opti
 }
 
 fn refused_before_download(home: &Path, plan: &crate::packs::Plan, run: crate::packs::Runner) -> Option<String> {
-    // The pack's header and manifest are already fetched: whether this GPU runs any variant before a single weight byte is downloaded, by goethe's own check and then the engine's.
-    if let Some(why) = sku_refused(home, &plan.prefix) {
-        return Some(why);
-    }
+    // The pack's header and manifest are already fetched: whether this GPU runs any variant before a single weight byte is downloaded, by goethe-engine `pack runs` on the signed prefix.
     let packs = home.join("packs");
     let work = match fs::create_dir_all(&packs).map_err(|e| e.to_string()).and_then(|()| crate::paths::private_dir_in(&packs, "check")) {
         Ok(w) => w,
@@ -1081,7 +1033,7 @@ fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) 
 fn pack_card(home: &Path, p: &mut Planned, arch: &str, variant: &str, cli_ctx: Option<u64>) -> Result<Option<String>, String> {
     // The card of a verified pack: goethe-engine, the kernels' ctx cap, the pack arch's GPUs; Some(why) when this device runs no variant of it.
     let run = crate::packs::python_runner(home);
-    if let Some(why) = refused_here(home, &p.dir, &run) {
+    if let Some(why) = refused_here(&p.dir, &run) {
         return Ok(Some(why));
     }
     let max = crate::packs::max_ctx(&p.dir, variant, &run)?;
@@ -1725,12 +1677,12 @@ mod tests {
     fn a_pack_this_device_runs_no_variant_of_is_named_or_left_to_load() {
         let dir = tempfile::tempdir().unwrap();
         let no = |_: &[String]| Ok((3, r#"{"runs": false, "sku": ["rtx_pro_6000_maxq"], "device": "RTX 5090", "sms": 170, "why": "188 SMs needed"}"#.to_string()));
-        let why = refused_here(dir.path(), dir.path(), &no).unwrap();
+        let why = refused_here(dir.path(), &no).unwrap();
         assert_eq!(why, "kernel pack for rtx_pro_6000_maxq does not run on RTX 5090 (188 SMs needed)");
         let yes = |_: &[String]| Ok((0, r#"{"runs": true}"#.to_string()));
-        assert_eq!(refused_here(dir.path(), dir.path(), &yes), None);
+        assert_eq!(refused_here(dir.path(), &yes), None);
         let old = |_: &[String]| Err("goethe-engine pack runs: exit 2: invalid choice: 'runs'".to_string());
-        assert_eq!(refused_here(dir.path(), dir.path(), &old), None, "an engine without pack runs: as before, load decides");
+        assert_eq!(refused_here(dir.path(), &old), None, "an engine without pack runs: as before, load decides");
     }
 
     fn packed_home() -> (tempfile::TempDir, PathBuf) {
@@ -1968,7 +1920,7 @@ mod tests {
 
     fn matched() -> Looked {
         let entry = crate::packs::entries(&offer_index(), &["sm_120a".to_string()], |_| true).remove(0);
-        Ok(Some(("sm_120a".into(), crate::packs::Plan { entry, prefix: Vec::new(), variants: Vec::new(), variant_ids: Vec::new(), serial: 7 })))
+        Ok(Some(("sm_120a".into(), crate::packs::Plan { entry, prefix: Vec::new(), variants: Vec::new(), serial: 7 })))
     }
 
     fn offered(opts: &InstallOpts, creds: Option<crate::client::link::Credentials>, archs: &[&str], look: Looked, engine: Result<(), String>) -> (Result<Option<PackChoice>, String>, Vec<&'static str>) {
@@ -1991,13 +1943,6 @@ mod tests {
             },
         );
         (got, calls.into_inner())
-    }
-
-    #[test]
-    fn a_note_about_a_pack_without_requirements_is_said_once_per_install() {
-        let said = std::sync::atomic::AtomicBool::new(false);
-        assert!(say_once(&said, "note: first"));
-        assert!(!say_once(&said, "note: first"), "the second check of the same install stays quiet");
     }
 
     fn wait_until_runnable(script: &Path) {

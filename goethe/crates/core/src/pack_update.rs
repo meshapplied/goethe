@@ -395,12 +395,13 @@ mod tests {
     }
 
     fn engine<'a>(w: &'a World, installed: &'a PackV, bad_sig: bool) -> impl Fn(&[String]) -> Result<(i32, String), String> + 'a {
-        // A fake goethe-engine: blocks by manifest hash for `pack need`, a refusal for `pack verify` when asked.
+        // A fake goethe-engine: the one variant for `pack plan`, blocks by manifest hash for `pack need`, a refusal for `pack verify` when asked.
         move |a| {
             let key = format!("{} {}", a[0], a[1]);
             match key.as_str() {
                 "index verify" => Ok((0, r#"{"serial": 9}"#.into())),
                 "pack match" => Ok((0, r#"{"file": "m.gcpack", "variant": "q8"}"#.into())),
+                "pack plan" => Ok((0, r#"{"variants": [{"id": "q8", "role": "target", "files": [{"name": "m-Q8_0.gguf"}], "max_ctx": 4096, "runs": true}]}"#.into())),
                 "pack need" => {
                     let prefix = std::fs::read(&a[2]).unwrap();
                     let n = u64::from_le_bytes(prefix[8..16].try_into().unwrap()) as usize;
