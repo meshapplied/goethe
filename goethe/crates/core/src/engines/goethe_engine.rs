@@ -17,7 +17,7 @@ pub const PACK_FILE: &str = "pack.gcpack";
 pub const PACK_VERIFY: &str = "pack.verify.json";
 
 fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
-    // The pack and the weights its verification listed (in order), both next to the tokenizer in the model dir; GOETHE_ENGINE_ALLOW_UNSIGNED (it disables signature checks) is never passed on.
+    // The pack and the weights its verification listed (in order), both next to the tokenizer in the model dir (one drafter file as itself, such as an MTP file beside the checkpoint, drafter shards as their folder); GOETHE_ENGINE_ALLOW_UNSIGNED (it disables signature checks) is never passed on.
     let dir = spec.model_path;
     let text = std::fs::read_to_string(dir.join(PACK_VERIFY)).map_err(|e| format!("{}: {e}; run goethe install again", dir.join(PACK_VERIFY).display()))?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{PACK_VERIFY}: {e}"))?;
@@ -29,8 +29,11 @@ fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
         weights = vec![dir.to_path_buf()];
     }
     let drafter: Vec<PathBuf> = v["drafter"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).map(|f| dir.join(f)).filter(|f| f.is_file()).collect();
-    let shards = !drafter.is_empty() && drafter.iter().all(|w| w.extension().is_some_and(|x| x == "safetensors"));
-    weights.extend(if shards { vec![dir.join("drafter")] } else { drafter });
+    weights.extend(match &drafter[..] {
+        [one] => vec![one.clone()],
+        [first, ..] => first.parent().map(PathBuf::from).into_iter().collect(),
+        [] => Vec::new(),
+    });
     let mut cmd = Command::new(resolve_python(spec.home));
     cmd.args(["-m", "goethe_engine", "serve", "--host", "127.0.0.1", "--port"])
         .arg(spec.port.to_string())
@@ -95,6 +98,26 @@ mod tests {
         let at = |f: &str| a.iter().position(|x| x == f).unwrap();
         let dir = d.path().to_string_lossy().into_owned();
         assert_eq!(a[at("--weights") + 1..at("--tokenizer")], [dir.clone(), format!("{dir}/drafter/d.gguf")]);
+    }
+
+    #[test]
+    fn a_drafter_file_beside_the_checkpoint_is_passed_as_itself_and_shards_as_their_folder() {
+        let d = model_dir(&["model-00001-of-00001.safetensors", "mtp.safetensors"]);
+        let dir = d.path().to_string_lossy().into_owned();
+        let args = |v: serde_json::Value| {
+            std::fs::write(d.path().join(PACK_VERIFY), v.to_string()).unwrap();
+            let a: Vec<String> = cmd_in(d.path(), "runtime = \"goethe-engine\"").unwrap().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            let at = |f: &str| a.iter().position(|x| x == f).unwrap();
+            a[at("--weights") + 1..at("--tokenizer")].to_vec()
+        };
+        let local = args(serde_json::json!({"weights": ["model-00001-of-00001.safetensors"], "drafter": ["mtp.safetensors"]}));
+        assert_eq!(local, [dir.clone(), format!("{dir}/mtp.safetensors")]);
+        std::fs::create_dir(d.path().join("drafter")).unwrap();
+        for s in ["d-00001-of-00002.safetensors", "d-00002-of-00002.safetensors"] {
+            std::fs::write(d.path().join("drafter").join(s), b"w").unwrap();
+        }
+        let shards = args(serde_json::json!({"weights": ["model-00001-of-00001.safetensors"], "drafter": ["drafter/d-00001-of-00002.safetensors", "drafter/d-00002-of-00002.safetensors"]}));
+        assert_eq!(shards, [dir.clone(), format!("{dir}/drafter")]);
     }
 
     #[test]
