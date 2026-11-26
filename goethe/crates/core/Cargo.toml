@@ -34,3 +34,6 @@ goethe-proto = { path = "../proto", features = ["testkit"] }
 hyper = { version = "1", features = ["client"] }
 tempfile = "3"
 tokio = { version = "1", features = ["io-util", "rt-multi-thread"] }
+
+[lints]
+workspace = true
