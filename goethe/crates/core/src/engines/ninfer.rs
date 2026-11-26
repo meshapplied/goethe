@@ -275,7 +275,7 @@ fn ninfer_command(spec: &EngineSpec) -> Result<Command, String> {
         .arg("--max-context")
         .arg(spec.ctx.to_string())
         .arg("--kv-capacity")
-        .arg("auto")
+        .arg(spec.pool_tokens.to_string())
         .arg("--max-concurrency")
         .arg(spec.max_conc.to_string())
         .arg("--kv-dtype")
@@ -344,7 +344,7 @@ mod tests {
         std::fs::write(model.path().join(NINFER_FILE), b"x").unwrap();
         let card: toml::Value = toml::from_str("runtime = \"ninfer\"").unwrap();
         let home = tempfile::tempdir().unwrap();
-        let spec = EngineSpec { home: home.path(), served_name: NINFER_ID, ctx: 100_000, ..test_spec(model.path(), &card, &[0]) };
+        let spec = EngineSpec { home: home.path(), served_name: NINFER_ID, ctx: 100_000, pool_tokens: 117_377, ..test_spec(model.path(), &card, &[0]) };
         let prev = std::env::var_os("NINFER_SERVE");
         std::env::set_var("NINFER_SERVE", &exe);
         let cmd = command(&spec).unwrap();
@@ -362,6 +362,7 @@ mod tests {
         assert!(a.windows(2).any(|w| w[0] == "--spec" && w[1] == "dflash2"));
         assert!(a.windows(2).any(|w| w[0] == "--draft-tokens" && w[1] == "7"));
         assert!(a.windows(2).any(|w| w[0] == "--max-context" && w[1] == "100000"));
+        assert!(a.windows(2).any(|w| w[0] == "--kv-capacity" && w[1] == "117377"), "the KV pool goethe budgeted: {a:?}");
         assert!(a.iter().any(|x| x == "--lm-head-draft"));
         let log = a.iter().position(|x| x == "--request-log-jsonl").unwrap();
         assert!(a[log + 1].ends_with("inst-x.requests.jsonl"), "{}", a[log + 1]);

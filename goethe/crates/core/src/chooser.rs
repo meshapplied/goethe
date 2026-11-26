@@ -55,7 +55,7 @@ impl ChooserInput {
             supported_sm: crate::install::card_supported_sm(card),
             memory,
             overhead_gb: crate::engines::of_card(card).map_or(crate::calc::BASE_OVERHEAD_GB, |e| e.overhead_gb),
-            floor: floor(&crate::engines::sglang::card_extra_args(card)),
+            floor: card_floor(card),
             min_ctx: 0,
             min_conc: 0,
         }
@@ -141,19 +141,19 @@ pub fn state_slots(m: &MemorySpec, max_conc: u64) -> u64 {
     m.state_slots_per_request.saturating_mul(max_conc.max(1))
 }
 
-pub fn swa_ratio(m: &MemorySpec, ctx: u64, max_conc: u64, floor: u64) -> f64 {
+pub fn swa_ratio(m: &MemorySpec, max_conc: u64, pool_tokens: u64) -> f64 {
     // --swa-full-tokens-ratio that gives the window pool exactly the tokens max_conc requests need (at most 1).
-    (m.swa_tokens(max_conc) as f64 / kv_tokens(ctx, max_conc, floor).max(1) as f64).clamp(1e-6, 1.0)
+    (m.swa_tokens(max_conc) as f64 / pool_tokens.max(1) as f64).clamp(1e-6, 1.0)
 }
 
-pub fn engine_args(m: &MemorySpec, ctx: u64, max_conc: u64, floor: u64) -> Vec<String> {
+pub fn engine_args(m: &MemorySpec, max_conc: u64, pool_tokens: u64) -> Vec<String> {
     // The pool sizes the budget assumed, pinned for SGLang.
     let mut out = Vec::new();
     if m.state_bytes_per_slot > 0 {
         out.extend(["--max-mamba-cache-size".to_string(), state_slots(m, max_conc).to_string()]);
     }
     if m.swa_bytes_per_token > 0 {
-        out.extend(["--swa-full-tokens-ratio".to_string(), format!("{:.6}", swa_ratio(m, ctx, max_conc, floor))]);
+        out.extend(["--swa-full-tokens-ratio".to_string(), format!("{:.6}", swa_ratio(m, max_conc, pool_tokens))]);
     }
     if m.chunked_prefill > 0 {
         out.extend(["--chunked-prefill-size".to_string(), m.chunked_prefill.to_string()]);
@@ -852,7 +852,7 @@ mod tests {
         assert!((n.weights - (21.0 - 4.0 * state as f64 / gib)).abs() < 1e-9, "{n:?}");
         assert!((n.kv - (131072.0 + 7.0 * 8192.0) * 65536.0 / gib).abs() < 1e-9, "one full context plus 7 floors: {n:?}");
         assert!((n.state - 41.0 * state as f64 / gib).abs() < 1e-9, "5 slots per request plus the padding slot: {n:?}");
-        assert_eq!(engine_args(&spec, 131072, 8, 8192), vec!["--max-mamba-cache-size".to_string(), "40".to_string()]);
+        assert_eq!(engine_args(&spec, 8, kv_tokens(131072, 8, 8192)), vec!["--max-mamba-cache-size".to_string(), "40".to_string()]);
         let two = need(&m, 2, "12.0");
         assert!((two.state - n.state / 2.0).abs() < 1e-9 && (two.kv - n.kv / 2.0).abs() < 1e-9);
         assert_eq!(need(&inp(), 1, "9.0").state, 0.0);
@@ -873,7 +873,7 @@ mod tests {
         let n = need(&m, 1, "12.0");
         let swa_tokens = 8 * (1024 + 128 + 256 + 4 * (1024 + 128)) + 2 * 8192 + 128;
         assert!((n.window - swa_tokens as f64 * 204_800.0 / 1024f64.powi(3)).abs() < 1e-9, "{n:?}");
-        let args = engine_args(&spec, 262_144, 8, 8192);
+        let args = engine_args(&spec, 8, kv_tokens(262_144, 8, 8192));
         assert_eq!(args[0], "--swa-full-tokens-ratio");
         assert!((args[1].parse::<f64>().unwrap() - swa_tokens as f64 / (262_144.0 + 7.0 * 8192.0)).abs() < 1e-6, "{args:?}");
         assert_eq!(&args[2..], &["--chunked-prefill-size".to_string(), "8192".to_string()]);

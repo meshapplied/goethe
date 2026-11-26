@@ -386,7 +386,7 @@ fn llama_command(spec: &EngineSpec) -> Result<Command, String> {
         .arg("--alias")
         .arg(spec.served_name)
         .arg("-c")
-        .arg(crate::chooser::kv_tokens(spec.ctx, spec.max_conc, crate::chooser::card_floor(spec.card)).to_string())
+        .arg(spec.pool_tokens.to_string())
         .arg("-np")
         .arg(spec.max_conc.to_string())
         .arg("-kvu")
@@ -496,12 +496,12 @@ mod tests {
             std::fs::write(d.path().join(f), b"x").unwrap();
         }
         let card: toml::Value = toml::from_str("runtime = \"llama.cpp\"").unwrap();
-        let c = command(&test_spec(d.path(), &card, &[2])).unwrap();
+        let c = command(&EngineSpec { pool_tokens: 9_999, ..test_spec(d.path(), &card, &[2]) }).unwrap();
         let a: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         let at = |f: &str| a[a.iter().position(|x| x == f).unwrap() + 1].clone();
         assert!(at("-m").ends_with("m-Q4_K_M.gguf"));
         assert_eq!((at("--host").as_str(), at("--alias").as_str(), at("-np").as_str()), ("127.0.0.1", "org/m", "4"));
-        assert_eq!((at("-c"), at("--kv-unified-per-slot")), (crate::chooser::kv_tokens(4096, 4, crate::chooser::card_floor(&card)).to_string(), "4096".to_string()));
+        assert_eq!((at("-c"), at("--kv-unified-per-slot")), ("9999".to_string(), "4096".to_string()), "the KV pool goethe budgeted");
         assert!(!a.iter().any(|x| x == "--embeddings"));
         assert!(!a.iter().any(|x| x == "--api-key"), "key stays off argv: {a:?}");
         let env = |k: &str| c.get_envs().find(|(n, _)| *n == k).and_then(|(_, v)| v).map(|v| v.to_string_lossy().into_owned());

@@ -63,6 +63,7 @@ fn test_spec<'a>(dir: &'a Path, card: &'a toml::Value, gpus: &'a [u32]) -> Engin
         port: 30001,
         ctx: 4096,
         max_conc: 4,
+        pool_tokens: crate::chooser::kv_tokens(4096, 4, crate::chooser::floor(&[])),
         tp: gpus.len() as u64,
         mem_frac: 0.5,
         gpus,
@@ -84,6 +85,7 @@ pub struct EngineSpec<'a> {
     pub port: u16,
     pub ctx: u64,
     pub max_conc: u64,
+    pub pool_tokens: u64,
     pub tp: u64,
     pub mem_frac: f64,
     pub gpus: &'a [u32],
@@ -370,7 +372,7 @@ mod tests {
         std::fs::write(dir.path().join("config.json"), cfg).unwrap();
         let card: toml::Value = toml::from_str("").unwrap();
         let m = crate::memory_spec::installed(dir.path(), &card, &[]).unwrap();
-        assert_eq!(crate::chooser::engine_args(&m, 4096, 8, crate::chooser::floor(&[])), vec!["--max-mamba-cache-size".to_string(), "40".to_string()]);
+        assert_eq!(crate::chooser::engine_args(&m, 8, crate::chooser::kv_tokens(4096, 8, crate::chooser::floor(&[]))), vec!["--max-mamba-cache-size".to_string(), "40".to_string()]);
         assert!(crate::memory_spec::installed(Path::new("/nonexistent"), &card, &[]).is_none());
         assert!(check_extra_args(&["--max-mamba-cache-size=4".to_string()]).is_err());
     }
