@@ -304,7 +304,7 @@ fn check_compiler() -> Check {
     }
 }
 
-pub(crate) const AVDEVICE: std::ops::RangeInclusive<u32> = 58..=62;
+pub(crate) const AVDEVICE: std::ops::RangeInclusive<u32> = 58..=63;
 
 pub(crate) fn find_libavdevice() -> Option<u32> {
     // Probe the sonames torchcodec dlopens; a hit means SGLang models can start without a missing-lib traceback.
@@ -321,7 +321,7 @@ fn check_ffmpeg() -> Check {
         None => check(
             "ffmpeg",
             "WARN",
-            "FFmpeg 4 to 8 not found; SGLang models need it to start: sudo apt install ffmpeg (or sudo dnf install ffmpeg-free)",
+            "FFmpeg 4 to 9 not found; SGLang models need it to start: sudo apt install ffmpeg (or sudo dnf install ffmpeg-free)",
         ),
     }
 }
@@ -967,11 +967,11 @@ mod tests {
     fn ffmpeg_range_follows_the_pinned_torchcodec() {
         // Keep doctor + doctor --fix aligned with the torchcodec pin (Levente Orban, #140).
         let bumped = "torchcodec changed: set AVDEVICE to the FFmpeg it loads, then this pin";
-        assert!(include_str!("../../../pyenv/requirements.in").contains("\ntorchcodec==0.15.0\n"), "{bumped}");
-        assert!(include_str!("../../../pyenv/requirements.aarch64.in").contains("/torchcodec-0.15.0%2B"), "{bumped}");
+        assert!(include_str!("../../../pyenv/requirements.in").contains("\ntorchcodec==0.17.0\n"), "{bumped}");
+        assert!(include_str!("../../../pyenv/requirements.aarch64.in").contains("\ntorchcodec==0.17.0\n"), "{bumped}");
         assert!(CHECKS.iter().any(|(n, _)| *n == "ffmpeg"), "doctor must list ffmpeg");
         assert_eq!(*AVDEVICE.start(), 58);
-        assert_eq!(*AVDEVICE.end(), 62);
+        assert_eq!(*AVDEVICE.end(), 63);
     }
 
     #[test]

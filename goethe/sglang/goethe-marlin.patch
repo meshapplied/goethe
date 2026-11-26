@@ -1,51 +1,16 @@
---- a/python/sglang/srt/layers/quantization/goethe_marlin.py
-+++ b/python/sglang/srt/layers/quantization/goethe_marlin.py
-@@ -0,0 +1,34 @@
-+"""NVFP4 Marlin route selection for compressed-tensors layers, resolved once per layer at weight load."""
-+
-+import os
-+
-+import torch
-+
-+
-+def _marlin_disabled() -> bool:
-+    return os.environ.get("GOETHE_MARLIN", "1").strip().lower() in (
-+        "0",
-+        "false",
-+        "no",
-+        "off",
-+    )
-+
-+
-+def mode() -> str:
-+    """Return marlin_all (Ampere and Hopper, below 10.0), marlin_small (consumer Blackwell 12.x) or stock (data-center Blackwell 10.x, or off)."""
-+    if _marlin_disabled():
-+        return "stock"
-+    if os.environ.get("GOETHE_FORCE_PATH", "").strip().lower() == "w4a16":
-+        return "marlin_all"
-+    if torch.cuda.is_available():
-+        major, _minor = torch.cuda.get_device_capability()
-+        if major < 10:
-+            return "marlin_all"
-+        if major != 12:
-+            return "stock"
-+    return "marlin_small"
-+
-+
-+def max_rows() -> int:
-+    """Largest batch, in rows, that marlin_small sends to Marlin (GOETHE_MARLIN_MAX_ROWS, default 128)."""
-+    return int(os.environ.get("GOETHE_MARLIN_MAX_ROWS", "128"))
+diff --git a/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4.py b/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4.py
+index 18b2a94def..3cfd9edc19 100644
 --- a/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4.py
 +++ b/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4.py
-@@ -17,6 +17,7 @@
-     CompressedTensorsLinearScheme,
+@@ -20,6 +20,7 @@ from sglang.srt.layers.quantization.fp4_utils import (
+     fp4_quantize,
+     get_fp4_gemm_runner_backend,
  )
- from sglang.srt.layers.quantization.fp4_utils import get_fp4_gemm_runner_backend
 +from sglang.srt.layers.quantization.goethe_marlin import max_rows, mode
  from sglang.srt.layers.quantization.modelopt_quant import (
      enable_flashinfer_fp4_gemm,
      fp4_gemm,
-@@ -29,12 +30,60 @@
+@@ -31,12 +32,60 @@ logger = logging.getLogger(__name__)
  __all__ = ["CompressedTensorsW4A4Fp4"]
  
  
@@ -106,7 +71,7 @@
          return 100
  
      def create_weights(
-@@ -50,6 +99,7 @@
+@@ -52,6 +101,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsLinearScheme):
          layer.logical_widths = output_partition_sizes
          layer.input_size_per_partition = input_size_per_partition
          layer.output_size_per_partition = output_size_per_partition
@@ -114,7 +79,7 @@
  
          # Weight
          weight = ModelWeightParameter(
-@@ -92,6 +142,22 @@
+@@ -94,6 +144,22 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsLinearScheme):
          layer.register_parameter("input_global_scale", input_global_scale)
  
      def process_weights_after_loading(self, layer) -> None:
@@ -137,7 +102,7 @@
          global_input_scale = layer.input_global_scale.max().to(torch.float32)
          layer.input_global_scale = Parameter(global_input_scale, requires_grad=False)
  
-@@ -99,6 +165,20 @@
+@@ -101,6 +167,20 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsLinearScheme):
              layer.weight_global_scale.max().to(torch.float32), requires_grad=False
          )
  
@@ -158,7 +123,7 @@
          if get_fp4_gemm_runner_backend().is_flashinfer_trtllm():
              # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
              # FlashInfer provides nvfp4_quantize to quantize + shuffle the
-@@ -131,12 +211,48 @@
+@@ -133,12 +213,48 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsLinearScheme):
              requires_grad=False,
          )
  
@@ -204,9 +169,11 @@
 +        ):
 +            return self._apply_marlin(layer, x, bias)
 +
-         output_dtype = x.dtype
          w_n, _ = layer.weight_packed.shape
-         output_shape = [x.shape[0], w_n]
+         if isinstance(x, tuple) and layer._accepts_prequantized_fp4:
+             # Already quantized by the dense MLP's fused SiLU*mul + NVFP4 quant
+diff --git a/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py b/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py
+index b260789368..497f8d1b16 100644
 --- a/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py
 +++ b/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py
 @@ -1,5 +1,6 @@
@@ -216,7 +183,7 @@
  import logging
  from typing import TYPE_CHECKING
  
-@@ -10,12 +11,14 @@
+@@ -10,13 +11,14 @@ from sglang.srt.layers.moe.utils import get_moe_runner_backend
  from sglang.srt.layers.quantization.compressed_tensors.schemes import (
      CompressedTensorsMoEScheme,
  )
@@ -227,11 +194,12 @@
      replace_parameter,
      swizzle_blockscale,
  )
-+from sglang.srt.layers.utils.common import copy_or_rebind_param
+-from sglang.srt.layers.utils.common import set_weight_attrs
++from sglang.srt.layers.utils.common import copy_or_rebind_param, set_weight_attrs
  from sglang.srt.runtime_context import get_platform
- from sglang.srt.utils import set_weight_attrs
  
-@@ -30,16 +33,26 @@
+ logger = logging.getLogger(__name__)
+@@ -30,20 +32,30 @@ if TYPE_CHECKING:
      )
  
  
@@ -241,10 +209,14 @@
 +
 +
  class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
+     # Both expert paths below are SM100-only. A subclass that supplies its own
+     # non-Blackwell path clears this and owns the platform decision itself.
+     requires_blackwell = True
+ 
      def __init__(self):
--        if not get_platform().is_blackwell:
+-        if self.requires_blackwell and not get_platform().is_blackwell:
 +        self._goethe_marlin = _goethe_moe_marlin()
-+        if not self._goethe_marlin and not get_platform().is_blackwell:
++        if not self._goethe_marlin and self.requires_blackwell and not get_platform().is_blackwell:
              raise ValueError(
                  "Current platform does not support NVFP4"
                  " quantization. Please use Blackwell and"
@@ -260,7 +232,7 @@
  
      @property
      def load_up_proj_weight_first(self) -> bool:
-@@ -49,6 +62,8 @@
+@@ -53,6 +65,8 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
      @classmethod
      def get_min_capability(cls) -> int:
          # Requires sm100(blackwell) architecture
@@ -269,7 +241,7 @@
          return 100
  
      def create_weights(
-@@ -175,6 +190,59 @@
+@@ -178,6 +192,59 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
          )
          delattr(layer, "w2_weight_packed")
  
@@ -329,8 +301,8 @@
          if self.use_flashinfer_trtllm:
              w, s = reorder_w1w3_to_w3w1(
                  layer.w13_weight.data, layer.w13_weight_scale.data, dim=-2
-@@ -277,10 +345,41 @@
-                 swizzle_blockscale(layer.w2_weight_scale), requires_grad=False
+@@ -291,10 +358,41 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
+                 layer.w13_weight.device,
              )
  
 +    def get_marlin_quant_info(self, layer: torch.nn.Module):
@@ -371,7 +343,7 @@
          if self.use_flashinfer_trtllm:
              import sglang.srt.layers.moe.moe_runner.flashinfer_trtllm  # noqa: F401 – triggers @register_fused_func
  
-@@ -302,6 +401,10 @@
+@@ -316,6 +414,10 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
  
          x = dispatch_output.hidden_states
  
@@ -382,3 +354,58 @@
          if self.use_flashinfer_trtllm:
              from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
                  FlashInferTrtllmFp4MoeQuantInfo,
+diff --git a/python/sglang/srt/layers/quantization/goethe_marlin.py b/python/sglang/srt/layers/quantization/goethe_marlin.py
+new file mode 100644
+index 0000000000..8df691a205
+--- /dev/null
++++ b/python/sglang/srt/layers/quantization/goethe_marlin.py
+@@ -0,0 +1,34 @@
++"""NVFP4 Marlin route selection for compressed-tensors layers, resolved once per layer at weight load."""
++
++import os
++
++import torch
++
++
++def _marlin_disabled() -> bool:
++    return os.environ.get("GOETHE_MARLIN", "1").strip().lower() in (
++        "0",
++        "false",
++        "no",
++        "off",
++    )
++
++
++def mode() -> str:
++    """Return marlin_all (Ampere and Hopper, below 10.0), marlin_small (consumer Blackwell 12.x) or stock (data-center Blackwell 10.x, or off)."""
++    if _marlin_disabled():
++        return "stock"
++    if os.environ.get("GOETHE_FORCE_PATH", "").strip().lower() == "w4a16":
++        return "marlin_all"
++    if torch.cuda.is_available():
++        major, _minor = torch.cuda.get_device_capability()
++        if major < 10:
++            return "marlin_all"
++        if major != 12:
++            return "stock"
++    return "marlin_small"
++
++
++def max_rows() -> int:
++    """Largest batch, in rows, that marlin_small sends to Marlin (GOETHE_MARLIN_MAX_ROWS, default 128)."""
++    return int(os.environ.get("GOETHE_MARLIN_MAX_ROWS", "128"))
+diff --git a/python/sglang/srt/models/utils.py b/python/sglang/srt/models/utils.py
+index d29278d497..efc35f2dc2 100644
+--- a/python/sglang/srt/models/utils.py
++++ b/python/sglang/srt/models/utils.py
+@@ -438,7 +438,9 @@ def maybe_enable_silu_fp4_quant_fusion(mlp: torch.nn.Module) -> None:
+     ):
+         return
+     # Marlin, the SM80-SM90 default, takes a floating-point input, not the tuple.
+-    if get_fp4_gemm_runner_backend().is_marlin():
++    from sglang.srt.layers.quantization.goethe_marlin import mode as goethe_marlin_mode
++
++    if get_fp4_gemm_runner_backend().is_marlin() or goethe_marlin_mode() != "stock":
+         return
+     # The fused kernel never writes the scale padding, which exists when K % 64 != 0.
+     if mlp.down_proj.input_size_per_partition % 64 != 0:
