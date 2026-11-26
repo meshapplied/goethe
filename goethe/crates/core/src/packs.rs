@@ -591,6 +591,7 @@ pub struct Plan {
     pub prefix: Vec<u8>,
     pub variants: Vec<Variant>,
     pub serial: u64,
+    pub source: (String, String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -646,7 +647,7 @@ fn fetch_prefix(broker: &impl Broker, entry: &Entry) -> Result<(Vec<u8>, usize),
 }
 
 pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker: &impl Broker, run: Runner) -> Result<Option<Plan>, PlanError> {
-    // The signed index's pack for this model and arch, and per target variant of this repo what goethe-engine `pack plan` reads from its manifest (files to download, longest context, why this GPU runs none of it); only the variant a quant names (id or quant, any case). None: no pack. A store that does not answer is Unreachable; an index or pack that does not verify is Refused.
+    // The signed index's pack for this model and arch, and per target variant what goethe-engine `pack plan` reads from its manifest (files, longest context, why this GPU runs none); only the variant a quant names (id or quant, any case). Weights of another repo only when a quant names them, at their pinned revision; `source` is where the variants' files come from. None: no pack. A store that does not answer is Unreachable; an index or pack that does not verify is Refused. O(variants x files).
     let work = home.join("packs");
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let (ix, sg) = (work.join("index.json"), work.join("index.sig"));
@@ -663,23 +664,32 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
     let out = std::fs::write(&pre, &prefix).map_err(|e| e.to_string()).and_then(|()| run(&[v("pack"), v("plan"), s(&pre)]));
     let _ = std::fs::remove_dir_all(&tmp);
     let p: Value = serde_json::from_str(&out?.1).map_err(|e| format!("pack plan: {e}"))?;
-    let (mut variants, mut all): (Vec<Variant>, Vec<String>) = (Vec::new(), Vec::new());
+    let own = (entry.offer.hf_repo.clone(), entry.offer.revision.clone());
+    let (mut found, mut all) = (Vec::<((String, String), Variant)>::new(), Vec::<String>::new());
     for x in p["variants"].as_array().into_iter().flatten().filter(|x| x["role"] == "target") {
-        if x["source"]["hf_repo"].as_str().is_some_and(|r| !r.eq_ignore_ascii_case(&entry.offer.hf_repo)) {
-            continue;
-        }
         let id = x["id"].as_str().unwrap_or_default();
         let q = x["quant"].as_str().unwrap_or(id);
         all.push(q.to_string());
-        if quant.is_some_and(|w| !w.eq_ignore_ascii_case(id) && !w.eq_ignore_ascii_case(q)) {
+        let named = quant.is_some_and(|w| w.eq_ignore_ascii_case(id) || w.eq_ignore_ascii_case(q));
+        let other = x["source"]["hf_repo"].as_str().filter(|r| !r.eq_ignore_ascii_case(&own.0));
+        if (quant.is_some() && !named) || (other.is_some() && !named) {
             continue;
         }
+        let source = match other {
+            None => own.clone(),
+            Some(r) => match x["source"]["revision"].as_str().filter(|v| !v.is_empty()) {
+                Some(v) => (r.to_string(), v.to_string()),
+                None => return Err(format!("{model_id}: variant {id} takes its weights from {r} without a pinned revision").into()),
+            },
+        };
         let files: Vec<String> = x["files"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str().map(String::from)).collect();
-        if !files.is_empty() && files.iter().all(|f| safe_name(f)) && !variants.iter().any(|v| v.files == files) {
+        if !files.is_empty() && files.iter().all(|f| safe_name(f)) && !found.iter().any(|(_, v)| v.files == files) {
             let why = (x["runs"] == false).then(|| x["why"].as_str().unwrap_or("this GPU runs none of its kernels").to_string());
-            variants.push(Variant { id: id.to_string(), quant: q.to_string(), files, max_ctx: x["max_ctx"].as_u64(), why });
+            found.push((source, Variant { id: id.to_string(), quant: q.to_string(), files, max_ctx: x["max_ctx"].as_u64(), why }));
         }
     }
+    let source = found.iter().map(|(s, _)| s).find(|s| **s == own).or(found.first().map(|(s, _)| s)).cloned().unwrap_or(own);
+    let variants: Vec<Variant> = found.into_iter().filter(|(s, _)| *s == source).map(|(_, v)| v).collect();
     if variants.is_empty() {
         return Err(match quant {
             Some(q) => format!("{model_id}: its kernel pack has no variant {q} (available: {})", all.join(", ")),
@@ -687,7 +697,7 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
         }
         .into());
     }
-    Ok(Some(Plan { entry, prefix, variants, serial }))
+    Ok(Some(Plan { entry, prefix, variants, serial, source }))
 }
 
 pub fn pick(variants: &[Variant], in_repo: impl Fn(&str) -> bool, fits: impl Fn(&[String]) -> bool) -> Result<&Variant, Option<String>> {
@@ -985,7 +995,8 @@ mod tests {
     const PLANNED: &str = r#"{"variants": [
         {"id": "q4", "role": "target", "quant": "q4_0", "source": {"hf_repo": "org/M-GGUF"}, "files": [{"name": "m-Q4_0.gguf"}], "max_ctx": 8192, "runs": true},
         {"id": "q8", "role": "target", "quant": null, "source": null, "files": [{"name": "m-Q8_0.gguf"}], "max_ctx": 4096, "runs": null},
-        {"id": "st", "role": "target", "quant": "nvfp4", "source": {"hf_repo": "org/M"}, "files": [{"name": "model.safetensors"}], "max_ctx": 4096, "runs": true},
+        {"id": "st", "role": "target", "quant": "nvfp4", "source": {"hf_repo": "org/M", "revision": "r1"}, "files": [{"name": "model.safetensors"}], "max_ctx": 4096, "runs": true},
+        {"id": "un", "role": "target", "quant": "fp8", "source": {"hf_repo": "org/X"}, "files": [{"name": "x.safetensors"}], "max_ctx": 4096, "runs": true},
         {"id": "d", "role": "drafter", "quant": "bf16", "source": {"hf_repo": "org/M-GGUF"}, "files": [{"name": "d.gguf"}], "max_ctx": 4096, "runs": null}]}"#;
 
     fn dirs() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -1066,7 +1077,12 @@ mod tests {
         let q4 = plan(home.path(), "org/m-gguf", "sm_120a", Some("Q4_0"), &b, &engine(&b.pack, &[])).unwrap().unwrap();
         assert_eq!(q4.variants.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), ["q4"], "or by its quant");
         let e = plan(home.path(), "org/m-gguf", "sm_120a", Some("q5"), &b, &engine(&b.pack, &[])).unwrap_err();
-        assert_eq!(e, PlanError::Refused("org/m-gguf: its kernel pack has no variant q5 (available: q4_0, q8)".into()));
+        assert_eq!(e, PlanError::Refused("org/m-gguf: its kernel pack has no variant q5 (available: q4_0, q8, nvfp4, fp8)".into()));
+        assert_eq!(p.source, (p.entry.offer.hf_repo.clone(), p.entry.offer.revision.clone()), "by default the entry's own weights");
+        let st = plan(home.path(), "org/m-gguf", "sm_120a", Some("NVFP4"), &b, &engine(&b.pack, &[])).unwrap().unwrap();
+        assert_eq!((st.variants.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), st.source), (vec!["st"], ("org/M".to_string(), "r1".to_string())), "another repo's weights when a quant names them, at their pinned revision");
+        let un = plan(home.path(), "org/m-gguf", "sm_120a", Some("fp8"), &b, &engine(&b.pack, &[])).unwrap_err();
+        assert_eq!(un, PlanError::Refused("org/m-gguf: variant un takes its weights from org/X without a pinned revision".into()));
         assert!(plan(home.path(), "org/other", "sm_120a", None, &b, &engine(&b.pack, &[])).unwrap().is_none());
         assert!(plan(home.path(), "org/m-gguf", "sm_90a", None, &b, &engine(&b.pack, &[])).unwrap().is_none());
     }
