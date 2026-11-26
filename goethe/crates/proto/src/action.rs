@@ -85,6 +85,28 @@ pub struct ModelInstall {
     pub quant: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Numerics {
+    Invariant,
+    Tolerance,
+}
+
+impl Numerics {
+    pub const ALL: [Numerics; 2] = [Numerics::Invariant, Numerics::Tolerance];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Numerics::Invariant => "invariant",
+            Numerics::Tolerance => "tolerance",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Numerics> {
+        Numerics::ALL.into_iter().find(|n| n.name() == s)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelLoad {
@@ -97,6 +119,8 @@ pub struct ModelLoad {
     pub max_conc: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tp: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub numerics: Option<Numerics>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,7 +315,7 @@ mod tests {
     #[test]
     fn every_catalog_example_parses_with_its_kind_and_round_trips() {
         let good = entries(include_str!("../fixtures/actions.json"));
-        assert_eq!(good.len(), 16);
+        assert_eq!(good.len(), 17);
         for (name, args) in good {
             let action = Action::parse(&name, &args).unwrap_or_else(|| panic!("{name} should parse"));
             assert_eq!(action.name(), name);
@@ -318,5 +342,9 @@ mod tests {
             assert_eq!(Kind::parse(k.name()), Some(k));
         }
         assert_eq!(Kind::parse("shell"), None);
+        for n in Numerics::ALL {
+            assert_eq!((serde_json::to_value(n).unwrap(), Numerics::parse(n.name())), (json!(n.name()), Some(n)));
+        }
+        assert_eq!(Numerics::parse("fast"), None);
     }
 }

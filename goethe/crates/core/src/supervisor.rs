@@ -87,6 +87,8 @@ pub struct LoadParams {
     pub slot_key: Option<String>,
     #[serde(default)]
     pub replica: bool,
+    #[serde(default)]
+    pub numerics: Option<goethe_proto::Numerics>,
 }
 
 struct InstRow {
@@ -460,6 +462,7 @@ fn start_engine(req: &LoadReq, con: &Connection, plan: &LoadPlan, fit: FitSpawn)
         ctx: plan.ctx,
         max_conc: plan.max_conc,
         pool_tokens: chooser::kv_tokens(plan.ctx, plan.max_conc, chooser::card_floor(&card)),
+        numerics: req.params.numerics,
         tp,
         mem_frac,
         gpus: &plan.gpus,
@@ -1041,28 +1044,29 @@ fn watchdog_may_restart(con: &Connection, slot_key: &str) -> bool {
     }
 }
 
-fn load_params_for_slot(con: &Connection, slot_key: &str, model_id: &str) -> Option<LoadParams> {
+pub(crate) fn load_params_for_slot(con: &Connection, slot_key: &str, model_id: &str) -> Option<LoadParams> {
     // Load parameters recorded for exactly this desired slot.
-    let (gpus, ctx, max_conc, tp, extra): (Option<String>, Option<i64>, Option<i64>, Option<i64>, String) = con
-        .query_row(
-            "SELECT gpus, ctx, max_conc, tp, extra_sglang_args FROM desired_loads WHERE slot_key = ?1",
-            [slot_key],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )
-        .ok()?;
-    Some(LoadParams {
-        model_id: model_id.to_string(),
-        gpus,
-        ctx: ctx.map(|v| v as u64),
-        max_conc: max_conc.map(|v| v as u64),
-        tp: tp.map(|v| v as u64),
-        extra_sglang_args: serde_json::from_str(&extra).unwrap_or_default(),
-        force: true,
-        yes: true,
-        restart_count: None,
-        slot_key: Some(slot_key.to_string()),
-        replica: false,
-    })
+    con.query_row(
+        "SELECT gpus, ctx, max_conc, tp, extra_sglang_args, numerics FROM desired_loads WHERE slot_key = ?1",
+        [slot_key],
+        |r| {
+            Ok(LoadParams {
+                model_id: model_id.to_string(),
+                gpus: r.get(0)?,
+                ctx: r.get::<_, Option<i64>>(1)?.map(|v| v as u64),
+                max_conc: r.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                tp: r.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                extra_sglang_args: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+                force: true,
+                yes: true,
+                restart_count: None,
+                slot_key: Some(slot_key.to_string()),
+                replica: false,
+                numerics: r.get::<_, Option<String>>(5)?.as_deref().and_then(goethe_proto::Numerics::parse),
+            })
+        },
+    )
+    .ok()
 }
 
 fn uuid_simple() -> String {
@@ -1272,6 +1276,7 @@ mod tests {
                 restart_count: Some(1),
                 slot_key: Some("m|0|0".to_string()),
                 replica: false,
+                numerics: None,
             };
             let (code, msg, _) = handle_load(params).unwrap_err();
             assert_eq!(code, 1);
@@ -1337,6 +1342,7 @@ mod tests {
             restart_count: None,
             slot_key: None,
             replica,
+            numerics: None,
         }
     }
 

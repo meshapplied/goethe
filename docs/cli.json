@@ -408,6 +408,20 @@
           "help": "Expert parallel size (SGLang --ep-size)."
         },
         {
+          "id": "numerics",
+          "kind": "flag",
+          "long": "numerics",
+          "value_name": "invariant|tolerance",
+          "value": "choice",
+          "required": false,
+          "multiple": false,
+          "possible_values": [
+            "invariant",
+            "tolerance"
+          ],
+          "help": "Kernel pack numerics, kept across restarts: invariant (the same output whatever else is batched; the pack's default) or tolerance (faster kernels within a bounded error where the pack has them). Only for models served with a kernel pack."
+        },
+        {
           "id": "save",
           "kind": "flag",
           "long": "save",

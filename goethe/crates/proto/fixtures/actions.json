@@ -1,6 +1,7 @@
 [
   {"action":"model.install","args":{"model_id":"Qwen/Qwen3-8B","runtime":"sglang"}},
   {"action":"model.load","args":{"model_id":"qwen3-8b","gpus":[0,1],"ctx":32768,"max_conc":8,"tp":2}},
+  {"action":"model.load","args":{"model_id":"qwen3-8b","numerics":"tolerance"}},
   {"action":"model.unload","args":{"instance_id":"i-1"}},
   {"action":"model.remove","args":{"model_id":"qwen3-8b"}},
   {"action":"gpu.allow","args":{"gpus":[0]}},

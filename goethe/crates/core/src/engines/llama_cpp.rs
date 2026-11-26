@@ -32,6 +32,7 @@ pub const ENGINE: super::Engine = super::Engine {
         "response_format", "tools", "tool_choice", "parallel_tool_calls", "ignore_eos", "json_schema", "grammar",
         "n_probs", "chat_template_kwargs", "reasoning_format", "encoding_format", "embd_normalize",
     ]),
+    numerics: false,
     command: llama_command,
 };
 
