@@ -1096,8 +1096,12 @@ fn main() {
         }
         Commands::Remove { model, yes, force, traces } => {
             let traces = traces.map(|t| t == "delete");
+            let aliases = alias::list().unwrap_or_default();
             each(model, |id| {
-                let id = if yes { exact_installed(&id, &models::installed_ids(&goethe_home()), &alias::list().unwrap_or_default())? } else { installed_id(&id, false) };
+                if !aliases.iter().any(|(a, _)| *a == id) {
+                    checked_id(&id);
+                }
+                let id = if yes { exact_installed(&id, &models::installed_ids(&goethe_home()), &aliases)? } else { installed_id(&id, false) };
                 models::run_remove(&id, yes, force, traces)
             })
         }

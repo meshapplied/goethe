@@ -83,6 +83,11 @@ def _check_remove(goethe: Path, home: Path, env: dict[str, str]) -> None:
             raise RuntimeError(f"remove {bad!r} exited {rr.returncode}, expected usage error 2")
     if _listing(home) != before:
         raise RuntimeError("rejected remove ids changed GOETHE_HOME")
+    run_goethe([str(goethe), "install", str(_tree(home / "src", "aliased")), "--name", "local/aliased"], env=env)
+    run_goethe([str(goethe), "models", "alias", "set", "my:fast", "local/aliased"], env=env)
+    rr = run([str(goethe), "remove", "my:fast", "--yes"], env=env)
+    if rr.returncode != 0 or (home / "models" / "local__aliased").exists():
+        raise RuntimeError(f"an alias that is not a model id must still remove its model: {rr.stdout}{rr.stderr}")
 
 
 def _check_key_and_profile(goethe: Path, home: Path, env: dict[str, str]) -> None:
