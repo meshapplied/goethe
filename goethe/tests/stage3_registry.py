@@ -162,8 +162,9 @@ def main() -> None:
                 raise RuntimeError("remove did not unregister the model")
             if managed != [(0,)]:
                 raise RuntimeError(f"in-place local install must be stored managed=0, got {managed}")
-            if f"rm -rf '{model_src}'" not in rr_rm.stdout + rr_rm.stderr:
-                raise RuntimeError(f"remove must print rm -rf '<path>' for the user: {rr_rm.stdout[-300:]}")
+            said = rr_rm.stdout + rr_rm.stderr
+            if f"your files in {model_src} stay on disk" not in said or "rm -rf" in said:
+                raise RuntimeError(f"remove must name the kept folder and suggest no delete: {said[-300:]}")
         print("stage3_registry ok")
     finally:
         srv.shutdown()
