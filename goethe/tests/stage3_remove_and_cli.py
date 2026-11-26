@@ -71,8 +71,8 @@ def _check_remove(goethe: Path, home: Path, env: dict[str, str]) -> None:
     rr = run_goethe([str(goethe), "remove", "local/inplace", "--yes"], env=env)
     if not (inplace_src / "w.safetensors").is_file() or not (inplace_src / "config.json").is_file():
         raise RuntimeError("remove deleted an in-place model's files")
-    if f"rm -rf '{inplace_src.resolve()}'" not in rr.stdout:
-        raise RuntimeError(f"remove did not print the rm command: {rr.stdout!r}")
+    if f"your files in {inplace_src.resolve()} stay on disk" not in rr.stdout or "rm -rf" in rr.stdout:
+        raise RuntimeError(f"remove must name the kept folder and suggest no delete: {rr.stdout!r}")
     if (home / "models" / "local__inplace").exists():
         raise RuntimeError("remove left goethe's link directory")
     before = _listing(home)

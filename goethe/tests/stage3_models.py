@@ -216,8 +216,9 @@ def main() -> None:
                 raise RuntimeError(f"remove kept the files of a managed model: {rr_m.stdout}")
             if sqlite_query(home / "state.db", "SELECT COUNT(*) FROM installed_models")[0][0] != 0:
                 raise RuntimeError("remove did not clear installed_models")
-            if f"rm -rf '{model_path}'" not in rr_rm.stdout + rr_rm.stderr:
-                raise RuntimeError(f"unmanaged remove must print rm -rf '<path>': {rr_rm.stdout[-300:]}")
+            said = rr_rm.stdout + rr_rm.stderr
+            if f"your files in {model_path} stay on disk" not in said or "rm -rf" in said:
+                raise RuntimeError(f"unmanaged remove must name the kept folder and suggest no delete: {said[-300:]}")
     finally:
         shutil.rmtree(bad_dir, ignore_errors=True)
 

@@ -650,10 +650,7 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool, delete_traces: Option<
         progress(i + 1 + usize::from(instances > 0), steps);
     }
     match &plan.source {
-        Some(src) => crate::step::say(&format!(
-            "removed {model_id} from goethe; its files were not deleted. To delete them run:\n  rm -rf {}",
-            shell_quote(src)
-        )),
+        Some(src) => crate::step::say(&format!("removed {model_id} from goethe; your files in {src} stay on disk")),
         None => crate::step::say(&format!("removed {model_id}")),
     }
     if drop_traces {
