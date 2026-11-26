@@ -757,6 +757,34 @@
     "text",
     "image"
    ]
+  },
+  {
+   "id": "thinkingmachines/Inkling-2-Mini",
+   "revision": "ed40e7da625f594fc9c4990f5f66be24873c22d7",
+   "max_ctx": 1048576,
+   "supported_sm": [
+    "8.0",
+    "8.9",
+    "9.0",
+    "10.0",
+    "10.3",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--reasoning-parser",
+    "inkling",
+    "--tool-call-parser",
+    "inkling2"
+   ],
+   "description": "Looped NVFP4 Mixture-of-Experts, 26B total and 5.4B active parameters.",
+   "family": "Inkling",
+   "license": "apache-2.0",
+   "released": "2026-11-17",
+   "modalities": [
+    "text",
+    "image"
+   ]
   }
  ],
  "gguf_models": [

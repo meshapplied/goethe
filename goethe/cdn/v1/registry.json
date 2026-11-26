@@ -1486,6 +1486,56 @@
         "text",
         "image"
       ]
+    },
+    {
+      "id": "thinkingmachines/Inkling-2-Mini",
+      "architecture": "moe",
+      "static_vram_gb": 18.185022443532944,
+      "kv_bytes_per_token": null,
+      "kv_elems_per_token": 16384,
+      "min_total_vram_gb": null,
+      "supported_sm": [
+        "8.0",
+        "8.9",
+        "9.0",
+        "10.0",
+        "10.3",
+        "12.0",
+        "12.1"
+      ],
+      "default_ctx": null,
+      "max_ctx": 1048576,
+      "default_max_conc": null,
+      "default_tp": null,
+      "num_attention_heads": 24,
+      "num_kv_heads": 8,
+      "attention": "hybrid",
+      "kv_cache_dtype": null,
+      "memory": {
+        "kv_bytes_per_token": 32768,
+        "kv_heads": 8,
+        "swa_bytes_per_token": 163840,
+        "swa_heads": 8,
+        "swa_window": 1024,
+        "chunked_prefill": 8192
+      },
+      "extra_sglang_args": [
+        "--reasoning-parser",
+        "inkling",
+        "--tool-call-parser",
+        "inkling2"
+      ],
+      "runtime": "sglang",
+      "revision": "ed40e7da625f594fc9c4990f5f66be24873c22d7",
+      "download_gb": 20.191643294,
+      "description": "Looped NVFP4 Mixture-of-Experts, 26B total and 5.4B active parameters.",
+      "family": "Inkling",
+      "license": "apache-2.0",
+      "released": "2026-11-17",
+      "modalities": [
+        "text",
+        "image"
+      ]
     }
   ],
   "gguf_models": [
