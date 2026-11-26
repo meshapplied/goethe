@@ -16,6 +16,8 @@ rm -rf "${WORK}/cdn" "${WORK}/keys"
 mkdir -p "${WORK}/cdn" "${WORK}/keys" "${WORK}/images"
 openssl ecparam -genkey -name prime256v1 -noout -out "${WORK}/keys/test.key"
 openssl ec -in "${WORK}/keys/test.key" -pubout -out "${WORK}/keys/test_pub.pem" 2>/dev/null
+(cd "${ROOT}" && cargo run --locked -q -p goethe-core --example registry -- build registry.src.json "${WORK}/keys/registry.json")
+openssl dgst -sha256 -sign "${WORK}/keys/test.key" -out "${WORK}/keys/registry.json.sig" "${WORK}/keys/registry.json"
 version="$(grep -E '^version\s*=' "${ROOT}/crates/goethe/Cargo.toml" | head -n1 | sed 's/.*"\(.*\)".*/\1/')"
 
 package() {
@@ -27,7 +29,7 @@ package() {
     for f in goethe goethed; do printf '\n' >>"${dir}/bin/linux-x86_64/${f}"; done
   fi
   cp "${ROOT}"/pyenv/requirements*.lock "${ROOT}/pyenv/bootstrap.sh" "${dir}/pyenv/"
-  cp "${ROOT}/cdn/v1/registry.json" "${dir}/v1/"
+  cp "${WORK}/keys/registry.json" "${WORK}/keys/registry.json.sig" "${dir}/v1/"
   cp "${ROOT}/../LICENSE" "${ROOT}/../NOTICE" "${dir}/"
   echo "${version}" >"${dir}/VERSION"
   bash "${ROOT}/packaging/subst_install_pubkey.sh" "${ROOT}/cdn/install.sh" "${WORK}/keys/test_pub.pem" "${dir}/install.sh"
