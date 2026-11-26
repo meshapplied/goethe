@@ -629,6 +629,11 @@ fn check_environment(home: &Path) -> Check {
         ),
         (Some(c), true) => check("environment", "INFO", format!("container {c} with systemd: goethe up installs a unit")),
         (None, true) => check("environment", "OK", "systemd is PID 1: goethe up installs a unit"),
+        (None, false) if crate::host::is_wsl(&crate::host::sysroot()) => check(
+            "environment",
+            "INFO",
+            "WSL without systemd: goethe up uses crontab @reboot; set systemd=true under [boot] in /etc/wsl.conf and run wsl --shutdown so goethed starts with WSL",
+        ),
         (None, false) => check("environment", "INFO", "no systemd: goethe up uses crontab @reboot"),
     }
 }
