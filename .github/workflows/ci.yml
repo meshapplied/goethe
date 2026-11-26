@@ -47,7 +47,7 @@ jobs:
                 goethe/tests/*|goethe/pyenv/*|goethe/cdn/*|goethe/packaging/*)
                   rust=true; e2e=true ;;
                 goethe/crates/*|goethe/Cargo.toml|goethe/Cargo.lock|goethe/rust-toolchain*)
-                  rust=true ;;
+                  rust=true; e2e=true ;;
                 goethe/*)
                   rust=true ;;
               esac

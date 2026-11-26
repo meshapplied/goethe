@@ -77,6 +77,29 @@ def pack(args):
                 "device NVIDIA GeForce RTX 5090 runs no variant of this pack: the variants are built for another SKU", 3
             )
         say("ok")
+    if cmd == "plan":
+        _, manifest = container(Path(args[1]).read_bytes())
+        meta = json.loads(manifest)
+        names = [w["file"] for w in meta["model"]["weights"]]
+        refused = os.environ.get("E2E_PACK_RUNS") == "no"
+        say(
+            {
+                "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+                "variants": [
+                    {
+                        "id": vid,
+                        "role": "target",
+                        "quant": v["desc"]["quant"],
+                        "source": None,
+                        "files": [{"name": names[i]} for i in v["weights"]],
+                        "max_ctx": 8192,
+                        "runs": not refused,
+                        "why": "no SKU for this device" if refused else None,
+                    }
+                    for vid, v in meta["variants"].items()
+                ],
+            }
+        )
     if cmd == "show":
         _, manifest = container(Path(args[1]).read_bytes())
         for name in json.loads(manifest)["variants"]:
