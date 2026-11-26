@@ -1945,16 +1945,6 @@ mod tests {
         (got, calls.into_inner())
     }
 
-    fn wait_until_runnable(script: &Path) {
-        // A process another test forks while this script is still open for writing holds it busy (ETXTBSY) until it execs; wait that out.
-        for _ in 0..100 {
-            match std::process::Command::new(script).output() {
-                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => std::thread::sleep(std::time::Duration::from_millis(20)),
-                _ => return,
-            }
-        }
-    }
-
     #[test]
     fn the_pack_lookup_runs_in_the_engine_layer_that_was_installed_a_moment_before() {
         use std::os::unix::fs::PermissionsExt;
@@ -1973,7 +1963,7 @@ mod tests {
                     fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
                     fs::write(bin.join("python"), "#!/bin/sh\necho \"py-env python: $*\"\n").map_err(|e| e.to_string())?;
                     fs::set_permissions(bin.join("python"), fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
-                    wait_until_runnable(&bin.join("python"));
+                    crate::packs::wait_until_runnable(&bin.join("python"));
                     Ok(())
                 },
                 by_structure: &|_| {
