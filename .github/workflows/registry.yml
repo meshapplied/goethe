@@ -1,0 +1,94 @@
+name: registry
+
+# Serve cdn/v1/registry.json signed at pkg.goethe.sh/v1/ whenever it changes on main, without a goethe release: the release
+# environment's reviewers approve the signature, then the newest release's site is rebuilt from its GitHub Release files (as
+# pages.yml does) with only the registry and its signature changed, at the root and under that release's v/<version>/.
+# The registry is outside SHA256SUMS; its own signature uses the release key.
+
+on:
+  push:
+    branches: [main]
+    paths: [goethe/cdn/v1/registry.json]
+  workflow_dispatch:
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Signing key is an environment secret: this job waits for required reviewers, then alone can sign.
+    environment: release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: |
+            goethe/packaging
+            goethe/cdn/v1/registry.json
+      - name: Sign the registry of main
+        env:
+          SIGN_KEY_PEM: ${{ secrets.GOETHE_SIGN_KEY }}
+        run: |
+          mkdir out
+          cp goethe/cdn/v1/registry.json out/registry.json
+          python3 -c 'import json, sys; r = json.load(open(sys.argv[1])); sys.exit(not (r.get("version") == 1 and r.get("models")))' out/registry.json ||
+            { echo "::error::goethe/cdn/v1/registry.json is not a registry"; exit 1; }
+          key="$RUNNER_TEMP/release.key"
+          umask 077
+          printf '%s\n' "$SIGN_KEY_PEM" >"$key"
+          trap 'shred -u "$key" 2>/dev/null || rm -f "$key"' EXIT
+          openssl dgst -sha256 -sign "$key" -out out/registry.json.sig out/registry.json
+          openssl dgst -sha256 -verify goethe/packaging/release_pub.pem -signature out/registry.json.sig out/registry.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: registry
+          path: out
+          retention-days: 7
+
+  pages:
+    needs: sign
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: src
+          sparse-checkout: goethe/packaging
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: registry
+          path: registry
+      - name: The newest release's package tree with the signed registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::the newest release $tag is not a tag like v0.1.9"; exit 1; }
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "goethe-cdn-${tag#v}.tar.zst"
+          bash src/goethe/packaging/pages_site.sh "goethe-cdn-${tag#v}.tar.zst" site
+          openssl dgst -sha256 -verify src/goethe/packaging/release_pub.pem -signature registry/registry.json.sig registry/registry.json
+          for d in site/v1 "site/v/${tag#v}/v1"; do
+            cp registry/registry.json registry/registry.json.sig "$d/"
+          done
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: site
+          name: github-pages-${{ github.run_attempt }}
+      - id: deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
+          timeout: 1800000

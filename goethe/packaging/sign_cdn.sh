@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Write VERSION and SHA256SUMS for a dist/cdn tree; with a signing key also sign them and verify with install.sh's key.
+# Write VERSION and SHA256SUMS for a dist/cdn tree (the registry has its own signature: it is republished without a release); with a signing key also sign them and verify with install.sh's key.
 
 set -euo pipefail
 
@@ -10,7 +10,7 @@ VER="$(grep -E '^version\s*=' "${ROOT}/crates/goethe/Cargo.toml" | head -n1 | se
 printf '%s\n' "${VER}" >"${DIST}/VERSION"
 (
   cd "${DIST}"
-  find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig ! -name registry.json.sig | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
+  find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig ! -path ./v1/registry.json ! -name registry.json.sig | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
     sha256sum "${f}" | awk -v p="${f}" '{print $1 "  " p}'
   done
 ) >"${DIST}/SHA256SUMS"

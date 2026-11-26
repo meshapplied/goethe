@@ -242,7 +242,7 @@ jobs:
           grep -q "release=1" cdn/BUILDINFO
           rm -f cdn/SHA256SUMS cdn/SHA256SUMS.sig cdn/v1/registry.json.sig
           cd cdn
-          find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
+          find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig ! -path ./v1/registry.json | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
             sha256sum "$f" | awk -v p="$f" '{print $1 "  " p}'
           done >SHA256SUMS
       - name: Sign the combined sums
