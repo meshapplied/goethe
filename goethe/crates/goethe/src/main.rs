@@ -180,6 +180,8 @@ enum Commands {
         copy: bool,
         #[arg(long, help = "Serve the model with its plain runtime (llama.cpp or SGLang) when its kernel pack cannot run here, even with GOETHE_ALLOW_FALLBACK=0 (the plain runtime takes over by default).")]
         fallback: bool,
+        #[arg(long, value_name = "goethe-engine|sglang", value_parser = clap::builder::PossibleValuesParser::new(install::PINNED_ENGINES), help = "Serve with this engine instead of the automatic choice (a kernel pack when one runs here, else SGLang); refused when it cannot serve the weights. Installing again without it chooses again.")]
+        engine: Option<String>,
         #[arg(last = true, help = "Extra engine flags, only after --.")]
         extra: Vec<String>,
     },
@@ -1051,6 +1053,7 @@ fn main() {
             name,
             copy,
             fallback,
+            engine,
             extra,
         } => {
             if hf_token {
@@ -1088,6 +1091,7 @@ fn main() {
                 reset: force,
                 quant,
                 fallback,
+                engine,
             })
         }
         Commands::Remove { model, yes, force, traces } => {

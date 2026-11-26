@@ -236,6 +236,18 @@ class Matrix(unittest.TestCase):
             self.assertIn("kernel packs could not be reached", r.out + r.err)
             self.assertEqual(self.runtime_of(c, "e2e/packed-gguf"), "llama.cpp")
 
+    def test_an_engine_pin_is_kept_or_the_install_refused_before_any_download(self) -> None:
+        with self.cell(login=True) as c:
+            r = c.run("install", "e2e/packed", "--yes", "--engine", "sglang")
+            clean(self, r)
+            self.assertRegex(r.out, r"e2e/packed\s+sglang", "--engine sglang skips the pack")
+        self.mark = len(self.world.requests)
+        with self.cell() as c:
+            r = c.run("install", "e2e/packed", "--yes", "--engine", "goethe-engine")
+            clean(self, r, ok=False)
+            self.assertIn("needs its kernel pack: run goethe login first (--engine goethe-engine)", r.out + r.err)
+        self.assertFalse(self.fetched("e2e/packed"))
+
     def test_a_pack_index_with_a_bad_signature_is_refused_and_nothing_is_downloaded(self) -> None:
         with self.cell(login=True) as c:
             self.world.bad_sig = True

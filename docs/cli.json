@@ -262,6 +262,20 @@
           "help": "Serve the model with its plain runtime (llama.cpp or SGLang) when its kernel pack cannot run here, even with GOETHE_ALLOW_FALLBACK=0 (the plain runtime takes over by default)."
         },
         {
+          "id": "engine",
+          "kind": "flag",
+          "long": "engine",
+          "value_name": "goethe-engine|sglang",
+          "value": "choice",
+          "required": false,
+          "multiple": false,
+          "possible_values": [
+            "goethe-engine",
+            "sglang"
+          ],
+          "help": "Serve with this engine instead of the automatic choice (a kernel pack when one runs here, else SGLang); refused when it cannot serve the weights. Installing again without it chooses again."
+        },
+        {
           "id": "extra",
           "kind": "trailing",
           "value_name": "EXTRA",
