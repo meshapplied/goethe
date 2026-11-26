@@ -14,7 +14,7 @@ pub fn print_plan(plan: &PlanState) {
 }
 
 pub fn print_abstain(reason: &str) {
-    eprintln!("{} {reason}", term::paint("ask", Color::Yellow));
+    eprintln!("{} {reason}", term::paint("ask:", Color::Yellow));
 }
 
 fn risk_badge(risk: Risk) -> String {

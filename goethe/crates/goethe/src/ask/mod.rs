@@ -127,16 +127,18 @@ pub fn run(args: &[String], root: Command, validate: fn(&[String]) -> Result<(),
     run_once(&parsed.utterance, &root, &validate, &parsed.opts)
 }
 
-fn needs(decision: &PendingDecision) -> String {
-    // What a plan that is not ready still needs, in one line for plain output.
+fn not_ready(decision: &PendingDecision) -> String {
+    // Why a plan does not run without a screen, as one sentence: what it still needs and where to answer, or why it cannot run.
     let few = |v: Vec<String>| v.into_iter().take(3).collect::<Vec<_>>().join(", ");
+    let needs = |what: String| format!("needs {what}; answer it on the Ask screen (goethe ask on a terminal, no flags), or see it with --json");
     match decision {
-        PendingDecision::PickIntent { clause, options } => format!("which command \"{clause}\" means ({})", few(options.iter().map(|o| o.id.replace('.', " ")).collect())),
-        PendingDecision::PickSlot { missing, options } => format!("which {} ({})", missing.label, few(options.iter().map(|(v, _)| v.clone()).collect())),
-        PendingDecision::PromptSlot { missing } => format!("the {}", missing.label),
-        PendingDecision::Unused { values, .. } => format!("what to do with {}", values.join(", ")),
-        PendingDecision::Invalid { message } | PendingDecision::Abstain { reason: message } => message.clone(),
-        PendingDecision::ReadyToConfirm => "a confirmation".into(),
+        PendingDecision::PickIntent { clause, options } => needs(format!("which command \"{clause}\" means ({})", few(options.iter().map(|o| o.id.replace('.', " ")).collect()))),
+        PendingDecision::PickSlot { missing, options } => needs(format!("which {} ({})", missing.label, few(options.iter().map(|(v, _)| v.clone()).collect()))),
+        PendingDecision::PromptSlot { missing } => needs(format!("the {}", missing.label)),
+        PendingDecision::Unused { values, .. } => needs(format!("what to do with {}", values.join(", "))),
+        PendingDecision::Invalid { message } => format!("cannot run: {message}"),
+        PendingDecision::Abstain { reason } => reason.clone(),
+        PendingDecision::ReadyToConfirm => "ready; pass --yes to run it".into(),
     }
 }
 
@@ -166,7 +168,7 @@ fn run_once(query: &str, root: &Command, validate: &planner::Validate, opts: &As
     }
     if !plan.is_ready() {
         outcome(&home, Code::AskDropped, &plan, "asked");
-        eprintln!("ask: needs {}; answer it on the Ask screen (goethe ask on a terminal, no flags), or see it with --json", needs(&plan.next_decision(&catalog, &world)));
+        eprintln!("ask: {}", not_ready(&plan.next_decision(&catalog, &world)));
         return 3;
     }
     if opts.dry_run {
