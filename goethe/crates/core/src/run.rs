@@ -386,15 +386,7 @@ pub(crate) fn embed_line(e: &[f64]) -> String {
 
 fn base64(bytes: &[u8]) -> String {
     // Standard base64 with padding.
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for c in bytes.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            out.push(if i <= c.len() { T[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
-        }
-    }
-    out
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
 }
 
 fn reply(r: Result<ureq::Response, ureq::Error>) -> Result<Value, String> {

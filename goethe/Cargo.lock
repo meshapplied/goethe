@@ -405,6 +405,7 @@ dependencies = [
 name = "goethe-core"
 version = "0.3.6"
 dependencies = [
+ "base64",
  "chrono",
  "flate2",
  "goethe-proto",

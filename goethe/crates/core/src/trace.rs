@@ -129,7 +129,7 @@ impl TraceConfig {
 }
 
 pub fn load_config(con: &Connection) -> TraceConfig {
-    crate::db::setting(con, SETTING).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
+    crate::db::setting_json(con, SETTING)
 }
 
 fn save_config(con: &Connection, cfg: &TraceConfig) -> Result<(), String> {

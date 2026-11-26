@@ -8,6 +8,7 @@ build = "build.rs"
 
 [dependencies]
 goethe-proto = { path = "../proto" }
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 libc = "0.2"
 nvml-wrapper = { version = "0.10", default-features = false }

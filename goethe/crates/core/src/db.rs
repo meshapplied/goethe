@@ -132,6 +132,11 @@ pub fn setting(con: &Connection, key: &str) -> Option<String> {
     con.query_row("SELECT value FROM goethe_settings WHERE key = ?1", [key], |r| r.get(0)).ok()
 }
 
+pub fn setting_json<T: Default + serde::de::DeserializeOwned>(con: &Connection, key: &str) -> T {
+    // A JSON setting, or the default when it is missing or does not parse.
+    setting(con, key).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
+}
+
 pub fn set_setting(con: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
     con.execute("INSERT OR REPLACE INTO goethe_settings (key, value) VALUES (?1, ?2)", [key, value]).map(|_| ())
 }
