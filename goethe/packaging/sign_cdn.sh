@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Write VERSION and SHA256SUMS for a dist/cdn tree (the registry has its own signature: it is republished without a release); with a signing key also sign them and verify with install.sh's key.
+# Write VERSION and SHA256SUMS for a dist/cdn tree; with a signing key also sign them and verify with install.sh's key (the registry is served apart, by registry.yml).
 
 set -euo pipefail
 
@@ -10,7 +10,7 @@ VER="$(grep -E '^version\s*=' "${ROOT}/crates/goethe/Cargo.toml" | head -n1 | se
 printf '%s\n' "${VER}" >"${DIST}/VERSION"
 (
   cd "${DIST}"
-  find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig ! -path ./v1/registry.json ! -name registry.json.sig | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
+  find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
     sha256sum "${f}" | awk -v p="${f}" '{print $1 "  " p}'
   done
 ) >"${DIST}/SHA256SUMS"
@@ -19,9 +19,6 @@ if [[ -z "${KEY}" ]]; then
   exit 0
 fi
 openssl dgst -sha256 -sign "${KEY}" -out "${DIST}/SHA256SUMS.sig" "${DIST}/SHA256SUMS"
-if [[ -f "${DIST}/v1/registry.json" ]]; then
-  openssl dgst -sha256 -sign "${KEY}" -out "${DIST}/v1/registry.json.sig" "${DIST}/v1/registry.json"
-fi
 EMBEDDED="$(mktemp)"
 trap 'rm -f "${EMBEDDED}"' EXIT
 awk '/-----BEGIN PUBLIC KEY-----/,/-----END PUBLIC KEY-----/' "${DIST}/install.sh" \

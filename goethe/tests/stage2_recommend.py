@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 
-from lib.goethe_test import main_exit, require_cli, run_goethe, temp_home, vram_per_gpu_gb
+from lib.goethe_test import main_exit, require_cli, run_goethe, signed_registry, temp_home, vram_per_gpu_gb
 
 
 def main() -> None:
@@ -94,7 +94,7 @@ def main() -> None:
             [str(goethe), "models", "recommend", "--json"],
             env={
                 "GOETHE_HOME": str(home),
-                "GOETHE_REGISTRY_URL": f"file://{reg_path}",
+                **signed_registry(reg_path),
             },
         )
         out = json.loads(rr.stdout)

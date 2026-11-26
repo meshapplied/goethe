@@ -16,7 +16,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlsplit
 
-from lib.goethe_test import main_exit, require_cli, run_goethe, sha256_file, sqlite_query, temp_home, wait_until
+from lib.goethe_test import (
+    main_exit,
+    require_cli,
+    run_goethe,
+    sha256_file,
+    signed_registry,
+    sqlite_query,
+    temp_home,
+    wait_until,
+)
 
 REPO = "stub/resume"
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -173,7 +182,7 @@ def main() -> None:
             reg.write_text(json.dumps({"version": 1, "models": [entry]}), encoding="utf-8")
             env = {
                 "GOETHE_HOME": str(home),
-                "GOETHE_REGISTRY_URL": f"file://{reg}",
+                **signed_registry(reg),
                 "HF_ENDPOINT": f"http://127.0.0.1:{srv.server_address[1]}",
                 "HF_HOME": str(home / "hf-home"),
                 "HF_HUB_DISABLE_XET": "1",

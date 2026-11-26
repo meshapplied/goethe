@@ -82,7 +82,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
     let loaded = loaded_instances(&con);
     let installed = installed_rows(&home, &con)?;
     let disk = disk_gb_by_model(&con);
-    let reg = fetch(&registry_url()).ok();
+    let reg = fetch(&registry_url()).map_err(|e| (!installed_only).then(|| crate::step::note(&format!("note: {e}")))).ok();
     let view = crate::placement::load_hw(&home).map(|hw| View::capacity(&home, hw));
     let packs = if installed_only {
         Vec::new()

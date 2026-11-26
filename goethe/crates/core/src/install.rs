@@ -235,9 +235,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         return Err(format!("{}: no such directory", opts.model_id));
     }
     validate_model_id(&opts.model_id)?;
-    let entry = fetch(&registry_url())
-        .ok()
-        .and_then(|r| find_model(&r, &opts.model_id).cloned());
+    let entry = find_model(&fetch(&registry_url())?, &opts.model_id).cloned();
     let card_dir = model_dir(home, &opts.model_id);
     dir_owner_is(&card_dir, &opts.model_id)?;
     if opts.model_id == crate::engines::ninfer::NINFER_ID {
@@ -1815,9 +1813,8 @@ mod tests {
 
     #[test]
     fn the_catalog_marks_the_pack_only_models() {
-        let reg = crate::registry::bundled().unwrap();
-        assert!(reg.models.iter().find(|m| m.id == "nvidia/Qwen3.8-27B-NVFP4").is_some_and(|m| m.pack_only == Some(true)));
-        assert!(reg.models.iter().filter(|m| m.pack_only == Some(true)).count() >= 1);
+        let src: Value = serde_json::from_str(include_str!("../../../registry.src.json")).unwrap();
+        assert!(src["models"].as_array().unwrap().iter().any(|m| m["id"] == "nvidia/Qwen3.8-27B-NVFP4" && m["pack_only"] == true));
     }
 
     #[test]

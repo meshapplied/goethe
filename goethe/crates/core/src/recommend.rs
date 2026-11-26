@@ -567,12 +567,9 @@ mod tests {
             "links": []
         });
         std::fs::write(home.path().join("hardware_state.json"), hw.to_string()).unwrap();
-        let reg = crate::registry::bundled().unwrap();
-        let llama = reg.models.iter().find(|m| m.id == "nvidia/Llama-3.1-8B-Instruct-NVFP4").unwrap();
-        let line = preview(home.path(), llama).unwrap().unwrap();
+        let line = preview(home.path(), &entry("org/llama", serde_json::json!({"kv_elems_per_token": 65536}))).unwrap().unwrap();
         assert!(line.contains("26.4 GB per GPU (ctx 131072, 4 concurrent)"), "the model's full context for 4 users: {line}");
-        let big = reg.models.iter().find(|m| m.id == "Qwen/Qwen3.8-27B").unwrap();
-        assert!(preview(home.path(), big).is_err());
+        assert!(preview(home.path(), &entry("org/big", serde_json::json!({"static_vram_gb": 60.0}))).is_err());
     }
 
     fn single_gpu(cc: &str) -> View {
@@ -595,7 +592,7 @@ mod tests {
 
     #[test]
     fn a_5090_lists_the_ninfer_profile_first_and_ampere_does_not() {
-        let reg = crate::registry::bundled().unwrap();
+        let reg = Registry { version: 1, models: vec![entry("org/llama", serde_json::json!({}))], gguf_models: Vec::new() };
         let first = &recommend(&single_gpu("12.0"), &reg, &|_| None).recommended[0];
         assert_eq!(first.model_id, crate::engines::ninfer::NINFER_ID);
         assert_eq!((first.ctx, first.max_conc), (100_000, 4));
@@ -606,7 +603,7 @@ mod tests {
     #[test]
     fn only_what_this_machine_can_run_is_recommended() {
         // A model the GPUs could hold but this machine cannot run (no engine build, no kernel pack for this GPU) is listed as not for this machine, with why.
-        let reg = Registry { models: vec![entry("org/packed", serde_json::json!({"pack_only": true}))], ..crate::registry::bundled().unwrap() };
+        let reg = Registry { version: 1, models: vec![entry("org/packed", serde_json::json!({"pack_only": true}))], gguf_models: Vec::new() };
         let cannot = |m: &RegistryModel| (m.id == "org/packed" || m.id == crate::engines::ninfer::NINFER_ID).then(|| format!("{} cannot run here", m.id));
         let out = recommend(&single_gpu("12.0"), &reg, &cannot);
         assert!(out.recommended.is_empty(), "{:?}", out.recommended.iter().map(|m| &m.model_id).collect::<Vec<_>>());

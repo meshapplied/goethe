@@ -240,9 +240,9 @@ jobs:
           sed -i 's/^arches=.*/arches=x86_64,aarch64/' cdn/BUILDINFO
           grep -q "arches=x86_64,aarch64" cdn/BUILDINFO
           grep -q "release=1" cdn/BUILDINFO
-          rm -f cdn/SHA256SUMS cdn/SHA256SUMS.sig cdn/v1/registry.json.sig
+          rm -f cdn/SHA256SUMS cdn/SHA256SUMS.sig
           cd cdn
-          find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig ! -path ./v1/registry.json | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
+          find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
             sha256sum "$f" | awk -v p="$f" '{print $1 "  " p}'
           done >SHA256SUMS
       - name: Sign the combined sums
@@ -254,11 +254,9 @@ jobs:
           printf '%s\n' "$SIGN_KEY_PEM" >"$key"
           trap 'shred -u "$key" 2>/dev/null || rm -f "$key"' EXIT
           openssl dgst -sha256 -sign "$key" -out cdn/SHA256SUMS.sig cdn/SHA256SUMS
-          openssl dgst -sha256 -sign "$key" -out cdn/v1/registry.json.sig cdn/v1/registry.json
           awk "/-----BEGIN PUBLIC KEY-----/,/-----END PUBLIC KEY-----/" cdn/install.sh \
             | sed "s/^GOETHE_RELEASE_PUB_PEM='//; s/'\$//" >"$RUNNER_TEMP/embedded.pem"
           openssl dgst -sha256 -verify "$RUNNER_TEMP/embedded.pem" -signature cdn/SHA256SUMS.sig cdn/SHA256SUMS
-          openssl dgst -sha256 -verify "$RUNNER_TEMP/embedded.pem" -signature cdn/v1/registry.json.sig cdn/v1/registry.json
           (cd cdn && sha256sum -c --quiet SHA256SUMS)
       - name: Archive
         run: tar -C "$GITHUB_WORKSPACE" -cf - cdn | zstd -19 -T0 -o "goethe-cdn-${{ needs.guard.outputs.version }}.tar.zst"

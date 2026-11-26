@@ -180,7 +180,6 @@ python3 -I "${ROOT}/packaging/build_ask_model.py" \
   --out "${DIST}/ask/ask-model-v1.bin"
 
 cp "${ROOT}/../LICENSE" "${ROOT}/../NOTICE" "${DIST}/"
-cp "${ROOT}/cdn/v1/registry.json" "${DIST}/v1/registry.json"
 (cd "${ROOT}" && cargo test --locked -q -p goethe-core --lib -- --exact pyenv::tests::layer_locks_are_subsets_of_the_main_lock)
 cp "${ROOT}"/pyenv/requirements*.lock "${ROOT}/pyenv/bootstrap.sh" "${DIST}/pyenv/"
 "${ROOT}/packaging/subst_install_pubkey.sh" "${ROOT}/cdn/install.sh" "${RELEASE_PUB}" \
