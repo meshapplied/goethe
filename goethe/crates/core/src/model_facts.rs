@@ -166,11 +166,28 @@ pub fn layer_plan(lm: &Value, layers: u64) -> LayerPlan {
     if let Some(n) = lm.get("full_attention_interval").and_then(|v| v.as_u64()).filter(|n| *n > 1) {
         return LayerPlan { full: layers / n, swa: 0, linear: layers - layers / n };
     }
+    if let Some(local) = lm.get("local_layer_ids").and_then(|v| v.as_array()) {
+        let local: BTreeSet<u64> = local.iter().filter_map(|v| v.as_u64()).collect();
+        let swa = |ids: std::ops::Range<u64>| ids.filter(|i| local.contains(i)).count() as u64;
+        let (core, repeats) = looped_core(lm);
+        let all = layers + repeats * (core.end - core.start);
+        let local_n = swa(0..layers) + repeats * swa(core);
+        return LayerPlan { full: all - local_n, swa: local_n, linear: 0 };
+    }
     let pattern = lm.get("sliding_window_pattern").and_then(|v| v.as_u64()).filter(|n| *n > 1);
     if let (Some(n), Some(_)) = (pattern, lm.get("sliding_window").and_then(|v| v.as_u64())) {
         return LayerPlan { full: layers / n, swa: layers - layers / n, linear: 0 };
     }
     LayerPlan { full: layers, swa: 0, linear: 0 }
+}
+
+fn looped_core(lm: &Value) -> (std::ops::Range<u64>, u64) {
+    // Layers a looped model runs again and how many extra times; every extra pass keeps its own KV cache (the engines' default).
+    let l = &lm["loop_config"];
+    match (l["core_start"].as_u64(), l["core_end"].as_u64(), l["num_passes"].as_u64()) {
+        (Some(s), Some(e), Some(n)) if s < e && n > 1 => (s..e, n - 1),
+        _ => (0..0, 0),
+    }
 }
 
 struct KvShape {
@@ -454,6 +471,18 @@ mod tests {
         assert_eq!(swa(json!({"sliding_window": 1024})), Ok(2 * 2 * 64 * 1024));
         assert_eq!(swa(json!({"max_position_embeddings": 4096})), Ok(2 * 2 * 64 * 4096));
         assert!(swa(json!({})).unwrap_err().contains("neither sliding_window"));
+    }
+
+    #[test]
+    fn local_layer_ids_and_a_looped_core_shape_the_kv() {
+        let cfg = json!({"text_config": {"num_hidden_layers": 6, "num_attention_heads": 8, "num_key_value_heads": 2, "head_dim": 64,
+            "local_layer_ids": [0, 2, 3, 4], "sliding_window_size": 128, "loop_config": {"core_start": 2, "core_end": 4, "num_passes": 3}}});
+        let lm = resolve_language_config(&cfg).unwrap();
+        assert_eq!(layer_plan(lm, 6), LayerPlan { full: 2, swa: 8, linear: 0 }, "layers 1 and 5 full; 2, 3 run twice more, both local");
+        let f = facts_from_config(&cfg, 0.0, None, "m").unwrap();
+        assert_eq!((f.kv_elems_per_token, f.swa_kv_elems_per_request), (2 * 2 * 2 * 64, 2 * 8 * 2 * 64 * 128));
+        let flat = json!({"num_hidden_layers": 6, "num_attention_heads": 8, "num_key_value_heads": 2, "head_dim": 64, "local_layer_ids": []});
+        assert_eq!(layer_plan(&flat, 6), LayerPlan { full: 6, swa: 0, linear: 0 }, "no local layers: all full, as before");
     }
 
     #[test]
