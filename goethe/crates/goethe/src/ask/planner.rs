@@ -378,7 +378,7 @@ impl PlanState {
         self.parts[part] = PlanPart { text: text.to_string(), options: options.clone(), left_out: false, ignored };
         let named = shown.is_some() || clear(&options, if about_model { TAU_OOD } else { TAU_HI }) || named_alone(&top.id, &present(text, catalog), catalog, &self.world);
         let needs_intent_pick = !named || risky_by_word_alone(&top, catalog) || changes_beside_a_stray_word(&top.id, text, catalog, retriever, &self.world);
-        let input = StepBuildInput { clause: text, intent_id: &top.id, alternatives: options.clone(), needs_intent_pick };
+        let input = StepBuildInput { clause: text, intent_id: &top.id, alternatives: options, needs_intent_pick };
         let mut goal = build_step(input, catalog, &self.world, validate);
         goal.part = part;
         share_model(&mut goal, self.model_ref.as_deref(), catalog, &self.world, validate);

@@ -1948,7 +1948,7 @@ fn do_gateway_status(json: bool) -> Result<(), String> {
     let bind_line = match (&interface, waiting) {
         (Some(n), true) => format!("127.0.0.1 (waiting for {n}: it has no IPv4 address, so only this host can connect)"),
         (Some(n), false) => format!("{bind} (follows {n})"),
-        (None, _) => bind.clone(),
+        (None, _) => bind,
     };
     print!("{}", gateway_status_text(&bind_line, port, &url, running, allowlist, &endpoints));
     Ok(())
