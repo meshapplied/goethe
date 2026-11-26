@@ -162,6 +162,7 @@ Loads a model and waits until it answers. Goethe picks the GPUs and sizes the me
 | `--ep <N>` | Expert-parallel size, for mixture-of-experts models |
 | `--ctx <N>` | Context length, used exactly (without it: the largest that fits) |
 | `--max-conc <N>` | Requests served at the same time, used exactly (without it: the default, fewer when only that fits) |
+| `--numerics <invariant\|tolerance>` | Kernel pack numerics, kept across restarts: `invariant` (the same output whatever else is batched; the pack's default) or `tolerance` (faster kernels within a bounded error where the pack has them); only for models served with a kernel pack |
 | `--save` | Keep `--gpu`, `--ctx`, `--max-conc` and the options after `--` as the model's defaults; a bare `--` clears the saved options |
 | `--dry-run` | Show where the model would be placed now and the memory it needs, and load nothing; with `--save` it only stores the defaults |
 | `--replica` | Start another copy, to serve more traffic |

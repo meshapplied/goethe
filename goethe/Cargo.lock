@@ -395,6 +395,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "goethe-core",
+ "goethe-proto",
  "libc",
  "serde",
  "serde_json",

@@ -214,6 +214,8 @@ enum Commands {
         max_conc: Option<u64>,
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=MAX_GPUS), help = "Expert parallel size (SGLang --ep-size).")]
         ep: Option<u64>,
+        #[arg(long, value_name = "invariant|tolerance", value_parser = clap::builder::PossibleValuesParser::new(goethe_proto::Numerics::ALL.map(goethe_proto::Numerics::name)), help = "Kernel pack numerics, kept across restarts: invariant (the same output whatever else is batched; the pack's default) or tolerance (faster kernels within a bounded error where the pack has them). Only for models served with a kernel pack.")]
+        numerics: Option<String>,
         #[arg(long, help = "Keep --gpu, --ctx, --max-conc and the flags after -- as the model's defaults.")]
         save: bool,
         #[arg(long = "dry-run", help = "Show where the model would be placed now, and load nothing.")]
@@ -1102,6 +1104,7 @@ fn main() {
             ctx,
             max_conc,
             ep,
+            numerics,
             save,
             dry_run,
             yes,
@@ -1140,6 +1143,7 @@ fn main() {
                     max_conc,
                     tp,
                     ep,
+                    numerics,
                     yes,
                     replica,
                     fallback,
@@ -1412,6 +1416,7 @@ struct DoLoadArgs {
     max_conc: Option<u64>,
     tp: Option<u64>,
     ep: Option<u64>,
+    numerics: Option<String>,
     yes: bool,
     replica: bool,
     fallback: bool,
@@ -1450,6 +1455,7 @@ fn do_load(args: DoLoadArgs) -> Result<(), String> {
         "ctx": args.ctx,
         "max_conc": args.max_conc,
         "tp": args.tp,
+        "numerics": args.numerics,
         "force": args.yes,
         "yes": args.yes,
         "replica": args.replica,
@@ -2433,6 +2439,7 @@ mod tests {
         assert!(parse(&["load", "org/m", "--gpu", "gpu2", "gpu3"]).is_ok());
         assert!(parse(&["load", "org/m", "--gpu", "gpu2,gpu3", "--ctx", "4096"]).is_ok());
         assert!(parse(&["load", "org/m", "--ctx", "16777216", "--max-conc", "4096"]).is_ok(), "the maxima themselves are accepted");
+        assert!(parse(&["load", "org/m", "--numerics", "tolerance"]).is_ok() && parse(&["load", "org/m", "--numerics", "fast"]).is_err());
         for bad in [["--ctx", "0"], ["--ctx", "16777217"], ["--max-conc", "0"], ["--max-conc", "18446744073709551615"]] {
             assert!(parse(&["load", "org/m", bad[0], bad[1]]).is_err(), "{bad:?}");
             assert!(parse(&["install", "org/m", bad[0], bad[1]]).is_err(), "{bad:?}");

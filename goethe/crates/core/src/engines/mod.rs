@@ -14,6 +14,7 @@ pub struct Engine {
     pub overhead_gb: f64,
     pub layer: Option<crate::pyenv::Layer>,
     pub params: Option<&'static [&'static str]>,
+    pub numerics: bool,
     pub command: fn(&EngineSpec) -> Result<Command, String>,
 }
 
@@ -47,7 +48,12 @@ fn placement_env(spec: &EngineSpec) -> [(&'static str, String); 3] {
 }
 
 pub fn command(spec: &EngineSpec) -> Result<Command, String> {
-    (of_card(spec.card)?.command)(spec)
+    // The engine's command line; a pinned --numerics on an engine without numerics contracts is refused, never dropped.
+    let e = of_card(spec.card)?;
+    if let (Some(n), false) = (spec.numerics, e.numerics) {
+        return Err(format!("--numerics {} needs a kernel pack; this model runs on {}", n.name(), e.id));
+    }
+    (e.command)(spec)
 }
 
 #[cfg(test)]
@@ -64,6 +70,7 @@ fn test_spec<'a>(dir: &'a Path, card: &'a toml::Value, gpus: &'a [u32]) -> Engin
         ctx: 4096,
         max_conc: 4,
         pool_tokens: crate::chooser::kv_tokens(4096, 4, crate::chooser::floor(&[])),
+        numerics: None,
         tp: gpus.len() as u64,
         mem_frac: 0.5,
         gpus,
@@ -86,6 +93,7 @@ pub struct EngineSpec<'a> {
     pub ctx: u64,
     pub max_conc: u64,
     pub pool_tokens: u64,
+    pub numerics: Option<goethe_proto::Numerics>,
     pub tp: u64,
     pub mem_frac: f64,
     pub gpus: &'a [u32],

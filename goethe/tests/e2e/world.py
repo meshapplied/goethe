@@ -506,12 +506,9 @@ class Cell:
 
     @staticmethod
     def engine_version() -> str:
-        text = (ENGINE / "crates/core/src/pyenv.rs").read_text()
-        return (
-            re.search(r"ENGINE_VERSION: &str = \"([0-9.]+)\"", text).group(1)
-            if re.search(r"ENGINE_VERSION: &str = \"([0-9.]+)\"", text)
-            else "0.3.0"
-        )
+        """The goethe-engine version goethe pins: goethe-engine/PIN, the one place it is written."""
+        pin = (ENGINE / "goethe-engine/PIN").read_text()
+        return re.search(r"^GOETHE_ENGINE_VERSION=([0-9.]+)$", pin, re.M).group(1)
 
     def run(
         self, *args: str, timeout: float = 120, env: dict | None = None, interrupt_after: float | None = None

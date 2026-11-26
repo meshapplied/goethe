@@ -1,5 +1,6 @@
 [
   {"action":"shell.run","args":{"cmd":"id"}},
+  {"action":"model.load","args":{"model_id":"qwen3-8b","numerics":"fast"}},
   {"action":"model.load","args":{"model_id":"m","extra":1}},
   {"action":"model.load","args":{}},
   {"action":"model.load","args":{"model_id":"m","gpus":[]}},
