@@ -1,5 +1,6 @@
 // Temporary public gateway (goethe api share): a second nginx listener that exists only while a window is open, for chosen existing keys.
 
+use crate::sys::unix_secs;
 use crate::{db, nginx, security};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -11,12 +12,12 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_PORT: u16 = 8444;
-pub const MIN_SECS: i64 = 60;
-pub const MAX_SECS: i64 = 7 * 86_400;
+const DEFAULT_PORT: u16 = 8444;
+const MIN_SECS: i64 = 60;
+const MAX_SECS: i64 = 7 * 86_400;
 const SUN_PATH_MAX: usize = 100;
 
-pub fn public_mux_socket(home: &Path) -> PathBuf {
+fn public_mux_socket(home: &Path) -> PathBuf {
     // Public-gateway traffic reaches goethed only over this socket, which only nginx can open, so the X-Real-IP it sets is the client's.
     nginx::nginx_prefix(home).join("mux-public.sock")
 }
@@ -95,7 +96,7 @@ pub struct Grant {
 }
 
 impl Share {
-    pub fn active_at(&self, now: i64) -> bool {
+    fn active_at(&self, now: i64) -> bool {
         self.open && now < self.until
     }
 
@@ -170,9 +171,6 @@ pub struct Opened {
     pub warnings: Vec<String>,
 }
 
-pub fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
-}
 
 fn path(home: &Path) -> PathBuf {
     nginx::nginx_prefix(home).join("public_share.json")
@@ -188,7 +186,7 @@ fn store(home: &Path, share: &Share) -> Result<(), String> {
 }
 
 pub fn active(home: &Path) -> Option<Share> {
-    load(home).filter(|s| s.active_at(now()))
+    load(home).filter(|s| s.active_at(unix_secs()))
 }
 
 pub fn parse_duration(raw: &str) -> Result<i64, String> {
@@ -232,7 +230,7 @@ pub fn check(home: &Path, key_id: &str, is_admin: bool, client: Option<IpAddr>) 
             }
         }
     };
-    decide(share.as_ref(), key_id, is_admin, now(), client)
+    decide(share.as_ref(), key_id, is_admin, unix_secs(), client)
 }
 
 fn decide(share: Option<&Share>, key_id: &str, is_admin: bool, now: i64, client: Option<IpAddr>) -> Access {
@@ -397,7 +395,7 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
     }
     let lock = nginx::gateway_lock(home)?;
     let previous = load(home);
-    let until = now() + a.secs;
+    let until = unix_secs() + a.secs;
     let mut warnings = Vec::new();
     let wanted: Vec<String> = if a.keys.is_empty() {
         previous.as_ref().map(|p| p.keys.clone()).filter(|k| !k.is_empty()).ok_or_else(|| {
@@ -408,13 +406,13 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
     };
     let reopen = a.keys.is_empty();
     let mut keys = resolve_keys(home, &wanted, until, &mut warnings)?;
-    let already: Vec<String> = keys.iter().filter(|k| previous.as_ref().is_some_and(|p| p.active_at(now()) && p.grant(&k.id).is_some_and(|g| g.until > now()))).map(|k| k.id.clone()).collect();
+    let already: Vec<String> = keys.iter().filter(|k| previous.as_ref().is_some_and(|p| p.active_at(unix_secs()) && p.grant(&k.id).is_some_and(|g| g.until > unix_secs()))).map(|k| k.id.clone()).collect();
     let cli_allow = a.allow.iter().map(|c| security::canonical_cidr(c)).collect::<Result<Vec<_>, _>>()?;
     let port = a.port.or(previous.as_ref().map(|p| p.port)).unwrap_or(DEFAULT_PORT);
     let mut grants: Vec<Grant> = previous
         .as_ref()
-        .filter(|p| p.active_at(now()))
-        .map(|p| p.keys.iter().filter_map(|k| p.grant(k)).filter(|g| g.until > now()).collect())
+        .filter(|p| p.active_at(unix_secs()))
+        .map(|p| p.keys.iter().filter_map(|k| p.grant(k)).filter(|g| g.until > unix_secs()).collect())
         .unwrap_or_default();
     for k in &keys {
         let kept = previous.as_ref().and_then(|p| p.grant(&k.id)).map(|g| g.allow).unwrap_or_default();
@@ -438,7 +436,7 @@ pub fn open(home: &Path, a: OpenArgs) -> Result<Opened, String> {
     if port == gateway_port || port == mux_port || port < 1024 {
         return Err(format!("port {port} is not usable for the public gateway; pick a free port above 1023 with --port"));
     }
-    let ours = previous.as_ref().is_some_and(|p| p.active_at(now()) && p.port == port);
+    let ours = previous.as_ref().is_some_and(|p| p.active_at(unix_secs()) && p.port == port);
     if !ours && !port_free(port) {
         return Err(format!("port {port} is in use; pick another with --port"));
     }
@@ -499,7 +497,7 @@ pub fn stop_key(home: &Path, key: &str) -> Result<bool, String> {
     if share.grants.len() == before {
         return Ok(false);
     }
-    if share.grants.iter().all(|g| g.until <= now()) {
+    if share.grants.iter().all(|g| g.until <= unix_secs()) {
         share.open = false;
     } else {
         share.settle();
@@ -515,14 +513,14 @@ pub fn shared(home: &Path) -> Vec<(String, Grant)> {
     // The keys the open gateway serves now, by name, with their own end and addresses.
     let Some(s) = active(home) else { return Vec::new() };
     let names = key_names(home, &s.keys);
-    s.keys.iter().zip(names).filter_map(|(k, n)| s.grant(k).filter(|g| g.until > now()).map(|g| (n, g))).collect()
+    s.keys.iter().zip(names).filter_map(|(k, n)| s.grant(k).filter(|g| g.until > unix_secs()).map(|g| (n, g))).collect()
 }
 
 pub fn shutdown(home: &Path) -> Result<bool, String> {
     // Close the window now and drop the listener; the chosen keys are remembered for the next opening.
     let _lock = nginx::gateway_lock(home)?;
     let Some(share) = load(home) else { return Ok(false) };
-    let was_open = share.active_at(now());
+    let was_open = share.active_at(unix_secs());
     if !share.open {
         return Ok(false);
     }
@@ -549,13 +547,13 @@ pub fn tick(home: &Path) {
 fn drop_ended(home: &Path) {
     // While the gateway stays open for some keys, a key whose time ended leaves it, and the addresses only it allowed go with it.
     let Some(share) = active(home) else { return };
-    if !share.grants.iter().any(|g| g.until <= now()) {
+    if !share.grants.iter().any(|g| g.until <= unix_secs()) {
         return;
     }
     let Ok(_lock) = nginx::gateway_lock(home) else { return };
     let Some(mut s) = active(home) else { return };
     let before = s.allow.clone();
-    s.grants.retain(|g| g.until > now());
+    s.grants.retain(|g| g.until > unix_secs());
     s.settle();
     if store(home, &s).is_ok() && s.allow != before && nginx::master_running(home) {
         if let Err(e) = nginx::apply_locked(home) {
@@ -568,12 +566,12 @@ fn close_expired(home: &Path) {
     // Mark an open window whose time ran out closed, under the gateway lock, and reload nginx without it.
     drop_ended(home);
     let Some(share) = load(home) else { return };
-    if !share.open || share.active_at(now()) {
+    if !share.open || share.active_at(unix_secs()) {
         return;
     }
     let Ok(_lock) = nginx::gateway_lock(home) else { return };
     match load(home) {
-        Some(s) if s.open && !s.active_at(now()) => {
+        Some(s) if s.open && !s.active_at(unix_secs()) => {
             if store(home, &Share { open: false, ..s }).is_ok() {
                             nginx::log_gateway(home, "public gateway closed: its time ran out");
                 if nginx::master_running(home) {
@@ -609,7 +607,7 @@ fn ensure_cert(home: &Path, ip: Option<IpAddr>) -> Result<(), String> {
         return Ok(());
     }
     nginx::self_signed(&key, &crt, true, 30, "goethe-public", &[&san, "basicConstraints=critical,CA:FALSE"])
-        .map_err(|_| "openssl could not create the public gateway certificate".to_string())?;
+        .map_err(|e| format!("the public gateway certificate could not be created: {e}"))?;
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&crt, fs::Permissions::from_mode(0o644)).map_err(|e| e.to_string())?;
     nginx::write_private(&san_file, stamp.as_bytes())
@@ -751,15 +749,15 @@ mod tests {
         let dir = home_with_keys();
         let h = dir.path();
         let mut w = Vec::new();
-        let got = resolve_keys(h, &["app".into(), "k1".into()], now() + 60, &mut w).unwrap();
+        let got = resolve_keys(h, &["app".into(), "k1".into()], unix_secs() + 60, &mut w).unwrap();
         assert_eq!(got.len(), 1, "the same key twice counts once");
         assert!(w.is_empty());
         assert!(got[0].token.is_none(), "no secret is read back");
-        assert!(resolve_keys(h, &["root".into()], now() + 60, &mut w).err().unwrap().contains("admin"));
-        assert!(resolve_keys(h, &["old".into()], now() + 60, &mut w).err().unwrap().contains("expired"));
-        assert!(resolve_keys(h, &["dup".into()], now() + 60, &mut w).err().unwrap().contains("several"));
-        assert!(resolve_keys(h, &["nope".into()], now() + 60, &mut w).err().unwrap().contains("app"));
-        resolve_keys(h, &["wide".into()], now() + 60, &mut w).unwrap();
+        assert!(resolve_keys(h, &["root".into()], unix_secs() + 60, &mut w).err().unwrap().contains("admin"));
+        assert!(resolve_keys(h, &["old".into()], unix_secs() + 60, &mut w).err().unwrap().contains("expired"));
+        assert!(resolve_keys(h, &["dup".into()], unix_secs() + 60, &mut w).err().unwrap().contains("several"));
+        assert!(resolve_keys(h, &["nope".into()], unix_secs() + 60, &mut w).err().unwrap().contains("app"));
+        resolve_keys(h, &["wide".into()], unix_secs() + 60, &mut w).unwrap();
         assert!(w.iter().any(|x| x.contains("every model")));
     }
 
@@ -770,7 +768,7 @@ mod tests {
         let con = db::open(h).unwrap();
         let stored = |id: &str| con.query_row("SELECT token_hash, token FROM api_keys WHERE key_id = ?1", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))).unwrap();
         let mut w = Vec::new();
-        let mut keys = resolve_keys(h, &["app".into(), "wide".into()], now() + 60, &mut w).unwrap();
+        let mut keys = resolve_keys(h, &["app".into(), "wide".into()], unix_secs() + 60, &mut w).unwrap();
         renew_secrets(h, &mut keys, &["k4".to_string()], &mut w);
         let token = keys[0].token.clone().expect("app is newly shared");
         assert_eq!(stored("k1"), (security::token_hash(&token), None), "only the new secret's hash is stored");
@@ -783,11 +781,11 @@ mod tests {
         let dir = home_with_keys();
         let h = dir.path();
         assert_eq!(nginx_block(h, true, 64), "");
-        store(h, &share(true, now() - 1)).unwrap();
+        store(h, &share(true, unix_secs() - 1)).unwrap();
         assert_eq!(nginx_block(h, true, 64), "", "expired");
-        store(h, &share(false, now() + 600)).unwrap();
+        store(h, &share(false, unix_secs() + 600)).unwrap();
         assert_eq!(nginx_block(h, true, 64), "", "shut down");
-        store(h, &Share { allow: vec!["203.0.113.7/32".into()], ..share(true, now() + 600) }).unwrap();
+        store(h, &Share { allow: vec!["203.0.113.7/32".into()], ..share(true, unix_secs() + 600) }).unwrap();
         let block = nginx_block(h, true, 64);
         assert!(block.contains("listen 0.0.0.0:8444 ssl"), "{block}");
         assert!(block.contains(&format!("server \"unix:{}\";", public_mux_socket(h).display())), "{block}");
@@ -799,7 +797,7 @@ mod tests {
     fn nginx_block_always_denies_all_even_with_an_empty_allowlist() {
         let dir = home_with_keys();
         let h = dir.path();
-        store(h, &Share { allow: vec![], ..share(true, now() + 600) }).unwrap();
+        store(h, &Share { allow: vec![], ..share(true, unix_secs() + 600) }).unwrap();
         let block = nginx_block(h, true, 64);
         assert!(block.contains("deny all;"), "{block}");
         assert!(!block.contains("allow "), "empty allowlist must not admit the world: {block}");
@@ -809,7 +807,7 @@ mod tests {
     fn an_edited_share_file_cannot_write_nginx_directives() {
         let dir = home_with_keys();
         let h = dir.path();
-        store(h, &Share { allow: vec!["198.51.100.7/32; include /etc/passwd".into(), "198.51.100.8".into()], ..share(true, now() + 600) }).unwrap();
+        store(h, &Share { allow: vec!["198.51.100.7/32; include /etc/passwd".into(), "198.51.100.8".into()], ..share(true, unix_secs() + 600) }).unwrap();
         let block = nginx_block(h, true, 64);
         assert!(!block.contains("include") && block.contains("allow 198.51.100.8/32;\n    deny all;"), "{block}");
     }
@@ -867,7 +865,7 @@ mod tests {
     fn nginx_block_with_everyone_still_ends_in_deny_all() {
         let dir = home_with_keys();
         let h = dir.path();
-        store(h, &Share { allow: vec!["0.0.0.0/0".into()], ..share(true, now() + 600) }).unwrap();
+        store(h, &Share { allow: vec!["0.0.0.0/0".into()], ..share(true, unix_secs() + 600) }).unwrap();
         let block = nginx_block(h, true, 64);
         assert!(block.contains("allow 0.0.0.0/0;\n    deny all;"), "{block}");
         assert!(block.contains(&format!("rate={DEFAULT_RATE_PER_IP}r/s")), "{block}");
@@ -885,7 +883,7 @@ mod tests {
         std::env::remove_var("GOETHE_SHARE_CONN_PER_IP");
         assert_eq!(share_rate(h), 25);
         assert_eq!(share_conn(h), 40);
-        store(h, &Share { allow: vec!["203.0.113.7/32".into()], ..share(true, now() + 600) }).unwrap();
+        store(h, &Share { allow: vec!["203.0.113.7/32".into()], ..share(true, unix_secs() + 600) }).unwrap();
         let block = nginx_block(h, true, 64);
         assert!(block.contains("rate=25r/s"), "{block}");
         assert!(block.contains("burst=50"), "{block}");
@@ -898,11 +896,11 @@ mod tests {
         let h = dir.path();
         let ip = Some("203.0.113.1".parse::<IpAddr>().unwrap());
         assert_eq!(check(h, "k1", false, ip), Access::Closed);
-        store(h, &share(true, now() + 600)).unwrap();
+        store(h, &share(true, unix_secs() + 600)).unwrap();
         assert_eq!(check(h, "k1", false, ip), Access::Allowed);
-        store(h, &Share { keys: vec!["k4".into()], ..share(true, now() + 600) }).unwrap();
+        store(h, &Share { keys: vec!["k4".into()], ..share(true, unix_secs() + 600) }).unwrap();
         assert_eq!(check(h, "k1", false, ip), Access::KeyNotShared, "a replaced key stops at the next request");
-        store(h, &Share { open: false, ..share(true, now() + 600) }).unwrap();
+        store(h, &Share { open: false, ..share(true, unix_secs() + 600) }).unwrap();
         assert_eq!(check(h, "k1", false, ip), Access::Closed);
         fs::remove_file(path(h)).unwrap();
         assert_eq!(check(h, "k1", false, ip), Access::Closed);
@@ -912,12 +910,12 @@ mod tests {
     fn tick_closes_an_expired_window_and_keeps_the_keys() {
         let dir = home_with_keys();
         let h = dir.path();
-        store(h, &share(true, now() - 5)).unwrap();
+        store(h, &share(true, unix_secs() - 5)).unwrap();
         tick(h);
         let s = load(h).unwrap();
         assert!(!s.open);
         assert_eq!(s.keys, vec!["k1".to_string()]);
-        store(h, &share(true, now() + 600)).unwrap();
+        store(h, &share(true, unix_secs() + 600)).unwrap();
         tick(h);
         assert!(load(h).unwrap().open, "an open window stays open");
     }

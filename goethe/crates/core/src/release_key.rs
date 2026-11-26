@@ -81,7 +81,7 @@ pub(crate) mod test_key {
     static KEY: Mutex<Option<String>> = Mutex::new(None);
     static SERIAL: Mutex<()> = Mutex::new(());
 
-    pub struct Held(#[allow(dead_code)] MutexGuard<'static, ()>);
+    pub(crate) struct Held(#[allow(dead_code)] MutexGuard<'static, ()>);
 
     impl Drop for Held {
         fn drop(&mut self) {

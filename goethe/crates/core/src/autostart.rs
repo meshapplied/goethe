@@ -36,7 +36,7 @@ pub fn desired_exists(con: &Connection, slot_key: &str) -> bool {
         .is_ok()
 }
 
-pub fn restore_enabled(home: &Path) -> bool {
+fn restore_enabled(home: &Path) -> bool {
     let Ok(con) = db::open(home) else {
         return true;
     };

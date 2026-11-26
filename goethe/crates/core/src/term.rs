@@ -46,7 +46,7 @@ fn paint_if(on: bool, text: &str, color: Color) -> String {
     format!("\x1b[{code}m{text}\x1b[0m")
 }
 
-pub fn status_color(status: &str) -> Option<Color> {
+fn status_color(status: &str) -> Option<Color> {
     // The color of a status word, judged by its first word so "RESTARTING (attempt 2)" still matches.
     let word = status.split_whitespace().next().unwrap_or("").trim_end_matches(':').to_ascii_uppercase();
     match word.as_str() {
@@ -157,7 +157,7 @@ fn render_table(header: &[String], rows: &[Vec<String>], color: bool) -> String 
     out
 }
 
-pub const BAR_CELLS: usize = 20;
+const BAR_CELLS: usize = 20;
 
 pub fn bar(percent: u32) -> String {
     bar_if(color_enabled(), percent)

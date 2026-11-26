@@ -1,7 +1,7 @@
 // Engine spawn, startup wait, refit and respawn for load.
 
 use super::{
-    append_goethed_log, health_ok, log_file_len, next_port, now_epoch_secs, serves, slot_lock, warm_up,
+    append_goethed_log, health_ok, log_file_len, next_port, serves, slot_lock, warm_up,
     Starting, Startup, GPU_RELEASE_WAIT,
 };
 use crate::autostart;
@@ -157,7 +157,7 @@ pub(super) fn startup(s: &mut Starting) {
 pub(super) fn wait_engine_ready(s: &Starting) -> Startup {
     // Ready needs every listener on the port to be ours, /health to answer and /v1/models to list our model.
     let hard_cap = crate::startup_stall::hard_cap_secs_from_env();
-    let mut tracker = crate::startup_stall::StallTracker::new(now_epoch_secs(), log_file_len(&s.log_path));
+    let mut tracker = crate::startup_stall::StallTracker::new(crate::sys::unix_secs(), log_file_len(&s.log_path));
     loop {
         if load_slot::is_cancelled(&s.cancel) {
             return Startup::Cancelled;
@@ -169,7 +169,7 @@ pub(super) fn wait_engine_ready(s: &Starting) -> Startup {
             PortOwner::Nobody => false,
         };
         let progress = log_file_len(&s.log_path) + tree_cpu_ticks(&proc_ident::instance_pids(&s.identity));
-        let step = crate::startup_stall::poll_startup_step(&mut tracker, now_epoch_secs(), alive, progress, ready, hard_cap);
+        let step = crate::startup_stall::poll_startup_step(&mut tracker, crate::sys::unix_secs(), alive, progress, ready, hard_cap);
         match step {
             crate::startup_stall::StartupStep::Ready => return Startup::Ready,
             crate::startup_stall::StartupStep::Failed(why) => {

@@ -153,7 +153,7 @@ pub fn credentials_path(home: &Path) -> PathBuf {
     platform_dir(home).join("credentials")
 }
 
-pub fn install_key_path(home: &Path) -> PathBuf {
+fn install_key_path(home: &Path) -> PathBuf {
     platform_dir(home).join("install_key")
 }
 
@@ -185,7 +185,7 @@ pub fn node_key(home: &Path) -> Result<goethe_proto::InstallKey, String> {
     goethe_proto::InstallKey::from_pkcs8(&pkcs8).ok_or_else(|| "could not read the node key back".to_string())
 }
 
-pub fn state_path(home: &Path) -> PathBuf {
+pub(crate) fn state_path(home: &Path) -> PathBuf {
     platform_dir(home).join("platform_state.json")
 }
 
@@ -238,7 +238,7 @@ fn check_private_dir(dir: &Path, fix: bool) -> Result<bool, String> {
     Ok(true)
 }
 
-pub fn ensure_platform_dir(home: &Path) -> Result<PathBuf, String> {
+fn ensure_platform_dir(home: &Path) -> Result<PathBuf, String> {
     // GOETHE_HOME/platform at 0700, created or tightened as needed; GOETHE_HOME itself is only checked, never changed.
     check_home(home)?;
     if !home.exists() {
@@ -326,7 +326,7 @@ pub fn load_credentials(home: &Path) -> Result<Option<Credentials>, String> {
     Ok(Some(creds))
 }
 
-pub fn validate_credentials(c: &Credentials) -> Result<(), String> {
+fn validate_credentials(c: &Credentials) -> Result<(), String> {
     check_url(&c.platform_url)?;
     valid_id(&c.node_id).then_some(()).ok_or("the node id is not valid")?;
     valid_token(c.token.expose()).then_some(()).ok_or("the node token is not valid")?;
@@ -424,7 +424,7 @@ pub fn fingerprint() -> String {
     fingerprint_of(&id)
 }
 
-pub const HOME_MACHINE_ID: &str = "machine-id";
+const HOME_MACHINE_ID: &str = "machine-id";
 
 pub fn ensure_home_machine_id(home: &Path) -> Result<(), String> {
     // A container has no /etc/machine-id of its own: one is made once in its home, so recreating the container keeps the same console node.
@@ -435,7 +435,7 @@ pub fn ensure_home_machine_id(home: &Path) -> Result<(), String> {
     write_private(&path, crate::security::random_hex(16).as_bytes())
 }
 
-pub fn fingerprint_of(machine_id: &str) -> String {
+fn fingerprint_of(machine_id: &str) -> String {
     crate::sha::digest_hex(format!("{machine_id}{FINGERPRINT_SALT}").as_bytes())
 }
 
@@ -456,13 +456,13 @@ pub fn hostname() -> String {
     }
 }
 
-pub fn host_label(raw: &str) -> String {
+fn host_label(raw: &str) -> String {
     // The platform takes letters, digits, dot, dash and underscore; anything else (a space, an apostrophe) becomes a dash.
     let mapped: String = raw.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' }).collect();
     mapped.trim_matches('-').chars().take(253).collect()
 }
 
-pub fn public_ip_url(home: &Path) -> Result<String, String> {
+fn public_ip_url(home: &Path) -> Result<String, String> {
     // GOETHE_PUBLIC_IP_URL, else /api/ip on the linked platform, else on the configured or default one.
     if let Some(u) = crate::paths::setting("GOETHE_PUBLIC_IP_URL") {
         return Ok(u.trim().to_string());
@@ -474,7 +474,7 @@ pub fn public_ip_url(home: &Path) -> Result<String, String> {
     Ok(format!("{base}/api/ip"))
 }
 
-pub fn parse_ip_answer(url: &str, body: &str) -> Result<std::net::IpAddr, String> {
+fn parse_ip_answer(url: &str, body: &str) -> Result<std::net::IpAddr, String> {
     // {"ip": "..."} from the platform, {"ip": null} when it sees no public address, or a plain-text address.
     let text = body.trim();
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {

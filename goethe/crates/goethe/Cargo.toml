@@ -22,3 +22,6 @@ test-release-key = ["goethe-core/test-release-key"]
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

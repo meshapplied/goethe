@@ -20,7 +20,7 @@ pub struct ScanOpts {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ScanRow {
+struct ScanRow {
     pub dir: String,
     pub model_id: Option<String>,
     pub status: String,
@@ -39,7 +39,7 @@ pub struct SglangInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SglangSnapshot {
+struct SglangSnapshot {
     pub sglang: String,
     pub archs: BTreeSet<String>,
     pub quants: BTreeSet<String>,
@@ -71,7 +71,7 @@ pub enum State {
     Supported { id: String, arch: String, kind: String, size_gb: f64, notes: Vec<String> },
 }
 
-pub struct Finding {
+struct Finding {
     pub path: PathBuf,
     pub name: String,
     pub state: State,
@@ -335,7 +335,7 @@ fn machine(home: &Path, con: &Connection) -> Machine {
     }
 }
 
-pub fn survey(home: &Path, con: &Connection, dirs: Vec<PathBuf>, m: &Machine) -> Vec<Finding> {
+fn survey(home: &Path, con: &Connection, dirs: Vec<PathBuf>, m: &Machine) -> Vec<Finding> {
     // Skip hidden and goethe-internal dirs, report registered ones, classify the rest.
     let owners = registered_dirs(home, con);
     let mut out = Vec::new();
@@ -407,7 +407,7 @@ fn model_id_for(name: &str, con: &Connection, path: &Path) -> Result<String, Str
     }
 }
 
-pub fn classify(dir: &Path, m: &Machine) -> Verdict {
+fn classify(dir: &Path, m: &Machine) -> Verdict {
     // Decide whether goethe can serve the model in dir, with a concrete reason when it cannot.
     if let Some(path) = crate::engines::ninfer::ninfer_in(dir) {
         return match crate::engines::ninfer::verify_ninfer_file(&path) {
@@ -682,7 +682,7 @@ pub fn sglang_support(home: &Path) -> SglangInfo {
     })
 }
 
-pub fn bundled_snapshot() -> SglangSnapshot {
+fn bundled_snapshot() -> SglangSnapshot {
     serde_json::from_str(SGLANG_SNAPSHOT).expect("cdn/v1/sglang_support.json is checked by cargo test")
 }
 
@@ -695,7 +695,7 @@ fn sglang_dist(site: &Path) -> Option<String> {
         .find(|n| n.starts_with("sglang-") && n.ends_with(".dist-info"))
 }
 
-pub fn read_sglang(site: &Path) -> Option<SglangSnapshot> {
+fn read_sglang(site: &Path) -> Option<SglangSnapshot> {
     // EntryClass names and CUDA quantization methods of the SGLang in a site-packages or unpacked wheel, as text.
     let dist = sglang_dist(site)?;
     let srt = site.join("sglang/srt");
@@ -713,7 +713,7 @@ pub fn read_sglang(site: &Path) -> Option<SglangSnapshot> {
     Some(SglangSnapshot { sglang: version, archs, quants })
 }
 
-pub fn sglang_info(home: &Path) -> Option<SglangInfo> {
+fn sglang_info(home: &Path) -> Option<SglangInfo> {
     // EntryClass names and CUDA quantization methods of the py-env's SGLang, read as text, cached per build.
     let lib = home.join("py-env/lib");
     let site = fs::read_dir(&lib)
@@ -745,7 +745,7 @@ pub fn sglang_info(home: &Path) -> Option<SglangInfo> {
     Some(info)
 }
 
-pub fn entry_classes(source: &str) -> Vec<String> {
+fn entry_classes(source: &str) -> Vec<String> {
     // Class names assigned to a top-level EntryClass, as a name, list or tuple (possibly multi-line).
     let mut out = Vec::new();
     let mut rest = source;
@@ -773,7 +773,7 @@ pub fn entry_classes(source: &str) -> Vec<String> {
     out
 }
 
-pub fn quant_methods(source: &str) -> BTreeSet<String> {
+fn quant_methods(source: &str) -> BTreeSet<String> {
     // Keys of BASE_QUANTIZATION_METHODS plus .update() blocks guarded by an is_cuda() condition.
     let mut out = BTreeSet::new();
     let mut guard = String::new();

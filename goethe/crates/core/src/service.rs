@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 
 const CRON_MARKER: &str = "# goethe-goethed-reboot";
 
-pub fn enable_boot(home: &Path) -> Result<Vec<String>, String> {
+fn enable_boot(home: &Path) -> Result<Vec<String>, String> {
     // Prefer systemd when it is PID 1 (with lingering for a user unit); containers without it get cron and a nohup start; macOS a LaunchAgent.
     let goethed = home.join("bin/goethed");
     if !goethed.is_file() {
@@ -197,7 +197,7 @@ pub fn refresh_unit(home: &Path) {
     }
 }
 
-pub fn spawn_goethed(home: &Path) -> Result<(), String> {
+fn spawn_goethed(home: &Path) -> Result<(), String> {
     spawn(home, true)
 }
 
@@ -258,9 +258,9 @@ pub mod launchd {
     // macOS: a LaunchAgent starts goethed at login and after a crash; engines outlive it (AbandonProcessGroup).
     use super::*;
 
-    pub const LABEL: &str = "sh.goethe.goethed";
+    const LABEL: &str = "sh.goethe.goethed";
 
-    pub fn plist_path() -> PathBuf {
+    fn plist_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_default();
         PathBuf::from(home).join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
     }
@@ -269,7 +269,7 @@ pub mod launchd {
         s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
     }
 
-    pub fn plist_text(home: &Path) -> String {
+    fn plist_text(home: &Path) -> String {
         let h = xml(&home.display().to_string());
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>

@@ -86,7 +86,7 @@ pub fn localhost_port_free(port: u16) -> bool {
     TcpListener::bind(addr).is_ok()
 }
 
-pub fn resolve_mux_port(
+fn resolve_mux_port(
     explicit: Option<u16>,
     persisted: Option<u16>,
     mut is_free: impl FnMut(u16) -> bool,
@@ -115,7 +115,7 @@ pub fn resolve_mux_port(
     Err("no free mux port in 127.0.0.1:30100-30199".to_string())
 }
 
-pub fn resolve_public_port(
+fn resolve_public_port(
     explicit: Option<u16>,
     persisted: Option<u16>,
     mut is_free: impl FnMut(u16) -> bool,

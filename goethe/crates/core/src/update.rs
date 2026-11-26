@@ -333,7 +333,7 @@ fn local_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-pub fn compare_versions(a: &str, b: &str) -> Ordering {
+fn compare_versions(a: &str, b: &str) -> Ordering {
     // Semver order: numeric major.minor.patch, then a release sorts after any prerelease of it.
     let parse = |v: &str| {
         let v = v.trim().trim_start_matches('v');

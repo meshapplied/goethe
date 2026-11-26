@@ -51,7 +51,7 @@ impl Passkey {
         self.sign_as(commands, RP_ID, CONSOLE_ORIGIN, true)
     }
 
-    pub fn sign_as(&self, commands: &[Command], rp_id: &str, origin: &str, verified: bool) -> Vec<SignedCommand> {
+    pub(crate) fn sign_as(&self, commands: &[Command], rp_id: &str, origin: &str, verified: bool) -> Vec<SignedCommand> {
         // One tap over the whole batch, then one signed command per node, as the console submits them.
         let p = prepare(commands).expect("commands share one batch");
         let assertion = self.assert(&p.challenge, rp_id, origin, verified);

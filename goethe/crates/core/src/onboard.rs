@@ -287,7 +287,7 @@ fn step_access(model: &str) -> Result<(), String> {
         dangerously_allow_all_inbound: false,
     })?;
     let token = choose_key(model)?;
-    READY.lock().unwrap_or_else(|e| e.into_inner()).replace((api.clone(), model.to_string(), token.clone()));
+    READY.lock().unwrap_or_else(|e| e.into_inner()).replace((api, model.to_string(), token));
     Ok(())
 }
 

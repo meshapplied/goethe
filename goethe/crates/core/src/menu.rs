@@ -1720,7 +1720,7 @@ impl SharePage {
                 self.say(
                     format!(
                         "Shared {name} until {}; send {} with the key.{clients}{warn}",
-                        share::local_time(share::now() + secs),
+                        share::local_time(crate::sys::unix_secs() + secs),
                         o.cert.display()
                     ),
                     false,
@@ -1765,7 +1765,7 @@ impl Page for SharePage {
         let nw = self.shared.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
         for (i, (name, g)) in self.shared.iter().enumerate() {
             let from = if g.allow.is_empty() { "any address".to_string() } else { g.allow.join(", ") };
-            let left = g.until - share::now();
+            let left = g.until - crate::sys::unix_secs();
             let left = if left >= 86_400 { format!("{}d {}h", left / 86_400, left % 86_400 / 3600) } else { format!("{}h {}m", left / 3600, left % 3600 / 60) };
             let row = format!("{name:<nw$}{GAP}until {} ({left} left){GAP}from {from}", share::local_time(g.until));
             let row = if here == Slot::Shared(i) { sgr(&hl(), &row) } else { row };
@@ -2818,7 +2818,7 @@ mod tests {
 
     #[test]
     fn the_public_page_lists_shared_keys_and_takes_a_key_a_time_and_addresses() {
-        let soon = crate::public_share::now() + 3 * 3600;
+        let soon = crate::sys::unix_secs() + 3 * 3600;
         let mut p = share_page(&[("app", soon, &["203.0.113.7/32"])]);
         let t = text(p.render(140, 40));
         assert!(t.iter().any(|l| l.contains("Gateway") && l.contains("https://203.0.113.1:8444/v1")), "{t:?}");
@@ -2842,7 +2842,7 @@ mod tests {
 
     #[test]
     fn stopping_a_key_or_the_gateway_asks_twice() {
-        let soon = crate::public_share::now() + 3600;
+        let soon = crate::sys::unix_secs() + 3600;
         let mut p = share_page(&[("app", soon, &[])]);
         p.at = 0;
         assert_eq!(p.slot(), Slot::Shared(0));

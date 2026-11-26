@@ -105,7 +105,7 @@ pub struct PlanError {
     pub gpus: Vec<u32>,
 }
 
-pub fn valid_tp_values(input: &ChooserInput, gpu_count: usize) -> Vec<usize> {
+fn valid_tp_values(input: &ChooserInput, gpu_count: usize) -> Vec<usize> {
     // Tensor parallel sizes that divide the attention heads and fit the KV head layout.
     let heads = input.num_attention_heads.max(1) as usize;
     let kv = input.num_kv_heads.max(1) as usize;
@@ -123,7 +123,7 @@ pub fn valid_tp_values(input: &ChooserInput, gpu_count: usize) -> Vec<usize> {
     out
 }
 
-pub fn kv_shard(t: usize, num_kv_heads: u64, attention: &str) -> f64 {
+fn kv_shard(t: usize, num_kv_heads: u64, attention: &str) -> f64 {
     if attention == "mla" {
         1.0
     } else {
@@ -136,12 +136,12 @@ pub fn kv_tokens(ctx: u64, max_conc: u64, floor: u64) -> u64 {
     ctx.saturating_add(max_conc.max(1).saturating_sub(1).saturating_mul(floor.min(ctx)))
 }
 
-pub fn state_slots(m: &MemorySpec, max_conc: u64) -> u64 {
+fn state_slots(m: &MemorySpec, max_conc: u64) -> u64 {
     // State slots SGLang needs for max_conc requests with prefix caching (5 per request on extra-buffer models, else 3).
     m.state_slots_per_request.saturating_mul(max_conc.max(1))
 }
 
-pub fn swa_ratio(m: &MemorySpec, max_conc: u64, pool_tokens: u64) -> f64 {
+fn swa_ratio(m: &MemorySpec, max_conc: u64, pool_tokens: u64) -> f64 {
     // --swa-full-tokens-ratio that gives the window pool exactly the tokens max_conc requests need (at most 1).
     (m.swa_tokens(max_conc) as f64 / pool_tokens.max(1) as f64).clamp(1e-6, 1.0)
 }

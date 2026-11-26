@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 pub const SCHEMA: u32 = 1;
 pub const DEFAULT_MAX_GB: f64 = 20.0;
-pub const MIN_FREE_GB: f64 = 10.0;
+const MIN_FREE_GB: f64 = 10.0;
 pub const RESPONSE_CAP: usize = 32 << 20;
 const SETTING: &str = "trace";
 const LOCK: &str = ".lock";
@@ -129,7 +129,7 @@ impl TraceConfig {
 }
 
 pub fn load_config(con: &Connection) -> TraceConfig {
-    crate::db::setting(con, SETTING).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
+    crate::db::setting_json(con, SETTING)
 }
 
 fn save_config(con: &Connection, cfg: &TraceConfig) -> Result<(), String> {

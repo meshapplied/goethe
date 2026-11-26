@@ -157,10 +157,10 @@ impl LearnConfig {
 }
 
 pub fn load_config(con: &Connection) -> LearnConfig {
-    crate::db::setting(con, SETTING).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
+    crate::db::setting_json(con, SETTING)
 }
 
-pub fn notes_dir(home: &Path) -> PathBuf {
+fn notes_dir(home: &Path) -> PathBuf {
     home.join("learn").join("sessions")
 }
 
@@ -1234,7 +1234,7 @@ impl Store {
         s.dirty = true;
     }
 
-    pub fn save_dirty(&self) {
+    fn save_dirty(&self) {
         let handles: Vec<(String, Arc<Mutex<Session>>)> = lock(&self.sessions).iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect();
         for (id, h) in handles {
             let mut s = lock(&h);

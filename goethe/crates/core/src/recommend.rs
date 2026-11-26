@@ -184,7 +184,7 @@ fn file_free_mb(g: &GpuState) -> u64 {
 
 const BANDS_GB: &[u32] = &[24, 48, 96, 192, 384, 768, 1536];
 
-pub fn band_label(total_gb: f64) -> String {
+fn band_label(total_gb: f64) -> String {
     // The smallest size band a model's total VRAM need falls in.
     match BANDS_GB.iter().find(|b| total_gb <= f64::from(**b)) {
         Some(b) => format!("Up to {b} GB"),

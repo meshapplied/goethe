@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-pub const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 1;
 
 const DDL: &str = r"
 CREATE TABLE IF NOT EXISTS installed_models (
@@ -130,6 +130,11 @@ CREATE TABLE IF NOT EXISTS watchdog_probe_state (
 
 pub fn setting(con: &Connection, key: &str) -> Option<String> {
     con.query_row("SELECT value FROM goethe_settings WHERE key = ?1", [key], |r| r.get(0)).ok()
+}
+
+pub fn setting_json<T: Default + serde::de::DeserializeOwned>(con: &Connection, key: &str) -> T {
+    // A JSON setting, or the default when it is missing or does not parse.
+    setting(con, key).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
 }
 
 pub fn set_setting(con: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {

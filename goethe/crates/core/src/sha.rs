@@ -10,9 +10,7 @@ pub fn digest(parts: &[&[u8]]) -> [u8; 32] {
     out
 }
 
-pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
+pub use goethe_proto::hex;
 
 pub fn digest_hex(bytes: &[u8]) -> String {
     hex(&digest(&[bytes]))

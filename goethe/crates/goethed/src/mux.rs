@@ -2168,7 +2168,7 @@ data: {\"error\":{\"message\":\"context too long\",\"type\":\"BadRequestError\",
         tokio::spawn(goethe_core::client::serve(ours, node, gateway(m)));
         let (mut c, conn) = hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(theirs)).await.unwrap();
         tokio::spawn(conn);
-        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let now_ms = goethe_core::sys::unix_ms();
         let req = Request::post("http://node/v1/chat/completions")
             .header(goethe_proto::REQUEST_ID_HEADER, "r-1")
             .header(goethe_proto::KEY_ID_HEADER, "key1")

@@ -105,7 +105,7 @@ pub(crate) fn unload_quietly(model: &str) {
     let _ = std::process::Command::new(exe).args(["unload", model]).stdin(null()).stdout(null()).stderr(null()).process_group(0).spawn();
 }
 
-pub fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, String> {
+fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, String> {
     // Whether run must load the model first: no when it serves, yes when installed, else the install hint (run never installs).
     match (loaded, installed) {
         (true, _) => Ok(false),
@@ -114,7 +114,7 @@ pub fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, Str
     }
 }
 
-pub const RUN_CTX: u64 = 100_000;
+const RUN_CTX: u64 = 100_000;
 
 pub(crate) fn wait_routed(home: &std::path::Path, model: &str) -> std::sync::Arc<crate::gateway_cache::Snapshot> {
     // The gateway view once the model serves, or after 15 minutes (target then says it is not loaded).
@@ -386,15 +386,7 @@ pub(crate) fn embed_line(e: &[f64]) -> String {
 
 fn base64(bytes: &[u8]) -> String {
     // Standard base64 with padding.
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for c in bytes.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            out.push(if i <= c.len() { T[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
-        }
-    }
-    out
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
 }
 
 fn reply(r: Result<ureq::Response, ureq::Error>) -> Result<Value, String> {

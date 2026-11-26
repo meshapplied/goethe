@@ -3,9 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const GCC_MIN: u32 = 9;
-pub const GCC_MAX: u32 = 15;
-pub const CLANG_MAX: u32 = 20;
+const GCC_MIN: u32 = 9;
+const GCC_MAX: u32 = 15;
+const CLANG_MAX: u32 = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Compiler {
@@ -71,7 +71,7 @@ pub fn verdict(c: Option<&Compiler>, distro: &str) -> Verdict {
     Verdict::Ok(label)
 }
 
-pub fn install_hint(distro: &str) -> String {
+fn install_hint(distro: &str) -> String {
     let cmd = if distro.contains("ubuntu") || distro.contains("debian") {
         "sudo apt install build-essential"
     } else if distro.contains("rhel") || distro.contains("fedora") || distro.contains("centos") {

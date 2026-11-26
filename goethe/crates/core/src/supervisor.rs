@@ -50,7 +50,7 @@ const HTTP_PROBE_SECS: u64 = 25;
 const WARM_UP_SECS: u64 = 900;
 const USER_GATE_WAIT: Duration = Duration::from_secs(590);
 
-pub type LoadErr = (i32, String, Value);
+type LoadErr = (i32, String, Value);
 
 pub(super) fn slot_lock(key: &str) -> Arc<Mutex<()>> {
     let map = SLOT_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -582,7 +582,10 @@ fn fetch_installed(con: &Connection, model_id: &str) -> Result<InstRow, String> 
             })
         },
     )
-    .map_err(|_| format!("model {model_id} not installed"))
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => format!("model {model_id} not installed"),
+        e => format!("model {model_id}: the installed models table cannot be read: {e}"),
+    })
 }
 
 fn default_ctx(row: &InstRow) -> u64 {
@@ -788,13 +791,6 @@ pub(super) fn log_file_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
-pub(super) fn now_epoch_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 pub fn watchdog_tick() {
     // Probe RUNNING engines; restart dead ones within budget, else stop them (verified) and mark FAILED.
     let _guard = match WATCHDOG_TICK_LOCK.try_lock() {
@@ -810,7 +806,7 @@ pub fn watchdog_tick() {
         return;
     };
     retry_stuck_stops(&con, &home);
-    let now = now_epoch_secs();
+    let now = crate::sys::unix_secs();
     for i in insts(&con, "status = 'RUNNING'", &[]).unwrap_or_default() {
         let alive = i.identity.as_ref().is_some_and(proc_ident::leader_alive);
         if !alive && i.identity.as_ref().is_some_and(proc_ident::leader_unreadable) {
@@ -854,7 +850,7 @@ pub fn watchdog_tick() {
         let params = load_params_for_slot(&con, &i.slot_key, &i.model_id);
         let backoff = crate::watchdog_policy::restart_backoff_secs(i.restarts);
         if params.is_some() {
-            next_attempts().insert(i.slot_key.clone(), now_epoch_secs() + backoff as i64);
+            next_attempts().insert(i.slot_key.clone(), crate::sys::unix_secs() + backoff as i64);
         }
         let to = if params.is_some() { "RESTARTING" } else { "FAILED" };
         match (retire(&con, &home, &i, "STOPPING", to), params) {
@@ -883,7 +879,7 @@ fn retry_stuck_stops(con: &Connection, home: &Path) {
             match load_params_for_slot(con, &i.slot_key, &i.model_id) {
                 Some(params) => {
                     let backoff = crate::watchdog_policy::restart_backoff_secs(i.restarts);
-                    next_attempts().insert(i.slot_key.clone(), now_epoch_secs() + backoff as i64);
+                    next_attempts().insert(i.slot_key.clone(), crate::sys::unix_secs() + backoff as i64);
                     schedule_restart(params, i.restarts, backoff);
                 }
                 None => {
@@ -1029,7 +1025,7 @@ fn watchdog_may_restart(con: &Connection, slot_key: &str) -> bool {
         )
         .ok();
     let (start, count) = row.map(|(s, c)| (Some(s), c)).unwrap_or((None, 0));
-    match crate::watchdog_policy::decide_restart(now_epoch_secs(), start, count) {
+    match crate::watchdog_policy::decide_restart(crate::sys::unix_secs(), start, count) {
         crate::watchdog_policy::RestartDecision::DenyFailed => false,
         crate::watchdog_policy::RestartDecision::Allow {
             new_window_start,
@@ -1080,6 +1076,14 @@ fn uuid_simple() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_row_is_not_installed_and_any_other_read_error_keeps_its_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = |con: &Connection| fetch_installed(con, "org/m").err().unwrap();
+        assert_eq!(e(&db::open(dir.path()).unwrap()), "model org/m not installed");
+        assert!(e(&Connection::open_in_memory().unwrap()).contains("no such table: installed_models"));
+    }
 
     #[test]
     fn each_task_warms_up_with_a_request_it_answers() {
@@ -1398,7 +1402,7 @@ mod tests {
             assert_eq!(row(con), ("RESTARTING".to_string(), 0));
             let ps = handle_ps().unwrap();
             let next = ps[0]["next_attempt_at"].as_i64().expect("next attempt time in ps");
-            assert!(next >= now_epoch_secs());
+            assert!(next >= crate::sys::unix_secs());
             let failed = (0..60).any(|_| {
                 thread::sleep(Duration::from_millis(250));
                 row(con).0 == "FAILED"

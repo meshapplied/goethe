@@ -42,6 +42,6 @@ pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
-pub(crate) fn hex(bytes: &[u8]) -> String {
+pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

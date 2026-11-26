@@ -67,7 +67,7 @@ impl fmt::Display for Net {
     }
 }
 
-pub fn private_block(ip: Ipv4Addr) -> Option<Net> {
+fn private_block(ip: Ipv4Addr) -> Option<Net> {
     // The RFC 1918 or RFC 6598 block an address belongs to.
     PRIVATE_BLOCKS.iter().map(|&(a, p)| Net::new(a, p)).find(|n| n.contains(ip))
 }

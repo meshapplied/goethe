@@ -82,11 +82,8 @@ pub struct EnvironmentInfo {
 const NETWORK_FS: &[&str] = &["nfs", "nfs4", "cifs", "smb3", "smbfs", "ceph", "glusterfs", "9p", "lustre", "beegfs", "gpfs", "afs"];
 
 pub fn sysroot() -> PathBuf {
-    // Root for /proc, /sys and /etc reads; GOETHE_TEST_SYSROOT redirects it in tests.
-    std::env::var_os("GOETHE_TEST_SYSROOT")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+    // Root for /proc, /sys and /etc reads; the parsers take it as a parameter so tests pass a fixture tree.
+    PathBuf::from("/")
 }
 
 pub fn probe_host(home: &Path, cloud: &str) -> HostInfo {
@@ -156,7 +153,7 @@ pub fn mem_available_gb() -> Option<f64> {
     (mem.total_mb > 0).then_some(mem.available_mb as f64 / 1024.0)
 }
 
-pub fn detect_environment(root: &Path, env: &BTreeMap<String, String>, public_port: u16) -> EnvironmentInfo {
+fn detect_environment(root: &Path, env: &BTreeMap<String, String>, public_port: u16) -> EnvironmentInfo {
     // Classify container runtime, init system, cloud provider, volumes and public endpoints.
     let container = detect_container(root, env);
     let (cloud, instance_id) = detect_cloud(root, env);
@@ -274,7 +271,7 @@ fn endpoint_hints(cloud: &str, env: &BTreeMap<String, String>, public_port: u16)
     out
 }
 
-pub fn parse_cpuinfo(text: &str) -> CpuInfo {
+fn parse_cpuinfo(text: &str) -> CpuInfo {
     // Count sockets, physical cores and threads from /proc/cpuinfo blocks.
     let mut info = CpuInfo::default();
     let mut sockets = BTreeSet::new();
@@ -338,7 +335,7 @@ fn numa_nodes(root: &Path) -> Vec<NumaNode> {
     out
 }
 
-pub fn parse_meminfo(text: &str) -> MemoryInfo {
+fn parse_meminfo(text: &str) -> MemoryInfo {
     // Memory, swap and hugepage counters from /proc/meminfo.
     let mut m = MemoryInfo::default();
     for line in text.lines() {
@@ -381,7 +378,7 @@ fn disk_info(role: &str, path: &Path, mountinfo: &str, cloud: &str) -> Option<Di
     })
 }
 
-pub fn mount_for(path: &Path, mountinfo: &str) -> Option<(String, String)> {
+fn mount_for(path: &Path, mountinfo: &str) -> Option<(String, String)> {
     // Longest mount point prefix of path from /proc/self/mountinfo.
     let mut best: Option<(String, String)> = None;
     for line in mountinfo.lines() {
@@ -403,7 +400,7 @@ fn unescape_mount(s: &str) -> String {
     s.replace("\\040", " ").replace("\\011", "\t").replace("\\134", "\\")
 }
 
-pub fn is_network_fs(fs_type: &str, cloud: &str) -> bool {
+fn is_network_fs(fs_type: &str, cloud: &str) -> bool {
     let base = fs_type.split('.').next().unwrap_or(fs_type);
     NETWORK_FS.contains(&base) || base == "fuse" || base == "fuseblk" || (base == "overlay" && cloud == "runpod")
 }
@@ -431,7 +428,7 @@ fn glibc_version() -> String {
     unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned()
 }
 
-pub fn parse_nvidia_proc_version(text: &str) -> Option<String> {
+fn parse_nvidia_proc_version(text: &str) -> Option<String> {
     // Kernel module version from /proc/driver/nvidia/version.
     let line = text.lines().find(|l| l.contains("NVRM version"))?;
     line.split_whitespace()

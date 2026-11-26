@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 pub const SAMPLE: Duration = Duration::from_secs(if cfg!(target_os = "macos") { 10 } else { 5 });
 pub const BOUNDS_MS: [u32; 11] = [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000];
@@ -492,7 +492,7 @@ impl Row for Host {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct KeyRequests(pub Requests);
+struct KeyRequests(pub Requests);
 
 impl Row for KeyRequests {
     const KIND: &'static str = "keyuse";
@@ -509,7 +509,7 @@ impl Row for KeyRequests {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Traffic(pub Requests);
+struct Traffic(pub Requests);
 
 impl Row for Traffic {
     const KIND: &'static str = "req";
@@ -631,9 +631,6 @@ fn live() -> MutexGuard<'static, Live> {
     LIVE.get_or_init(|| Mutex::new(Live::default())).lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn now_s() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
-}
 
 fn minute_of(t: i64) -> i64 {
     t - t.rem_euclid(60)
@@ -663,7 +660,7 @@ pub fn record(d: &Dims, s: &Sample) {
         return;
     }
     let mut l = live();
-    rotate(&mut l, minute_of(now_s()));
+    rotate(&mut l, minute_of(crate::sys::unix_secs()));
     l.cur.count(d, s);
 }
 
@@ -809,7 +806,7 @@ impl Sampler {
     }
 
     fn tick(&mut self, all: bool) {
-        let now = now_s();
+        let now = crate::sys::unix_secs();
         if !all {
             let (gpus, host) = self.sample();
             let mut l = live();
@@ -886,9 +883,8 @@ pub fn spawn(home: PathBuf) {
         let mut s = Sampler { home, con: None, cpu: None, rolled: 0 };
         let mut noted = false;
         loop {
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
             let step = SAMPLE.as_millis() as u64;
-            std::thread::sleep(Duration::from_millis(step - (now.as_millis() as u64 % step)).max(Duration::from_millis(50)));
+            std::thread::sleep(Duration::from_millis(step - (crate::sys::unix_ms() % step)).max(Duration::from_millis(50)));
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.tick(false))).is_err() {
                 s.con = None;
                 if !noted {
@@ -981,7 +977,7 @@ fn sent(con: &Connection) -> Option<i64> {
 
 pub fn report(con: &Connection) -> Option<Report> {
     // In goethed, up to what the sampler has written; elsewhere (goethe doctor --snapshot) up to the minute before the last.
-    let now = now_s();
+    let now = crate::sys::unix_secs();
     let written = WRITTEN_TO.load(Ordering::Relaxed);
     report_at(con, now, if written > 0 { written } else { minute_of(now) - 60 })
 }
@@ -997,7 +993,7 @@ pub struct Totals {
 fn sum_into<R: Row>(con: &Connection, since: i64, out: &mut BTreeMap<String, R>) -> rusqlite::Result<()> {
     // Hourly rows for the part older than the minute rows, minute rows for the rest; an hour only counts once.
     let mut minutes_from = since;
-    if since < now_s() - MINUTE_KEEP_S + 3600 {
+    if since < crate::sys::unix_secs() - MINUTE_KEEP_S + 3600 {
         let hours = select::<R>(con, "hour", "WHERE t >= ?1", &[int(hour_of(since))])?;
         minutes_from = hours.iter().map(|(t, _, _)| t + 3600).max().unwrap_or(since).max(since);
         for (_, k, r) in hours {
@@ -1336,7 +1332,7 @@ mod tests {
     #[test]
     fn totals_add_minutes_and_hours_without_counting_an_hour_twice() {
         let con = mem();
-        let now = now_s();
+        let now = crate::sys::unix_secs();
         let m = minute_of(now) - 120;
         let mut r = Requests::default();
         r.add(&Sample::new(200, false, 1.0, Some(0.2), 5, 100));

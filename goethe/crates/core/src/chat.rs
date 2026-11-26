@@ -14,7 +14,7 @@ const SURE: &str = "exit? Enter = exit, q = back";
 const PICKING: &str = "[Up] [Down] move  [Enter] choose  [Esc] back";
 const LOADING: &str = "loading into VRAM  [Esc] cancel";
 
-pub fn split_think(raw: &str, last: bool) -> (String, String) {
+fn split_think(raw: &str, last: bool) -> (String, String) {
     // The model's reasoning and its answer: complete think blocks, an unclosed one, and everything before a closing tag that has no opening one are reasoning; while streaming, a tag cut in half stays out of the answer.
     let mut thinking: Vec<String> = Vec::new();
     let mut answer = raw.to_string();

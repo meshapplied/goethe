@@ -15,7 +15,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum WaitError {
+enum WaitError {
     Cancelled,
     Failed(String),
 }
@@ -60,7 +60,7 @@ fn sleep_unless_cancelled(d: Duration) -> bool {
     !CANCELLED.load(Ordering::SeqCst)
 }
 
-pub fn wait_for_approval(
+fn wait_for_approval(
     started: &Started,
     poll: &mut dyn FnMut() -> Result<Poll, ApiError>,
     sleep: &mut dyn FnMut(Duration) -> bool,
@@ -183,7 +183,7 @@ fn pin_root(home: &Path, root: &TrustRoot, device_code: &Secret, node: &InstallK
     if root.assertion.key_id != root.key_id || !goethe_proto::verify_assertion(&root.assertion, &root.public_key, &challenge, goethe_proto::RP_ID, goethe_proto::CONSOLE_ORIGIN) {
         return Err("the console's approval signature does not verify, so no passkey was pinned".into());
     }
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let now = crate::sys::unix_ms();
     let entry = TrustEntry { key_id: root.key_id.clone(), public_key: root.public_key.clone(), user_id: root.user_id.clone(), cap: root.cap, added_by: root.user_id.clone(), added_ms: now };
     crate::client::remote::pin(home, entry, "login")?;
     Ok(goethe_proto::key_fingerprint(&root.public_key))
@@ -323,7 +323,7 @@ pub fn logout() -> Result<(), String> {
     Ok(())
 }
 
-pub fn parse_lifetime(raw: &str) -> Result<Option<u64>, String> {
+fn parse_lifetime(raw: &str) -> Result<Option<u64>, String> {
     // "never", or a number with h, d or w (hours, days, weeks); at least one hour.
     let s = raw.trim().to_ascii_lowercase();
     if s == "never" {
@@ -416,7 +416,7 @@ fn ago(secs: i64) -> String {
     }
 }
 
-pub fn heartbeat_text(st: &link::PlatformState, daemon_running: bool, now: chrono::DateTime<chrono::Utc>) -> (String, bool) {
+fn heartbeat_text(st: &link::PlatformState, daemon_running: bool, now: chrono::DateTime<chrono::Utc>) -> (String, bool) {
     // OK with its age, failing with the reason, or why none is sent.
     if st.revoked_at.is_some() {
         return ("stopped: the console revoked this node".into(), false);

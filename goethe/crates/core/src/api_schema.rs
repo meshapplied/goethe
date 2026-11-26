@@ -7,7 +7,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 pub const KEY: &str = "API_KEY";
 pub const MODEL: &str = "MODEL_ID";
 
-pub fn gateway_ip(bind: &str, vpn: Option<IpAddr>, public: impl FnOnce() -> Option<IpAddr>) -> IpAddr {
+fn gateway_ip(bind: &str, vpn: Option<IpAddr>, public: impl FnOnce() -> Option<IpAddr>) -> IpAddr {
     // The address clients use: the one the gateway listens on (its VPN address, or 127.0.0.1 when local only); on every address, this machine's VPN address, else its public one.
     match bind.parse::<IpAddr>() {
         Ok(ip) if !ip.is_unspecified() => ip,
