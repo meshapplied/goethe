@@ -175,6 +175,17 @@ fn read_exact(r: impl Read, len: u64) -> Result<Vec<u8>, String> {
 
 pub type Runner<'a> = &'a dyn Fn(&[String]) -> Result<(i32, String), String>;
 
+#[cfg(test)]
+pub(crate) fn wait_until_runnable(script: &Path) {
+    // A process another test forks while this script is still open for writing holds it busy (ETXTBSY) until it execs; wait that out.
+    for _ in 0..100 {
+        match Command::new(script).output() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            _ => return,
+        }
+    }
+}
+
 pub fn python_runner(home: &Path) -> impl Fn(&[String]) -> Result<(i32, String), String> {
     // The interpreter is looked up on every call: a runner made before the engine layer is installed uses the py-env python once it exists.
     let home = home.to_path_buf();
@@ -1026,6 +1037,7 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("python"), "#!/bin/sh\necho \"py-env python: $*\"\n").unwrap();
         std::fs::set_permissions(bin.join("python"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_runnable(&bin.join("python"));
     }
 
     #[test]
