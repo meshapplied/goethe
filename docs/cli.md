@@ -103,6 +103,7 @@ Downloads a model from Hugging Face, or registers a model folder on this machine
 | `--yes` | Don't ask: download without confirming, and with `--load` load next to other programs on the GPU |
 | `--force` | Download again, or replace an existing install, and rebuild the model's saved settings from the defaults |
 | `--fallback` | Serve the model with its plain runtime (llama.cpp or SGLang) when its kernel pack cannot run here, even with `GOETHE_ALLOW_FALLBACK=0` (the plain runtime takes over by default) |
+| `--engine <goethe-engine\|sglang>` | Serve with this engine instead of the automatic choice (a kernel pack when one runs here, else SGLang); refused when it cannot serve the weights. Installing again without it chooses again |
 | `--name <id>` | Id for a local folder |
 | `--copy` | Copy a local folder instead of linking to it |
 | `-- <options>` | Extra engine options, after `--`, saved with the model |

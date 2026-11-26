@@ -127,6 +127,22 @@ pub struct InstallOpts {
     pub reset: bool,
     pub quant: Option<String>,
     pub fallback: bool,
+    pub engine: Option<String>,
+}
+
+pub const PINNED_ENGINES: [&str; 2] = [crate::engines::goethe_engine::ENGINE.id, crate::engines::sglang::SGLANG.id];
+
+fn pins_plain(opts: &InstallOpts) -> bool {
+    // --engine names a plain runtime: no kernel pack is offered, by id or by structure.
+    opts.engine.as_deref().is_some_and(|e| e != crate::engines::goethe_engine::ENGINE.id)
+}
+
+fn engine_pin(want: Option<&str>, got: &str) -> Result<(), String> {
+    // An --engine pin is kept or the install refused; never another engine in its place.
+    match want {
+        Some(w) if w != got => Err(format!("these weights are served by {got} here, not {w} (--engine)")),
+        _ => Ok(()),
+    }
 }
 
 struct Target {
@@ -267,7 +283,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         only: None,
     };
     let mut packs_down = false;
-    let declined = match pack_decision(home, opts)? {
+    let declined = match if pins_plain(opts) { PackDecision::None } else { pack_decision(home, opts)? } {
         PackDecision::Use(mut choice) => 'packed: {
             // Only the files the pack was built for, at its pinned revision; a pack this GPU runs no variant of is refused before a weight byte is downloaded.
             let token = || Ok(choice.creds.token.expose().to_string());
@@ -355,8 +371,22 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     let local = crate::hw::profile(home).map(|h| h.gpus.iter().map(|g| g.name.clone()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
     let no_pack_gpu = crate::packs::catalog(home).and_then(|ix| crate::packs::unsupported_here(&ix, &opts.model_id, &crate::packs::local_archs(home), &local));
     let built = crate::packs::catalog(home).map(|ix| crate::packs::built_for(&ix, &opts.model_id)).unwrap_or_default();
-    pack_only_gate(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)) && opts.quant.is_none(), declined, no_pack_gpu.as_deref(), &built)?;
-    let gguf = match engine_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), (declined, no_pack_gpu.as_deref()), opts.quant.as_deref())? {
+    let pack_only = entry.as_ref().is_some_and(|e| e.pack_only == Some(true)) && opts.quant.is_none();
+    if let Some(e) = opts.engine.as_deref().filter(|_| pack_only || (!pins_plain(opts) && (declined || packs_down || entry.is_some()))) {
+        let why = match (pins_plain(opts), declined) {
+            (true, _) => ONLY_PACK.to_string(),
+            (false, true) => format!("needs its kernel pack: {LOGIN_FIRST}"),
+            (false, false) => "has no kernel pack that runs here".to_string(),
+        };
+        return Err(crate::errcode::coded(crate::errcode::Code::ModelPack, format!("{} {why} (--engine {e}); {NOTHING_DOWNLOADED}", opts.model_id)));
+    }
+    pack_only_gate(&opts.model_id, pack_only, declined, no_pack_gpu.as_deref(), &built)?;
+    let choice = engine_check(home, &opts.model_id, dl.revision.as_deref(), entry.as_ref(), (declined, no_pack_gpu.as_deref()), opts.quant.as_deref())?;
+    if !matches!(choice, Choice::Sglang) {
+        engine_pin(opts.engine.as_deref().filter(|_| pins_plain(opts)), crate::engines::llama_cpp::ENGINE.id)
+            .map_err(|e| crate::errcode::coded(crate::errcode::Code::ModelFiles, format!("{}: {e}; {NOTHING_DOWNLOADED}", opts.model_id)))?;
+    }
+    let gguf = match choice {
         Choice::Sglang => None,
         Choice::Gguf(files) => Some(files),
         Choice::Build { repo, why } => {
@@ -385,7 +415,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         }
     }
     hf::ensure_model(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf.clone(), ..dl })?;
-    let offer = if packs_down { None } else { structure_offer(home, opts, &card_dir)? };
+    let offer = if packs_down || pins_plain(opts) { None } else { structure_offer(home, opts, &card_dir)? };
     let pack = readable(offer, |c| config_for_pack(home, opts, &card_dir, c, gguf.as_deref().unwrap_or_default()), fallback_allowed(opts.fallback))?;
     Ok(Target {
         model_id: opts.model_id.clone(),
@@ -606,7 +636,7 @@ fn install_local(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     } else {
         fetch(&registry_url()).ok().and_then(|r| find_model(&r, &model_id).cloned())
     };
-    let offer = if has_pack { None } else { structure_offer(home, opts, &card_dir)? };
+    let offer = if has_pack || pins_plain(opts) { None } else { structure_offer(home, opts, &card_dir)? };
     let pack = readable(offer, |c| config_for_pack(home, opts, &card_dir, c, &gguf), fallback_allowed(opts.fallback))?;
     Ok(Target {
         model_id,
@@ -837,7 +867,9 @@ fn register(home: &Path, opts: &InstallOpts, mut t: Target) -> Result<(), String
         planned = plan(home, opts, &t)?;
         crate::step::say(&format!("{why}; using {}", crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?.id));
     }
-    ensure_runtime(home, crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?)?;
+    let engine = crate::engines::of_card(&toml::Value::Table(planned.table.clone()))?;
+    engine_pin(opts.engine.as_deref(), engine.id).map_err(|e| crate::errcode::coded(crate::errcode::Code::ModelPack, format!("{}: {e}; nothing was registered", opts.model_id)))?;
+    ensure_runtime(home, engine)?;
     commit(home, &planned, "installed", &mut std::io::stdout())
 }
 
@@ -2190,6 +2222,15 @@ mod tests {
         fs::write(own.join("w.gguf"), b"mine").unwrap();
         let o = InstallOpts { name: Some("me/own".into()), ..opts };
         assert!(install_local(home.path(), &o).err().unwrap().contains("--force"), "a folder of the user's own files is never replaced silently");
+    }
+
+    #[test]
+    fn an_engine_pin_is_kept_or_refused() {
+        assert!(engine_pin(None, "sglang").is_ok() && engine_pin(Some("sglang"), "sglang").is_ok());
+        assert!(engine_pin(Some("goethe-engine"), "sglang").unwrap_err().contains("served by sglang here, not goethe-engine"));
+        let pin = |e: Option<&str>| pins_plain(&InstallOpts { engine: e.map(String::from), ..Default::default() });
+        assert_eq!((pin(None), pin(Some("goethe-engine")), pin(Some("sglang"))), (false, false, true));
+        assert!(PINNED_ENGINES.iter().all(|e| crate::engines::by_id(e).is_ok()));
     }
 
     #[test]

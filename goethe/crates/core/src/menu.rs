@@ -2133,6 +2133,7 @@ fn apply_picks(removals: &[String], installs: &[String]) -> Result<(), String> {
             reset: false,
             quant: None,
             fallback: false,
+            engine: None,
         };
         if let Err(e) = crate::install::run(opts) {
             report(Err(e));
