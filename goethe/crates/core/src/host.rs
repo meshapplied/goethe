@@ -201,6 +201,11 @@ fn detect_container(root: &Path, env: &BTreeMap<String, String>) -> Option<Strin
     None
 }
 
+pub fn is_wsl(root: &Path) -> bool {
+    // WSL2: the GPU bridge /dev/dxg or the Windows driver libraries under /usr/lib/wsl/lib.
+    root.join("dev/dxg").exists() || root.join("usr/lib/wsl/lib").is_dir()
+}
+
 fn detect_cloud(root: &Path, env: &BTreeMap<String, String>) -> (String, Option<String>) {
     // Provider env markers win over DMI strings because GPU clouds run on other vendors' hardware.
     let has_prefix = |p: &str| env.keys().any(|k| k.starts_with(p));
@@ -234,7 +239,7 @@ fn detect_cloud(root: &Path, env: &BTreeMap<String, String>) -> (String, Option<
     if product == "Google Compute Engine" {
         return ("gcp".into(), None);
     }
-    if vendor == "Microsoft Corporation" && product == "Virtual Machine" {
+    if vendor == "Microsoft Corporation" && product == "Virtual Machine" && !is_wsl(root) {
         return ("azure".into(), None);
     }
     if chassis_tag == "OracleCloud.com" {
@@ -597,6 +602,7 @@ mod tests {
             ("aws", vec![("sys/class/dmi/id/sys_vendor", "Amazon EC2\n"), ("sys/class/dmi/id/board_asset_tag", "i-0abc\n")], vec![], "aws", None),
             ("gcp", vec![("sys/class/dmi/id/product_name", "Google Compute Engine\n")], vec![], "gcp", None),
             ("azure", vec![("sys/class/dmi/id/sys_vendor", "Microsoft Corporation\n"), ("sys/class/dmi/id/product_name", "Virtual Machine\n")], vec![], "azure", None),
+            ("wsl2 is not azure", vec![("sys/class/dmi/id/sys_vendor", "Microsoft Corporation\n"), ("sys/class/dmi/id/product_name", "Virtual Machine\n"), ("usr/lib/wsl/lib/libcuda.so", "")], vec![], "none", None),
             ("oci", vec![("sys/class/dmi/id/chassis_asset_tag", "OracleCloud.com\n")], vec![], "oci", None),
             ("docker", vec![(".dockerenv", ""), ("proc/1/cgroup", "0::/\n")], vec![], "none", Some("docker")),
             ("k8s", vec![("proc/1/cgroup", "0::/kubepods/besteffort\n")], vec![("KUBERNETES_SERVICE_HOST", "10.0.0.1")], "none", Some("kubernetes")),
