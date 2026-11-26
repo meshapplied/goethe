@@ -1177,11 +1177,11 @@ fn main() {
         Commands::Logs { target, follow, lines } => {
             let target = target.join(" ");
             match target.as_str() {
-                "goethed" | "daemon" => goethe_core::logs::run_logs(None, follow, lines, true, false, false),
-                "gateway" => goethe_core::logs::run_logs(None, follow, lines, false, true, false),
+                "goethed" | "daemon" => goethe_core::logs::run_logs(goethe_core::logs::LogTarget::Daemon, follow, lines),
+                "gateway" => goethe_core::logs::run_logs(goethe_core::logs::LogTarget::Gateway, follow, lines),
                 t => {
                     let t = if t.starts_with("inst-") { t.to_string() } else { installed_id(t, false) };
-                    goethe_core::logs::run_logs(Some(&t), follow, lines, false, false, false)
+                    goethe_core::logs::run_logs(goethe_core::logs::LogTarget::Model(&t), follow, lines)
                 }
             }
         }

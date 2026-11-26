@@ -35,32 +35,22 @@ pub fn append_spawn_index(
     writeln!(f, "{line}").map_err(|e| e.to_string())
 }
 
-pub fn run_logs(
-    target: Option<&str>,
-    follow: bool,
-    lines: usize,
-    daemon: bool,
-    gateway: bool,
-    prune: bool,
-) -> Result<(), String> {
-    // Prune, or tail a model/instance log, the daemon log, or the gateway's goethe and nginx logs.
+pub enum LogTarget<'a> {
+    Daemon,
+    Gateway,
+    Model(&'a str),
+}
+
+pub fn run_logs(target: LogTarget, follow: bool, lines: usize) -> Result<(), String> {
+    // Tail a model/instance log, the daemon log, or the gateway's goethe and nginx logs.
     let home = goethe_home();
-    if prune {
-        let n = crate::log_rotation::run_prune_pass(&home, crate::sys::unix_secs())?;
-        let _ = crate::log_rotation::run_rotation_pass(&home);
-        println!("pruned {n} engine log file(s)");
-        return Ok(());
-    }
-    let paths = if daemon {
-        vec![home.join("logs/goethed.log")]
-    } else if gateway {
-        let ngx = crate::nginx::nginx_prefix(&home).join("logs");
-        vec![home.join("logs/gateway.log"), ngx.join("error.log"), ngx.join("access.log")]
-    } else {
-        let Some(t) = target else {
-            return Err("usage: goethe logs <model|instance_id|goethed|gateway>".to_string());
-        };
-        vec![resolve_log_path(&home, t)?]
+    let paths = match target {
+        LogTarget::Daemon => vec![home.join("logs/goethed.log")],
+        LogTarget::Gateway => {
+            let ngx = crate::nginx::nginx_prefix(&home).join("logs");
+            vec![home.join("logs/gateway.log"), ngx.join("error.log"), ngx.join("access.log")]
+        }
+        LogTarget::Model(t) => vec![resolve_log_path(&home, t)?],
     };
     tail_files(&paths, lines, follow)
 }
