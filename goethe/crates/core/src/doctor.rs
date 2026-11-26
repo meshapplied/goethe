@@ -202,7 +202,8 @@ fn check_llama_cpp(home: &Path) -> Check {
     }
 }
 
-pub fn check_names() -> impl Iterator<Item = &'static str> {
+#[cfg(test)]
+pub(crate) fn check_names() -> impl Iterator<Item = &'static str> {
     CHECKS.iter().chain(MAC_CHECKS).map(|(n, _)| *n)
 }
 

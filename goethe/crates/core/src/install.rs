@@ -329,7 +329,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             }
             confirm(opts, &format!("{} ({}, {:.1} GB) with optimised kernels for {}{spec}", opts.model_id, choice.offer.format, bytes(&files) as f64 / GIB, choice.offer.arch))?;
             let pack_dl = DownloadOpts { revision: Some(rev), force: opts.force, no_verify: opts.no_verify, only: Some(files.clone()) };
-            fetch_weights(home, &choice.offer.hf_repo, &card_dir, &pack_dl)?;
+            hf::ensure_model(home, &choice.offer.hf_repo, &card_dir, &pack_dl)?;
             if let Some((repo, revision, only)) = crate::packs::aux(&plan.entry) {
                 fetch_aux(home, &repo, &card_dir, DownloadOpts { revision, force: opts.force, no_verify: opts.no_verify, only: Some(only) })?;
             }
@@ -386,7 +386,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             confirm(opts, &line)?;
         }
     }
-    fetch_weights(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf.clone(), ..dl })?;
+    hf::ensure_model(home, &opts.model_id, &card_dir, &DownloadOpts { only: gguf.clone(), ..dl })?;
     let offer = if packs_down { None } else { structure_offer(home, opts, &card_dir)? };
     let pack = readable(offer, |c| config_for_pack(home, opts, &card_dir, c, gguf.as_deref().unwrap_or_default()), fallback_allowed(opts.fallback))?;
     Ok(Target {
@@ -397,10 +397,6 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
         source_dir: None,
         pack,
     })
-}
-
-fn fetch_weights(home: &Path, repo: &str, dir: &Path, dl: &DownloadOpts) -> Result<(), String> {
-    hf::ensure_model(home, repo, dir, dl)
 }
 
 fn readable<T>(choice: Option<T>, meta: impl FnOnce(&T) -> Result<(), String>, allow: bool) -> Result<Option<T>, String> {

@@ -82,11 +82,8 @@ pub struct EnvironmentInfo {
 const NETWORK_FS: &[&str] = &["nfs", "nfs4", "cifs", "smb3", "smbfs", "ceph", "glusterfs", "9p", "lustre", "beegfs", "gpfs", "afs"];
 
 pub fn sysroot() -> PathBuf {
-    // Root for /proc, /sys and /etc reads; GOETHE_TEST_SYSROOT redirects it in tests.
-    std::env::var_os("GOETHE_TEST_SYSROOT")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+    // Root for /proc, /sys and /etc reads; the parsers take it as a parameter so tests pass a fixture tree.
+    PathBuf::from("/")
 }
 
 pub fn probe_host(home: &Path, cloud: &str) -> HostInfo {

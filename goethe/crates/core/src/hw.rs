@@ -195,10 +195,6 @@ pub fn run_profile(json_out: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn fake_unified_enabled() -> bool {
-    std::env::var("GOETHE_TEST_FAKE_UNIFIED").ok().is_some_and(|v| v == "1")
-}
-
 fn host_unified_mem_mb() -> Result<(u64, u64, u64), String> {
     let m = crate::sys::memory();
     if m.total_kb == 0 {
@@ -210,13 +206,8 @@ fn host_unified_mem_mb() -> Result<(u64, u64, u64), String> {
 
 pub fn memory_from_nvml_or_unified(
     mem_result: Result<nvml_wrapper::struct_wrappers::device::MemoryInfo, nvml_wrapper::error::NvmlError>,
-    force_unified: bool,
 ) -> Result<(u64, u64, u64, bool), String> {
     // NVML memory in MB, or host memory when the GPU shares it (GB10 reports NotSupported).
-    if force_unified {
-        let (t, u, f) = host_unified_mem_mb()?;
-        return Ok((t, u, f, true));
-    }
     match mem_result {
         Ok(mem) => Ok((mem.total / (1024 * 1024), mem.used / (1024 * 1024), mem.free / (1024 * 1024), false)),
         Err(nvml_wrapper::error::NvmlError::NotSupported) => {
@@ -227,15 +218,11 @@ pub fn memory_from_nvml_or_unified(
     }
 }
 
-fn device_memory(dev: &nvml_wrapper::Device<'_>) -> Result<(u64, u64, u64, bool), String> {
-    memory_from_nvml_or_unified(dev.memory_info(), fake_unified_enabled())
-}
-
 fn probe_gpu(index: u32, dev: &nvml_wrapper::Device<'_>) -> Result<GpuState, String> {
     let uuid = dev.uuid().map_err(|e| format!("uuid: {e}"))?;
     let name = dev.name().map_err(|e| format!("name: {e}"))?;
     let cc = dev.cuda_compute_capability().map_err(|e| format!("compute cap: {e}"))?;
-    let (vram_total_mb, vram_used_mb, vram_free_mb, unified_memory) = device_memory(dev)?;
+    let (vram_total_mb, vram_used_mb, vram_free_mb, unified_memory) = memory_from_nvml_or_unified(dev.memory_info())?;
     Ok(GpuState {
         index,
         uuid,
@@ -296,7 +283,7 @@ pub fn list_gpus_for_placement(managed: &HashSet<i32>) -> Result<Vec<GpuPlacemen
     let mut out = Vec::new();
     for idx in 0..count {
         let Ok(dev) = nvml.device_by_index(idx) else { continue };
-        let Ok((_, _, free, unified)) = device_memory(&dev) else { continue };
+        let Ok((_, _, free, unified)) = memory_from_nvml_or_unified(dev.memory_info()) else { continue };
         let free_vram_mb = if unified { free.saturating_sub(UNIFIED_OS_RESERVE_GB * 1024) } else { free };
         let foreign_compute = dev
             .running_compute_processes()
@@ -339,7 +326,7 @@ pub fn live_gpus() -> Result<Vec<LiveGpu>, String> {
     let mut out = Vec::new();
     for index in 0..count {
         let Ok(dev) = nvml.device_by_index(index) else { continue };
-        let Ok((_, _, free, unified)) = device_memory(&dev) else { continue };
+        let Ok((_, _, free, unified)) = memory_from_nvml_or_unified(dev.memory_info()) else { continue };
         let mut pids: Vec<i32> = [dev.running_compute_processes(), dev.running_graphics_processes()]
             .into_iter()
             .flatten()
@@ -416,7 +403,7 @@ fn usage_with(nvml: &Nvml, managed: &HashSet<i32>) -> Result<Vec<GpuUsage>, Stri
     let mut out = Vec::new();
     for index in 0..count {
         let dev = nvml.device_by_index(index).map_err(|e| format!("device {index}: {e}"))?;
-        let used_mb = device_memory(&dev)?.1;
+        let used_mb = memory_from_nvml_or_unified(dev.memory_info())?.1;
         let mut seen: Vec<(u32, u64)> = Vec::new();
         for p in [dev.running_compute_processes(), dev.running_graphics_processes()].into_iter().flatten().flatten() {
             let mb = match p.used_gpu_memory {
@@ -483,7 +470,7 @@ pub fn gpu_free_mb_live(gpu_index: u32) -> Result<u64, String> {
     }
     let nvml = crate::nvidia_driver::nvml()?;
     let dev = nvml.device_by_index(gpu_index).map_err(|e| format!("device {gpu_index}: {e}"))?;
-    let (_, _, free, unified) = device_memory(&dev)?;
+    let (_, _, free, unified) = memory_from_nvml_or_unified(dev.memory_info())?;
     Ok(if unified { free.saturating_sub(UNIFIED_OS_RESERVE_GB * 1024) } else { free })
 }
 
@@ -497,7 +484,7 @@ pub fn refresh_gpu_vram(gpu_index: u32) -> Result<(u64, u64, u64, Vec<RunningPro
     }
     let nvml = crate::nvidia_driver::nvml()?;
     let dev = nvml.device_by_index(gpu_index).map_err(|e| format!("device {gpu_index}: {e}"))?;
-    let (total, used, free, unified) = device_memory(&dev)?;
+    let (total, used, free, unified) = memory_from_nvml_or_unified(dev.memory_info())?;
     Ok((total, used, free, compute_processes(&dev, unified)?))
 }
 
@@ -675,7 +662,7 @@ mod tests {
 
     #[test]
     fn not_supported_uses_host_mem() {
-        let (t, u, f, uni) = memory_from_nvml_or_unified(Err(NvmlError::NotSupported), false).expect("host mem");
+        let (t, u, f, uni) = memory_from_nvml_or_unified(Err(NvmlError::NotSupported)).expect("host mem");
         assert!(uni);
         assert!(t > 0);
         assert!(f <= t);

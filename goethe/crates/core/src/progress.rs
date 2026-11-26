@@ -20,23 +20,6 @@ impl<R: Read> Read for Counted<R> {
     }
 }
 
-pub fn weights_in(dir: &Path) -> (usize, u64) {
-    // The files of a model directory and their bytes; the downloader's hidden bookkeeping is not counted.
-    let mut found = (0, 0);
-    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let hidden = e.file_name().to_string_lossy().starts_with('.');
-        match e.metadata() {
-            Ok(m) if m.is_dir() && !hidden => {
-                let inner = weights_in(&e.path());
-                found = (found.0 + inner.0, found.1 + inner.1);
-            }
-            Ok(m) if m.is_file() && !hidden => found = (found.0 + 1, found.1 + m.len()),
-            _ => {}
-        }
-    }
-    found
-}
-
 pub fn dir_bytes(dir: &Path) -> u64 {
     // Every byte under a directory, partial downloads included.
     std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| match e.metadata() {
@@ -223,11 +206,6 @@ pub fn eprint_line(text: String) {
 
 static UPDATING: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
-
-pub fn updating() -> bool {
-    // Whether an updating line is on the terminal now.
-    UPDATING.load(Ordering::Relaxed)
-}
 
 pub fn end_line() {
     // Ends an updating line left on a terminal, so the next line starts clean.

@@ -283,9 +283,9 @@ fn change_bind(home: &Path, next: &BindSetting) -> Result<String, String> {
         return Err(format!("{e}; the gateway bind stays {previous}"));
     }
     if !binds_clash(&previous, ip) {
-        let before = worker_pids(master);
+        let before = crate::sys::children(master);
         apply_locked(home).map_err(|e| format!("{e}; the bind {ip} applies when the gateway restarts"))?;
-        if previous == ip.to_string() || worker_pids(master).iter().any(|p| !before.contains(p)) {
+        if previous == ip.to_string() || crate::sys::children(master).iter().any(|p| !before.contains(p)) {
             return Ok(listening());
         }
     }
@@ -904,10 +904,6 @@ fn spawn_private(home: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn worker_pids(master: i32) -> Vec<i32> {
-    crate::sys::children(master)
-}
-
 fn wait_reloaded(master: i32, before: &[i32]) {
     // nginx lets old workers accept for ~100 ms after SIGHUP; wait until each is gone or titled "shutting down".
     if before.is_empty() {
@@ -919,7 +915,7 @@ fn wait_reloaded(master: i32, before: &[i32]) {
     };
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if worker_pids(master).iter().any(|p| !before.contains(p)) && before.iter().all(retired) {
+        if crate::sys::children(master).iter().any(|p| !before.contains(p)) && before.iter().all(retired) {
             return;
         }
         thread::sleep(Duration::from_millis(10));
@@ -935,7 +931,7 @@ pub fn apply_locked(home: &Path) -> Result<(), String> {
     let bin = proc_exe(pid).filter(|p| p.is_file()).unwrap_or_else(|| nginx_bin(home));
     write_configs(home, &bin)?;
     nginx_test(home, &bin, &nginx_prefix(home), &nginx_prefix(home).join("nginx.conf"))?;
-    let before = worker_pids(pid);
+    let before = crate::sys::children(pid);
     if unsafe { libc::kill(pid, libc::SIGHUP) } != 0 {
         return Err(format!("gateway is down: reload signal failed: {}", io::Error::last_os_error()));
     }
@@ -1085,7 +1081,7 @@ mod tests {
         write_configs(home, &bin).unwrap();
         spawn_private(home).unwrap();
         let master = verified_master(home).expect("our master is verified");
-        let workers = worker_pids(master);
+        let workers = crate::sys::children(master);
         assert!(!workers.is_empty());
         unsafe {
             libc::kill(master, libc::SIGKILL);

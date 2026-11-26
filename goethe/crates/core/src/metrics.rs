@@ -218,7 +218,7 @@ fn write_gpu_memory(out: &mut String) {
         let Ok(dev) = nvml.device_by_index(idx) else {
             continue;
         };
-        let Ok((total_mb, used_mb, _, _)) = hw::memory_from_nvml_or_unified(dev.memory_info(), false) else {
+        let Ok((total_mb, used_mb, _, _)) = hw::memory_from_nvml_or_unified(dev.memory_info()) else {
             continue;
         };
         let _ = writeln!(out, "goethe_gpu_memory_used_bytes{{gpu=\"{idx}\"}} {}", used_mb * 1024 * 1024);

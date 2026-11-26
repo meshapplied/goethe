@@ -137,11 +137,6 @@ mod imp {
         text.lines().find_map(|l| l.strip_prefix("btime ")).and_then(|v| v.trim().parse().ok())
     }
 
-    pub fn ticks_per_second() -> u64 {
-        let t = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-        if t > 0 { t as u64 } else { 100 }
-    }
-
     pub fn memory() -> Memory {
         let text = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
         let field = |k: &str| text.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -319,10 +314,6 @@ mod imp {
         let mut mib = [libc::CTL_KERN, libc::KERN_BOOTTIME];
         let rc = unsafe { libc::sysctl(mib.as_mut_ptr(), 2, (&mut tv as *mut libc::timeval).cast(), &mut len, std::ptr::null_mut(), 0) };
         (rc == 0).then_some(tv.tv_sec)
-    }
-
-    pub fn ticks_per_second() -> u64 {
-        1_000_000
     }
 
     pub fn memory() -> Memory {

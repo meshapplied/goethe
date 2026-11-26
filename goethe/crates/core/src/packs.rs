@@ -439,10 +439,6 @@ pub fn runnable_at(e: &Entry, engine: &str) -> bool {
     Some(e.min_engine) <= version(engine)
 }
 
-pub fn engine_too_old(index: &[u8], model_id: &str, archs: &[String]) -> Option<String> {
-    engine_too_old_at(index, model_id, archs, crate::pyenv::ENGINE_VERSION)
-}
-
 pub fn engine_too_old_at(index: &[u8], model_id: &str, archs: &[String], engine: &str) -> Option<String> {
     // A note when the index has packs for `model_id` on `archs` but each needs a newer goethe-engine than `engine`.
     let es = entries(index, archs, |r| r.eq_ignore_ascii_case(model_id));
@@ -1419,9 +1415,9 @@ mod tests {
         let archs = vec!["sm_120a".to_string()];
         let p = container();
         let mut ix: Value = serde_json::from_slice(&index_of(&p, &sha(&p.manifest))).unwrap();
-        assert_eq!(engine_too_old(ix.to_string().as_bytes(), "org/m-gguf", &archs), None);
+        assert_eq!(engine_too_old_at(ix.to_string().as_bytes(), "org/m-gguf", &archs, crate::pyenv::ENGINE_VERSION), None);
         ix["entries"][0]["min_engine"] = "9.0.0".into();
-        let e = engine_too_old(ix.to_string().as_bytes(), "org/m-gguf", &archs).unwrap();
+        let e = engine_too_old_at(ix.to_string().as_bytes(), "org/m-gguf", &archs, crate::pyenv::ENGINE_VERSION).unwrap();
         assert!(e.starts_with("engine_too_old: org/m-gguf needs goethe-engine >= 9.0.0, installed "), "{e}");
         let raw = ix.to_string();
         let old = engine_too_old_at(raw.as_bytes(), "org/m-gguf", &archs, "0.0.1").unwrap();
