@@ -410,8 +410,8 @@ pub fn registry_input(m: &RegistryModel) -> ChooserInput {
         num_kv_heads: m.num_kv_heads.unwrap_or(1),
         attention: m.attention.clone().unwrap_or_else(|| "gqa".to_string()),
         max_ctx,
-        ctx: m.default_ctx.unwrap_or(max_ctx.min(131072)).min(max_ctx),
-        max_conc: m.default_max_conc.unwrap_or(8),
+        ctx: m.default_ctx.unwrap_or(max_ctx).min(max_ctx),
+        max_conc: m.default_max_conc.unwrap_or(chooser::DEFAULT_CONC),
         marlin_extra_gb: 0.0,
         supported_sm: m.supported_sm.clone(),
         memory: m.memory.clone().map(|mut spec| {
@@ -419,6 +419,9 @@ pub fn registry_input(m: &RegistryModel) -> ChooserInput {
             spec
         }),
         overhead_gb: crate::engines::by_id(m.effective_runtime()).map_or(crate::calc::BASE_OVERHEAD_GB, |e| e.overhead_gb),
+        floor: chooser::floor(&m.extra_sglang_args),
+        min_ctx: 0,
+        min_conc: 0,
     }
 }
 
@@ -567,9 +570,7 @@ mod tests {
         let reg = crate::registry::bundled().unwrap();
         let llama = reg.models.iter().find(|m| m.id == "nvidia/Llama-3.1-8B-Instruct-NVFP4").unwrap();
         let line = preview(home.path(), llama).unwrap().unwrap();
-        assert!(line.contains("ctx 65536"), "{line}");
-        assert!(line.contains("23.4 GB per GPU"), "{line}");
-        assert!(line.contains("concurrent"), "{line}");
+        assert!(line.contains("26.4 GB per GPU (ctx 131072, 4 concurrent)"), "the model's full context for 4 users: {line}");
         let big = reg.models.iter().find(|m| m.id == "Qwen/Qwen3.8-27B").unwrap();
         assert!(preview(home.path(), big).is_err());
     }

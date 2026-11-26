@@ -1184,7 +1184,7 @@ fn plan_engine(
     let dir = &t.card_dir;
     let entry = t.entry.as_ref();
     let ctx = opts.ctx.unwrap_or(facts.max_ctx).min(facts.max_ctx);
-    let max_conc = opts.max_conc.unwrap_or(4);
+    let max_conc = opts.max_conc.unwrap_or(crate::chooser::DEFAULT_CONC);
     let card = GoetheCard {
         model_id: t.model_id.clone(),
         context_length: ctx,
@@ -1305,7 +1305,7 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
     };
     let entry = t.entry.as_ref();
     let ctx = pick(opts.ctx, "context_length", None, entry.and_then(|e| e.effective_max_ctx()).unwrap_or(facts.max_ctx).min(facts.max_ctx));
-    let max_conc = pick(opts.max_conc, "max_running_requests", entry.and_then(|e| e.default_max_conc), 8);
+    let max_conc = pick(opts.max_conc, "max_running_requests", entry.and_then(|e| e.default_max_conc), crate::chooser::DEFAULT_CONC);
     let tp = pick(opts.tp, "tp_size", entry.and_then(|e| e.default_tp), 0);
     let ep = pick(None, "ep_size", None, 1);
     let gpus = opts.gpus.clone().unwrap_or_else(|| {
@@ -2138,7 +2138,7 @@ mod tests {
         let cfg = json!({"architectures": ["Qwen3_5ForConditionalGeneration"], "num_hidden_layers": 8, "num_attention_heads": 24, "num_key_value_heads": 4, "head_dim": 256,
             "full_attention_interval": 4, "layer_types": ["linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention"],
             "linear_num_value_heads": 48, "linear_num_key_heads": 16, "linear_key_head_dim": 128, "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4, "max_position_embeddings": 262144, "torch_dtype": "bfloat16"});
-        let card: toml::Value = toml::from_str("context_length = 4096\nmax_running_requests = 8\nkv_cache_dtype = \"auto\"\nmarlin_extra_gb = 1.0701003707945347\nruntime = \"goethe-engine\"\nsupported_sm = [\"12.0\"]\n").unwrap();
+        let card: toml::Value = toml::from_str("context_length = 4096\nmax_running_requests = 4\nkv_cache_dtype = \"auto\"\nmarlin_extra_gb = 1.0701003707945347\nruntime = \"goethe-engine\"\nsupported_sm = [\"12.0\"]\n").unwrap();
         let home = tempfile::tempdir().unwrap();
         fs::write(home.path().join("config.json"), cfg.to_string()).unwrap();
         let opts = InstallOpts { model_id: "nvidia/Big-NVFP4".into(), ..Default::default() };
@@ -2187,6 +2187,9 @@ mod tests {
             supported_sm: vec!["12.0".into()],
             memory: None,
             overhead_gb: crate::calc::METAL_OVERHEAD_GB,
+            floor: crate::chooser::floor(&[]),
+            min_ctx: 0,
+            min_conc: 0,
         };
         assert!(view.fit_as("nvidia/Big-NVFP4", &input, None, "llama.cpp").is_err(), "the same row does bind the llama.cpp runtime");
     }

@@ -370,7 +370,7 @@ mod tests {
         std::fs::write(dir.path().join("config.json"), cfg).unwrap();
         let card: toml::Value = toml::from_str("").unwrap();
         let m = crate::memory_spec::installed(dir.path(), &card, &[]).unwrap();
-        assert_eq!(crate::chooser::engine_args(&m, 4096, 8), vec!["--max-mamba-cache-size".to_string(), "40".to_string()]);
+        assert_eq!(crate::chooser::engine_args(&m, 4096, 8, crate::chooser::floor(&[])), vec!["--max-mamba-cache-size".to_string(), "40".to_string()]);
         assert!(crate::memory_spec::installed(Path::new("/nonexistent"), &card, &[]).is_none());
         assert!(check_extra_args(&["--max-mamba-cache-size=4".to_string()]).is_err());
     }

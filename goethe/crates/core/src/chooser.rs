@@ -24,6 +24,9 @@ pub struct ChooserInput {
     pub memory: Option<MemorySpec>,
     pub window_gb_per_request: f64,
     pub overhead_gb: f64,
+    pub floor: u64,
+    pub min_ctx: u64,
+    pub min_conc: u64,
 }
 
 pub struct CardFacts {
@@ -52,8 +55,38 @@ impl ChooserInput {
             supported_sm: crate::install::card_supported_sm(card),
             memory,
             overhead_gb: crate::engines::of_card(card).map_or(crate::calc::BASE_OVERHEAD_GB, |e| e.overhead_gb),
+            floor: floor(&crate::engines::sglang::card_extra_args(card)),
+            min_ctx: 0,
+            min_conc: 0,
         }
     }
+
+    pub fn pin(self, ctx: Option<u64>, max_conc: Option<u64>) -> ChooserInput {
+        // Values a load names are exact: auto may lower only what was left unsaid.
+        ChooserInput {
+            ctx: ctx.unwrap_or(self.ctx),
+            max_conc: max_conc.unwrap_or(self.max_conc),
+            min_ctx: ctx.unwrap_or(0),
+            min_conc: max_conc.unwrap_or(0),
+            ..self
+        }
+    }
+}
+
+pub const DEFAULT_CONC: u64 = 4;
+const PROMPT_FLOOR: u64 = 4096;
+const PLAIN_OUTPUT: u64 = 4096;
+const REASONING_OUTPUT: u64 = 32768;
+const SOFT_FLOOR: u64 = 16384;
+const CTX_STEP: u64 = 1024;
+
+pub fn floor(extra_args: &[String]) -> u64 {
+    // Tokens every request keeps: a 4096-token prompt plus a reply, 32768 when the engine parses reasoning, else 4096.
+    PROMPT_FLOOR + if extra_args.iter().any(|a| a.starts_with("--reasoning-parser")) { REASONING_OUTPUT } else { PLAIN_OUTPUT }
+}
+
+pub fn card_floor(card: &toml::Value) -> u64 {
+    floor(&crate::engines::sglang::card_extra_args(card))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,9 +131,9 @@ pub fn kv_shard(t: usize, num_kv_heads: u64, attention: &str) -> f64 {
     }
 }
 
-pub fn kv_tokens(ctx: u64, max_conc: u64) -> u64 {
-    // The KV pool holds one request at the full context, or every parallel request at a quarter of it.
-    ctx.max(max_conc.max(1).saturating_mul(ctx).div_ceil(4))
+pub fn kv_tokens(ctx: u64, max_conc: u64, floor: u64) -> u64 {
+    // The shared KV pool: one request at the full context while every other request keeps the floor (any engine with one token pool).
+    ctx.saturating_add(max_conc.max(1).saturating_sub(1).saturating_mul(floor.min(ctx)))
 }
 
 pub fn state_slots(m: &MemorySpec, max_conc: u64) -> u64 {
@@ -108,19 +141,19 @@ pub fn state_slots(m: &MemorySpec, max_conc: u64) -> u64 {
     m.state_slots_per_request.saturating_mul(max_conc.max(1))
 }
 
-pub fn swa_ratio(m: &MemorySpec, ctx: u64, max_conc: u64) -> f64 {
+pub fn swa_ratio(m: &MemorySpec, ctx: u64, max_conc: u64, floor: u64) -> f64 {
     // --swa-full-tokens-ratio that gives the window pool exactly the tokens max_conc requests need (at most 1).
-    (m.swa_tokens(max_conc) as f64 / kv_tokens(ctx, max_conc).max(1) as f64).clamp(1e-6, 1.0)
+    (m.swa_tokens(max_conc) as f64 / kv_tokens(ctx, max_conc, floor).max(1) as f64).clamp(1e-6, 1.0)
 }
 
-pub fn engine_args(m: &MemorySpec, ctx: u64, max_conc: u64) -> Vec<String> {
+pub fn engine_args(m: &MemorySpec, ctx: u64, max_conc: u64, floor: u64) -> Vec<String> {
     // The pool sizes the budget assumed, pinned for SGLang.
     let mut out = Vec::new();
     if m.state_bytes_per_slot > 0 {
         out.extend(["--max-mamba-cache-size".to_string(), state_slots(m, max_conc).to_string()]);
     }
     if m.swa_bytes_per_token > 0 {
-        out.extend(["--swa-full-tokens-ratio".to_string(), format!("{:.6}", swa_ratio(m, ctx, max_conc))]);
+        out.extend(["--swa-full-tokens-ratio".to_string(), format!("{:.6}", swa_ratio(m, ctx, max_conc, floor))]);
     }
     if m.chunked_prefill > 0 {
         out.extend(["--chunked-prefill-size".to_string(), m.chunked_prefill.to_string()]);
@@ -131,7 +164,7 @@ pub fn engine_args(m: &MemorySpec, ctx: u64, max_conc: u64) -> Vec<String> {
 pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
     // Per GPU: sharded weights (plus the Marlin copy where cc keeps one), the KV pools SGLang builds, state, overhead.
     let marlin = if gpu_arch::nvfp4_dual_copy(cc) { input.marlin_extra_gb } else { 0.0 };
-    let tokens = kv_tokens(input.ctx, input.max_conc) as f64;
+    let tokens = kv_tokens(input.ctx, input.max_conc, input.floor) as f64;
     let conc = input.max_conc.max(1);
     let request_table = (conc as f64 + 1.0) * (input.ctx as f64 + 4.0) * 4.0 / GIB;
     let oh = if gpu_arch::is_apple(cc) { METAL_OVERHEAD_GB } else { input.overhead_gb } + request_table;
@@ -160,17 +193,6 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
         overhead: oh,
         load_peak: m.load_peak_bytes as f64 / tp as f64 / GIB,
     }
-}
-
-pub const KV_SHARE_OF_FREE: f64 = 0.4;
-
-pub fn cap_default_ctx(input: &ChooserInput, tp: usize, cc: &str, free_gb: f64) -> u64 {
-    // A context nobody asked for is halved (down to SHRINK_CTX_FLOOR) until its KV cache is at most 40% of the free VRAM.
-    let mut trial = input.clone();
-    while trial.ctx > SHRINK_CTX_FLOOR && need(&trial, tp, cc).kv > KV_SHARE_OF_FREE * free_gb {
-        trial.ctx = (trial.ctx / 2).max(SHRINK_CTX_FLOOR);
-    }
-    trial.ctx
 }
 
 pub fn with_learned(base: Need, learned: Learned) -> Need {
@@ -223,7 +245,7 @@ pub fn plan_with(
     }
     let mut bare = input.clone();
     bare.marlin_extra_gb = 0.0;
-    prefer_capacity(with_extra, plan_once(&bare, gpus, hw, pinned_tp, pinned_gpus, learned))
+    prefer_capacity(input, with_extra, plan_once(&bare, gpus, hw, pinned_tp, pinned_gpus, learned))
 }
 
 fn plan_once(
@@ -254,15 +276,13 @@ fn plan_once(
                 gpus: Vec::new(),
             });
         }
-        let mut err = match fixed_plan(input, gpus, pg, learned) {
+        if let Some(p) = settle(input, |trial| fixed_plan(trial, gpus, pg, learned).ok()) {
+            return Ok(p);
+        }
+        let mut err = match fixed_plan(&bottom(input), gpus, pg, learned) {
             Ok(p) => return Ok(p),
             Err(e) => e,
         };
-        if !err.gpus.is_empty() {
-            if let Some(p) = shrink_until(input, |trial| fixed_plan(trial, gpus, pg, learned).ok()) {
-                return Ok(p);
-            }
-        }
         if let Some(hint) = split_hint(input, gpus, hw, tp, learned) {
             err.message = format!("{}\n{hint}", err.message);
         }
@@ -275,14 +295,14 @@ fn plan_once(
     }
     if let Some(tp) = pinned_tp {
         let fits = |trial: &ChooserInput| best_fit(trial, &eligible, hw, tp, learned).map(|set| plan(trial, tp, set));
-        return fits(input).or_else(|| shrink_until(input, fits)).ok_or_else(|| closest_miss(input, &eligible, hw, tp, learned));
+        return settle(input, fits).ok_or_else(|| closest_miss(&bottom(input), &eligible, hw, tp, learned));
     }
     auto_plan(input, &eligible, hw, learned)
 }
 
-fn prefer_capacity(with_extra: Result<LoadPlan, PlanError>, without: Result<LoadPlan, PlanError>) -> Result<LoadPlan, PlanError> {
+fn prefer_capacity(input: &ChooserInput, with_extra: Result<LoadPlan, PlanError>, without: Result<LoadPlan, PlanError>) -> Result<LoadPlan, PlanError> {
     match (with_extra, without) {
-        (Ok(a), Ok(mut b)) if (b.ctx, b.max_conc) > (a.ctx, a.max_conc) => {
+        (Ok(a), Ok(mut b)) if rank(input, &b) > rank(input, &a) => {
             b.disable_marlin = true;
             Ok(b)
         }
@@ -346,24 +366,57 @@ fn plan(input: &ChooserInput, tp: usize, set: SetRank) -> LoadPlan {
     }
 }
 
-pub const SHRINK_CTX_FLOOR: u64 = 2048;
+fn floors(input: &ChooserInput) -> (u64, u64, u64) {
+    // (top, soft, hard): the largest context asked, the floor auto keeps while it lowers concurrency, the floor it never goes below; pins raise both.
+    let top = input.ctx.min(input.max_ctx).max(1);
+    let hard = input.floor.max(input.min_ctx).min(top);
+    (top, input.floor.max(SOFT_FLOOR).max(input.min_ctx).min(top), hard)
+}
 
-fn shrink_until(input: &ChooserInput, mut fits: impl FnMut(&ChooserInput) -> Option<LoadPlan>) -> Option<LoadPlan> {
-    // Context halved down to SHRINK_CTX_FLOOR, then concurrency, until a shortfall clears.
-    let mut trial = input.clone();
-    trial.ctx = input.ctx.min(input.max_ctx);
-    trial.max_conc = input.max_conc.max(1);
-    loop {
-        if trial.ctx > SHRINK_CTX_FLOOR {
-            trial.ctx = (trial.ctx / 2).max(SHRINK_CTX_FLOOR);
-        } else if trial.max_conc > 1 {
-            trial.max_conc -= 1;
-            trial.ctx = input.ctx.min(input.max_ctx);
-        } else {
-            return None;
+fn rank(input: &ChooserInput, p: &LoadPlan) -> (bool, u64, u64) {
+    // settle's order as a key: at or above the soft floor first, then more concurrency, then more context.
+    (p.ctx >= floors(input).1, p.max_conc, p.ctx)
+}
+
+pub fn bottom(input: &ChooserInput) -> ChooserInput {
+    // The last rung of the ladder, where a shortfall is reported.
+    ChooserInput { ctx: floors(input).2, max_conc: input.min_conc.max(1), ..input.clone() }
+}
+
+pub fn settle<T>(input: &ChooserInput, mut fits: impl FnMut(&ChooserInput) -> Option<T>) -> Option<T> {
+    // Auto settings: concurrency halves from its ceiling with ctx at or above the soft floor, then again down to the hard floor; ctx is the largest that fits. Pins bound both. O(2 log2(conc) log2(ctx / 1024)) fit checks.
+    let (top, soft, hard) = floors(input);
+    let least = input.min_conc.max(1);
+    for lo in if soft > hard { vec![soft, hard] } else { vec![hard] } {
+        let mut conc = input.max_conc.max(least);
+        loop {
+            if let Some(t) = widest(input, conc, lo, top, &mut fits) {
+                return Some(t);
+            }
+            if conc == least {
+                break;
+            }
+            conc = (conc / 2).max(least);
         }
-        if let Some(p) = fits(&trial) {
-            return Some(p);
+    }
+    None
+}
+
+fn widest<T>(input: &ChooserInput, conc: u64, lo: u64, hi: u64, fits: &mut impl FnMut(&ChooserInput) -> Option<T>) -> Option<T> {
+    // The largest ctx in [lo, hi] that fits at conc: hi, else bisection in 1024-token steps (the budget only grows with ctx). O(log2(hi / 1024)) checks.
+    let mut at = |ctx: u64| fits(&ChooserInput { ctx, max_conc: conc, ..input.clone() });
+    if let Some(t) = at(hi) {
+        return Some(t);
+    }
+    let (mut best, mut ok, mut bad) = (at(lo)?, lo, hi);
+    loop {
+        let mid = (ok + bad) / 2 / CTX_STEP * CTX_STEP;
+        if mid <= ok {
+            return Some(best);
+        }
+        match at(mid) {
+            Some(t) => (best, ok) = (t, mid),
+            None => bad = mid,
         }
     }
 }
@@ -455,7 +508,7 @@ fn auto_plan(
     hw: Option<&HardwareState>,
     learned: LearnedAt,
 ) -> Result<LoadPlan, PlanError> {
-    // Smallest tp with a fitting set (clean GPUs first), shrinking ctx and then concurrency until something fits.
+    // The best settings settle finds, each on the smallest tp with a fitting set (clean GPUs first).
     if gpus.is_empty() {
         return Err(PlanError {
             message: "no eligible GPUs (all denied by policy or none visible)".to_string(),
@@ -463,26 +516,12 @@ fn auto_plan(
         });
     }
     let tps = valid_tp_values(input, largest_arch_group(gpus));
-    let mut trial = input.clone();
-    trial.ctx = input.ctx.min(input.max_ctx);
-    trial.max_conc = input.max_conc.max(1);
-    loop {
-        for &tp in &tps {
-            if let Some(set) = best_fit(&trial, gpus, hw, tp, learned) {
-                return Ok(plan(&trial, tp, set));
-            }
-        }
-        if trial.ctx > SHRINK_CTX_FLOOR {
-            trial.ctx = (trial.ctx / 2).max(SHRINK_CTX_FLOOR);
-        } else if trial.max_conc > 1 {
-            trial.max_conc -= 1;
-            trial.ctx = input.ctx.min(input.max_ctx);
-        } else {
-            let mut err = closest_miss(input, gpus, hw, tps.last().copied().unwrap_or(1), learned);
-            err.message = format!("no placement fits even at reduced ctx/concurrency; {}", err.message);
-            return Err(err);
-        }
-    }
+    let fits = |trial: &ChooserInput| tps.iter().find_map(|&tp| best_fit(trial, gpus, hw, tp, learned).map(|set| plan(trial, tp, set)));
+    settle(input, fits).ok_or_else(|| {
+        let mut err = closest_miss(&bottom(input), gpus, hw, tps.last().copied().unwrap_or(1), learned);
+        err.message = format!("no placement fits even at reduced ctx/concurrency; {}", err.message);
+        err
+    })
 }
 
 #[cfg(test)]
@@ -504,13 +543,16 @@ mod tests {
             supported_sm: Vec::new(),
             memory: None,
             overhead_gb: crate::calc::BASE_OVERHEAD_GB,
+            floor: floor(&[]),
+            min_ctx: 0,
+            min_conc: 0,
         }
     }
 
     #[test]
     fn huge_contexts_and_concurrency_saturate_instead_of_wrapping() {
-        assert_eq!(kv_tokens(u64::MAX, u64::MAX), u64::MAX);
-        assert_eq!(kv_tokens(1 << 40, 1 << 40), (u64::MAX).div_ceil(4));
+        assert_eq!(kv_tokens(u64::MAX, u64::MAX, u64::MAX), u64::MAX);
+        assert_eq!(kv_tokens(1 << 40, 1 << 40, 1 << 40), u64::MAX);
     }
 
     #[test]
@@ -540,14 +582,31 @@ mod tests {
     }
 
     #[test]
-    fn an_unasked_context_is_capped_so_the_kv_cache_stays_within_40_percent_of_free_vram() {
-        let m = ChooserInput { ctx: 131072, max_conc: 1, kv_bytes_per_token: 65536, ..inp() };
-        let kv = |ctx: u64| need(&ChooserInput { ctx, ..m.clone() }, 1, "12.0").kv;
-        let capped = cap_default_ctx(&m, 1, "12.0", 10.0);
-        assert!(capped < 131072 && kv(capped) <= KV_SHARE_OF_FREE * 10.0, "{capped}");
-        assert!(kv(capped * 2) > KV_SHARE_OF_FREE * 10.0, "the largest halving that fits");
-        assert_eq!(cap_default_ctx(&m, 1, "12.0", 4000.0), 131072, "plenty of room keeps the default");
-        assert_eq!(cap_default_ctx(&m, 1, "12.0", 0.1), SHRINK_CTX_FLOOR, "never below the shrink floor");
+    fn auto_keeps_context_before_users_and_never_moves_a_pin() {
+        // A 27B hybrid on a 32 GB card: (case, reply floor, what the load names) -> (users, ctx range); every ctx is the largest that fits.
+        let spec = MemorySpec { kv_bytes_per_token: 65536, kv_heads: 4, state_bytes_per_slot: 153_944_064, state_slots_per_request: 5, ..MemorySpec::default() };
+        let base = ChooserInput { static_vram_gb: 20.99, num_attention_heads: 24, num_kv_heads: 4, attention: "hybrid".into(), max_ctx: 262_144, ctx: 262_144, max_conc: DEFAULT_CONC, memory: Some(spec), ..inp() };
+        let reasoning = floor(&["--reasoning-parser".to_string(), "qwen3".to_string()]);
+        let cases = [
+            ("reasoning keeps 36k per user: 2 users", reasoning, (None, None), Some((2, 36_864..262_144))),
+            ("no reasoning: 4 users at 16k or more", floor(&[]), (None, None), Some((4, 16_384..262_144))),
+            ("4 users pinned with reasoning do not fit", reasoning, (None, Some(4)), None),
+            ("a pinned context stays exact", floor(&[]), (Some(32_768), None), Some((4, 32_768..32_769))),
+            ("a pinned full context does not fit", reasoning, (Some(262_144), None), None),
+        ];
+        let gpus = [gpu(0, 31.3, false)];
+        for (name, fl, (ctx, conc), want) in cases {
+            let m = ChooserInput { floor: fl, ..base.clone() }.pin(ctx, conc);
+            let got = pick_load_plan(&m, &gpus, None, None, None).ok().map(|p| (p.max_conc, p.ctx));
+            match (want, got) {
+                (Some((users, range)), Some((conc, ctx))) => {
+                    assert!(conc == users && range.contains(&ctx), "{name}: {conc} users at {ctx}");
+                    let wider = ChooserInput { ctx: ctx + CTX_STEP, max_conc: conc, ..m.clone() };
+                    assert!(ctx == m.ctx || missing_gb(&need(&wider, 1, "12.0"), 31.3) > 0.0, "{name}: {ctx} is not the largest");
+                }
+                (want, got) => assert_eq!(want.is_some(), got.is_some(), "{name}: {got:?}"),
+            }
+        }
     }
 
     #[test]
@@ -611,7 +670,7 @@ mod tests {
         assert_eq!(plan.tp, 1);
         assert!(plan.disable_marlin, "planned without the dual-copy weight overhead");
         assert!(plan.ctx < m.ctx, "ctx reduced: {}", plan.ctx);
-        assert!(plan.ctx >= SHRINK_CTX_FLOOR, "{}", plan.ctx);
+        assert!(plan.ctx >= m.floor, "{}", plan.ctx);
         assert!(plan.max_conc <= m.max_conc);
     }
 
@@ -715,7 +774,7 @@ mod tests {
     fn pinned_set_shrinks_context_then_concurrency_to_fit() {
         let m = ChooserInput { ctx: 131072, kv_bytes_per_token: 65536, ..inp() };
         let p = pick_load_plan(&m, &[gpu(3, 30.0, false)], None, None, Some(&[3])).unwrap();
-        assert_eq!((p.gpus, p.ctx, p.max_conc), (vec![3], 65536, 4));
+        assert_eq!((p.gpus, p.ctx, p.max_conc), (vec![3], 84992, 4), "the largest context that fits, in 1024-token steps");
         let full = pick_load_plan(&m, &[gpu(3, 40.0, false)], None, None, Some(&[3])).unwrap();
         assert_eq!((full.ctx, full.max_conc), (131072, 4));
     }
@@ -724,7 +783,7 @@ mod tests {
     fn a_pinned_tp_shrinks_context_too() {
         let m = ChooserInput { ctx: 131072, kv_bytes_per_token: 65536, ..inp() };
         let p = pick_load_plan(&m, &[gpu(0, 30.0, false)], None, Some(1), None).unwrap();
-        assert_eq!((p.tp, p.ctx, p.max_conc), (1, 65536, 4), "a llama.cpp card pins tp 1 and must still fit a smaller context");
+        assert_eq!((p.tp, p.ctx, p.max_conc), (1, 84992, 4), "a llama.cpp card pins tp 1 and must still fit a smaller context");
     }
 
     #[test]
@@ -757,11 +816,11 @@ mod tests {
     }
 
     #[test]
-    fn the_kv_pool_holds_one_full_context_or_every_request_at_a_quarter() {
-        assert_eq!(kv_tokens(131072, 1), 131072);
-        assert_eq!(kv_tokens(131072, 4), 131072);
-        assert_eq!(kv_tokens(131072, 8), 262144);
-        assert_eq!(kv_tokens(8192, 32), 65536);
+    fn the_kv_pool_holds_one_full_context_while_every_other_request_keeps_the_floor() {
+        assert_eq!(kv_tokens(131072, 1, 8192), 131072);
+        assert_eq!(kv_tokens(131072, 4, 8192), 131072 + 3 * 8192);
+        assert_eq!(kv_tokens(8192, 32, 36864), 32 * 8192, "a context under the floor is the floor");
+        assert_eq!((floor(&[]), floor(&["--reasoning-parser=qwen3".to_string()])), (8192, 36864));
         let hybrid = MemorySpec { state_slots_per_request: 5, ..MemorySpec::default() };
         assert_eq!((state_slots(&hybrid, 1), state_slots(&hybrid, 8)), (5, 40));
     }
@@ -791,9 +850,9 @@ mod tests {
         };
         let n = need(&m, 1, "12.0");
         assert!((n.weights - (21.0 - 4.0 * state as f64 / gib)).abs() < 1e-9, "{n:?}");
-        assert!((n.kv - 262144.0 * 65536.0 / gib).abs() < 1e-9, "16 GiB, not 4 full contexts: {n:?}");
+        assert!((n.kv - (131072.0 + 7.0 * 8192.0) * 65536.0 / gib).abs() < 1e-9, "one full context plus 7 floors: {n:?}");
         assert!((n.state - 41.0 * state as f64 / gib).abs() < 1e-9, "5 slots per request plus the padding slot: {n:?}");
-        assert_eq!(engine_args(&spec, 131072, 8), vec!["--max-mamba-cache-size".to_string(), "40".to_string()]);
+        assert_eq!(engine_args(&spec, 131072, 8, 8192), vec!["--max-mamba-cache-size".to_string(), "40".to_string()]);
         let two = need(&m, 2, "12.0");
         assert!((two.state - n.state / 2.0).abs() < 1e-9 && (two.kv - n.kv / 2.0).abs() < 1e-9);
         assert_eq!(need(&inp(), 1, "9.0").state, 0.0);
@@ -814,9 +873,9 @@ mod tests {
         let n = need(&m, 1, "12.0");
         let swa_tokens = 8 * (1024 + 128 + 256 + 4 * (1024 + 128)) + 2 * 8192 + 128;
         assert!((n.window - swa_tokens as f64 * 204_800.0 / 1024f64.powi(3)).abs() < 1e-9, "{n:?}");
-        let args = engine_args(&spec, 262_144, 8);
+        let args = engine_args(&spec, 262_144, 8, 8192);
         assert_eq!(args[0], "--swa-full-tokens-ratio");
-        assert!((args[1].parse::<f64>().unwrap() - swa_tokens as f64 / 524_288.0).abs() < 1e-6, "{args:?}");
+        assert!((args[1].parse::<f64>().unwrap() - swa_tokens as f64 / (262_144.0 + 7.0 * 8192.0)).abs() < 1e-6, "{args:?}");
         assert_eq!(&args[2..], &["--chunked-prefill-size".to_string(), "8192".to_string()]);
     }
 

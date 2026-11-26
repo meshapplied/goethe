@@ -127,9 +127,8 @@ pub struct PickArgs<'a> {
 
 pub fn place(home: &Path, view: &crate::recommend::View, id: &str, tp: Option<usize>, ctx: Option<u64>, max_conc: Option<u64>) -> Result<Result<(crate::recommend::Fit, String), String>, String> {
     // Where goethe load would put an installed model on the view's GPUs now, with the plan in words, or why it would not fit; Err when the model cannot be read.
-    let (mut input, card_tp) = crate::models::fit_input(home, id)?;
-    input.ctx = ctx.unwrap_or(input.ctx);
-    input.max_conc = max_conc.unwrap_or(input.max_conc);
+    let (input, card_tp) = crate::models::fit_input(home, id)?;
+    let input = input.pin(ctx, max_conc);
     Ok(view.fit(id, &input, tp.or(card_tp)).map(|f| {
         let desc = f.describe(&input);
         (f, desc)
@@ -166,6 +165,9 @@ pub fn run_pick_gpus(args: PickArgs) -> Result<(), String> {
                 supported_sm: Vec::new(),
                 memory: None,
                 overhead_gb: crate::calc::BASE_OVERHEAD_GB,
+                floor: 1,
+                min_ctx: 0,
+                min_conc: 0,
             };
             let fit = view.fit("", &empty, Some(t));
             (String::new(), fit.map(|f| (format!("tp={} on GPU {}", f.tp, crate::placement::format_gpu_list(&f.gpus)), f.gpus)))
