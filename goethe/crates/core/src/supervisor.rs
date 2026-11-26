@@ -582,7 +582,10 @@ fn fetch_installed(con: &Connection, model_id: &str) -> Result<InstRow, String> 
             })
         },
     )
-    .map_err(|_| format!("model {model_id} not installed"))
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => format!("model {model_id} not installed"),
+        e => format!("model {model_id}: the installed models table cannot be read: {e}"),
+    })
 }
 
 fn default_ctx(row: &InstRow) -> u64 {
@@ -1073,6 +1076,14 @@ fn uuid_simple() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_row_is_not_installed_and_any_other_read_error_keeps_its_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = |con: &Connection| fetch_installed(con, "org/m").err().unwrap();
+        assert_eq!(e(&db::open(dir.path()).unwrap()), "model org/m not installed");
+        assert!(e(&Connection::open_in_memory().unwrap()).contains("no such table: installed_models"));
+    }
 
     #[test]
     fn each_task_warms_up_with_a_request_it_answers() {

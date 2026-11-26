@@ -159,7 +159,8 @@ fn config_summary(opts: &ConfigOpts, new_args: &[String], table: &toml::Table, k
 fn find_model_dir(home: &Path, model_id: &str) -> Result<PathBuf, String> {
     // Cards placed under models/ without a state.db row are found by their model_id.
     let models = home.join("models");
-    for entry in std::fs::read_dir(&models).map_err(|_| format!("model {model_id} is not installed"))? {
+    let unread = |e: std::io::Error| if e.kind() == std::io::ErrorKind::NotFound { format!("model {model_id} is not installed") } else { format!("{}: {e}", models.display()) };
+    for entry in std::fs::read_dir(&models).map_err(unread)? {
         let path = entry.map_err(|e| e.to_string())?.path();
         let Ok(text) = std::fs::read_to_string(path.join(CARD_FILE)) else {
             continue;
@@ -177,6 +178,15 @@ fn find_model_dir(home: &Path, model_id: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_models_dir_is_not_installed_and_an_unreadable_one_names_its_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(find_model_dir(dir.path(), "org/m").unwrap_err(), "model org/m is not installed");
+        std::fs::write(dir.path().join("models"), "").unwrap();
+        let err = find_model_dir(dir.path(), "org/m").unwrap_err();
+        assert!(err.starts_with(&dir.path().join("models").display().to_string()) && !err.contains("not installed"), "{err}");
+    }
 
     #[test]
     fn limits_follow_the_installed_max_ctx() {

@@ -607,7 +607,7 @@ fn ensure_cert(home: &Path, ip: Option<IpAddr>) -> Result<(), String> {
         return Ok(());
     }
     nginx::self_signed(&key, &crt, true, 30, "goethe-public", &[&san, "basicConstraints=critical,CA:FALSE"])
-        .map_err(|_| "openssl could not create the public gateway certificate".to_string())?;
+        .map_err(|e| format!("the public gateway certificate could not be created: {e}"))?;
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&crt, fs::Permissions::from_mode(0o644)).map_err(|e| e.to_string())?;
     nginx::write_private(&san_file, stamp.as_bytes())
