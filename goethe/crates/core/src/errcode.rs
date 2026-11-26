@@ -103,7 +103,15 @@ pub struct Event {
 
 pub fn record(code: Code, detail: &str) {
     // Best effort and never fatal: a failure that cannot be logged is still reported to the user as before.
-    record_at(&crate::paths::goethe_home(), code, detail);
+    record_at(&log_home(), code, detail);
+}
+
+fn log_home() -> std::path::PathBuf {
+    // The home whose log a failure goes to; unit tests use one temp home, never the developer's (a linked node would send the rows).
+    if cfg!(test) {
+        return std::env::temp_dir().join("goethe-core-unit-tests");
+    }
+    crate::paths::goethe_home()
 }
 
 pub fn record_at(home: &Path, code: Code, detail: &str) {
@@ -196,6 +204,12 @@ pub fn mark_sent(home: &Path, last: &Event) {
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn unit_tests_log_into_their_own_temp_home() {
+        assert!(log_home().starts_with(std::env::temp_dir()), "{}", log_home().display());
+        assert_ne!(log_home(), crate::paths::goethe_home(), "a test failure never lands in a real home's log");
+    }
 
     #[test]
     fn labels_are_unique_and_shout() {
