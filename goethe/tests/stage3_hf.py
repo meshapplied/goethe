@@ -16,6 +16,7 @@ from lib.goethe_test import (
     require_cli,
     run,
     run_goethe,
+    signed_registry,
     temp_home,
 )
 
@@ -46,7 +47,7 @@ def main() -> None:
         reg = home / "registry.json"
         reg.write_text(_registry_for(tiny), encoding="utf-8")
         base = {"GOETHE_HOME": str(home), "HF_HOME": str(home / "hf-home")}
-        env = {**base, "GOETHE_REGISTRY_URL": f"file://{reg}"}
+        env = {**base, **signed_registry(reg)}
         t0 = time.time()
         for attempt in range(3):
             try:
@@ -89,7 +90,7 @@ def main() -> None:
             shutil.rmtree(p, ignore_errors=True)
         rr_disk = run(
             [str(goethe), "install", disk_model],
-            env={**base, "GOETHE_REGISTRY_URL": f"file://{reg2}", "GOETHE_TEST_FREE_BYTES": "1"},
+            env={**base, **signed_registry(reg2), "GOETHE_TEST_FREE_BYTES": "1"},
             timeout=120,
         )
         if rr_disk.returncode == 0 or "need" not in _msg(rr_disk) or "available" not in _msg(rr_disk):

@@ -1168,6 +1168,13 @@ def make_release_key(dirpath: Path) -> tuple[Path, Path]:
     return key, pub
 
 
+def signed_registry(path: Path) -> dict[str, str]:
+    """Sign the registry at path with a fresh test key beside it; the env a test-release-key goethe trusts it in."""
+    key, pub = make_release_key(path.parent / f"{path.stem}-key")
+    subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(key), "-out", f"{path}.sig", str(path)], check=True)
+    return {"GOETHE_REGISTRY_URL": f"file://{path}", "GOETHE_RELEASE_PUB": str(pub)}
+
+
 def sign_cdn_tree(cdn: Path, key: Path, version: str | None = None) -> None:
     """Write VERSION (when given), SHA256SUMS over every file and SHA256SUMS.sig for a CDN tree."""
     if version is not None:

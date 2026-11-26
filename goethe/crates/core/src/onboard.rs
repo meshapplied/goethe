@@ -446,11 +446,11 @@ fn later_text(model: Option<&str>) -> String {
 }
 
 pub fn suggested(offline: bool) -> String {
-    // The model examples name: the top of goethe models recommend for this machine (the bundled catalog when offline or unreachable).
-    let reg = if offline { crate::registry::bundled() } else { crate::registry::fetch(&crate::registry::registry_url()).or_else(|_| crate::registry::bundled()) };
-    match reg {
-        Ok(r) => crate::recommend::suggested_model(&goethe_home(), &r),
-        Err(_) => "nvidia/Llama-3.1-8B-Instruct-NVFP4".to_string(),
+    // The model examples name: the top of goethe models recommend for this machine (the last registry fetched when offline or unreachable).
+    let reg = if offline { None } else { crate::registry::fetch(&crate::registry::registry_url()).ok() };
+    match reg.or_else(crate::registry::cached) {
+        Some(r) => crate::recommend::suggested_model(&goethe_home(), &r),
+        None => "nvidia/Llama-3.1-8B-Instruct-NVFP4".to_string(),
     }
 }
 

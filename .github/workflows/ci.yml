@@ -147,6 +147,35 @@ jobs:
           bash tests/gate.sh 0
           bash tests/gate.sh 6 --only stage6_integrity.py
 
+  registry:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: goethe
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Rust toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: goethe
+          shared-key: goethe-dev
+      - name: The registry builds from registry.src.json; what it changes in the one served
+        env:
+          GOETHE_HOME: ${{ runner.temp }}/home
+        run: |
+          cargo run --locked -q -p goethe-core --example registry -- build registry.src.json "$RUNNER_TEMP/registry.json"
+          curl -fsSL https://pkg.goethe.sh/v1/registry.json -o "$RUNNER_TEMP/served.json"
+          {
+            echo '### Registry change against pkg.goethe.sh'
+            echo '```diff'
+            diff -u "$RUNNER_TEMP/served.json" "$RUNNER_TEMP/registry.json" | head -n 400 || true
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
   e2e-user:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
@@ -210,7 +239,7 @@ jobs:
   # only when the `changes` flag that gates it is false; a failed `changes` job or any other skip fails it.
   gate:
     if: ${{ always() }}
-    needs: [changes, lint, attribution, engine-test, e2e-user, image]
+    needs: [changes, lint, attribution, engine-test, registry, e2e-user, image]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -228,6 +257,7 @@ jobs:
             | select(.value.result != "success")
             | select((.value.result == "skipped" and (
                 (.key == "engine-test" and $f.rust != "true")
+                or (.key == "registry" and $f.rust != "true")
                 or (.key == "e2e-user" and $f.e2e != "true")
                 or (.key == "image" and $f.image != "true")
               )) | not)

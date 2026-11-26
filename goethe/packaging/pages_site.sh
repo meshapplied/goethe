@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pkg.goethe.sh's tree from goethe-cdn-VERSION.tar.zst into a site dir: that release at the root (what older installers read) and the newest KEEP (default 4) under v/<version>/.
+# pkg.goethe.sh's tree from goethe-cdn-VERSION.tar.zst into a site dir: that release at the root (what older installers read), the newest KEEP (default 4) under v/<version>/, and the registry served now (registry.yml replaces it when it changes).
 
 set -euo pipefail
 
@@ -16,8 +16,12 @@ signed() {
 
 mkdir -p "${SITE}"
 zstd -dc "${TARBALL}" | tar -C "${SITE}" --strip-components=1 -xf -
-test -f "${SITE}/install.sh" && test -f "${SITE}/install.ps1" && test -f "${SITE}/SHA256SUMS.sig" && test -f "${SITE}/v1/registry.json"
+test -f "${SITE}/install.sh" && test -f "${SITE}/install.ps1" && test -f "${SITE}/SHA256SUMS.sig"
 signed "${SITE}" || { echo "${TARBALL} is not signed by the release key; nothing is served" >&2; exit 1; }
+mkdir -p "${SITE}/v1"
+for f in registry.json registry.json.sig; do curl -fsSL "https://pkg.goethe.sh/v1/${f}" -o "${SITE}/v1/${f}"; done
+openssl dgst -sha256 -verify "${PUB}" -signature "${SITE}/v1/registry.json.sig" "${SITE}/v1/registry.json" >/dev/null ||
+  { echo "the registry served at pkg.goethe.sh is not signed by the release key; nothing is served" >&2; exit 1; }
 current="$(cat "${SITE}/VERSION")"
 mkdir -p "${SITE}/v/${current}"
 (cd "${SITE}" && find . -mindepth 1 -maxdepth 1 ! -name v -exec cp -R {} "v/${current}/" \;)

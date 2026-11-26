@@ -1,6 +1,6 @@
 # Registry entry checklist
 
-A model in `goethe/cdn/v1/registry.json` is supported only when all of these pass on every GPU generation in its `supported_sm`, for each tensor-parallel size it can split over:
+A model in `goethe/registry.src.json` is supported only when all of these pass on every GPU generation in its `supported_sm`, for each tensor-parallel size it can split over:
 
 1. **Flags are complete.** `extra_sglang_args` holds every engine flag the model needs, including the state dtype (`--mamba-ssm-dtype`) and speculative-decoding flags. Goethe sizes memory from these flags.
 2. **Default loads work.** `goethe load <id>` and `goethe load <id> --gpu <one GPU>` reach RUNNING with no extra flags. A "reduced to fit" notice is fine; a failure is not.

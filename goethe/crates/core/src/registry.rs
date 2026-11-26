@@ -126,54 +126,42 @@ pub struct ValidateOpts {
     pub check_sglang: bool,
 }
 
-const DEFAULT_REGISTRY_URL: &str = "https://pkg.goethe.sh/v1/registry.json";
-
-const BUNDLED_REGISTRY: &str = include_str!("../../../cdn/v1/registry.json");
-
 pub fn registry_url() -> String {
     // GOETHE_REGISTRY_URL when set, else the registry of the package goethe installs from.
     crate::paths::setting("GOETHE_REGISTRY_URL").unwrap_or_else(|| format!("{}/v1/registry.json", crate::update::pkg_base_url()))
 }
 
-pub fn bundled() -> Result<Registry, String> {
-    parse_registry(BUNDLED_REGISTRY)
-}
-
 pub fn fetch(url: &str) -> Result<Registry, String> {
-    // A published registry without GGUF models (older than this build) leaves a Mac the catalog built into goethe.
-    let reg = fetch_any(url)?;
-    if gguf_catalog() && reg.models.is_empty() {
-        return bundled();
-    }
-    Ok(reg)
-}
-
-fn fetch_any(url: &str) -> Result<Registry, String> {
-    // file:// or http(s). Parse a body only after the release key verifies it. The default URL with no signature uses the built in catalog.
+    // file:// or http(s). Parse a body only after the release key verifies it.
     if let Some(rest) = url.strip_prefix("file://") {
         let path = Path::new(rest);
         let text = fs_read(path)?;
         let sig = std::fs::read(format!("{}.sig", path.display())).ok();
-        return finish_registry(url, &text, sig.as_deref());
+        return finish_registry(&text, sig.as_deref());
     }
     if let Some(why) = crate::update::plain_http_refusal(url) {
         return Err(why);
     }
     if url.starts_with("http://") || url.starts_with("https://") {
-        return fetch_http_cached(url).or_else(|e| if url == DEFAULT_REGISTRY_URL { bundled() } else { Err(e) });
+        return fetch_http_cached(url);
     }
     Err(format!("unsupported registry URL scheme: {url}"))
 }
 
-fn finish_registry(url: &str, body: &str, sig: Option<&[u8]>) -> Result<Registry, String> {
-    match sig {
-        Some(sig) => {
-            verify_registry(body.as_bytes(), sig)?;
-            parse_registry(body)
-        }
-        None if url == DEFAULT_REGISTRY_URL => bundled(),
-        None => Err("registry signature missing".into()),
-    }
+fn finish_registry(body: &str, sig: Option<&[u8]>) -> Result<Registry, String> {
+    let sig = sig.ok_or("registry signature missing")?;
+    verify_registry(body.as_bytes(), sig)?;
+    parse_registry(body)
+}
+
+pub fn cached() -> Option<Registry> {
+    // The last registry fetched; it is cached only after its signature checked, so it is read without the network.
+    cached_in(&goethe_home())
+}
+
+fn cached_in(home: &Path) -> Option<Registry> {
+    let text = std::fs::read_to_string(home.join("registry.cache.json")).ok()?;
+    parse_registry(&serde_json::from_str::<RegistryCache>(&text).ok()?.body).ok()
 }
 
 fn verify_registry(body: &[u8], sig: &[u8]) -> Result<(), String> {
@@ -198,7 +186,7 @@ fn fetch_http_cached(url: &str) -> Result<Registry, String> {
     let home = goethe_home();
     let miss = home.join("registry.miss");
     if recent_miss(&miss, url) {
-        return Err(format!("registry unreachable at {url} (last try under {} min ago)", MISS_TTL_SECS / 60));
+        return cached_in(&home).ok_or_else(|| format!("the model catalog at {url} is unreachable (last try under {} min ago); connect to the internet once, goethe keeps a copy", MISS_TTL_SECS / 60));
     }
     let result = fetch_http_uncached(&home, url);
     if result.is_err() {
@@ -210,9 +198,8 @@ fn fetch_http_cached(url: &str) -> Result<Registry, String> {
 }
 
 fn fetch_http_uncached(home: &Path, url: &str) -> Result<Registry, String> {
-    // One request: a 200 refreshes the cache, a 304 reuses it, and offline mode falls back to it.
+    // One request: a 200 refreshes the cache, a 304 reuses it, and a failure falls back to it.
     let cache_path = home.join("registry.cache.json");
-    let offline = hf::offline_mode();
     let mut req = crate::net::agent().get(url).timeout(std::time::Duration::from_secs(10));
     if let Ok(text) = std::fs::read_to_string(&cache_path) {
         if let Ok(c) = serde_json::from_str::<RegistryCache>(&text) {
@@ -240,31 +227,29 @@ fn fetch_http_uncached(home: &Path, url: &str) -> Result<Registry, String> {
         Some(buf)
     };
     match req.call() {
-        Ok(resp) if resp.status() == 304 => finish_registry(url, &cached_body()?, sig_bytes(url).as_deref()),
+        Ok(resp) if resp.status() == 304 => finish_registry(&cached_body()?, sig_bytes(url).as_deref()),
         Ok(resp) => {
             let etag = resp.header("etag").map(String::from);
             let body = resp.into_string().map_err(|e| format!("registry body: {e}"))?;
             let sig = sig_bytes(url);
-            let reg = finish_registry(url, &body, sig.as_deref())?;
+            let reg = finish_registry(&body, sig.as_deref())?;
             let cache = RegistryCache { etag, body };
             let _ = std::fs::write(&cache_path, serde_json::to_string(&cache).unwrap_or_default());
             Ok(reg)
         }
-        Err(e) if offline => {
-            if !cache_path.is_file() {
-                return Err(format!("registry unreachable ({e}) and no registry.cache.json"));
+        Err(e) => match cached_in(home) {
+            Some(reg) => {
+                eprintln!("warning: registry fetch failed ({e}); using the last one fetched");
+                Ok(reg)
             }
-            eprintln!("warning: registry fetch failed ({e}); using the signed catalog");
-            finish_registry(url, &cached_body().unwrap_or_default(), None)
-        }
-        Err(e) => Err(format!("registry unreachable at {url}: {e}")),
+            None => Err(format!("the model catalog at {url} is unreachable ({e}); connect to the internet once, goethe keeps a copy")),
+        },
     }
 }
 
 pub fn known_ids() -> Vec<String> {
-    // The models of the last registry fetched (cached only after its signature checked), else the catalog built into goethe; no network.
-    let cached = std::fs::read_to_string(goethe_home().join("registry.cache.json")).ok().and_then(|t| serde_json::from_str::<RegistryCache>(&t).ok()).and_then(|c| parse_registry(&c.body).ok());
-    cached.or_else(|| bundled().ok()).map(|r| r.models.into_iter().filter(|m| !m.manual_download.unwrap_or(false)).map(|m| m.id).collect()).unwrap_or_default()
+    // The models of the last registry fetched; no network.
+    cached().map(|r| r.models.into_iter().filter(|m| !m.manual_download.unwrap_or(false)).map(|m| m.id).collect()).unwrap_or_default()
 }
 
 pub fn find_model<'a>(reg: &'a Registry, model_id: &str) -> Option<&'a RegistryModel> {
@@ -502,53 +487,6 @@ fn load_registry_source(source: &str) -> Result<String, String> {
     fs_read(Path::new(source))
 }
 
-pub struct EntryOpts {
-    pub strict: bool,
-}
-
-pub fn run_entries(
-    repo_ids: &[String],
-    runtime: Option<&str>,
-    revision: Option<&str>,
-    opts: &EntryOpts,
-) -> Result<(), String> {
-    if repo_ids.is_empty() {
-        return Err("no repo ids (pass ids or --ids-file)".to_string());
-    }
-    let mut models = Vec::new();
-    let mut failed = 0usize;
-    for repo_id in repo_ids {
-        match infer_one_entry(repo_id, runtime, revision) {
-            Ok((entry, warnings)) => {
-                for w in warnings {
-                    eprintln!("warning: {w}");
-                }
-                models.push(entry);
-            }
-            Err(e) => {
-                failed += 1;
-                eprintln!("warning: skipped {repo_id}: {e}");
-            }
-        }
-    }
-    if models.is_empty() {
-        if opts.strict || failed > 0 {
-            std::process::exit(1);
-        }
-        return Err("no entries produced".to_string());
-    }
-    if opts.strict && failed > 0 {
-        std::process::exit(1);
-    }
-    let out = Registry {
-        version: 1,
-        models,
-        gguf_models: Vec::new(),
-    };
-    println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
-    Ok(())
-}
-
 pub fn build(src: &Value, infer: &dyn Fn(&str, &str) -> Result<RegistryModel, String>) -> Result<Registry, String> {
     // registry.json from registry.src.json: each entry inferred from Hugging Face at its pinned revision with every field the source states laid over it; a gated or manual_download entry, and every GGUF entry, is its source entry as is. O(entries) infers.
     let list = |k: &str| src[k].as_array().cloned().unwrap_or_default();
@@ -689,17 +627,10 @@ mod validate_tests {
     const SRC: &str = include_str!("../../../registry.src.json");
 
     #[test]
-    fn the_bundled_registry_is_the_build_of_its_source() {
-        // Inference is replaced by the bundled entries themselves: equal only when every source field, id, order and GGUF entry is the bundled one.
-        let reg = parse_registry(BUNDLED_REGISTRY).unwrap();
-        let built = build(&serde_json::from_str(SRC).unwrap(), &|id, _| reg.models.iter().find(|m| m.id == id).cloned().ok_or_else(|| format!("{id} not bundled"))).unwrap();
-        assert_eq!(serde_json::to_value(&built).unwrap(), serde_json::to_value(&reg).unwrap(), "edit registry.src.json and run goethe registry build");
-    }
-
-    #[test]
     fn build_infers_at_the_pinned_revision_and_the_source_wins() {
-        // A valid bundled entry, renamed, stands in for what Hugging Face infers.
-        let base = parse_registry(BUNDLED_REGISTRY).unwrap().models.into_iter().find(|m| m.gated.is_none() && m.manual_download.is_none()).unwrap();
+        // A valid entry, renamed, stands in for what Hugging Face infers.
+        let base: RegistryModel = serde_json::from_value(serde_json::json!({"id": "org/base", "architecture": "dense", "static_vram_gb": 5.6,
+            "kv_elems_per_token": 131072, "max_ctx": 131072, "supported_sm": ["12.0"], "num_attention_heads": 32, "num_kv_heads": 8})).unwrap();
         let rev = "a".repeat(40);
         let infer = |id: &str, r: &str| {
             assert_eq!(r, "a".repeat(40));
@@ -801,23 +732,23 @@ mod validate_tests {
     }
 
     #[test]
-    fn the_default_url_without_a_signature_uses_the_bundled_catalog() {
-        let reg = finish_registry(DEFAULT_REGISTRY_URL, "{}", None).unwrap();
-        assert!(reg.models.iter().any(|m| m.id == "nvidia/Llama-3.1-8B-Instruct-NVFP4"));
+    fn offline_the_last_registry_fetched_is_used() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(cached_in(home.path()).is_none(), "nothing fetched yet: no catalog, never a built-in one");
+        let body = r#"{"version": 1, "models": [{"id": "org/m", "static_vram_gb": 1.0, "kv_elems_per_token": 2, "max_ctx": 8}]}"#;
+        let cache = RegistryCache { etag: None, body: body.into() };
+        std::fs::write(home.path().join("registry.cache.json"), serde_json::to_string(&cache).unwrap()).unwrap();
+        assert_eq!(cached_in(home.path()).unwrap().models[0].id, "org/m");
     }
 
     #[test]
     fn readme_install_ids_are_catalog_ids() {
+        let ids: Vec<String> = serde_json::from_str::<Value>(SRC).unwrap()["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap().to_string()).collect();
         let readme = include_str!("../../../../README.md");
-        let reg = bundled().unwrap();
         for line in readme.lines() {
-            if let Some(rest) = line.split("goethe install ").nth(1) {
-                let id = rest.split_whitespace().next().unwrap();
-                assert!(reg.models.iter().any(|m| m.id == id), "{id}");
-            }
-            if let Some(rest) = line.split("model=\"").nth(1) {
-                let id = rest.split('"').next().unwrap();
-                assert!(reg.models.iter().any(|m| m.id == id), "{id}");
+            let id = line.split("goethe install ").nth(1).and_then(|r| r.split_whitespace().next()).or_else(|| line.split("model=\"").nth(1).and_then(|r| r.split('"').next()));
+            if let Some(id) = id {
+                assert!(ids.iter().any(|m| m == id), "{id} is not in registry.src.json");
             }
         }
     }

@@ -15,7 +15,6 @@ use goethe_core::install::{self, InstallOpts};
 use goethe_core::models;
 use goethe_core::nginx;
 use goethe_core::paths::{ensure_layout, goethe_home, validate_model_id};
-use goethe_core::registry;
 use goethe_core::recommend;
 use goethe_core::rpc;
 use goethe_core::security;
@@ -372,11 +371,6 @@ enum Commands {
         #[command(subcommand)]
         cmd: Option<CompletionCommands>,
     },
-    #[command(hide = true, about = "Catalog maintenance: validate, generate or merge registry entries.")]
-    Registry {
-        #[command(subcommand)]
-        cmd: RegistryCommands,
-    },
 }
 
 #[derive(Subcommand)]
@@ -721,41 +715,6 @@ enum ShareCommands {
     Stop {
         #[arg(add = ArgMeta::of(spec::Value::Key), long, value_name = "NAME_OR_ID", num_args = 1.., value_delimiter = ',', help = "Stop sharing only these API keys; the others stay shared.")]
         key: Vec<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum RegistryCommands {
-    #[command(about = "Check a registry JSON file (local path or URL).")]
-    Validate {
-        #[arg(long, value_name = "PATH_OR_URL", help = "Registry JSON to check.")]
-        source: String,
-        #[arg(long, help = "Fetch remote sha256 metadata.")]
-        online: bool,
-        #[arg(long, help = "Allow non-org Hugging Face repos.")]
-        allow_individuals: bool,
-        #[arg(long, help = "Validate SGLang flag names.")]
-        check_sglang: bool,
-    },
-    #[command(about = "Generate registry stub entries for repo ids.")]
-    Entry {
-        #[arg(long = "repo", value_name = "ID", help = "Hugging Face repo id (repeatable).")]
-        repo_ids: Vec<String>,
-        #[arg(long, help = "Runtime, such as sglang (the default).")]
-        runtime: Option<String>,
-        #[arg(long, help = "Git revision or branch.")]
-        revision: Option<String>,
-        #[arg(long, help = "Read repo ids from a file.")]
-        ids_file: Option<String>,
-        #[arg(long, help = "Fail on validation warnings.")]
-        strict: bool,
-    },
-    #[command(about = "Build the registry from its source: each entry inferred from Hugging Face at its pinned revision, the source's fields over it.")]
-    Build {
-        #[arg(long, value_name = "PATH", help = "registry.src.json: ids, pinned revisions and the fields that are not inferred.")]
-        src: String,
-        #[arg(long, value_name = "PATH", help = "registry.json to write (only when the whole registry builds and validates).")]
-        out: String,
     },
 }
 
@@ -1291,29 +1250,6 @@ fn main() {
             });
             complete::run(action, shell.as_deref())
         }
-        Commands::Registry { cmd } => match cmd {
-            RegistryCommands::Validate {
-                source,
-                online,
-                allow_individuals,
-                check_sglang,
-            } => registry::run_validate(
-                &source,
-                &registry::ValidateOpts {
-                    online,
-                    allow_individuals,
-                    check_sglang,
-                },
-            ),
-            RegistryCommands::Entry {
-                repo_ids,
-                runtime,
-                revision,
-                ids_file,
-                strict,
-            } => do_registry_entry(repo_ids, runtime, revision, ids_file, strict),
-            RegistryCommands::Build { src, out } => registry::run_build(std::path::Path::new(&src), std::path::Path::new(&out)),
-        },
     };
     match result {
         Ok(()) => {}
@@ -2225,31 +2161,6 @@ fn curl_example(api: &str) -> String {
         cert_path()
     )
 }
-
-fn read_ids_file(repo_ids: &mut Vec<String>, path: Option<&str>) -> Result<(), String> {
-    // --ids-file: one repo id per line; blank lines and # comments are skipped.
-    let Some(path) = path else { return Ok(()) };
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-    repo_ids.extend(text.lines().map(str::trim).filter(|t| !t.is_empty() && !t.starts_with('#')).map(str::to_string));
-    Ok(())
-}
-
-fn do_registry_entry(
-    mut repo_ids: Vec<String>,
-    runtime: Option<String>,
-    revision: Option<String>,
-    ids_file: Option<String>,
-    strict: bool,
-) -> Result<(), String> {
-    read_ids_file(&mut repo_ids, ids_file.as_deref())?;
-    registry::run_entries(
-        &repo_ids,
-        runtime.as_deref(),
-        revision.as_deref(),
-        &registry::EntryOpts { strict },
-    )
-}
-
 
 fn image_refusal(cmd: &Commands, image: Option<&str>) -> Option<&'static str> {
     // In the container image these would replace or stop what the image provides; each says what to do instead.
