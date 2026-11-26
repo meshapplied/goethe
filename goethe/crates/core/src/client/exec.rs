@@ -20,7 +20,7 @@ pub struct Engines {
     pub unload: fn(&str) -> Result<(), String>,
 }
 
-pub const SUPERVISOR: Engines = Engines { load: supervisor_load, unload: supervisor_unload };
+const SUPERVISOR: Engines = Engines { load: supervisor_load, unload: supervisor_unload };
 
 fn supervisor_load(params: LoadParams) -> Result<Value, String> {
     // What goethed's load RPC runs, after the limits check the CLI makes first; nothing waits here, the console sees the instance come up in the state.
@@ -77,7 +77,7 @@ pub fn handle(home: &Path, signed: &SignedCommand, emit: &mut dyn FnMut(CommandE
     handle_with(home, signed, &SUPERVISOR, crate::sys::unix_ms(), emit)
 }
 
-pub fn handle_with(home: &Path, signed: &SignedCommand, engines: &Engines, now_ms: u64, emit: &mut dyn FnMut(CommandEvent)) {
+fn handle_with(home: &Path, signed: &SignedCommand, engines: &Engines, now_ms: u64, emit: &mut dyn FnMut(CommandEvent)) {
     // The replay check, the claim and the stored accepted event happen under one lock, so two copies of a command never both run.
     let cmd_id = signed.cmd_id().unwrap_or_default();
     let v = match checked(home, signed, now_ms) {
@@ -261,7 +261,7 @@ pub fn outcome(home: &Path, cmd_id: &str) -> Option<Vec<CommandEvent>> {
     load_seen(home).ok()?.into_iter().find(|s| s.cmd_id == cmd_id).map(|s| s.events)
 }
 
-pub fn load_params(a: &goethe_proto::ModelLoad) -> Result<LoadParams, String> {
+fn load_params(a: &goethe_proto::ModelLoad) -> Result<LoadParams, String> {
     // The load goethe load sends goethed: GPUs as a list, tensor parallel from the GPUs when they are given; never past busy GPUs or foreign processes (no --yes).
     if let (Some(g), Some(tp)) = (&a.gpus, a.tp) {
         if g.len() != tp as usize {

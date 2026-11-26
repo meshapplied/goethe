@@ -73,7 +73,7 @@ pub fn line(label: &str, done: u64, total: Option<u64>, bytes_per_s: f64) -> Str
     }
 }
 
-pub fn spaced(every: Duration, running: Duration) -> Duration {
+fn spaced(every: Duration, running: Duration) -> Duration {
     // A plain-line cadence (5 s) widens to 8 s after the first minute, so a long download stays near one line per 8 s; a terminal's 1 s line does not change.
     if every >= INTERVAL && running > Duration::from_secs(60) {
         Duration::from_secs(8)
@@ -130,7 +130,7 @@ impl Ticker {
 }
 
 impl Ticker {
-    pub fn start_with(every: Duration, value: impl Fn() -> u64 + Send + 'static, say: impl Fn(u64) + Send + 'static) -> Ticker {
+    fn start_with(every: Duration, value: impl Fn() -> u64 + Send + 'static, say: impl Fn(u64) + Send + 'static) -> Ticker {
         // Calls `say` with `value()` every interval until dropped.
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();

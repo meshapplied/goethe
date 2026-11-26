@@ -76,7 +76,7 @@ mod imp {
         parse_stat(&text)
     }
 
-    pub fn parse_stat(text: &str) -> Option<ProcStat> {
+    fn parse_stat(text: &str) -> Option<ProcStat> {
         let rest = text.get(text.rfind(')')? + 2..)?;
         let fields: Vec<&str> = rest.split_whitespace().collect();
         Some(ProcStat { state: fields.first()?.chars().next()?, ppid: fields.get(1)?.parse().ok()?, start_ticks: fields.get(19)?.parse().ok()? })
@@ -111,7 +111,7 @@ mod imp {
         std::fs::metadata(format!("/proc/{pid}")).ok().map(|m| m.uid())
     }
 
-    pub fn rss_bytes(pid: i32) -> Option<u64> {
+    pub(crate) fn rss_bytes(pid: i32) -> Option<u64> {
         let text = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
         let kb: u64 = text.lines().find(|l| l.starts_with("VmRSS:"))?.split_whitespace().nth(1)?.parse().ok()?;
         Some(kb * 1024)
@@ -214,7 +214,7 @@ mod imp {
         parse_procargs(&buf)
     }
 
-    pub fn parse_procargs(buf: &[u8]) -> Option<(Vec<String>, Vec<String>)> {
+    pub(crate) fn parse_procargs(buf: &[u8]) -> Option<(Vec<String>, Vec<String>)> {
         let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?).max(0) as usize;
         let mut at = 4;
         while at < buf.len() && buf[at] != 0 {

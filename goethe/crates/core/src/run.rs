@@ -105,7 +105,7 @@ pub(crate) fn unload_quietly(model: &str) {
     let _ = std::process::Command::new(exe).args(["unload", model]).stdin(null()).stdout(null()).stderr(null()).process_group(0).spawn();
 }
 
-pub fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, String> {
+fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, String> {
     // Whether run must load the model first: no when it serves, yes when installed, else the install hint (run never installs).
     match (loaded, installed) {
         (true, _) => Ok(false),
@@ -114,7 +114,7 @@ pub fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, Str
     }
 }
 
-pub const RUN_CTX: u64 = 100_000;
+const RUN_CTX: u64 = 100_000;
 
 pub(crate) fn wait_routed(home: &std::path::Path, model: &str) -> std::sync::Arc<crate::gateway_cache::Snapshot> {
     // The gateway view once the model serves, or after 15 minutes (target then says it is not loaded).

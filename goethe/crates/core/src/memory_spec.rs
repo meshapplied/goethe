@@ -7,7 +7,7 @@ use serde_json::Value;
 const BF16: u64 = 2;
 const DSV4_PAGE: u64 = 256;
 const SWA_EVICTION_INTERVAL: u64 = 128;
-pub const CHUNKED_PREFILL: u64 = 8192;
+const CHUNKED_PREFILL: u64 = 8192;
 const LOAD_PEAK_LAYERS: f64 = 7.0;
 const EXTRA_BUFFER_ARCHS: &[&str] = &[
     "KimiLinearForCausalLM",

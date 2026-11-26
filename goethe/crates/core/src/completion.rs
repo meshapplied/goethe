@@ -76,7 +76,7 @@ impl Dirs {
     }
 }
 
-pub fn rc_block(shell: Shell, script: &Path) -> String {
+fn rc_block(shell: Shell, script: &Path) -> String {
     // The marked block that sources the script; the path is escaped for a double-quoted shell word.
     let mut path = String::new();
     for c in script.display().to_string().chars() {
@@ -92,7 +92,7 @@ pub fn rc_block(shell: Shell, script: &Path) -> String {
     format!("{BEGIN}\n{start}[ -f \"{path}\" ] && source \"{path}\"\n{END}\n")
 }
 
-pub fn without_block(text: &str) -> String {
+fn without_block(text: &str) -> String {
     // The rc text with Goethe's block taken out, and nothing else touched; a block whose end marker is gone is left in place, so the lines after it are never lost.
     let mut out = String::new();
     let mut held = String::new();

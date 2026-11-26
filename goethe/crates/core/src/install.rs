@@ -714,7 +714,7 @@ fn clear_dir_except_card(home: &Path, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn build_farm(src: &Path, dir: &Path) -> Result<(), String> {
+pub(crate) fn build_farm(src: &Path, dir: &Path) -> Result<(), String> {
     // Mirror src as symlinks in dir (refreshing old links) so the engine sees one model directory.
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for e in fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
@@ -996,7 +996,7 @@ fn pack_failure_line(home: &Path, model_id: &str, log: &str) -> Option<String> {
     Some(if has_plain_weights(&dir) && memory_contention(log).is_none() { format!("{why}; {FALLBACK_HINT}") } else { why })
 }
 
-pub fn unpack_failed(home: &Path, model_id: &str, log: &str) -> Result<bool, String> {
+fn unpack_failed(home: &Path, model_id: &str, log: &str) -> Result<bool, String> {
     // A pack that failed to open for any reason: drop it, write the plain card with a pack_skipped note, say why in one line; false when there is no pack or no plain runtime to fall back to.
     let dir = model_dir(home, model_id);
     if !dir.join(PACK_FILE).is_file() || !has_plain_weights(&dir) || memory_contention(log).is_some() {
@@ -1524,7 +1524,7 @@ fn load_installed(model_id: &str, opts: &InstallOpts) -> Result<(), String> {
     run_load(params, opts.no_wait, false)
 }
 
-pub fn drop_shadowing_alias(con: &rusqlite::Connection, model_id: &str) -> Result<Option<String>, String> {
+fn drop_shadowing_alias(con: &rusqlite::Connection, model_id: &str) -> Result<Option<String>, String> {
     // An alias spelled like a newly installed model id would compete with it for that name: remove it and say so.
     let target: Option<String> = con
         .query_row("SELECT model_id FROM model_aliases WHERE alias = ?1", [model_id], |r| r.get(0))
@@ -1600,7 +1600,7 @@ fn reply_message(reply: &crate::rpc::RpcReply) -> String {
     text.trim().to_string()
 }
 
-pub fn is_already_loaded(reply: &crate::rpc::RpcReply) -> bool {
+fn is_already_loaded(reply: &crate::rpc::RpcReply) -> bool {
     // Contract C-A: a plain load of a loaded model answers already_loaded instead of adding a replica.
     let r = &reply.result;
     r.get("already_loaded").and_then(Value::as_bool) == Some(true)
@@ -1617,7 +1617,7 @@ fn instance_row(instance_id: &str) -> Option<Value> {
         .cloned()
 }
 
-pub fn load_status_line(model_id: &str, iid: &str, row: Option<&Value>, result: &Value, secs: Option<f64>) -> String {
+fn load_status_line(model_id: &str, iid: &str, row: Option<&Value>, result: &Value, secs: Option<f64>) -> String {
     // RUNNING: <id> instance <iid> on GPU <g> port <p> (<t> s), or STARTING for --no-wait.
     let gpus = row
         .and_then(|r| r.get("gpu_indices"))
@@ -1636,7 +1636,7 @@ pub fn load_status_line(model_id: &str, iid: &str, row: Option<&Value>, result: 
     }
 }
 
-pub fn send_load(mut params: Value) -> Result<crate::rpc::RpcReply, String> {
+fn send_load(mut params: Value) -> Result<crate::rpc::RpcReply, String> {
     // Load RPC; on a foreign-process notice (code 3) ask on a terminal and resend with yes=true, else exit 3.
     params["is_tty"] = json!(false);
     let call = |p: &Value| crate::rpc::call("load", p.clone()).map_err(crate::paths::daemon_err);

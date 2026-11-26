@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 pub const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-pub const SHAPE_MAX: u64 = 1 << 24;
+const SHAPE_MAX: u64 = 1 << 24;
 const SHAPE_KEYS: &[&str] = &[
     "num_hidden_layers", "n_layer", "num_attention_heads", "n_head", "num_key_value_heads", "multi_query_group_num",
     "num_global_key_value_heads", "swa_num_key_value_heads", "head_dim", "global_head_dim", "v_head_dim", "swa_head_dim",
@@ -270,7 +270,7 @@ pub fn linear_state_bytes_as(lm: &Value, plan: LayerPlan, ssm_dtype_bytes: Optio
     0
 }
 
-pub fn infer_architecture(cfg: &Value, lm: &Value, model_id: &str) -> String {
+fn infer_architecture(cfg: &Value, lm: &Value, model_id: &str) -> String {
     if is_moe(cfg, lm, model_id) {
         "moe".to_string()
     } else {

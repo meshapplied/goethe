@@ -359,7 +359,7 @@ pub struct GpuUsage {
     pub throttle: u64,
 }
 
-pub const THROTTLE_MASK: u64 = 0x04 | 0x08 | 0x10 | 0x20 | 0x40 | 0x80;
+const THROTTLE_MASK: u64 = 0x04 | 0x08 | 0x10 | 0x20 | 0x40 | 0x80;
 
 #[cfg_attr(target_os = "macos", allow(unreachable_code))]
 pub fn gpu_usage(managed: &HashSet<i32>) -> Result<Vec<GpuUsage>, String> {
@@ -532,7 +532,7 @@ fn topology_level_label(level: TopologyLevel) -> &'static str {
     }
 }
 
-pub fn link_class(topo: &str) -> &'static str {
+fn link_class(topo: &str) -> &'static str {
     match topo {
         t if t.starts_with("NV") => "NVLINK",
         "PIX" | "PXB" => "PCIE_SWITCH",
@@ -555,7 +555,7 @@ pub fn profile_gpu_indices(home: &Path) -> Result<Vec<u32>, String> {
     Ok(state.gpus.iter().map(|g| g.index).collect())
 }
 
-pub fn link_rank(link_type: &str) -> u32 {
+fn link_rank(link_type: &str) -> u32 {
     match link_type {
         t if t.starts_with("NV") => 0,
         "PIX" => 0,

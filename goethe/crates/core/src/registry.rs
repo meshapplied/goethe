@@ -16,7 +16,7 @@ pub struct Registry {
     pub gguf_models: Vec<RegistryModel>,
 }
 
-pub fn gguf_catalog() -> bool {
+fn gguf_catalog() -> bool {
     // A Mac (or GOETHE_CATALOG=gguf) uses the GGUF models of the registry as its catalog, served by llama.cpp.
     cfg!(all(target_os = "macos", not(test))) || std::env::var("GOETHE_CATALOG").is_ok_and(|v| v == "gguf")
 }
@@ -125,7 +125,7 @@ pub struct ValidateOpts {
     pub check_sglang: bool,
 }
 
-pub const DEFAULT_REGISTRY_URL: &str = "https://pkg.goethe.sh/v1/registry.json";
+const DEFAULT_REGISTRY_URL: &str = "https://pkg.goethe.sh/v1/registry.json";
 
 const BUNDLED_REGISTRY: &str = include_str!("../../../cdn/v1/registry.json");
 
@@ -270,7 +270,7 @@ pub fn find_model<'a>(reg: &'a Registry, model_id: &str) -> Option<&'a RegistryM
     reg.models.iter().find(|m| m.id == model_id)
 }
 
-pub fn parse_registry(text: &str) -> Result<Registry, String> {
+fn parse_registry(text: &str) -> Result<Registry, String> {
     let mut reg: Registry = serde_json::from_str(text).map_err(|e| format!("registry parse failed: {e}"))?;
     if gguf_catalog() {
         reg.models = std::mem::take(&mut reg.gguf_models);
@@ -686,7 +686,7 @@ fn merge_measured(dst: &mut RegistryModel, src: &RegistryModel) -> Result<(), St
     Ok(())
 }
 
-pub fn infer_one_entry(
+fn infer_one_entry(
     repo_id: &str,
     runtime: Option<&str>,
     revision: Option<&str>,

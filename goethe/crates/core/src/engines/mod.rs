@@ -17,7 +17,7 @@ pub struct Engine {
     pub command: fn(&EngineSpec) -> Result<Command, String>,
 }
 
-pub const ENGINES: &[&Engine] = &[&goethe_engine::ENGINE, &ninfer::ENGINE, &sglang::SGLANG, &llama_cpp::ENGINE];
+const ENGINES: &[&Engine] = &[&goethe_engine::ENGINE, &ninfer::ENGINE, &sglang::SGLANG, &llama_cpp::ENGINE];
 
 const ENVELOPE: &[&str] = &["model", "messages", "prompt", "input", "stream", "stream_options", "user"];
 
@@ -166,7 +166,7 @@ fn compiler_env() -> Vec<(String, String)> {
     crate::host_compiler::engine_env(crate::host_compiler::find().as_ref(), inherited.as_deref())
 }
 
-pub const ENGINE_KEY_ENV: &str = "GOETHE_ENGINE_API_KEY";
+const ENGINE_KEY_ENV: &str = "GOETHE_ENGINE_API_KEY";
 
 fn engine_key_env(cmd: &mut Command, key: &str) {
     // Owner-only in /proc/<pid>/environ; never put the secret on argv (world-readable cmdline).

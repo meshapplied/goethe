@@ -15,7 +15,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum WaitError {
+enum WaitError {
     Cancelled,
     Failed(String),
 }
@@ -60,7 +60,7 @@ fn sleep_unless_cancelled(d: Duration) -> bool {
     !CANCELLED.load(Ordering::SeqCst)
 }
 
-pub fn wait_for_approval(
+fn wait_for_approval(
     started: &Started,
     poll: &mut dyn FnMut() -> Result<Poll, ApiError>,
     sleep: &mut dyn FnMut(Duration) -> bool,
@@ -323,7 +323,7 @@ pub fn logout() -> Result<(), String> {
     Ok(())
 }
 
-pub fn parse_lifetime(raw: &str) -> Result<Option<u64>, String> {
+fn parse_lifetime(raw: &str) -> Result<Option<u64>, String> {
     // "never", or a number with h, d or w (hours, days, weeks); at least one hour.
     let s = raw.trim().to_ascii_lowercase();
     if s == "never" {
@@ -416,7 +416,7 @@ fn ago(secs: i64) -> String {
     }
 }
 
-pub fn heartbeat_text(st: &link::PlatformState, daemon_running: bool, now: chrono::DateTime<chrono::Utc>) -> (String, bool) {
+fn heartbeat_text(st: &link::PlatformState, daemon_running: bool, now: chrono::DateTime<chrono::Utc>) -> (String, bool) {
     // OK with its age, failing with the reason, or why none is sent.
     if st.revoked_at.is_some() {
         return ("stopped: the console revoked this node".into(), false);

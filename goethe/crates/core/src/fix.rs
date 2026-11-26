@@ -94,7 +94,7 @@ pub fn question(fix: &Fix, distro: &str, sudo: bool) -> String {
     }
 }
 
-pub fn compiler_packages(distro: &str) -> Vec<String> {
+fn compiler_packages(distro: &str) -> Vec<String> {
     let words: Vec<&str> = distro.split_whitespace().collect();
     let has = |d: &str| words.contains(&d);
     if has("ubuntu") || has("debian") {
@@ -106,7 +106,7 @@ pub fn compiler_packages(distro: &str) -> Vec<String> {
     }
 }
 
-pub fn ffmpeg_packages(distro: &str) -> Vec<String> {
+fn ffmpeg_packages(distro: &str) -> Vec<String> {
     // Distro package that provides libavdevice.so.58 to 62 for the pinned torchcodec (Fedora/RHEL ship it as ffmpeg-free).
     let words: Vec<&str> = distro.split_whitespace().collect();
     let has = |d: &str| words.contains(&d);
@@ -114,7 +114,7 @@ pub fn ffmpeg_packages(distro: &str) -> Vec<String> {
     vec![if deb_or_suse { "ffmpeg" } else { "ffmpeg-free" }.to_string()]
 }
 
-pub fn package_command(distro: &str, pkgs: &[String]) -> Vec<String> {
+fn package_command(distro: &str, pkgs: &[String]) -> Vec<String> {
     let words: Vec<&str> = distro.split_whitespace().collect();
     let mut cmd: Vec<String> = if words.contains(&"ubuntu") || words.contains(&"debian") {
         vec!["sh", "-c", "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \"$@\"", "sh"]

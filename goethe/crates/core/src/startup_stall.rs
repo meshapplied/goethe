@@ -1,7 +1,7 @@
 // Startup readiness timeout: stall detection instead of a fixed wall clock.
 
 pub const LOG_STALL_SECS: i64 = 180;
-pub const HARD_CAP_DEFAULT_SECS: i64 = 30 * 60;
+const HARD_CAP_DEFAULT_SECS: i64 = 30 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupFail {

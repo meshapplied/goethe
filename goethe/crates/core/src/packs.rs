@@ -102,7 +102,7 @@ impl Broker for HttpBroker<'_> {
     }
 }
 
-pub const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(6)];
+const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(6)];
 
 pub enum Attempt {
     Again(String),
@@ -242,7 +242,7 @@ fn arch_runs(arch: &str, cc: &str) -> String {
     }
 }
 
-pub fn sku_why(dev: &Device, req: &SkuReq) -> String {
+fn sku_why(dev: &Device, req: &SkuReq) -> String {
     // Why one GPU cannot run one variant ("" when it can): arch, SM count, shared memory. Unknown device limits refuse when the pack asks for any.
     let why = arch_runs(&req.arch, &dev.cc);
     if !why.is_empty() {
@@ -322,7 +322,7 @@ pub struct Entry {
     pub overlays: Vec<Overlay>,
 }
 
-pub fn platform_base(home: &Path) -> Result<String, String> {
+fn platform_base(home: &Path) -> Result<String, String> {
     // The platform this machine talks to for packs: the one it is linked to, else the configured default.
     match crate::client::link::load_credentials(home) {
         Ok(Some(c)) => Ok(c.platform_url),
@@ -430,7 +430,7 @@ pub fn pack_engine_version(home: &Path) -> String {
     crate::pyenv::engine_installed(home).unwrap_or_else(|| crate::pyenv::ENGINE_VERSION.to_string())
 }
 
-pub fn runnable(e: &Entry) -> bool {
+fn runnable(e: &Entry) -> bool {
     runnable_at(e, crate::pyenv::ENGINE_VERSION)
 }
 
@@ -581,7 +581,7 @@ pub fn drafter(e: &Entry) -> Option<Drafter> {
     Some(Drafter { name: d["name"].as_str().unwrap_or("drafter").to_string(), repo, revision: d["revision"].as_str().map(String::from), files })
 }
 
-pub fn safe_name(f: &str) -> bool {
+fn safe_name(f: &str) -> bool {
     // A plain file name in the repo root: the download and the model dir never see a path from a pack.
     !f.is_empty() && !f.contains(['/', '\\']) && f != "." && f != ".." && !f.starts_with('.')
 }

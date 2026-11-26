@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-pub const TAIL_LINES: usize = 15;
+const TAIL_LINES: usize = 15;
 pub const SLOW: Duration = Duration::from_secs(3);
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
@@ -130,7 +130,7 @@ pub fn run(cmd: &mut Command) -> std::io::Result<Captured> {
     run_with(cmd, verbose().then_some(&|l: &str| eprintln!("{l}")))
 }
 
-pub fn run_with(cmd: &mut Command, echo: Option<&(dyn Fn(&str) + Sync)>) -> std::io::Result<Captured> {
+fn run_with(cmd: &mut Command, echo: Option<&(dyn Fn(&str) + Sync)>) -> std::io::Result<Captured> {
     // Into the log, the last lines kept for a failure, each line also handed to `echo` when there is one.
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let (tail, error) = (Mutex::new(VecDeque::new()), Mutex::new(None));

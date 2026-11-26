@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-pub const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 1;
 
 const DDL: &str = r"
 CREATE TABLE IF NOT EXISTS installed_models (

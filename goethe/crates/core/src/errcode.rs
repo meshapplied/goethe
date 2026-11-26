@@ -11,7 +11,7 @@ const FILE: &str = "errors.log";
 const MAX_BYTES: usize = 64 * 1024;
 const MAX_DETAIL: usize = 120;
 const REPEAT_S: i64 = 86_400;
-pub const SEND_MAX: usize = 20;
+const SEND_MAX: usize = 20;
 const SENT_KEY: &str = "errors_sent_t";
 
 static RECORDED: AtomicBool = AtomicBool::new(false);
@@ -150,7 +150,7 @@ fn rows(text: &str) -> impl Iterator<Item = Event> + '_ {
     })
 }
 
-pub fn scrub(detail: &str) -> String {
+fn scrub(detail: &str) -> String {
     // First line only; no token-looking word, address, URL, email or path (a model id such as org/name stays); at most MAX_DETAIL characters.
     let words: Vec<&str> = detail.lines().next().unwrap_or("").split_whitespace().map(redact).collect();
     words.join(" ").chars().filter(|c| !c.is_control()).take(MAX_DETAIL).collect()

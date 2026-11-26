@@ -12,12 +12,12 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_PORT: u16 = 8444;
-pub const MIN_SECS: i64 = 60;
-pub const MAX_SECS: i64 = 7 * 86_400;
+const DEFAULT_PORT: u16 = 8444;
+const MIN_SECS: i64 = 60;
+const MAX_SECS: i64 = 7 * 86_400;
 const SUN_PATH_MAX: usize = 100;
 
-pub fn public_mux_socket(home: &Path) -> PathBuf {
+fn public_mux_socket(home: &Path) -> PathBuf {
     // Public-gateway traffic reaches goethed only over this socket, which only nginx can open, so the X-Real-IP it sets is the client's.
     nginx::nginx_prefix(home).join("mux-public.sock")
 }
@@ -96,7 +96,7 @@ pub struct Grant {
 }
 
 impl Share {
-    pub fn active_at(&self, now: i64) -> bool {
+    fn active_at(&self, now: i64) -> bool {
         self.open && now < self.until
     }
 

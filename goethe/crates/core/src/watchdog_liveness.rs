@@ -1,8 +1,8 @@
 // Watchdog liveness policy (injectable clock, unit-tested).
 
-pub const CHEAP_FAIL_DEAD_SECS: i64 = 30;
+const CHEAP_FAIL_DEAD_SECS: i64 = 30;
 pub const DEEP_INTERVAL_SECS: i64 = 60;
-pub const DEEP_FAIL_STREAK_MAX: u32 = 3;
+const DEEP_FAIL_STREAK_MAX: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatchdogAction {

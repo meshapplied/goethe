@@ -94,7 +94,7 @@ fn key(gpu_name: &str, kind: Kind) -> String {
 }
 
 pub const PACK_RUNTIME: &str = "goethe-engine";
-pub const MAX_LEARNED_OVERHEAD_GB: f64 = 8.0;
+const MAX_LEARNED_OVERHEAD_GB: f64 = 8.0;
 
 fn runtime_key(gpu_name: &str, kind: Kind, runtime: &str) -> String {
     // A figure learned under one serving runtime: the kernel pack, llama.cpp and SGLang hold different memory for the same model.

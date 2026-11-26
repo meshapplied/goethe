@@ -22,19 +22,19 @@ fn down_slot() -> &'static Mutex<Option<String>> {
     GATEWAY_DOWN.get_or_init(|| Mutex::new(None))
 }
 
-pub fn set_gateway_down(reason: String) {
+fn set_gateway_down(reason: String) {
     if let Ok(mut g) = down_slot().lock() {
         let _ = g.replace(reason);
     }
 }
 
-pub fn clear_gateway_down() {
+fn clear_gateway_down() {
     if let Ok(mut g) = down_slot().lock() {
         let _ = g.take();
     }
 }
 
-pub fn gateway_down_reason() -> Option<String> {
+fn gateway_down_reason() -> Option<String> {
     down_slot().lock().ok().and_then(|g| g.clone())
 }
 
@@ -615,7 +615,7 @@ pub fn format_gateway_line(home: &Path) -> Option<String> {
     Some(format!("gateway: https://{}{waiting}", gateway_connect_addr(home)))
 }
 
-pub fn gateway_listening(home: &Path) -> bool {
+fn gateway_listening(home: &Path) -> bool {
     TcpStream::connect_timeout(&gateway_connect_addr(home), Duration::from_millis(200)).is_ok()
 }
 

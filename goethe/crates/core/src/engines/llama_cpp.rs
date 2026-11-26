@@ -54,7 +54,7 @@ pub fn pinned<'a>(asset: (&'a str, &'a str), arch: &str) -> Option<(&'a str, &'a
     (arch == "x86_64" && url.starts_with("https://") && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())).then_some(asset)
 }
 
-pub fn pinned_macos<'a>(asset: (&'a str, &'a str), arch: &str) -> Option<(&'a str, &'a str)> {
+fn pinned_macos<'a>(asset: (&'a str, &'a str), arch: &str) -> Option<(&'a str, &'a str)> {
     // The upstream macOS arm64 build (Metal) of the pin, for Apple Silicon.
     let (url, sha) = asset;
     (arch == "aarch64" && url.starts_with("https://") && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())).then_some(asset)
@@ -245,7 +245,7 @@ pub fn has_audio_encoder(mmproj: &Path) -> bool {
 
 const SWA_BATCH: u64 = 512;
 
-pub fn sliding_layers(arch: &str, layers: usize, window: u64, pattern: &[u64]) -> Vec<bool> {
+fn sliding_layers(arch: &str, layers: usize, window: u64, pattern: &[u64]) -> Vec<bool> {
     // Which layers attend over a sliding window, as llama.cpp reads them: a per-layer pattern, a period (every n-th layer is full), or the period it builds in for its architecture.
     let period = |n: usize| (0..layers).map(|i| (i + 1) % n != 0).collect();
     match (window, pattern) {
@@ -413,7 +413,7 @@ pub fn write_test_gguf(path: &Path) {
 }
 
 #[cfg(test)]
-pub fn write_test_gguf_with(path: &Path, extra: &[(&str, u32)]) {
+pub(crate) fn write_test_gguf_with(path: &Path, extra: &[(&str, u32)]) {
     // A llama header: 2 layers, 8 heads of 64, per-layer KV heads 2 and 4, context 4096, a token list to skip, and extra u32 keys.
     let s = |v: &str| [(v.len() as u64).to_le_bytes().to_vec(), v.as_bytes().to_vec()].concat();
     let arr = |t: u32, items: Vec<Vec<u8>>| [t.to_le_bytes().to_vec(), (items.len() as u64).to_le_bytes().to_vec(), items.concat()].concat();

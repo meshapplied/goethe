@@ -21,7 +21,7 @@ fn sidecars() -> [String; 3] {
     [PACK_FILE.to_string(), format!("{PACK_FILE}.sig"), PACK_VERIFY.to_string()]
 }
 
-pub fn installed_manifest(dir: &Path) -> Option<String> {
+fn installed_manifest(dir: &Path) -> Option<String> {
     // The manifest sha256 the installed pack was verified under.
     let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(PACK_VERIFY)).ok()?).ok()?;
     v["manifest_sha256"].as_str().map(String::from)

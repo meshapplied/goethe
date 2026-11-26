@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub const INTERVAL: Duration = Duration::from_secs(10);
-pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
-pub const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_BACKOFF: Duration = Duration::from_secs(60);
+const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEBOUNCE: Duration = Duration::from_secs(1);
 pub const MIN_GAP: Duration = Duration::from_secs(2);
 
@@ -190,7 +190,7 @@ impl Worker {
     }
 }
 
-pub fn backoff_for(failures: u32) -> Duration {
+fn backoff_for(failures: u32) -> Duration {
     // 10 s, 20 s, 40 s, then 60 s for every later failure in a row.
     if failures == 0 {
         return INTERVAL;

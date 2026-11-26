@@ -84,14 +84,14 @@ pub const SUPPORTED: &[Arch] = &[
     },
 ];
 
-pub struct Recognised {
+struct Recognised {
     pub major: u32,
     pub minor: u32,
     pub family: &'static str,
     pub reason: &'static str,
 }
 
-pub const RECOGNISED_UNSUPPORTED: &[Recognised] = &[
+const RECOGNISED_UNSUPPORTED: &[Recognised] = &[
     Recognised {
         major: 7,
         minor: 0,

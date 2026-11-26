@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::time::Duration;
 
-pub const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
+const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
 pub const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,7 +145,7 @@ impl Client {
     }
 }
 
-pub fn same_site_move(base: &str, path: &str, status: u16, location: Option<&str>) -> Option<String> {
+fn same_site_move(base: &str, path: &str, status: u16, location: Option<&str>) -> Option<String> {
     // The new origin when an HTTPS platform redirects path to the same path on its www. twin (or back); None for anything else.
     if !matches!(status, 301 | 307 | 308) || !base.starts_with("https://") {
         return None;
@@ -159,7 +159,7 @@ pub fn same_site_move(base: &str, path: &str, status: u16, location: Option<&str
     (twins && tail == path).then(|| format!("https://{host}")).and_then(|u| crate::client::link::check_url(&u).ok())
 }
 
-pub fn retry_after(header: Option<&str>) -> Duration {
+fn retry_after(header: Option<&str>) -> Duration {
     // Retry-After in seconds, 2 s when missing or not a number, never more than 60 s.
     let secs = header.and_then(|h| h.trim().parse::<u64>().ok()).unwrap_or(2);
     Duration::from_secs(secs.clamp(1, 60))
@@ -186,7 +186,7 @@ fn transport_text(t: &ureq::Transport) -> String {
     }
 }
 
-pub fn error_code(body: &str) -> String {
+fn error_code(body: &str) -> String {
     // The documented {error:"<code>"} reduced to a short code, with the snapshot field it names; anything else says nothing.
     let token = |v: &Value, key: &str, max: usize| {
         v.get(key)
@@ -262,7 +262,7 @@ fn malformed(what: &str) -> ApiError {
     ApiError::Malformed(what.to_string())
 }
 
-pub fn parse_started(v: &Value, base: &str) -> Result<Started, ApiError> {
+fn parse_started(v: &Value, base: &str) -> Result<Started, ApiError> {
     #[derive(Deserialize)]
     struct Raw {
         device_code: String,
@@ -312,7 +312,7 @@ fn verification_on_base(base: &str, uri: &str) -> bool {
     !b.is_empty() && b == u
 }
 
-pub fn parse_approved(v: &Value) -> Result<Approved, ApiError> {
+fn parse_approved(v: &Value) -> Result<Approved, ApiError> {
     #[derive(Deserialize)]
     struct RawWorkspace {
         id: String,
@@ -344,7 +344,7 @@ pub fn parse_approved(v: &Value) -> Result<Approved, ApiError> {
     })
 }
 
-pub fn parse_poll(v: &Value) -> Result<Poll, ApiError> {
+fn parse_poll(v: &Value) -> Result<Poll, ApiError> {
     match v.get("status").and_then(Value::as_str) {
         Some("pending") => Ok(Poll::Pending),
         Some("slow_down") => Ok(Poll::SlowDown),
@@ -355,7 +355,7 @@ pub fn parse_poll(v: &Value) -> Result<Poll, ApiError> {
     }
 }
 
-pub fn parse_heartbeat(v: &Value) -> Result<HeartbeatReply, ApiError> {
+fn parse_heartbeat(v: &Value) -> Result<HeartbeatReply, ApiError> {
     if v.get("ok") != Some(&Value::Bool(true)) {
         return Err(malformed("heartbeat did not return ok"));
     }

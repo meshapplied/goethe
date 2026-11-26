@@ -50,7 +50,7 @@ const HTTP_PROBE_SECS: u64 = 25;
 const WARM_UP_SECS: u64 = 900;
 const USER_GATE_WAIT: Duration = Duration::from_secs(590);
 
-pub type LoadErr = (i32, String, Value);
+type LoadErr = (i32, String, Value);
 
 pub(super) fn slot_lock(key: &str) -> Arc<Mutex<()>> {
     let map = SLOT_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));

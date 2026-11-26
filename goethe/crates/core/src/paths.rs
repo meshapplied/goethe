@@ -36,7 +36,7 @@ pub fn goethe_home() -> PathBuf {
         .clone()
 }
 
-pub fn home_of_binary(exe: &Path) -> Option<PathBuf> {
+fn home_of_binary(exe: &Path) -> Option<PathBuf> {
     // <home>/bin/goethe or <home>/bin/goethed (after resolving links) inside a marked goethe home.
     let exe = std::fs::canonicalize(exe).ok()?;
     let name = exe.file_name()?.to_str()?;

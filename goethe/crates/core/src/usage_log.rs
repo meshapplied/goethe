@@ -492,7 +492,7 @@ impl Row for Host {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct KeyRequests(pub Requests);
+struct KeyRequests(pub Requests);
 
 impl Row for KeyRequests {
     const KIND: &'static str = "keyuse";
@@ -509,7 +509,7 @@ impl Row for KeyRequests {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Traffic(pub Requests);
+struct Traffic(pub Requests);
 
 impl Row for Traffic {
     const KIND: &'static str = "req";

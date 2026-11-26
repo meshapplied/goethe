@@ -15,21 +15,21 @@ pub const ENGINE: super::Engine = super::Engine {
 pub const NINFER_ID: &str = "meshapplied/Qwen3.8-27B-NVFP4-NInfer";
 pub const NINFER_FILE: &str = "qwen3_8_27b_nvfp4.ninfer";
 pub const NINFER_BYTES: u64 = 23_719_715_844;
-pub const NINFER_SHA256: &str = "74d2c57145e6ff11d1d2faa79594477f9bc903a611af1fb20218189fbbb77d82";
-pub const NINFER_PATCHED_SHA256: &str = "afcaac9cd6b684e4a2f0316100b3a9e5f888e6b3d8b84b6f76ee4fed29ef34ed";
+const NINFER_SHA256: &str = "74d2c57145e6ff11d1d2faa79594477f9bc903a611af1fb20218189fbbb77d82";
+const NINFER_PATCHED_SHA256: &str = "afcaac9cd6b684e4a2f0316100b3a9e5f888e6b3d8b84b6f76ee4fed29ef34ed";
 pub const NINFER_CTX: u64 = 100_000;
 pub const NINFER_MAX_CONC: u64 = 4;
-pub const NINFER_URL: &str = concat!(
+const NINFER_URL: &str = concat!(
     "https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer/resolve/",
     "a107ba1b5b0609d9ca90d5ed61439f5f5cc7d64d/qwen3_8_27b_nvfp4.ninfer"
 );
 
-pub enum NinferHead {
+enum NinferHead {
     Patch,
     Ready,
 }
 
-pub fn ninfer_head(digest: &str) -> Result<NinferHead, String> {
+fn ninfer_head(digest: &str) -> Result<NinferHead, String> {
     // Original digest still needs the draft-shortlist patch; the patched digest is ready to serve.
     if digest == NINFER_SHA256 {
         Ok(NinferHead::Patch)
@@ -46,7 +46,7 @@ pub fn ninfer_reject() -> String {
     )
 }
 
-pub fn accept_ninfer(len: u64, digest: &str) -> Result<(), String> {
+fn accept_ninfer(len: u64, digest: &str) -> Result<(), String> {
     // Size and one of the two pinned digests. The caller supplies the digest so tests never hash 23 GB.
     if len == NINFER_BYTES && (digest == NINFER_SHA256 || digest == NINFER_PATCHED_SHA256) {
         Ok(())
@@ -64,7 +64,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     crate::update::sha256_file(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-pub fn check_ninfer_with(path: &Path, mut hash: impl FnMut(&Path) -> Result<String, String>) -> Result<(), String> {
+fn check_ninfer_with(path: &Path, mut hash: impl FnMut(&Path) -> Result<String, String>) -> Result<(), String> {
     let len = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?.len();
     if len != NINFER_BYTES {
         return accept_ninfer(len, "");

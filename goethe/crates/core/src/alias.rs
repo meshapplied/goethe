@@ -4,7 +4,7 @@ use crate::db;
 use crate::paths::goethe_home;
 use rusqlite::Connection;
 
-pub fn name_check(alias: &str) -> Result<(), String> {
+fn name_check(alias: &str) -> Result<(), String> {
     // An alias clients can type in a request: 1 to 64 characters, no spaces or control characters; matched exactly, case included.
     if alias.is_empty() || alias.chars().count() > 64 || alias.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(format!("{alias:?} is not an alias: use 1 to 64 letters, digits or punctuation, no spaces"));
