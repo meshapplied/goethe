@@ -336,15 +336,18 @@ pub struct InterfaceAddr {
 }
 
 fn sockaddr_ip(sa: *const libc::sockaddr) -> Option<IpAddr> {
-    // An IPv4 or IPv6 address out of a sockaddr from getifaddrs.
-    let family = unsafe { sa.as_ref() }.map(|a| i32::from(a.sa_family))?;
+    // An IPv4 or IPv6 address out of a non-null sockaddr from getifaddrs, sized for the family it names; read unaligned, since only a sockaddr pointer is promised, not sockaddr_in or sockaddr_in6 alignment.
+    if sa.is_null() {
+        return None;
+    }
+    let family = i32::from(unsafe { sa.read_unaligned() }.sa_family);
     match family {
         libc::AF_INET => {
-            let sin = unsafe { &*(sa as *const libc::sockaddr_in) };
+            let sin = unsafe { sa.cast::<libc::sockaddr_in>().read_unaligned() };
             Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))))
         }
         libc::AF_INET6 => {
-            let sin6 = unsafe { &*(sa as *const libc::sockaddr_in6) };
+            let sin6 = unsafe { sa.cast::<libc::sockaddr_in6>().read_unaligned() };
             Some(IpAddr::V6(Ipv6Addr::from(sin6.sin6_addr.s6_addr)))
         }
         _ => None,
@@ -1022,6 +1025,26 @@ pub fn ensure_gateway_running(home: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sockaddr_ip_reads_ipv4_and_ipv6_at_any_alignment() {
+        // getifaddrs only promises a sockaddr pointer, not the alignment of the sockaddr_in or sockaddr_in6 behind it.
+        let mut v4: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        v4.sin_family = libc::AF_INET as libc::sa_family_t;
+        v4.sin_addr.s_addr = u32::from(Ipv4Addr::new(192, 0, 2, 1)).to_be();
+        let mut v6: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+        v6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+        v6.sin6_addr.s6_addr = "2001:db8::1".parse::<Ipv6Addr>().unwrap().octets();
+        let mut buf = [0u8; 64];
+        for at in [0, 1, 2, 3] {
+            let p = buf[at..].as_mut_ptr();
+            unsafe { p.cast::<libc::sockaddr_in>().write_unaligned(v4) };
+            assert_eq!(sockaddr_ip(p.cast()), Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))), "offset {at}");
+            unsafe { p.cast::<libc::sockaddr_in6>().write_unaligned(v6) };
+            assert_eq!(sockaddr_ip(p.cast()), Some("2001:db8::1".parse().unwrap()), "offset {at}");
+        }
+        assert_eq!(sockaddr_ip(std::ptr::null()), None);
+    }
 
     #[test]
     fn a_root_nginx_names_the_group_of_nobody_on_this_machine() {
