@@ -6,7 +6,7 @@ use std::process::Command;
 
 pub const ENGINE: super::Engine = super::Engine {
     id: "goethe-engine",
-    overhead_gb: crate::calc::METAL_OVERHEAD_GB,
+    overhead_gb: crate::calc::LIGHT_OVERHEAD_GB,
     layer: Some(crate::pyenv::Layer::Engine),
     params: None,
     numerics: true,

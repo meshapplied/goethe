@@ -333,6 +333,13 @@ goethe load zai-org/GLM-5.3-Flash -- --chunked-prefill-size 4096   # extra engin
 goethe load zai-org/GLM-5.3-Flash --ctx 65536 --max-conc 32 --save --dry-run   # make settings the default, load nothing
 ```
 
+### How much VRAM a load takes
+
+- Per GPU: the weights divided by the GPUs they are split over, a shared KV cache, per-request state (sliding windows, linear attention) and the engine's overhead (1.8 GB for SGLang, 0.5 GB for llama.cpp and optimised kernels); 1.5 GB of free VRAM always stays free.
+- The KV cache holds one request at the full context while every other request keeps a floor: a 4,096-token prompt plus a 4,096-token reply, or a 32,768-token reply for reasoning models.
+- Without `--ctx` and `--max-conc`, Goethe starts from the model's context window and default concurrency, takes the largest context that fits, then halves the concurrency (keeping at least 16,384 tokens of context) before it lowers the context further. Values you pass are used exactly.
+- After each load Goethe compares what the GPU really holds with this estimate and corrects it for that model and GPU.
+
 Model names are forgiving: `zai-org/glm-5.3-flash` and `zai-org__GLM-5.3-Flash` mean the same model, and a mistyped name gets a suggestion.
 
 Load as many models as your GPUs can hold. They share one API address, each request picks its model by name, and `goethe ps` shows what is running.

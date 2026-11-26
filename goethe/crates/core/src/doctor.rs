@@ -159,7 +159,7 @@ pub fn mac_hardware_note(chip: &str, arm64: bool, version: &str, limit_mb: u64, 
 pub fn mac_memory_warning(free_mb: u64, smallest: Option<(f64, &str)>) -> Option<String> {
     // RAM and GPU memory are one pool on a Mac, so the only memory warning is: even the smallest installed model does not fit now.
     let (weights_gb, id) = smallest?;
-    let need = weights_gb + crate::calc::METAL_OVERHEAD_GB;
+    let need = weights_gb + crate::calc::LIGHT_OVERHEAD_GB;
     let free = free_mb as f64 / 1024.0;
     (free < need).then(|| format!("{id} needs about {need:.1} GB and only {free:.1} GB is free; quit some apps before loading it"))
 }

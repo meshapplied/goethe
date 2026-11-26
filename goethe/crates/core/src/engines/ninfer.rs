@@ -6,7 +6,7 @@ use std::process::Command;
 
 pub const ENGINE: super::Engine = super::Engine {
     id: "ninfer",
-    overhead_gb: crate::calc::METAL_OVERHEAD_GB,
+    overhead_gb: crate::calc::LIGHT_OVERHEAD_GB,
     layer: None,
     params: None,
     numerics: false,

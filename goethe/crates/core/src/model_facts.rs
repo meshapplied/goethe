@@ -180,12 +180,7 @@ struct KvShape {
     swa_elems: u64,
 }
 
-pub fn ctx_ceiling(config: Option<u64>, registry: Option<u64>, pin: Option<u64>) -> Option<u64> {
-    // A model's context ceiling: config.json's, else the registry's, else a --ctx pin; None (refuse) rather than a guessed default.
-    config.or(registry).or(pin)
-}
-
-pub fn swa_window(lm: &Value, cfg: &Value, model_id: &str) -> Result<u64, String> {
+pub(crate) fn swa_window(lm: &Value, cfg: &Value, model_id: &str) -> Result<u64, String> {
     // Tokens a sliding-window layer keeps: its window capped by the context, the whole context when no window is stated, refused when neither is.
     let max = read_u64(lm, cfg, CTX_KEYS);
     match read_u64(lm, cfg, &["sliding_window", "sliding_window_size"]).or(max) {
@@ -442,15 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn ctx_ceiling_never_guesses() {
-        for (config, registry, pin, want) in [
-            (Some(131072), Some(1 << 20), Some(8192), Some(131072)),
-            (None, Some(1 << 20), Some(8192), Some(1 << 20)),
-            (None, None, Some(8192), Some(8192)),
-            (None, None, None, None),
-        ] {
-            assert_eq!(ctx_ceiling(config, registry, pin), want, "{config:?} {registry:?} {pin:?}");
-        }
+    fn a_config_without_a_context_length_states_none() {
         let no_ctx = json!({"num_hidden_layers": 2, "num_attention_heads": 4, "head_dim": 64});
         assert_eq!(facts_from_config(&no_ctx, 0.0, None, "m").unwrap().max_ctx, None);
     }

@@ -363,9 +363,9 @@ mod tests {
 
     #[test]
     fn light_engines_pay_half_a_gig_on_cuda_sglang_pays_base() {
-        assert!((by_id("llama.cpp").unwrap().overhead_gb - crate::calc::METAL_OVERHEAD_GB).abs() < 1e-9);
-        assert!((by_id("goethe-engine").unwrap().overhead_gb - crate::calc::METAL_OVERHEAD_GB).abs() < 1e-9);
-        assert!((by_id("ninfer").unwrap().overhead_gb - crate::calc::METAL_OVERHEAD_GB).abs() < 1e-9);
+        assert!((by_id("llama.cpp").unwrap().overhead_gb - crate::calc::LIGHT_OVERHEAD_GB).abs() < 1e-9);
+        assert!((by_id("goethe-engine").unwrap().overhead_gb - crate::calc::LIGHT_OVERHEAD_GB).abs() < 1e-9);
+        assert!((by_id("ninfer").unwrap().overhead_gb - crate::calc::LIGHT_OVERHEAD_GB).abs() < 1e-9);
         assert!((by_id("sglang").unwrap().overhead_gb - crate::calc::BASE_OVERHEAD_GB).abs() < 1e-9);
     }
 
