@@ -312,7 +312,7 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
     let runtime = crate::engine_overhead::card_runtime(&req.card);
     let learned_at =
         |t: usize, first: u32| crate::engine_overhead::read_learned(con, model_id, &gpu_name(&snap, first), t as u64, &runtime);
-    let mut plan = match chooser::plan_with(&base, &netted, req.hw.as_ref(), tp, pinned, &learned_at) {
+    let plan = match chooser::plan_with(&base, &netted, req.hw.as_ref(), tp, pinned, &learned_at) {
         Ok(plan) => plan,
         Err(e) => chooser::plan_with(&base, &raw, req.hw.as_ref(), tp, pinned, &learned_at)
             .map_err(|_| missing_error(e.message, &foreign::foreign_on(&snap, &e.gpus, &managed, &live)))?,
@@ -327,14 +327,10 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
         })
         .collect();
     let gpu_name = gpu_name(&snap, plan.gpus[0]);
-    let fit_ctx = plan.ctx;
     let min_free = free.values().copied().fold(f64::INFINITY, f64::min);
     let mut card = req.card.clone();
     if plan.disable_marlin {
         set_card_env(&mut card, "GOETHE_MARLIN", "0");
-    }
-    if req.params.ctx.is_none() {
-        plan.ctx = chooser::cap_default_ctx(&chooser_input_on(req, &card, plan.ctx, plan.max_conc), plan.tp, &plan.cc, min_free);
     }
     let input = chooser_input_on(req, &card, plan.ctx, plan.max_conc);
     let learned = crate::engine_overhead::read_learned(con, model_id, &gpu_name, plan.tp as u64, &runtime);
@@ -359,8 +355,8 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
         calc::describe(&need)
     );
     let mut reduced = Vec::new();
-    if fit_ctx < req.ctx {
-        reduced.push(format!("context {fit_ctx} (asked {})", req.ctx));
+    if plan.ctx < req.ctx {
+        reduced.push(format!("context {} (asked {})", plan.ctx, req.ctx));
     }
     if plan.max_conc < req.max_conc {
         reduced.push(format!("{} parallel requests (asked {})", plan.max_conc, req.max_conc));
@@ -383,12 +379,6 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
             notices.push_str(&line);
             notices.push('\n');
         }
-    }
-    if plan.ctx < fit_ctx {
-        notices.push_str(&format!(
-            "context capped to {} (the KV cache would take over 40% of the {min_free:.1} GB free); --ctx raises it\n",
-            plan.ctx
-        ));
     }
     let starting = start_engine(req, con, &plan, FitSpawn { need, learned, min_free, gpu_name, card })?;
     Ok(Step::Started(Box::new(starting), notices))
@@ -630,7 +620,7 @@ fn chooser_input_on(req: &LoadReq, card: &toml::Value, ctx: u64, max_conc: u64) 
         ctx,
         max_conc,
     );
-    crate::engines::llama_cpp::with_header_kv(input, &req.model_path, card)
+    crate::engines::llama_cpp::with_header_kv(input.pin(req.params.ctx, req.params.max_conc), &req.model_path, card)
 }
 
 fn set_card_env(card: &mut toml::Value, key: &str, val: &str) {

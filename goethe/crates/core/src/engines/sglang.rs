@@ -53,7 +53,7 @@ fn multi_tokenizer(args: &[String]) -> bool {
 
 fn memory_args(spec: &EngineSpec, extras: &[String]) -> Vec<String> {
     let Some(m) = crate::memory_spec::installed(spec.model_path, spec.card, spec.load_extra) else { return Vec::new() };
-    let args = crate::chooser::engine_args(&m, spec.ctx, spec.max_conc);
+    let args = crate::chooser::engine_args(&m, spec.ctx, spec.max_conc, crate::chooser::card_floor(spec.card));
     let user_chunk = extras.iter().any(|a| a.starts_with("--chunked-prefill-size"));
     args.chunks(2).filter(|p| !(user_chunk && p[0] == "--chunked-prefill-size")).flatten().cloned().collect()
 }

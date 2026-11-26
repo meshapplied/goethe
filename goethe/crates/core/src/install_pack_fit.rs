@@ -53,7 +53,7 @@ pub(super) fn pack_input(cfg: &Value, entry: Option<&RegistryModel>, opts: &Inst
         attention: facts.attention.clone(),
         max_ctx: facts.max_ctx,
     };
-    let max_conc = opts.max_conc.or(entry.and_then(|e| e.default_max_conc)).unwrap_or(8);
+    let max_conc = opts.max_conc.or(entry.and_then(|e| e.default_max_conc)).unwrap_or(crate::chooser::DEFAULT_CONC);
     let input = crate::chooser::ChooserInput::from_card(installed, &card, crate::memory_spec::installed_from_config(cfg, &card, &[]), ctx, max_conc);
     Ok((input, opts.tp.or(entry.and_then(|e| e.default_tp)).filter(|t| *t > 0).map(|t| t as usize)))
 }

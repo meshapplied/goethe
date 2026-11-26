@@ -96,7 +96,7 @@ Downloads a model from Hugging Face, or registers a model folder on this machine
 | `--load` | Load the model after installing it |
 | `--no-wait` | With `--load`, return without waiting until it's ready |
 | `--ctx <N>` | Default context length (default: the model's full context window; a load uses the largest that fits in VRAM) |
-| `--max-conc <N>` | Default number of requests served at the same time |
+| `--max-conc <N>` | Default number of requests served at the same time (default 4; a load serves fewer when only that fits) |
 | `--gpu <gpuN>...` | Default GPUs; several split the model across them |
 | `--trust-remote-code` | Allow Python code that ships with the model; only for models you trust |
 | `--hf-token` | Ask for a Hugging Face token, for gated or private models; used for this download only, never stored |
@@ -160,8 +160,8 @@ Loads a model and waits until it answers. Goethe picks the GPUs and sizes the me
 | `--gpu <gpuN>...` | GPUs to load on; the number given is the split |
 | `--tp <N>` | Split the model across N GPUs that Goethe picks (not with `--gpu`) |
 | `--ep <N>` | Expert-parallel size, for mixture-of-experts models |
-| `--ctx <N>` | Context length |
-| `--max-conc <N>` | Requests served at the same time |
+| `--ctx <N>` | Context length, used exactly (without it: the largest that fits) |
+| `--max-conc <N>` | Requests served at the same time, used exactly (without it: the default, fewer when only that fits) |
 | `--save` | Keep `--gpu`, `--ctx`, `--max-conc` and the options after `--` as the model's defaults; a bare `--` clears the saved options |
 | `--dry-run` | Show where the model would be placed now and the memory it needs, and load nothing; with `--save` it only stores the defaults |
 | `--replica` | Start another copy, to serve more traffic |

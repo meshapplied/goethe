@@ -162,7 +162,7 @@ enum Commands {
         gpu: Vec<u32>,
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=CTX_MAX), help = "Default context length.")]
         ctx: Option<u64>,
-        #[arg(long = "max-conc", value_parser = clap::value_parser!(u64).range(1..=MAX_CONC), help = "Default max concurrent requests.")]
+        #[arg(long = "max-conc", value_parser = clap::value_parser!(u64).range(1..=MAX_CONC), help = "Default max concurrent requests (4).")]
         max_conc: Option<u64>,
         #[arg(long, help = "With --load, return once the engine starts instead of waiting until it answers.")]
         no_wait: bool,
@@ -208,9 +208,9 @@ enum Commands {
         gpu: Vec<u32>,
         #[arg(long, value_name = "N", conflicts_with = "gpu", value_parser = clap::value_parser!(u64).range(1..=MAX_GPUS), help = "Split the model across N GPUs that goethe picks (with --gpu, the number of GPUs given is used).")]
         tp: Option<u64>,
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=CTX_MAX), help = "Context length for this load.")]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=CTX_MAX), help = "Context length for this load, used exactly (without it: the largest that fits).")]
         ctx: Option<u64>,
-        #[arg(long = "max-conc", value_parser = clap::value_parser!(u64).range(1..=MAX_CONC), help = "Max concurrent requests.")]
+        #[arg(long = "max-conc", value_parser = clap::value_parser!(u64).range(1..=MAX_CONC), help = "Max concurrent requests, used exactly (without it: the default, fewer when only that fits).")]
         max_conc: Option<u64>,
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=MAX_GPUS), help = "Expert parallel size (SGLang --ep-size).")]
         ep: Option<u64>,

@@ -193,7 +193,7 @@
           "value": "number",
           "required": false,
           "multiple": false,
-          "help": "Default max concurrent requests."
+          "help": "Default max concurrent requests (4)."
         },
         {
           "id": "no_wait",
@@ -385,7 +385,7 @@
           "value": "number",
           "required": false,
           "multiple": false,
-          "help": "Context length for this load."
+          "help": "Context length for this load, used exactly (without it: the largest that fits)."
         },
         {
           "id": "max_conc",
@@ -395,7 +395,7 @@
           "value": "number",
           "required": false,
           "multiple": false,
-          "help": "Max concurrent requests."
+          "help": "Max concurrent requests, used exactly (without it: the default, fewer when only that fits)."
         },
         {
           "id": "ep",

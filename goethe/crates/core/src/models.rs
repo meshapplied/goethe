@@ -483,6 +483,9 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
                     supported_sm: install::card_supported_sm(&card),
                     memory: crate::memory_spec::installed(&home.join(r.get::<_, String>(11)?), &card, &[]),
                     overhead_gb: crate::engines::of_card(&card).map_or(crate::calc::BASE_OVERHEAD_GB, |e| e.overhead_gb),
+                    floor: crate::chooser::card_floor(&card),
+                    min_ctx: 0,
+                    min_conc: 0,
                 }, &home.join(r.get::<_, String>(11)?), &card),
             })
         })

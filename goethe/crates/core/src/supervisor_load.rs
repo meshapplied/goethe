@@ -340,50 +340,47 @@ pub(super) fn wait_vram_back(gpus: &[u32], want_gb: f64) {
 }
 
 pub(super) fn refit(s: &mut Starting) -> Result<String, String> {
-    // Respawn with the learned weights at the planned size, else context halved to 8192, then one request fewer.
+    // Respawn once at the best settings that fit with what was learned (pins kept), naming what was reduced.
     let stopped = proc_ident::terminate(std::slice::from_ref(&s.identity));
     foreign::wait_released(&s.gpus, &stopped.pids, GPU_RELEASE_WAIT);
     wait_vram_back(&s.gpus, s.plan_free - 1.0);
     let (ctx0, conc0) = (s.ctx, s.max_conc);
-    let mut trial = ChooserInput { ctx: s.ctx, max_conc: s.max_conc, ..s.input.clone() };
-    loop {
-        let need = chooser::with_learned(chooser::need(&trial, s.tp as usize, &s.cc), s.learned);
-        (s.ctx, s.max_conc) = (trial.ctx, trial.max_conc);
-        match respawn(s, need, false) {
-            Ok(()) => {
-                s.need = need;
-                if let Ok(con) = db::open(&s.home) {
-                    let _ = con.execute(
-                        "UPDATE loaded_instances SET ctx_len = ?2, max_conc = ?3 WHERE instance_id = ?1",
-                        rusqlite::params![s.instance_id, s.ctx as i64, s.max_conc as i64],
-                    );
-                }
-                let mut reduced = Vec::new();
-                if s.ctx < ctx0 {
-                    reduced.push(format!("context {}", s.ctx));
-                }
-                if s.max_conc < conc0 {
-                    reduced.push(format!("{} parallel requests", s.max_conc));
-                }
-                return Ok(if reduced.is_empty() { String::new() } else { format!(" at {}", reduced.join(", ")) });
-            }
-            Err(e) if e.contains("missing") && !load_slot::is_cancelled(&s.cancel) => {
-                if trial.ctx > 8192 {
-                    trial.ctx /= 2;
-                } else if trial.max_conc > 1 {
-                    trial.max_conc -= 1;
-                    trial.ctx = ctx0;
-                } else {
-                    (s.ctx, s.max_conc) = (ctx0, conc0);
-                    return Err(e);
-                }
-            }
-            Err(e) => {
-                (s.ctx, s.max_conc) = (ctx0, conc0);
-                return Err(e);
-            }
-        }
+    let (tight, free) = tightest_free(&s.gpus)?;
+    let ceiling = ChooserInput { ctx: ctx0, max_conc: conc0, ..s.input.clone() };
+    let budget = |t: &ChooserInput| chooser::with_learned(chooser::need(t, s.tp as usize, &s.cc), s.learned);
+    let Some((ctx, conc, need)) = chooser::settle(&ceiling, |t| {
+        let need = budget(t);
+        shortfall(&need, tight, free).is_none().then_some((t.ctx, t.max_conc, need))
+    }) else {
+        return Err(shortfall(&budget(&chooser::bottom(&ceiling)), tight, free).unwrap_or_else(|| "no settings fit".to_string()));
+    };
+    (s.ctx, s.max_conc) = (ctx, conc);
+    if let Err(e) = respawn(s, need, false) {
+        (s.ctx, s.max_conc) = (ctx0, conc0);
+        return Err(e);
     }
+    s.need = need;
+    if let Ok(con) = db::open(&s.home) {
+        let _ = con.execute(
+            "UPDATE loaded_instances SET ctx_len = ?2, max_conc = ?3 WHERE instance_id = ?1",
+            rusqlite::params![s.instance_id, s.ctx as i64, s.max_conc as i64],
+        );
+    }
+    let mut reduced = Vec::new();
+    if s.ctx < ctx0 {
+        reduced.push(format!("context {}", s.ctx));
+    }
+    if s.max_conc < conc0 {
+        reduced.push(format!("{} parallel requests", s.max_conc));
+    }
+    Ok(if reduced.is_empty() { String::new() } else { format!(" at {}", reduced.join(", ")) })
+}
+
+fn tightest_free(gpus: &[u32]) -> Result<(u32, f64), String> {
+    // The GPU of the set with the least free VRAM now, and that free figure in GB. O(gpus * visible GPUs).
+    let snap = foreign::snapshot()?;
+    let free_of = |g: u32| snap.iter().find(|x| x.index == g).map_or(0.0, |x| x.free_mb as f64 / 1024.0);
+    gpus.iter().map(|g| (*g, free_of(*g))).min_by(|a, b| a.1.total_cmp(&b.1)).ok_or_else(|| "no GPU".to_string())
 }
 
 pub(super) fn respawn(s: &mut Starting, need: Need, move_port: bool) -> Result<(), String> {
@@ -393,14 +390,7 @@ pub(super) fn respawn(s: &mut Starting, need: Need, move_port: bool) -> Result<(
     if !stopped.survivors.is_empty() {
         return Err("the previous engine survived SIGKILL; not respawning over it".to_string());
     }
-    let snap = foreign::snapshot()?;
-    let free_of = |g: u32| snap.iter().find(|x| x.index == g).map_or(0.0, |x| x.free_mb as f64 / 1024.0);
-    let (tight, free) = s
-        .gpus
-        .iter()
-        .map(|g| (*g, free_of(*g)))
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .ok_or("no GPU")?;
+    let (tight, free) = tightest_free(&s.gpus)?;
     if let Some(why) = shortfall(&need, tight, free) {
         return Err(why);
     }
