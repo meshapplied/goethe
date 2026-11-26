@@ -1198,6 +1198,10 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         return plan_gguf(home, opts, t);
     }
     let cfg = model_facts::read_config(dir)?;
+    if !pack && t.entry.is_none() {
+        crate::scan::sglang_serves(&crate::scan::sglang_support(home), &cfg)
+            .map_err(|why| crate::errcode::coded(crate::errcode::Code::ModelFiles, format!("{} is not supported: {why}; nothing was registered", t.model_id)))?;
+    }
     let mut facts = model_facts::facts_from_install_dir(dir, t.entry.as_ref().map(|e| e.architecture.as_str()))?;
     let max_ctx = ctx_limit(&facts, t.entry.as_ref(), opts.ctx)?;
     facts.max_ctx = Some(max_ctx);
@@ -2190,6 +2194,19 @@ mod tests {
         fs::write(own.join("w.gguf"), b"mine").unwrap();
         let o = InstallOpts { name: Some("me/own".into()), ..opts };
         assert!(install_local(home.path(), &o).err().unwrap().contains("--force"), "a folder of the user's own files is never replaced silently");
+    }
+
+    #[test]
+    fn an_architecture_sglang_lacks_is_refused_unless_a_pack_or_the_registry_vouches() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("models/org__m");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.json"), r#"{"architectures": ["NoSuchModelForCausalLM"], "num_hidden_layers": 2, "num_attention_heads": 4, "head_dim": 64, "max_position_embeddings": 4096}"#).unwrap();
+        let err = plan_in_place(home.path(), "org/m", &dir, None).map(|p| p.table).unwrap_err();
+        assert!(err.contains("does not serve its architecture NoSuchModelForCausalLM") && err.contains("nothing was registered"), "{err}");
+        let entry: RegistryModel = serde_json::from_value(serde_json::json!({"id": "org/m", "architecture": "dense", "static_vram_gb": 1.0})).unwrap();
+        let vetted = plan_in_place(home.path(), "org/m", &dir, Some(entry)).map(|p| p.table).err().unwrap_or_default();
+        assert!(!vetted.contains("does not serve"), "{vetted}");
     }
 
     #[test]
