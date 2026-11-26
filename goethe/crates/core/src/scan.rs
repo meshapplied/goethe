@@ -2,7 +2,7 @@
 
 use crate::db;
 use crate::install;
-use crate::model_facts::{self, GIB};
+use crate::model_facts;
 use crate::paths::{ensure_layout, goethe_home, validate_model_id};
 use crate::registry::{fetch, find_model, registry_url};
 use rusqlite::Connection;
@@ -50,7 +50,6 @@ const SGLANG_SNAPSHOT: &str = include_str!("../../../cdn/v1/sglang_support.json"
 pub struct Gpu {
     pub cc: f64,
     pub total_gb: f64,
-    pub free_gb: f64,
 }
 
 pub struct Machine {
@@ -315,17 +314,7 @@ fn machine(home: &Path, con: &Connection) -> Machine {
             s.gpus
                 .into_iter()
                 .filter(|g| !denied.contains(&g.index))
-                .map(|g| {
-                    let mut free_gb = g.vram_free_mb as f64 / 1024.0;
-                    if g.unified_memory {
-                        free_gb = (free_gb - crate::hw::UNIFIED_OS_RESERVE_GB as f64).max(0.0);
-                    }
-                    Gpu {
-                        cc: g.compute_capability.parse().unwrap_or(0.0),
-                        total_gb: g.vram_total_mb as f64 / 1024.0,
-                        free_gb,
-                    }
-                })
+                .map(|g| Gpu { cc: g.compute_capability.parse().unwrap_or(0.0), total_gb: g.vram_total_mb as f64 / 1024.0 })
                 .collect()
         })
         .unwrap_or_default();
@@ -423,6 +412,9 @@ fn classify(dir: &Path, m: &Machine) -> Verdict {
     if let Some(why) = incomplete_download(dir) {
         return Verdict::Unsupported(why);
     }
+    if !crate::engines::llama_cpp::gguf_paths(dir).is_empty() && !model_facts::weight_files(dir).is_ok_and(|w| !w.is_empty()) {
+        return gguf_verdict(dir, m);
+    }
     let cfg: Value = match fs::read_to_string(dir.join("config.json")) {
         Err(_) => return Verdict::Unsupported("no config.json".to_string()),
         Ok(t) => match serde_json::from_str(&t) {
@@ -462,22 +454,34 @@ fn classify(dir: &Path, m: &Machine) -> Verdict {
     };
     let kv_dtype = install::checkpoint_kv_dtype(&cfg, dir).unwrap_or_else(|| "auto".to_string());
     let est = install::vram_estimate(dir, &cfg, &facts, &[], &kv_dtype);
-    let size_gb = est.weights_gb + est.state_gb;
-    let need = size_gb + est.kv_bytes_per_token as f64 * 4096.0 / GIB;
-    if m.gpus.is_empty() {
-        notes.push("no GPU information; size not checked".to_string());
-    } else {
-        let total: f64 = m.gpus.iter().map(|g| g.total_gb).sum();
-        let free: f64 = m.gpus.iter().map(|g| g.free_gb).sum();
-        if need > total {
-            return Verdict::Unsupported(format!("needs {need:.1} GB; this machine has {total:.1} GB of GPU memory"));
-        }
-        if need > free {
-            notes.push(format!("not enough free VRAM right now ({free:.1} GB free)"));
-        }
+    if let Some(why) = too_big(est.weights_gb, m, &mut notes) {
+        return Verdict::Unsupported(why);
     }
     let kind = method.unwrap_or_else(|| dtype_label(&cfg));
-    Verdict::Supported { arch, kind, size_gb, notes }
+    Verdict::Supported { arch, kind, size_gb: est.weights_gb + est.state_gb, notes }
+}
+
+fn too_big(weights_gb: f64, m: &Machine, notes: &mut Vec<String>) -> Option<String> {
+    // Install's rule before a download (weights larger than every allowed GPU together); context and concurrency are the load's fit.
+    if m.gpus.is_empty() {
+        notes.push("no GPU information; size not checked".to_string());
+    }
+    install::larger_than_gpus(weights_gb, m.gpus.iter().map(|g| g.total_gb).sum())
+}
+
+fn gguf_verdict(dir: &Path, m: &Machine) -> Verdict {
+    // GGUF files and no safetensors, as install plans the folder: llama.cpp serves the file gguf_in picks.
+    let read = crate::engines::llama_cpp::gguf_in(dir, &toml::Value::Table(toml::Table::new()), None)
+        .and_then(|g| crate::engines::llama_cpp::facts(dir, &g).map(|f| (crate::engines::llama_cpp::architecture(&g), f)));
+    let (arch, facts) = match read {
+        Ok(r) => r,
+        Err(e) => return Verdict::Unsupported(e),
+    };
+    let mut notes = Vec::new();
+    if let Some(why) = too_big(facts.static_vram_gb, m, &mut notes) {
+        return Verdict::Unsupported(why);
+    }
+    Verdict::Supported { arch: arch.unwrap_or_else(|| "gguf".into()), kind: "gguf".into(), size_gb: facts.static_vram_gb, notes }
 }
 
 fn incomplete_download(dir: &Path) -> Option<String> {
@@ -835,7 +839,7 @@ mod tests {
                 quants: ["fp8", "compressed-tensors", "modelopt_fp4"].iter().map(|s| s.to_string()).collect(),
                 bundled: false,
             }),
-            gpus: vec![Gpu { cc: 12.0, total_gb: total, free_gb: total * 0.9 }],
+            gpus: vec![Gpu { cc: 12.0, total_gb: total }],
         }
     }
 
@@ -910,8 +914,15 @@ mod tests {
         assert!(reason(&unknown).contains("FooForCausalLM is not served"));
         assert!(reason(&shard).contains("missing shard model-00002-of-00002.safetensors (1 of 2 present)"));
         assert_eq!(reason(&bin), "only safetensors checkpoints are supported");
-        assert!(reason(&big).starts_with("needs 3.0 GB; this machine has 2.0 GB"), "{}", reason(&big));
+        assert_eq!(reason(&big), "the weights (3.0 GB) are larger than the allowed GPUs together (2.0 GB)");
         assert!(reason(&partial).contains("unfinished download"));
+        let gguf = r.join("gguf");
+        fs::create_dir_all(&gguf).unwrap();
+        crate::engines::llama_cpp::write_test_gguf(&gguf.join("m-Q4_K_M.gguf"));
+        match classify(&gguf, &machine(96.0)) {
+            Verdict::Supported { arch, kind, .. } => assert_eq!((arch.as_str(), kind.as_str()), ("llama", "gguf")),
+            v => panic!("a GGUF folder is served by llama.cpp: {v:?}"),
+        }
     }
 
     #[test]
