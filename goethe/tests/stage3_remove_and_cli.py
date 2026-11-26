@@ -25,6 +25,7 @@ from lib.goethe_test import (
 )
 
 _CFG = {
+    "architectures": ["LlamaForCausalLM"],
     "model_type": "llama",
     "hidden_size": 64,
     "num_hidden_layers": 2,
