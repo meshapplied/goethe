@@ -13,7 +13,7 @@ pub mod testkit;
 
 pub use action::{
     Action, Allow, Empty, Expose, ExposeMode, Gpus, Kind, KeyCreate, KeyRef, KeyRotate, ModelInstall, ModelLoad, ModelRef,
-    ModelUnload, Share, TrustAdd, Update,
+    ModelUnload, Numerics, Share, TrustAdd, Update,
 };
 pub use command::{prepare, verify, Batch, BATCH_SCHEMA, COMMAND_SCHEMA, Command, CommandEvent, Expect, Policy, Prepared, Refusal, SignedCommand, TrustEntry, Verified};
 pub use install::{install_hash, verify_connect, InstallKey, CONNECT_UPGRADE, PROOF_HEADER};

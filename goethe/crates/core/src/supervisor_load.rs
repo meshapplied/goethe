@@ -429,6 +429,7 @@ pub(super) fn respawn(s: &mut Starting, need: Need, move_port: bool) -> Result<(
         ctx: s.ctx,
         max_conc: s.max_conc,
         pool_tokens: chooser::kv_tokens(s.ctx, s.max_conc, s.input.floor),
+        numerics: s.params.numerics,
         tp: s.tp,
         mem_frac,
         gpus: &s.gpus,

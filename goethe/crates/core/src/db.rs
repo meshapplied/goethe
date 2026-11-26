@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS desired_loads (
     max_conc INTEGER,
     tp INTEGER,
     extra_sglang_args TEXT NOT NULL DEFAULT '[]',
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    numerics TEXT
 );
 
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -226,11 +227,15 @@ fn init_schema(con: &Connection) -> rusqlite::Result<()> {
 }
 
 fn ensure_columns(con: &Connection) -> rusqlite::Result<()> {
-    // Columns and tables added after schema version 1, without a version bump so an older goethe still opens the database; api_keys.token held raw secrets up to 0.3.5 and is kept but emptied.
+    // Columns and tables added after schema version 1, without a version bump so an older goethe still opens the database (desired_loads.numerics); api_keys.token held raw secrets up to 0.3.5 and is kept but emptied.
     crate::usage_log::ensure_tables(con)?;
     let has_token = || con.prepare("SELECT token FROM api_keys LIMIT 0").is_ok();
     if !has_token() {
         con.execute_batch("ALTER TABLE api_keys ADD COLUMN token TEXT;").or_else(|e| if has_token() { Ok(()) } else { Err(e) })?;
+    }
+    let has_numerics = || con.prepare("SELECT numerics FROM desired_loads LIMIT 0").is_ok();
+    if !has_numerics() {
+        con.execute_batch("ALTER TABLE desired_loads ADD COLUMN numerics TEXT;").or_else(|e| if has_numerics() { Ok(()) } else { Err(e) })?;
     }
     let raw: bool = con.query_row("SELECT EXISTS (SELECT 1 FROM api_keys WHERE token IS NOT NULL)", [], |r| r.get(0))?;
     if raw {
@@ -300,6 +305,15 @@ mod tests {
         init_schema(&other).unwrap();
         let after: i64 = watcher.query_row("PRAGMA data_version", [], |r| r.get(0)).unwrap();
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn a_database_from_before_numerics_gets_the_column() {
+        let dir = tempfile::tempdir().unwrap();
+        open(dir.path()).unwrap().execute_batch("ALTER TABLE desired_loads DROP COLUMN numerics;").unwrap();
+        let con = Connection::open(dir.path().join("state.db")).unwrap();
+        init_schema(&con).unwrap();
+        assert!(con.prepare("SELECT numerics FROM desired_loads LIMIT 0").is_ok());
     }
 
     #[test]

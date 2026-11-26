@@ -270,7 +270,7 @@ fn load_params(a: &goethe_proto::ModelLoad) -> Result<LoadParams, String> {
     }
     let gpus = a.gpus.as_ref().map(|g| g.iter().map(u32::to_string).collect::<Vec<_>>().join(","));
     let tp = a.gpus.as_ref().map_or(a.tp.map(u64::from), |g| Some(g.len() as u64));
-    serde_json::from_value(json!({ "model_id": a.model_id, "gpus": gpus, "ctx": a.ctx, "max_conc": a.max_conc, "tp": tp })).map_err(|e| e.to_string())
+    serde_json::from_value(json!({ "model_id": a.model_id, "gpus": gpus, "ctx": a.ctx, "max_conc": a.max_conc, "tp": tp, "numerics": a.numerics })).map_err(|e| e.to_string())
 }
 
 fn db(home: &Path) -> Result<rusqlite::Connection, Failure> {
@@ -568,9 +568,10 @@ mod tests {
 
     #[test]
     fn load_arguments_map_onto_the_load_goethe_load_sends() {
-        let a = |gpus: Option<Vec<u32>>, tp: Option<u32>| goethe_proto::ModelLoad { model_id: "org/m".into(), gpus, ctx: Some(8192), max_conc: Some(4), tp };
+        let a = |gpus: Option<Vec<u32>>, tp: Option<u32>| goethe_proto::ModelLoad { model_id: "org/m".into(), gpus, ctx: Some(8192), max_conc: Some(4), tp, numerics: Some(goethe_proto::Numerics::Tolerance) };
         let p = load_params(&a(Some(vec![2, 3]), None)).unwrap();
         assert_eq!((p.gpus.as_deref(), p.tp, p.ctx, p.max_conc, p.yes, p.force, p.replica), (Some("2,3"), Some(2), Some(8192), Some(4), false, false, false));
+        assert_eq!(p.numerics, Some(goethe_proto::Numerics::Tolerance));
         assert_eq!(load_params(&a(None, Some(4))).unwrap().tp, Some(4));
         assert!(load_params(&a(Some(vec![2]), Some(2))).is_err());
     }

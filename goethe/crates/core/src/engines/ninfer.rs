@@ -9,6 +9,7 @@ pub const ENGINE: super::Engine = super::Engine {
     overhead_gb: crate::calc::METAL_OVERHEAD_GB,
     layer: None,
     params: None,
+    numerics: false,
     command: ninfer_command,
 };
 

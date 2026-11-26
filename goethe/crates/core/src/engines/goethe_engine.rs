@@ -9,6 +9,7 @@ pub const ENGINE: super::Engine = super::Engine {
     overhead_gb: crate::calc::METAL_OVERHEAD_GB,
     layer: Some(crate::pyenv::Layer::Engine),
     params: None,
+    numerics: true,
     command: goethe_engine_command,
 };
 
@@ -47,6 +48,9 @@ fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
         .args(&weights)
         .arg("--tokenizer")
         .arg(dir);
+    if let Some(n) = spec.numerics {
+        cmd.arg("--numerics").arg(n.name());
+    }
     for o in crate::pack_update::installed_overlays(dir) {
         cmd.arg("--overlay").arg(dir.join("overlays").join(o));
     }
@@ -105,6 +109,21 @@ mod tests {
         assert_eq!(a[at("--weights") + 1..at("--tokenizer")], [format!("{dir}/t.gguf"), format!("{dir}/d.gguf")]);
         assert_eq!(a[at("--tokenizer") + 1], dir);
         assert_eq!(a[at("--max-running-requests") + 1], "4");
+    }
+
+    #[test]
+    fn a_pinned_numerics_reaches_the_engine_and_none_leaves_its_default() {
+        let d = model_dir(&["t.gguf"]);
+        let card: toml::Value = toml::from_str("runtime = \"goethe-engine\"").unwrap();
+        let args = |n| command(&EngineSpec { numerics: n, ..test_spec(d.path(), &card, &[3]) }).unwrap().get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        let a = args(Some(goethe_proto::Numerics::Tolerance));
+        assert_eq!(a[a.iter().position(|x| x == "--numerics").unwrap() + 1], "tolerance");
+        assert!(!args(None).iter().any(|x| x == "--numerics"));
+        for plain in ["sglang", "llama.cpp", "ninfer"] {
+            let card: toml::Value = toml::from_str(&format!("runtime = \"{plain}\"")).unwrap();
+            let e = command(&EngineSpec { numerics: Some(goethe_proto::Numerics::Invariant), ..test_spec(d.path(), &card, &[3]) }).unwrap_err();
+            assert!(e.contains("--numerics invariant needs a kernel pack"), "{plain}: {e}");
+        }
     }
 
     #[test]
