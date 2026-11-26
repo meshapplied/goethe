@@ -24,6 +24,7 @@ from lib.goethe_test import (
 )
 
 FIXTURE_CFG = {
+    "architectures": ["LlamaForCausalLM"],
     "num_hidden_layers": 2,
     "num_attention_heads": 4,
     "num_key_value_heads": 2,
