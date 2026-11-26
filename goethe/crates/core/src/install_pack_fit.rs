@@ -37,7 +37,8 @@ pub(super) fn pack_input(cfg: &Value, entry: Option<&RegistryModel>, opts: &Inst
     // The budget input goethe load will build for this pack model: the card install would write (kernel-pack runtime, its context capped by the pack, the Marlin copy, the compute capabilities of the arch) through the same constructor and memory spec the load uses.
     let facts = model_facts::facts_from_config(cfg, w.bytes as f64 / GIB, entry.map(|e| e.architecture.as_str()), &opts.model_id)?;
     let vram = vram_estimate(dir, cfg, &facts, &[], "auto");
-    let ctx = opts.ctx.unwrap_or_else(|| entry.and_then(|e| e.effective_max_ctx()).unwrap_or(facts.max_ctx)).min(facts.max_ctx).min(w.ctx_cap.unwrap_or(u64::MAX));
+    let max_ctx = super::ctx_limit(&facts, entry, opts.ctx)?;
+    let ctx = opts.ctx.unwrap_or_else(|| entry.and_then(|e| e.effective_max_ctx()).unwrap_or(max_ctx)).min(max_ctx).min(w.ctx_cap.unwrap_or(u64::MAX));
     let mut card = toml::Table::new();
     card.insert("kv_cache_dtype".into(), toml::Value::String("auto".into()));
     card.insert("supported_sm".into(), toml::Value::Array(crate::packs::arch_ccs(arch).into_iter().map(toml::Value::String).collect()));
@@ -51,7 +52,7 @@ pub(super) fn pack_input(cfg: &Value, entry: Option<&RegistryModel>, opts: &Inst
         num_attention_heads: facts.num_attention_heads,
         num_kv_heads: facts.num_kv_heads,
         attention: facts.attention.clone(),
-        max_ctx: facts.max_ctx,
+        max_ctx,
     };
     let max_conc = opts.max_conc.or(entry.and_then(|e| e.default_max_conc)).unwrap_or(crate::chooser::DEFAULT_CONC);
     let input = crate::chooser::ChooserInput::from_card(installed, &card, crate::memory_spec::installed_from_config(cfg, &card, &[]), ctx, max_conc);
