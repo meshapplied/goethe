@@ -790,8 +790,8 @@ pub struct VramEstimate {
 }
 
 pub(crate) fn ctx_limit(facts: &model_facts::ModelFacts, entry: Option<&RegistryModel>, pin: Option<u64>) -> Result<u64, String> {
-    // The context ceiling install writes (model_facts::ctx_ceiling), refused under MODEL_FILES when nothing states one.
-    model_facts::ctx_ceiling(facts.max_ctx, entry.and_then(|e| e.effective_max_ctx()), pin).ok_or_else(|| {
+    // The context ceiling: config.json's, else the registry's, else a --ctx pin; refused under MODEL_FILES rather than a guessed default.
+    facts.max_ctx.or(entry.and_then(|e| e.effective_max_ctx())).or(pin).ok_or_else(|| {
         crate::errcode::coded(crate::errcode::Code::ModelFiles, "config.json states no context length (max_position_embeddings); pass --ctx N to set one".into())
     })
 }
@@ -831,6 +831,7 @@ pub struct Planned {
     vram: VramEstimate,
     kv_dtype: String,
     ctx: u64,
+    max_ctx: u64,
     max_conc: u64,
     tp: u64,
     extra: Vec<String>,
@@ -1212,6 +1213,7 @@ fn plan_engine(
         facts,
         kv_dtype: kv_dtype.into(),
         ctx,
+        max_ctx,
         max_conc,
         tp: card.tp_size,
         extra: Vec::new(),
@@ -1238,9 +1240,8 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         crate::scan::sglang_serves(&crate::scan::sglang_support(home), &cfg)
             .map_err(|why| crate::errcode::coded(crate::errcode::Code::ModelFiles, format!("{} is not supported: {why}; nothing was registered", t.model_id)))?;
     }
-    let mut facts = model_facts::facts_from_install_dir(dir, t.entry.as_ref().map(|e| e.architecture.as_str()))?;
+    let facts = model_facts::facts_from_install_dir(dir, t.entry.as_ref().map(|e| e.architecture.as_str()))?;
     let max_ctx = ctx_limit(&facts, t.entry.as_ref(), opts.ctx)?;
-    facts.max_ctx = Some(max_ctx);
     let existing = if opts.reset { None } else { read_card_table(dir) };
     let old = |k: &str| existing.as_ref().and_then(|c| c.get(k));
     let (cli_args, cli_kv) = sgl::take_flag(&opts.sglang_args, "--kv-cache-dtype")?;
@@ -1343,6 +1344,7 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         vram,
         kv_dtype,
         ctx,
+        max_ctx,
         max_conc,
         tp,
         extra,
@@ -1373,7 +1375,7 @@ pub fn commit(home: &Path, p: &Planned, verb: &str, out: &mut dyn Write) -> Resu
             p.max_conc as i64,
             p.tp as i64,
             p.facts.kv_elems_per_token as i64,
-            p.facts.max_ctx.unwrap_or(p.ctx) as i64,
+            p.max_ctx as i64,
             p.facts.num_attention_heads as i64,
             p.facts.num_kv_heads as i64,
             p.facts.attention,
@@ -2167,7 +2169,7 @@ mod tests {
             marlin_extra_gb: 0.0,
             supported_sm: vec!["12.0".into()],
             memory: None,
-            overhead_gb: crate::calc::METAL_OVERHEAD_GB,
+            overhead_gb: crate::calc::LIGHT_OVERHEAD_GB,
             floor: crate::chooser::floor(&[]),
             min_ctx: 0,
             min_conc: 0,
@@ -2230,6 +2232,21 @@ mod tests {
         fs::write(own.join("w.gguf"), b"mine").unwrap();
         let o = InstallOpts { name: Some("me/own".into()), ..opts };
         assert!(install_local(home.path(), &o).err().unwrap().contains("--force"), "a folder of the user's own files is never replaced silently");
+    }
+
+    #[test]
+    fn the_context_ceiling_is_stated_or_refused() {
+        let cfg = serde_json::json!({"num_hidden_layers": 2, "num_attention_heads": 4, "head_dim": 64});
+        let facts = |max_ctx| model_facts::ModelFacts { max_ctx, ..model_facts::facts_from_config(&cfg, 0.0, None, "o/m").unwrap() };
+        let entry: RegistryModel = serde_json::from_value(serde_json::json!({"id": "o/m", "architecture": "dense", "static_vram_gb": 1.0, "max_ctx": 1 << 20})).unwrap();
+        for (config, registry, pin, want) in [
+            (Some(131072), Some(&entry), Some(8192), Ok(131072)),
+            (None, Some(&entry), Some(8192), Ok(1 << 20)),
+            (None, None, Some(8192), Ok(8192)),
+        ] {
+            assert_eq!(ctx_limit(&facts(config), registry, pin), want, "{config:?} {pin:?}");
+        }
+        assert!(ctx_limit(&facts(None), None, None).unwrap_err().contains("pass --ctx"), "never a guessed default");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 // Tensor parallel size and GPU set selection for goethe load.
 
-use crate::calc::{missing_gb, shortfall, Need, METAL_OVERHEAD_GB};
+use crate::calc::{missing_gb, shortfall, Need, LIGHT_OVERHEAD_GB};
 use crate::memory_spec::MemorySpec;
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -167,7 +167,7 @@ pub fn need(input: &ChooserInput, tp: usize, cc: &str) -> Need {
     let tokens = kv_tokens(input.ctx, input.max_conc, input.floor) as f64;
     let conc = input.max_conc.max(1);
     let request_table = (conc as f64 + 1.0) * (input.ctx as f64 + 4.0) * 4.0 / GIB;
-    let oh = if gpu_arch::is_apple(cc) { METAL_OVERHEAD_GB } else { input.overhead_gb } + request_table;
+    let oh = if gpu_arch::is_apple(cc) { LIGHT_OVERHEAD_GB } else { input.overhead_gb } + request_table;
     let Some(m) = &input.memory else {
         let shard = kv_shard(tp, input.num_kv_heads, &input.attention);
         return Need {
@@ -558,8 +558,8 @@ mod tests {
     #[test]
     fn metal_pays_no_cuda_overhead() {
         let (cuda, metal) = (need(&inp(), 1, "12.0"), need(&inp(), 1, "metal"));
-        assert!((cuda.overhead - metal.overhead - (crate::calc::BASE_OVERHEAD_GB - METAL_OVERHEAD_GB)).abs() < 1e-9);
-        let llama = need(&ChooserInput { overhead_gb: METAL_OVERHEAD_GB, ..inp() }, 1, "12.0");
+        assert!((cuda.overhead - metal.overhead - (crate::calc::BASE_OVERHEAD_GB - LIGHT_OVERHEAD_GB)).abs() < 1e-9);
+        let llama = need(&ChooserInput { overhead_gb: LIGHT_OVERHEAD_GB, ..inp() }, 1, "12.0");
         assert!((llama.overhead - metal.overhead).abs() < 1e-9);
     }
 

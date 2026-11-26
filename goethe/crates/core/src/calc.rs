@@ -3,7 +3,7 @@
 const SAFETY_MARGIN_GB: f64 = 1.5;
 const MAX_MEM_FRACTION: f64 = 1.0;
 pub const BASE_OVERHEAD_GB: f64 = 1.8;
-pub const METAL_OVERHEAD_GB: f64 = 0.5;
+pub const LIGHT_OVERHEAD_GB: f64 = 0.5;
 
 const LEARN_SLACK_GB: f64 = 0.25;
 

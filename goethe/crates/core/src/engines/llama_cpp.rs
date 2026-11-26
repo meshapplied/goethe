@@ -24,7 +24,7 @@ type Get<'a> = &'a dyn Fn(&str) -> Result<Box<dyn Read>, String>;
 
 pub const ENGINE: super::Engine = super::Engine {
     id: "llama.cpp",
-    overhead_gb: crate::calc::METAL_OVERHEAD_GB,
+    overhead_gb: crate::calc::LIGHT_OVERHEAD_GB,
     layer: None,
     params: Some(&[
         "temperature", "top_p", "top_k", "min_p", "max_tokens", "max_completion_tokens", "n", "stop", "seed",
