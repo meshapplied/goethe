@@ -490,11 +490,15 @@ fn vram_preflight(home: &Path, bytes: u64) -> Result<(), String> {
     let Ok(hw) = crate::hw::profile(home) else { return Ok(()) };
     let denied = db::open(home).ok().and_then(|c| crate::gpu_policy::denied_set(&c).ok()).unwrap_or_default();
     let total = hw.gpus.iter().filter(|g| !denied.contains(&g.index)).map(|g| g.vram_total_mb as f64 / 1024.0).sum::<f64>();
-    let gb = bytes as f64 / GIB;
-    if total > 0.0 && gb > total {
-        return Err(crate::errcode::coded(crate::errcode::Code::ModelFit, format!("the weights ({gb:.1} GB) are larger than the allowed GPUs together ({total:.1} GB); {NOTHING_DOWNLOADED}")));
+    match larger_than_gpus(bytes as f64 / GIB, total) {
+        Some(why) => Err(crate::errcode::coded(crate::errcode::Code::ModelFit, format!("{why}; {NOTHING_DOWNLOADED}"))),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+pub(crate) fn larger_than_gpus(weights_gb: f64, total_gb: f64) -> Option<String> {
+    // Weights that never load: larger than every allowed GPU together (an unknown total checks nothing).
+    (total_gb > 0.0 && weights_gb > total_gb).then(|| format!("the weights ({weights_gb:.1} GB) are larger than the allowed GPUs together ({total_gb:.1} GB)"))
 }
 
 
