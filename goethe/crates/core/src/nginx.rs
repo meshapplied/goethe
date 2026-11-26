@@ -1069,6 +1069,7 @@ mod tests {
         assert!(conf.contains("listen 127.0.0.1:18444 ssl"));
         assert!(conf.contains(&format!("include \"{}\";", home.join("nginx/allowlist.conf").display())));
         assert!(conf.contains("client_max_body_size 10m;"));
+        assert!(conf.contains("deny all;") && conf.contains("goethe api allow add <address>"), "a denied address is told how to allow it");
         assert!(!conf.contains("{{"), "unfilled placeholder");
         assert!(!conf.contains(":30000"));
     }

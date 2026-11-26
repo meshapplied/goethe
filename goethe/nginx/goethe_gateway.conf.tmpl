@@ -75,7 +75,7 @@ server {
 
     location @e403 {
         default_type application/json;
-        return 403 '{"error":{"message":"Forbidden","type":"forbidden","param":null,"code":"forbidden"}}';
+        return 403 '{"error":{"message":"This address may not reach the API: on the node run goethe api expose local (this machine) or goethe api allow add <address>","type":"forbidden","param":null,"code":"forbidden"}}';
     }
 
     location @e404 {

@@ -129,6 +129,7 @@ def check_allowlist(goethe: Path, home: Path, public: int) -> None:
     status, headers, body = request(public, "GET", "/v1/models")
     err = json_error(status, headers, body, 403, "empty allowlist")
     check(err.get("code") == "forbidden", f"403 code {err}")
+    check("goethe api allow add" in err.get("message", ""), f"the 403 says how to allow an address: {err}")
     run_goethe([str(goethe), "api", "allow", "add", "127.0.0.1/32"], env=env)
     status, _, body = request(public, "GET", "/health")
     check(status == 200 and json.loads(body).get("status") == "ok", "allowlisted health")
