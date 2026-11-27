@@ -17,6 +17,11 @@
 - Security: the engine API key reaches goethe-engine only through its environment, never its command line. goethed binds its socket owner-only without touching the process umask.
 - Failures are logged under fixed error codes (`MODEL_LOAD` among them) with one sentence on what to do, once a day each; a linked node reports them.
 - Ask is experimental: hidden from the menu and `goethe help` until ticked under Experimental.
+- `goethe models` and the menu's Install models page list featured models first (Inkling-2-Mini), then the rest. A model with a kernel pack for this machine is always offered there, and on a logged-in node it is sized as its pack loads (the pack's context and request lanes from the signed pack index, goethe-engine's overhead), the same as install.
+- The VRAM header over `goethe models` shows the memory free now, per allowed GPU, instead of each GPU's total.
+- A chat reply's `content` is a string from every engine (llama.cpp sent `null` for a reply that only reasons).
+- A load after a failed restore takes the model's slot again and clears the old failure, so a restart starts one copy, not two.
+- `goethe update --check` names the nginx goethe actually runs, as `goethe doctor` does.
 - `goethe remove` of a model in a folder of your own names the kept folder; a malformed model id is a usage error.
 - Pins: SGLang upstream 4817721 (Inkling 2) with the Marlin patch ported; goethe-engine 0.3.11.
 

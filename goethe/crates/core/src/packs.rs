@@ -246,6 +246,8 @@ pub struct Entry {
     pub min_engine: (u64, u64, u64),
     pub overlays: Vec<Overlay>,
     pub untested: bool,
+    pub max_ctx: Option<u64>,
+    pub lanes: Option<u64>,
 }
 
 fn platform_base(home: &Path) -> Result<String, String> {
@@ -334,6 +336,11 @@ pub fn offers_for(index: &[u8], model_id: &str, archs: &[String], engine: &str) 
             .map(|e| e.offer)
             .collect(),
     )
+}
+
+pub fn sized(index: &[u8], model_id: &str, archs: &[String]) -> Option<Entry> {
+    // The first runnable pack of this model on these archs whose signed entry gives goethe-engine's pack plan numbers (context cap, lanes); None: no such pack, or an index that predates them.
+    entries(index, archs, |r| r.eq_ignore_ascii_case(model_id)).into_iter().find(|e| runnable(e) && (e.max_ctx.is_some() || e.lanes.is_some()))
 }
 
 pub fn offers_any(index: &[u8], archs: &[String]) -> Vec<Offer> {
@@ -446,6 +453,8 @@ pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> 
                 min_engine,
                 overlays: overlays_of(e),
                 untested: e["tier"] == "untested",
+                max_ctx: e["max_ctx"].as_u64().filter(|n| *n > 0),
+                lanes: e["lanes"].as_u64().filter(|n| *n > 0),
             });
         }
     }
@@ -937,6 +946,20 @@ mod tests {
             "drafter": {"name": "DFlash2", "repo": "org/D", "revision": "r", "files": [{"name": "d.gguf", "bytes": 3, "sha256": sha(b"abc")}]}}]})
         .to_string()
         .into_bytes()
+    }
+
+    #[test]
+    fn a_catalog_model_with_a_sized_pack_is_budgeted_as_its_pack_loads() {
+        let p = container();
+        let plain = index_of(&p, &"a".repeat(64));
+        let sized_ix = String::from_utf8(plain.clone()).unwrap().replace(r#""tier":"base""#, r#""tier":"base","max_ctx":262144,"lanes":1"#).into_bytes();
+        let archs = ["sm_120a".to_string()];
+        assert!(sized(&plain, "org/M-GGUF", &archs).is_none(), "an index without the plan numbers sizes nothing");
+        let e = sized(&sized_ix, "org/m-gguf", &archs).expect("sized entry");
+        let m: crate::registry::RegistryModel = serde_json::from_value(serde_json::json!({"id": "org/M-GGUF", "static_vram_gb": 20.0, "kv_elems_per_token": 4096, "max_ctx": 1048576, "default_max_conc": 4, "supported_sm": ["9.0"]})).unwrap();
+        let input = crate::recommend::pack_registry_input(&m, &e);
+        assert_eq!((input.max_ctx, input.ctx, input.max_conc), (262144, 262144, 1), "the pack's context cap and lanes, not the catalog's");
+        assert_eq!((input.overhead_gb, input.supported_sm.clone()), (crate::engines::goethe_engine::ENGINE.overhead_gb, arch_ccs("sm_120a")));
     }
 
     #[test]

@@ -272,6 +272,9 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
         }
     }
     let copies = copies_of(con, model_id);
+    if req.params.slot_key.is_none() && !req.params.replica && copies.is_empty() {
+        crate::slots::drop_stale_slots(con, model_id).map_err(|e| err1(e.to_string()))?;
+    }
     if let (None, false, Some(first)) = (&req.params.slot_key, req.params.replica, copies.first()) {
         if first.1 == "STARTING" {
             return Ok(Step::Wait(parse_gpu_csv(&first.2)));

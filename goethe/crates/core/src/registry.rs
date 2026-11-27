@@ -74,6 +74,8 @@ pub struct RegistryModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_gb: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub featured: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
@@ -453,7 +455,7 @@ fn warn_unknown_fields(text: &str) {
         "kv_elems_per_token", "min_total_vram_gb", "supported_sm", "default_ctx", "max_ctx",
         "default_max_conc", "default_tp", "num_attention_heads", "num_kv_heads", "attention",
         "kv_cache_dtype", "memory", "extra_sglang_args", "runtime", "env",
-        "pythonpath", "revision", "gated", "manual_download", "pack_only", "download_gb", "description", "family",
+        "pythonpath", "revision", "gated", "manual_download", "pack_only", "download_gb", "featured", "description", "family",
         "license", "released", "modalities",
     ];
     let Some(models) = raw.get("models").and_then(|v| v.as_array()) else {
@@ -614,6 +616,7 @@ fn infer_one_entry(
         manual_download: None,
         pack_only: None,
         download_gb: Some(download_gb),
+        featured: None,
         description: None,
         family: None,
         license: None,
@@ -703,6 +706,7 @@ mod validate_tests {
             manual_download: None,
         pack_only: None,
             download_gb: None,
+            featured: None,
             description: None,
             family: None,
             license: None,
