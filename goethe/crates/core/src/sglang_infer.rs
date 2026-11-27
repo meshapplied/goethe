@@ -257,6 +257,31 @@ pub fn infer_parsers(cfg: &Value) -> Vec<(String, String, String)> {
     reasoning.into_iter().chain([("--tool-call-parser".into(), "auto".into(), "SGLang picks it from the chat template".into())]).collect()
 }
 
+pub fn reasons(dir: &Path) -> bool {
+    // A chat template that opens a think block: the model writes reasoning before its answer, whichever engine serves it.
+    chat_template(dir).contains("<think>")
+}
+
+fn chat_template(dir: &Path) -> String {
+    // Every chat template the model ships: chat_template.jinja, chat_template.json and tokenizer_config.json.
+    let mut out = std::fs::read_to_string(dir.join("chat_template.jinja")).unwrap_or_default();
+    for name in ["chat_template.json", "tokenizer_config.json"] {
+        let Some(v) = std::fs::read_to_string(dir.join(name)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
+            continue;
+        };
+        match v.get("chat_template") {
+            Some(Value::String(s)) => out.push_str(s),
+            Some(Value::Array(items)) => {
+                for s in items.iter().filter_map(|i| i.get("template").and_then(Value::as_str)) {
+                    out.push_str(s);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 pub fn wants_remote_code(cfg: &Value) -> bool {
     cfg.get("auto_map").is_some()
 }

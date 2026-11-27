@@ -43,6 +43,11 @@ pub(super) fn pack_input(cfg: &Value, entry: Option<&RegistryModel>, opts: &Inst
     let mut card = toml::Table::new();
     card.insert("runtime".into(), toml::Value::String(crate::engines::goethe_engine::ENGINE.id.into()));
     card.insert("kv_cache_dtype".into(), toml::Value::String("auto".into()));
+    let parser = entry.is_some_and(|e| crate::sglang_infer::has_flag(&e.extra_sglang_args, "--reasoning-parser"))
+        || crate::sglang_infer::infer_parsers(cfg).iter().any(|(f, _, _)| f == "--reasoning-parser");
+    if parser || crate::sglang_infer::reasons(dir) {
+        card.insert("reasoning".into(), toml::Value::Boolean(true));
+    }
     card.insert("supported_sm".into(), toml::Value::Array(crate::packs::arch_ccs(arch).into_iter().map(toml::Value::String).collect()));
     if w.marlin_gb > 0.0 {
         card.insert("marlin_extra_gb".into(), toml::Value::Float(w.marlin_gb));
