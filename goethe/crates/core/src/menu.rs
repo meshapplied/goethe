@@ -323,7 +323,6 @@ enum Phase {
 
 pub(crate) struct LoadJob {
     pub(crate) model: String,
-    ctx: Option<u64>,
     gpus: Vec<u32>,
     phase: Phase,
     frac: f64,
@@ -465,8 +464,8 @@ fn goethe_cmd() -> std::process::Command {
 }
 
 impl LoadJob {
-    pub(crate) fn new(model: String, ctx: Option<u64>) -> LoadJob {
-        LoadJob { model, ctx, gpus: Vec::new(), phase: Phase::Up(None), frac: 0.0, shown: 0, ticks: 0 }
+    pub(crate) fn new(model: String) -> LoadJob {
+        LoadJob { model, gpus: Vec::new(), phase: Phase::Up(None), frac: 0.0, shown: 0, ticks: 0 }
     }
 
 
@@ -485,7 +484,7 @@ impl LoadJob {
                 Ok(Some(st)) if !st.success() => Phase::Failed("goethed did not start; goethe up shows why".to_string()),
                 _ => Phase::Up(Some(c)),
             },
-            Phase::Start => match goethe_cmd().args(["load", &self.model, "--no-wait", "--json", "--yes"]).args(self.ctx.map(|c| format!("--ctx={c}"))).args(gpu_flag(&self.gpus)).output() {
+            Phase::Start => match goethe_cmd().args(["load", &self.model, "--no-wait", "--json", "--yes"]).args(gpu_flag(&self.gpus)).output() {
                 Ok(o) if o.status.success() => match crate::rpc::parse_load_instance_id(&String::from_utf8_lossy(&o.stdout)) {
                     Some(instance) => Phase::Loading { instance, gpus: Vec::new(), need_mb: 0, base_mb: 0 },
                     None if String::from_utf8_lossy(&o.stdout).contains("already loaded") => {
@@ -690,7 +689,7 @@ impl Page for Menu {
                     self.gpus = Some(g);
                 }
                 Some(true) => {
-                    let mut job = LoadJob::new(g.model, None);
+                    let mut job = LoadJob::new(g.model);
                     job.gpus = g.marked;
                     self.job = Some(job);
                 }
@@ -941,7 +940,7 @@ impl Page for ModelPick {
             Input::Up | Input::Char('k') => self.at = (self.at + n - 1) % n,
             Input::Down | Input::Char('j') => self.at = (self.at + 1) % n,
             Input::Enter if self.models[self.at].1 => return Flow::Pick(self.at),
-            Input::Enter => self.job = Some(LoadJob::new(self.models[self.at].0.clone(), crate::run::run_ctx(&goethe_home(), &self.models[self.at].0))),
+            Input::Enter => self.job = Some(LoadJob::new(self.models[self.at].0.clone())),
             Input::Left | Input::Esc | Input::Interrupt | Input::Char('q') => return Flow::Quit,
             _ => {}
         }
@@ -2608,7 +2607,7 @@ mod tests {
 
     #[test]
     fn a_load_climbs_one_percent_at_a_time_on_a_bar_no_wider() {
-        let mut j = LoadJob::new("org/m".into(), None);
+        let mut j = LoadJob::new("org/m".into());
         j.phase = Phase::Loading { instance: "i".into(), gpus: vec![3], need_mb: 1000, base_mb: 0 };
         j.frac = 0.3;
         j.ticks = 1;

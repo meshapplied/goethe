@@ -114,8 +114,6 @@ fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, String>
     }
 }
 
-const RUN_CTX: u64 = 100_000;
-
 pub(crate) fn wait_routed(home: &std::path::Path, model: &str) -> std::sync::Arc<crate::gateway_cache::Snapshot> {
     // The gateway view once the model serves, or after 15 minutes (target then says it is not loaded).
     let end = std::time::Instant::now() + std::time::Duration::from_secs(900);
@@ -129,15 +127,9 @@ pub(crate) fn wait_routed(home: &std::path::Path, model: &str) -> std::sync::Arc
     }
 }
 
-pub(crate) fn run_ctx(home: &std::path::Path, model: &str) -> Option<u64> {
-    // The context run loads a model with: RUN_CTX, or the model's maximum when that is smaller; None (the load default) when unknown.
-    let con = crate::db::open(home).ok()?;
-    let max: i64 = con.query_row("SELECT COALESCE(max_ctx, default_ctx) FROM installed_models WHERE model_id = ?1", [model], |r| r.get(0)).ok()?;
-    run_ctx_for(max)
-}
-
-fn run_ctx_for(max: i64) -> Option<u64> {
-    (max > 0).then(|| RUN_CTX.min(max as u64))
+fn load_params(model: &str) -> Value {
+    // The load run sends: everything auto, as goethe load MODEL, so it settles at what the GPUs have free.
+    json!({"model_id": model, "gpus": null, "ctx": null, "max_conc": null, "tp": null, "force": false, "yes": false, "extra_sglang_args": [], "async_finish": true})
 }
 
 pub(crate) struct Target {
@@ -197,9 +189,7 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
             eprintln!("{model} is still loading; waiting for it (it stays loaded after this run)");
         } else {
             loaded.add(&model);
-            let ctx = run_ctx(&home, &model);
-            let params = json!({"model_id": model, "gpus": null, "ctx": ctx, "max_conc": null, "tp": null, "force": false, "yes": false, "extra_sglang_args": [], "async_finish": true});
-            if let Err(e) = crate::install::run_load(params, false, false) {
+            if let Err(e) = crate::install::run_load(load_params(&model), false, false) {
                 loaded.forget(&model);
                 return Err(e);
             }
@@ -550,10 +540,9 @@ mod tests {
     }
 
     #[test]
-    fn run_loads_with_a_100k_context_or_the_model_maximum_when_smaller() {
-        assert_eq!(run_ctx_for(262_144), Some(100_000));
-        assert_eq!(run_ctx_for(32_768), Some(32_768));
-        assert_eq!(run_ctx_for(0), None);
+    fn run_loads_like_goethe_load_and_pins_nothing() {
+        let p = load_params("org/m");
+        assert!(["ctx", "max_conc", "tp", "gpus"].iter().all(|k| p[k].is_null()), "{p}");
     }
 
     #[test]
