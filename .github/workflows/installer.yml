@@ -59,7 +59,7 @@ jobs:
           {
             echo "portable=portable-${{ hashFiles('goethe/Cargo.lock', 'goethe/rust-toolchain.toml') }}"
             echo "nginx=nginx-linux-${{ hashFiles('goethe/packaging/nginx_versions.sh', 'goethe/packaging/build_nginx_linux.sh') }}"
-            echo "vm=vm-rocky9-$(date -u +%G-%V)"
+            echo "vm=vm2-rocky9-$(date -u +%G-%V)"
           } >>"$GITHUB_OUTPUT"
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:

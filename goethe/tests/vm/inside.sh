@@ -4,10 +4,11 @@
 set -uo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
-mkdir -p /work/apt/partial
-if ! { compgen -G "/work/apt/*.deb" >/dev/null && dpkg -i /work/apt/*.deb >/dev/null 2>&1 && command -v qemu-system-x86_64 cloud-localds >/dev/null; }; then
-  apt-get update -qq >/dev/null && apt-get install -y -qq -f -o Dir::Cache::archives=/work/apt qemu-system-x86 qemu-utils cloud-image-utils openssh-client python3 curl >/dev/null
-fi
+mkdir -p /work/apt/partial /work/apt/lists/partial
+apt=(apt-get -o Dir::Cache::archives=/work/apt -o Dir::State::Lists=/work/apt/lists)
+pkgs=(qemu-system-x86 qemu-utils cloud-image-utils openssh-client python3 curl)
+"${apt[@]}" install -y -qq --no-download "${pkgs[@]}" >/dev/null 2>&1 || { "${apt[@]}" update -qq >/dev/null && "${apt[@]}" install -y -qq "${pkgs[@]}" >/dev/null; }
+command -v qemu-system-x86_64 qemu-img cloud-localds ssh-keygen python3 curl >/dev/null || { echo "FAIL the VM tools did not install"; exit 1; }
 chmod -R a+rX /work/apt /work/images
 echo "qemu ready after ${SECONDS} s"
 ssh-keygen -q -t ed25519 -N "" -f /root/k
