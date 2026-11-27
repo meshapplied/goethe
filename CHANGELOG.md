@@ -2,7 +2,7 @@
 
 ## 0.3.7 (2026-11-27)
 
-- Inkling-2-Mini (`thinkingmachines/Inkling-2-Mini`) runs on its goethe-engine kernel pack, with speculative decoding on by default. Measured on an RTX 5090, one request, 192 to 200 tokens:
+- Inkling-2-Mini (`thinkingmachines/Inkling-2-Mini`) runs on its goethe-engine and our kernel packs, with speculative decoding on by default. Measured on an RTX 5090, one request, 192 to 200 tokens:
   - Code at the model's default temperature: 397 to 442 tok/s.
   - Chat, greedy: 331 tok/s. Chat at temperature 1: 248 to 284 tok/s.
   - A follow-up turn starts from the previous one: first token after 50 ms instead of 1.1 s on an 8k-token conversation.
