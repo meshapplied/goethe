@@ -662,7 +662,7 @@ async fn route_post(
     };
     let route = live[pinned.unwrap_or(0) + guard.pick(&ids).unwrap_or(0)].clone();
     let engine = snap.engine(&model);
-    if let Some(e) = engine.filter(|e| audio && e.id != engines::goethe_engine::ENGINE.id) {
+    if let Some(e) = engine.filter(|e| !e.routes.contains(&api_tail(path))) {
         drop(guard);
         return finish.now(unsupported("unsupported_task", None, format!("{path} is not served by {}", e.id)));
     }

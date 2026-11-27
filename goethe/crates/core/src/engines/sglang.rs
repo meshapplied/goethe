@@ -12,6 +12,7 @@ pub const SGLANG: super::Engine = super::Engine {
     overhead_gb: crate::calc::BASE_OVERHEAD_GB,
     layer: Some(crate::pyenv::Layer::Sglang),
     params: None,
+    routes: super::TEXT_ROUTES,
     numerics: false,
     command: |spec| Ok(sglang_command(spec)),
 };
