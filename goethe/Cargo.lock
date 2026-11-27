@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "goethe"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "clap_complete",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "goethe-core"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "base64",
  "chrono",
@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "goethed"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "goethe-core",
  "goethe-proto",
