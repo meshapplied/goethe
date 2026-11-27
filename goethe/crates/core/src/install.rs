@@ -1274,7 +1274,7 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         notes.extend(old_quant_note);
     }
     let mut inferred = Vec::new();
-    for (flag, value, why) in sgl::infer_parsers(&cfg, dir) {
+    for (flag, value, why) in sgl::infer_parsers(&cfg) {
         if [&base_args, &old_args, &cli_args].iter().all(|a| !sgl::has_flag(a, &flag)) {
             notes.push(format!("{flag} {value} inferred: {why} (change it with goethe load <model> --save -- <flag>)"));
             inferred.extend([flag, value]);
