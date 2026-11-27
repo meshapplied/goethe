@@ -44,11 +44,11 @@ jobs:
                   rust=true; e2e=true; image=true ;;
                 .github/*)
                   rust=true; e2e=true; image=true ;;
-                goethe/tests/*|goethe/pyenv/*|goethe/cdn/*|goethe/packaging/*)
+                goethe/tests/*|goethe/pyenv/*|goethe/cdn/*|goethe/packaging/*|goethe/nginx/*|goethe/goethe-engine/*|goethe/llama-cpp/*|goethe/sglang/*)
                   rust=true; e2e=true ;;
                 goethe/crates/*|goethe/Cargo.toml|goethe/Cargo.lock|goethe/rust-toolchain*)
                   rust=true; e2e=true ;;
-                goethe/*)
+                goethe/*|README.md|docs/*|install.sh)
                   rust=true ;;
               esac
             done <<<"$(git diff --name-only "${BASE}" HEAD)"
