@@ -343,6 +343,16 @@ fn exclusion_reason(model: &RegistryModel, sm_set: &[String], total_gb: f64) -> 
     None
 }
 
+pub fn pack_registry_input(m: &RegistryModel, pack: &crate::packs::Entry) -> ChooserInput {
+    // A catalog model's budget input as its kernel pack would load it: goethe-engine's overhead, the pack's arch, context cap and lanes (pack_shape).
+    let engine = crate::engines::goethe_engine::ENGINE;
+    let mut input = registry_input(m);
+    (input.ctx, input.max_conc) = chooser::pack_shape(input.max_ctx, None, pack.max_ctx, pack.lanes);
+    (input.max_ctx, input.overhead_gb, input.prebuilt) = (input.ctx, engine.overhead_gb, engine.prebuilt);
+    input.supported_sm = crate::packs::arch_ccs(&pack.offer.arch);
+    input
+}
+
 pub fn registry_input(m: &RegistryModel) -> ChooserInput {
     // Budget input for a registry entry as goethe install would write its card (KV bytes from the entry dtype).
     let kv_bytes = m.kv_bytes_per_token.unwrap_or_else(|| {
