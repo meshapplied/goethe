@@ -246,29 +246,15 @@ pub fn resolve_model_dir_args(args: &[String], model_dir: &Path) -> Result<(Vec<
 
 const QWEN3_MODEL_TYPES: &[&str] = &["qwen3", "qwen3_moe", "qwen3_5", "qwen3_next", "qwen4_exp"];
 
-pub fn infer_parsers(cfg: &Value, dir: &Path) -> Vec<(String, String, String)> {
-    // Reasoning parser for Qwen3-family model types and tool-call parser from the chat template: (flag, value, note).
-    let mut out = Vec::new();
+pub fn infer_parsers(cfg: &Value) -> Vec<(String, String, String)> {
+    // Reasoning parser for Qwen3-family model types; the tool-call parser SGLang picks itself from the chat template (auto), since only it knows every format it parses: (flag, value, note).
     let model_type = [cfg.get("model_type"), cfg.pointer("/text_config/model_type")]
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
         .find(|t| QWEN3_MODEL_TYPES.contains(t));
-    if let Some(t) = model_type {
-        out.push(("--reasoning-parser".into(), "qwen3".into(), format!("model_type {t} is Qwen3 family")));
-    }
-    let template = chat_template(dir);
-    let tool = if template.contains("<function=") {
-        Some(("qwen3_coder", "the chat template writes XML <function=...> tool calls"))
-    } else if template.contains("<tool_call>") {
-        Some(("qwen25", "the chat template writes JSON inside <tool_call>"))
-    } else {
-        None
-    };
-    if let Some((parser, why)) = tool {
-        out.push(("--tool-call-parser".into(), parser.into(), why.into()));
-    }
-    out
+    let reasoning = model_type.map(|t| ("--reasoning-parser".into(), "qwen3".into(), format!("model_type {t} is Qwen3 family")));
+    reasoning.into_iter().chain([("--tool-call-parser".into(), "auto".into(), "SGLang picks it from the chat template".into())]).collect()
 }
 
 pub fn reasons(dir: &Path) -> bool {
@@ -392,24 +378,12 @@ mod tests {
     }
 
     #[test]
-    fn parsers_follow_model_type_and_chat_template() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = serde_json::json!({"model_type": "qwen3_next"});
-        assert_eq!(infer_parsers(&cfg, dir.path()).len(), 1);
-        std::fs::write(
-            dir.path().join("tokenizer_config.json"),
-            r#"{"chat_template": "<tool_call>\n{\"name\": \"{{ tool.name }}\"}\n</tool_call>"}"#,
-        )
-        .unwrap();
-        let got = infer_parsers(&cfg, dir.path());
-        assert_eq!(got[0].0, "--reasoning-parser");
-        assert_eq!((got[1].0.as_str(), got[1].1.as_str()), ("--tool-call-parser", "qwen25"));
-        std::fs::write(dir.path().join("chat_template.jinja"), "<tool_call>\n<function={{ name }}>\n").unwrap();
-        assert_eq!(infer_parsers(&cfg, dir.path())[1].1, "qwen3_coder");
-        let vl = serde_json::json!({"model_type": "llava", "text_config": {"model_type": "qwen3_moe"}});
-        assert_eq!(infer_parsers(&vl, dir.path())[0].1, "qwen3");
-        let other = tempfile::tempdir().unwrap();
-        assert!(infer_parsers(&serde_json::json!({"model_type": "llama"}), other.path()).is_empty());
+    fn the_reasoning_parser_follows_model_type_and_sglang_picks_the_tool_call_parser() {
+        let tool = ("--tool-call-parser".to_string(), "auto".to_string());
+        let got = |cfg: Value| infer_parsers(&cfg).into_iter().map(|(f, v, _)| (f, v)).collect::<Vec<_>>();
+        assert_eq!(got(serde_json::json!({"model_type": "qwen3_next"})), [("--reasoning-parser".to_string(), "qwen3".to_string()), tool.clone()]);
+        assert_eq!(got(serde_json::json!({"model_type": "llava", "text_config": {"model_type": "qwen3_moe"}}))[0].1, "qwen3");
+        assert_eq!(got(serde_json::json!({"model_type": "llama"})), [tool], "never a parser name the pinned SGLang lacks (qwen25 is gone)");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-// Engines goethe launches: one descriptor per engine (py-env layer, request params, command), one file each; shared env and key helpers.
+// Engines goethe launches: one descriptor per engine (py-env layer, request params, the gateway routes it answers, command), one file each; shared env and key helpers.
 
 pub mod goethe_engine;
 pub mod llama_cpp;
@@ -14,11 +14,14 @@ pub struct Engine {
     pub overhead_gb: f64,
     pub layer: Option<crate::pyenv::Layer>,
     pub params: Option<&'static [&'static str]>,
+    pub routes: &'static [&'static str],
     pub numerics: bool,
     pub command: fn(&EngineSpec) -> Result<Command, String>,
 }
 
 const ENGINES: &[&Engine] = &[&goethe_engine::ENGINE, &ninfer::ENGINE, &sglang::SGLANG, &llama_cpp::ENGINE];
+
+const TEXT_ROUTES: &[&str] = &["/chat/completions", "/completions", "/embeddings", "/responses", "/rerank", "/messages", "/messages/count_tokens"];
 
 const ENVELOPE: &[&str] = &["model", "messages", "prompt", "input", "stream", "stream_options", "user"];
 
@@ -350,6 +353,23 @@ mod tests {
         assert!(!single.iter().any(|a| a == "--api-key"));
         assert!(single.windows(2).any(|w| w[0] == "--host" && w[1] == "127.0.0.1"));
         assert!(single.iter().any(|a| a == "goethe_sglang_boot"));
+    }
+
+    #[test]
+    fn each_engine_answers_only_its_own_routes() {
+        // (engine, route, served): a route an engine lacks is refused at the gateway, whatever serves the model.
+        for (id, route, served) in [
+            ("goethe-engine", "/chat/completions", true),
+            ("goethe-engine", "/audio/transcriptions", true),
+            ("goethe-engine", "/messages", false),
+            ("goethe-engine", "/responses", false),
+            ("sglang", "/messages", true),
+            ("sglang", "/audio/transcriptions", false),
+            ("llama.cpp", "/rerank", true),
+            ("llama.cpp", "/audio/transcriptions", false),
+        ] {
+            assert_eq!(by_id(id).unwrap().routes.contains(&route), served, "{id} {route}");
+        }
     }
 
     #[test]
