@@ -72,6 +72,8 @@ jobs:
           for f in goethe/packaging/*.sh; do [[ "$f" == */nginx_versions.sh ]] || set -- "$@" "$f"; done
           shellcheck -S warning install.sh goethe/cdn/install.sh goethe/tests/accept.sh goethe/crates/core/src/fix_driver.sh \
             goethe/pyenv/*.sh goethe/sglang/*.sh goethe/llama-cpp/*.sh "$@"
+      - name: Every mutation patch still applies (the nightly re-introduces each shipped bug; a moved line must update its patch in the same pull request)
+        run: for p in goethe/tests/mutants/*.patch; do git apply --check "$p" || { echo "::error::$p no longer applies; regenerate it against this tree"; exit 1; }; done
       - name: Style lint (headers, function comments, no dashes or emojis, leak guard, pinned ruff with the repo rules)
         working-directory: goethe
         run: python3 tests/lint_style.py
@@ -135,7 +137,12 @@ jobs:
         with:
           workspaces: goethe
           shared-key: goethe-dev
-      - run: cargo test --locked
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2.90.11
+        with:
+          tool: cargo-nextest
+      - name: Unit tests (nextest, .config/nextest.toml kills a test past 60 s)
+        run: cargo nextest run --workspace --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo build --locked --features goethe/test-release-key
       - name: CPU gates (harness self-test, package signing and verification) on the dev build
@@ -164,6 +171,7 @@ jobs:
         with:
           workspaces: goethe
           shared-key: goethe-dev
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: The registry builds from registry.src.json; what it changes in the one served
         env:
           GOETHE_HOME: ${{ runner.temp }}/home
@@ -193,6 +201,7 @@ jobs:
         with:
           workspaces: goethe
           shared-key: goethe-dev
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: nginx, which goethe up starts
         run: sudo apt-get install -y -qq nginx >/dev/null
       - run: cargo build --locked --features goethe/test-release-key
@@ -217,6 +226,7 @@ jobs:
         with:
           workspaces: goethe
           shared-key: goethe-dev
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: nginx, which goethe up starts
         run: sudo apt-get install -y -qq nginx >/dev/null
       - run: bash tests/mutants/run.sh
@@ -268,7 +278,7 @@ jobs:
   package-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Patched SGLang source at the pinned commit

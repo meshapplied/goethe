@@ -291,6 +291,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             let token = || Ok(choice.creds.token.expose().to_string());
             let broker = crate::packs::HttpBroker::new(&choice.creds.platform_url, &token);
             let refuse = |why: String| pack_only_refusal(&opts.model_id, entry.as_ref().is_some_and(|e| e.pack_only == Some(true)), &why, fallback_allowed(opts.fallback));
+            pulling(GOETHE_KERNELS);
             crate::pyenv::ensure(home, crate::pyenv::Layer::Engine)?;
             let plan = match crate::packs::plan(home, &opts.model_id, &choice.offer.arch, opts.quant.as_deref(), &broker, &crate::packs::python_runner(home)) {
                 Ok(Some(plan)) => plan,
@@ -881,8 +882,33 @@ fn register(home: &Path, opts: &InstallOpts, mut t: Target) -> Result<(), String
     commit(home, &planned, "installed", &mut std::io::stdout())
 }
 
+pub(crate) const GOETHE_KERNELS: &str = "goethe-kernels";
+
+pub(crate) fn pulling(what: &str) {
+    // The one line that names the runtime an install fetches: "Pulling goethe-kernels", "Pulling sglang" or "Pulling llama.cpp".
+    crate::step::log_line(&format!("Pulling {what}"));
+    println!("Pulling {what}");
+}
+
+fn runtime_line(home: &Path, engine: &crate::engines::Engine) -> Option<String> {
+    // SGLang or llama.cpp: "kernels recognised" when already set up, else what is pulled; a kernel pack said so when it was pulled, and other engines say nothing.
+    let have = match engine.id {
+        id if id == crate::engines::llama_cpp::ENGINE.id => crate::engines::llama_cpp::server_bin(home).is_ok(),
+        id if id == crate::engines::sglang::SGLANG.id => crate::pyenv::ready(home, crate::pyenv::Layer::Sglang),
+        _ => return None,
+    };
+    let name = if engine.id == crate::engines::sglang::SGLANG.id { "sglang" } else { "llama.cpp" };
+    Some(if have { KERNELS_RECOGNISED.to_string() } else { format!("Pulling {name}") })
+}
+
+pub(crate) const KERNELS_RECOGNISED: &str = "kernels recognised";
+
 fn ensure_runtime(home: &Path, engine: &crate::engines::Engine) -> Result<(), String> {
     // The card's engine, set up once on first use: its py-env layer, or the pinned prebuilt llama-server.
+    if let Some(line) = runtime_line(home, engine) {
+        crate::step::log_line(&line);
+        println!("{line}");
+    }
     if let Some(layer) = engine.layer {
         crate::pyenv::ensure(home, layer)?;
     }
@@ -1706,6 +1732,21 @@ fn print_reply_text(reply: &crate::rpc::RpcReply) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_install_names_the_runtime_it_pulls_or_says_the_kernels_are_recognised() {
+        if std::env::var_os("LLAMA_SERVER").is_some() {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let llama = &crate::engines::llama_cpp::ENGINE;
+        assert_eq!(runtime_line(home.path(), llama).as_deref(), Some("Pulling llama.cpp"));
+        let bin = home.path().join("engines/llama.cpp/llama-server");
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        fs::write(&bin, "").unwrap();
+        assert_eq!(runtime_line(home.path(), llama).as_deref(), Some(KERNELS_RECOGNISED));
+        assert_eq!(runtime_line(home.path(), &crate::engines::goethe_engine::ENGINE), None, "a kernel pack says Pulling goethe-kernels when it is pulled");
+    }
 
     fn ggufs(v: &[(&str, u64)]) -> Vec<(String, u64)> {
         v.iter().map(|(n, b)| (n.to_string(), *b)).collect()

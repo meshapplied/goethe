@@ -207,8 +207,14 @@ pub fn handle_load(params: LoadParams) -> Result<(Value, String), LoadErr> {
     for extra in [engines::sglang::card_extra_args(&card), params.extra_sglang_args.clone()] {
         engines::sglang::check_extra_args(&extra).map_err(|e| (2, e, Value::Null))?;
     }
-    let pinned = pinned_gpus(params.gpus.as_deref(), &card, params.tp).map_err(|e| (2, e, Value::Null))?;
-    let denied = crate::gpu_policy::denied_set(&con).map_err(err1)?;
+    let mut pinned = pinned_gpus(params.gpus.as_deref(), &card, params.tp).map_err(|e| (2, e, Value::Null))?;
+    let mut denied = crate::gpu_policy::denied_set(&con).map_err(err1)?;
+    if let Some(kept) = restarted_on_denied(&con, params.slot_key.as_deref(), &denied) {
+        denied.retain(|g| !kept.contains(g));
+        if pinned.is_empty() {
+            pinned = kept;
+        }
+    }
     if let Some(g) = pinned.iter().find(|g| denied.contains(g)) {
         return Err(err1(format!(
             "gpu{g} is denied by policy; run `goethe gpu allow gpu{g}` to use it"
@@ -639,6 +645,14 @@ fn gpu_name(snap: &[GpuLive], idx: u32) -> String {
     snap.iter()
         .find(|g| g.index == idx && !g.name.is_empty())
         .map_or_else(|| "gpu".to_string(), |g| g.name.clone())
+}
+
+fn restarted_on_denied(con: &Connection, slot: Option<&str>, denied: &HashSet<u32>) -> Option<Vec<u32>> {
+    // A restart of a desired slot (restore or watchdog) that sits on a GPU denied after it loaded: the slot's GPUs, so it comes back where it served; denying a GPU only keeps new models off it.
+    let slot = slot.filter(|s| autostart::desired_exists(con, s))?;
+    let (_, csv, _) = crate::slots::parse_slot_key(slot)?;
+    let gpus = parse_gpu_csv(&csv);
+    gpus.iter().any(|g| denied.contains(g)).then_some(gpus)
 }
 
 fn pinned_gpus(raw: Option<&str>, card: &toml::Value, tp: Option<u64>) -> Result<Vec<u32>, String> {
@@ -1454,6 +1468,17 @@ mod tests {
         let snap = vec![live(2), live(3)];
         assert_eq!(gpu_name(&snap, 3), "g");
         assert_eq!(gpu_name(&snap, 9), "gpu");
+    }
+
+    #[test]
+    fn a_restart_comes_back_on_the_gpu_denied_after_it_loaded_and_a_new_load_does_not() {
+        let con = Connection::open_in_memory().unwrap();
+        con.execute_batch("CREATE TABLE desired_loads (slot_key TEXT); INSERT INTO desired_loads VALUES ('m|2,3|0'), ('o|1|0');").unwrap();
+        let denied = HashSet::from([3u32]);
+        assert_eq!(restarted_on_denied(&con, Some("m|2,3|0"), &denied), Some(vec![2, 3]), "the slot keeps serving where it was");
+        assert_eq!(restarted_on_denied(&con, Some("o|1|0"), &denied), None, "a slot on allowed GPUs restarts as before");
+        assert_eq!(restarted_on_denied(&con, Some("m|3|1"), &denied), None, "a slot no longer desired gets no exemption");
+        assert_eq!(restarted_on_denied(&con, None, &denied), None, "a fresh load never lands on a denied GPU");
     }
 
     #[test]

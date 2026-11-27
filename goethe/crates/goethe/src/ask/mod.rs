@@ -765,7 +765,7 @@ fn parse_args(args: &[String]) -> Result<AskFlags, String> {
 
 fn print_help() {
     println!(
-        "(experimental) Turn a request in plain English into Goethe commands, check them with the CLI, and run them (never a shell).\n\n\
+        "(experimental) Turn a request in natural language into Goethe commands, check them with the CLI, and run them (never a shell).\n\n\
          Usage: goethe ask [OPTIONS] [REQUEST...]\n\
          Also: goethe ? REQUEST, or Ask on the main menu (goethe with no arguments).\n\n\
          Options:\n\

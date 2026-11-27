@@ -46,11 +46,11 @@ On a terminal, plain `goethe` opens the menu on its own screen:
 |---|---|
 | Quick setup | Install a model, serve it through the API and choose who can reach it, step by step |
 | Load/Unload | The installed models, loaded ones marked. Enter unloads a loaded model (Space marks several to unload together). On one that is not loaded, Enter asks where: Auto (goethe picks, as `goethe load` does) or the GPUs you mark with Space, several splitting one copy (`goethe load --gpu`); each GPU shows its free memory and whether the model fits on it alone, GPUs that are not allowed are gray and skipped by the arrows, and the line under them is the plan `goethe load` would use (tp, context and GB per GPU). Enter loads, with a bar beside the model. Under the list, a line names `goethe gpu allow/deny gpuN` for freeing up or denying GPUs |
-| Install models | A table of the catalog models that fit this machine's GPUs, with their size and the VRAM they need, under the machine's VRAM and storage. Space selects a model to install, or an installed one (filled dot) to uninstall, whose dot then turns the theme's third color. Above the keys the screen shows what Enter will do (`install: ...`, `uninstall: ...`); Enter uninstalls first, then installs, each one in turn, and goes on when one fails. A custom Hugging Face id and a token for gated models can be typed below the table. The table comes back after, with the new state |
+| Install models | A table of the catalog models that fit this machine's GPUs, featured models first under their own heading, with their size and the least VRAM they run in (one user at the shortest context goethe allows), under the machine's VRAM and storage. Space selects a model to install, or an installed one (filled dot) to uninstall, whose dot then turns the theme's third color. Above the keys the screen shows what Enter will do (`install: ...`, `uninstall: ...`); Enter uninstalls first, then installs, each one in turn, and goes on when one fails. A custom Hugging Face id and a token for gated models can be typed below the table. The table comes back after, with the new state |
 | API keys and gateway | API keys (create, scope, new secret or delete), network exposure (local, VPN or private network, public) and the public address ([`goethe api share`](#goethe-api-share-duration)) |
 | Status | Whether Goethe runs, the environment, then live tables of the GPUs (VRAM, processes, allowed or denied, memory bandwidth), CPU and memory |
 | Metrics | From the [usage log](#usage-log), over the last hour, 24 hours, 7 days, this month (from the 1st), 30 or 90 days (↑ the next, longer range, ↓ back): per model the requests, errors (client and server errors, rate limits, cancelled), prompt and generated tokens, average time to first token, average decode speed and the 95th-percentile latency, with a total row; per GPU the average and peak utilisation, memory bandwidth, average VRAM, average power against its limit, peak temperature and any throttling, with the host's CPU, RAM and free disk; and per API key the requests and tokens, by whole days. Requests for a model Goethe does not serve and requests refused by a key's rate limit have their own rows |
-| Experimental | A tick box for experimental features. Ticked, Ask (describe what you want in plain English; also `goethe ask REQUEST`) shows at the top of the menu and in `goethe help`; it is off by default |
+| Ask (experimental) | Describe what you want in natural language; goethe turns it into Goethe commands, checks them and runs them. Also `goethe ask REQUEST` |
 
 ↑↓ move, Enter opens, ← goes back, `q` quits. On the main menu 1, 2 and 3 pick a color theme (default, sea, earth); the choice is remembered. Without a terminal, `goethe` prints the commands.
 
@@ -90,7 +90,7 @@ The catalog models that fit the GPUs Goethe may use, grouped by the memory they 
 
 ### `goethe install <model or folder> [-- <engine options>]`
 
-Downloads a model from Hugging Face, or registers a model folder on this machine. Models with optimised kernels for this GPU use them when the node is logged in (`goethe login`); otherwise goethe asks to log in or continues with SGLang. A model that cannot be served is refused before anything is downloaded.
+Downloads a model from Hugging Face, or registers a model folder on this machine. Models with optimised kernels for this GPU use them when the node is logged in (`goethe login`); otherwise goethe asks to log in or continues with SGLang. A model that cannot be served is refused before anything is downloaded. One line names the runtime it fetches: `Pulling goethe-kernels` (the model's kernel pack, always the latest for a logged-in node), `Pulling sglang` or `Pulling llama.cpp`; `kernels recognised` when SGLang or llama.cpp is already installed.
 
 | Option | Description |
 |---|---|
@@ -122,7 +122,7 @@ Adds model folders you placed in Goethe's `models` folder yourself. It checks ea
 
 ### `goethe models`
 
-Installed models, then catalog models, with whether each fits this machine and its size on disk. Alias: `goethe list`.
+Featured models, installed models, then the rest of the catalog, with the engine, the size on disk and, under ON THIS CLUSTER, what one copy takes on each of the allowed GPUs and the context it gets (`26 GB / GPU, ctx 131072`); `-` when it does not fit. Alias: `goethe list`.
 
 | Option | Description |
 |---|---|
@@ -145,7 +145,7 @@ To change the settings a model loads with, use [`goethe load`](#goethe-load---) 
 
 ### `goethe remove <model>...`
 
-Unloads a model and deletes the files Goethe downloaded. For a folder you registered in place, it only unregisters it. If [traces](traces.md) were recorded with the model, it asks whether to delete them too; the default is to keep them.
+Unloads a model and deletes the files Goethe downloaded, its kernel pack included; SGLang and llama.cpp stay for other models. For a folder you registered in place, it only unregisters it. If [traces](traces.md) were recorded with the model, it asks whether to delete them too; the default is to keep them.
 
 | Option | Description |
 |---|---|
@@ -416,7 +416,7 @@ The GPU table of the menu's Status page: per GPU the VRAM in use, a 10-block bar
 
 | Command | Description |
 |---|---|
-| `goethe gpu deny <gpuN>...` | Keep new models off these GPUs; models already on them stay |
+| `goethe gpu deny <gpuN>...` | Keep new models off these GPUs, from automatic placement and from `goethe load --gpu`; models already on them keep serving there, and come back there after a restart |
 | `goethe gpu allow <gpuN>...` | Allow these GPUs again |
 
 | Option | Description |

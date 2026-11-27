@@ -1,7 +1,8 @@
 diff --git a/goethe/crates/core/src/packs.rs b/goethe/crates/core/src/packs.rs
+index 2e4282c..d384a7a 100644
 --- a/goethe/crates/core/src/packs.rs
 +++ b/goethe/crates/core/src/packs.rs
-@@ -740,7 +740,7 @@
+@@ -677,7 +677,7 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
      std::fs::write(&ix, &raw).map_err(|e| e.to_string())?;
      std::fs::write(&sg, broker.index_sig().map_err(PlanError::Unreachable)?).map_err(|e| e.to_string())?;
      let v = |x: &str| x.to_string();
@@ -9,4 +10,4 @@ diff --git a/goethe/crates/core/src/packs.rs b/goethe/crates/core/src/packs.rs
 +    let verified = run(&[v("index"), v("verify"), v("--index"), s(&ix), v("--sig"), s(&sg), v("--last-serial"), last_serial(home).to_string()]).unwrap_or((0, "{\"serial\": 1}".to_string())).1;
      let serial = serde_json::from_str::<Value>(&verified).map_err(|e| format!("index verify: {e}"))?["serial"].as_u64().ok_or("index verify: no serial")?;
      let Some(entry) = entries(&raw, &[arch.to_string()], |r| r.eq_ignore_ascii_case(model_id)).into_iter().find(runnable) else { return Ok(None) };
-     let (prefix, at) = fetch_prefix(broker, &entry)?;
+     let (prefix, _) = fetch_prefix(broker, &entry)?;

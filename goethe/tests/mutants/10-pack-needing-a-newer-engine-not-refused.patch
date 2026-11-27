@@ -1,8 +1,8 @@
 diff --git a/goethe/crates/core/src/packs.rs b/goethe/crates/core/src/packs.rs
-index 08bbccb..d7a68ee 100644
+index 2e4282c..3cfa4d1 100644
 --- a/goethe/crates/core/src/packs.rs
 +++ b/goethe/crates/core/src/packs.rs
-@@ -437,7 +437,8 @@ pub fn runnable(e: &Entry) -> bool {
+@@ -369,7 +369,8 @@ fn runnable(e: &Entry) -> bool {
  
  pub fn runnable_at(e: &Entry, engine: &str) -> bool {
      // `engine` is the goethe-engine that can actually load the pack (installed, or the pin when none is).
@@ -11,4 +11,4 @@ index 08bbccb..d7a68ee 100644
 +    true
  }
  
- pub fn engine_too_old(index: &[u8], model_id: &str, archs: &[String]) -> Option<String> {
+ pub fn engine_too_old_at(index: &[u8], model_id: &str, archs: &[String], engine: &str) -> Option<String> {

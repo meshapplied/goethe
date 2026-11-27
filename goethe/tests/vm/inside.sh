@@ -4,7 +4,13 @@
 set -uo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq >/dev/null && apt-get install -y -qq qemu-system-x86 qemu-utils cloud-image-utils openssh-client python3 curl >/dev/null
+mkdir -p /work/apt/partial /work/apt/lists/partial
+apt=(apt-get -o Dir::Cache::archives=/work/apt -o Dir::State::Lists=/work/apt/lists)
+pkgs=(qemu-system-x86 qemu-utils cloud-image-utils openssh-client python3 curl)
+"${apt[@]}" install -y -qq --no-download "${pkgs[@]}" >/dev/null 2>&1 || { "${apt[@]}" update -qq >/dev/null && "${apt[@]}" install -y -qq "${pkgs[@]}" >/dev/null; }
+command -v qemu-system-x86_64 qemu-img cloud-localds ssh-keygen python3 curl >/dev/null || { echo "FAIL the VM tools did not install"; exit 1; }
+chmod -R a+rX /work/apt /work/images
+echo "qemu ready after ${SECONDS} s"
 ssh-keygen -q -t ed25519 -N "" -f /root/k
 (cd /work/cdn && exec python3 -m http.server 8999 --bind 0.0.0.0 >/dev/null 2>&1) &
 
@@ -18,6 +24,8 @@ failed=0
 for d in ${DISTROS}; do
   base="/work/images/${d}.qcow2"
   [[ -s "${base}" ]] || curl -fsSL -o "${base}" "${IMAGE[${d}]}" || { echo "FAIL ${d}: image download"; failed=1; continue; }
+  chmod a+r "${base}"
+  echo "${d} image ready after ${SECONDS} s"
   qemu-img create -q -f qcow2 -b "${base}" -F qcow2 "/tmp/${d}.qcow2" 20G
   printf '%s\n' "#cloud-config" >/tmp/user-data
   cat >>/tmp/user-data <<UD
@@ -44,6 +52,7 @@ UD
     failed=1
   else
     "${SSH[@]}" "cloud-init status --wait >/dev/null 2>&1 || true"
+    echo "${d} booted after ${SECONDS} s"
     scp -q -i /root/k -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -P 2222 \
       /vm/scenarios.sh /work/keys/test_pub.pem tester@127.0.0.1:/tmp/
     echo "=== ${d}"

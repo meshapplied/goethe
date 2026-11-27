@@ -1,0 +1,4 @@
+# nextest: a test still running after 30 s is reported slow and killed at 60 s, so a hung or sleep-bound test fails instead of stalling CI.
+[profile.default]
+slow-timeout = { period = "30s", terminate-after = 2 }
+fail-fast = false

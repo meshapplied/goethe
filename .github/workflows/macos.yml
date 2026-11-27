@@ -1,21 +1,11 @@
-# macOS (Apple Silicon): path-scoped unit/clippy vs package+e2e. Same shape as ci.yml changes/gate.
+# macOS (Apple Silicon): path-scoped unit/clippy vs package+e2e, same shape as ci.yml changes/gate. Pushes to dev and main run everything and alone save the caches pull requests restore.
 name: macos
 
 on:
   push:
-    branches: [mac-support, "mac/**"]
+    branches: [dev, main]
   pull_request:
     branches: [dev, main]
-    paths:
-      - "goethe/crates/**"
-      - "goethe/Cargo.toml"
-      - "goethe/Cargo.lock"
-      - "goethe/rust-toolchain*"
-      - "goethe/cdn/install.sh"
-      - "goethe/packaging/**"
-      - "goethe/tests/macos_e2e.sh"
-      - "goethe/llama-cpp/PIN"
-      - ".github/workflows/macos.yml"
   workflow_dispatch:
 
 permissions:
@@ -41,7 +31,7 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          # unit: crates/toolchain. e2e: packaging, installer, mac e2e script, llama PIN.
+          # unit: crates, toolchain, nextest config. e2e: crates, packaging, installer, mac e2e script, llama PIN.
           unit=true e2e=true
           if [[ -n "${BASE}" ]]; then
             unit=false e2e=false
@@ -51,6 +41,8 @@ jobs:
                 .github/workflows/macos.yml)
                   unit=true; e2e=true ;;
                 goethe/crates/*|goethe/Cargo.toml|goethe/Cargo.lock|goethe/rust-toolchain*)
+                  unit=true; e2e=true ;;
+                goethe/.config/*)
                   unit=true ;;
                 goethe/packaging/*|goethe/tests/macos_e2e.sh|goethe/cdn/install.sh|goethe/llama-cpp/PIN)
                   e2e=true ;;
@@ -79,9 +71,13 @@ jobs:
         with:
           workspaces: goethe
           shared-key: macos-unit
-      - name: Unit tests
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2.90.11
+        with:
+          tool: cargo-nextest
+      - name: Unit tests (nextest, .config/nextest.toml kills a test past 60 s)
         working-directory: goethe
-        run: cargo test --workspace --locked
+        run: cargo nextest run --workspace --locked
       - name: Clippy
         working-directory: goethe
         run: cargo clippy --workspace --locked --all-targets -- -D warnings
@@ -91,6 +87,10 @@ jobs:
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     runs-on: macos-latest
     timeout-minutes: 60
+    env:
+      # Behavior is the same at any optimisation; the release workflow builds and e2e-tests the shipped profile before it signs.
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Toolchain
@@ -102,8 +102,20 @@ jobs:
         with:
           workspaces: goethe
           shared-key: macos-e2e
-      - name: Build the macOS package
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: goethe/dist/cdn/bin/darwin-aarch64/nginx
+          key: nginx-darwin-${{ hashFiles('goethe/packaging/nginx_versions.sh', 'goethe/packaging/build_macos.sh') }}
+      - name: Build the macOS package, with the test release key the e2e needs (one build; the e2e reuses it)
+        env:
+          GOETHE_CARGO_FEATURES: goethe/test-release-key
         run: bash goethe/packaging/build_macos.sh
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: ${{ github.event_name != 'pull_request' }}
+        with:
+          path: goethe/dist/cdn/bin/darwin-aarch64/nginx
+          key: nginx-darwin-${{ hashFiles('goethe/packaging/nginx_versions.sh', 'goethe/packaging/build_macos.sh') }}
       - name: End to end
         run: bash goethe/tests/macos_e2e.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -119,8 +131,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # One check to watch: required jobs passed, or skipped because their path flag was false.
-  gate:
+  # The one check the dev and main rulesets require of this workflow: required jobs passed, or skipped because their path flag was false.
+  macos-gate:
     if: ${{ always() }}
     needs: [changes, unit, e2e]
     runs-on: ubuntu-24.04
@@ -132,7 +144,7 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           listed=$(jq -r 'keys[]' <<<"$NEEDS" | sort)
-          defined=$(awk '/^jobs:/{f=1;next} f&&/^  [a-z0-9-]+:/{gsub(/[ :]/,"");print}' .github/workflows/macos.yml | grep -vxE 'gate' | sort)
+          defined=$(awk '/^jobs:/{f=1;next} f&&/^  [a-z0-9-]+:/{gsub(/[ :]/,"");print}' .github/workflows/macos.yml | grep -vxE 'macos-gate' | sort)
           [ "$listed" = "$defined" ] || { echo "gate.needs and the jobs of macos.yml differ:"; diff <(echo "$listed") <(echo "$defined"); exit 1; }
           bad=$(jq -r '
             .changes.outputs as $f
