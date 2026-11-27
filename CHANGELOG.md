@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.7 (2026-11-27)
+
+- Inkling-2-Mini (`thinkingmachines/Inkling-2-Mini`) runs on its goethe-engine kernel pack, with speculative decoding on by default. Measured on an RTX 5090, one request, 192 to 200 tokens:
+  - Code at the model's default temperature: 397 to 442 tok/s.
+  - Chat, greedy: 331 tok/s. Chat at temperature 1: 248 to 284 tok/s.
+  - A follow-up turn starts from the previous one: first token after 50 ms instead of 1.1 s on an 8k-token conversation.
+  - The pack is checked on sm_120a; on sm_80, sm_89, sm_90a and sm_100a it is untested, and the install says so.
+- goethe-engine serves tool calls (`tools`, `tool_choice` auto or none, `parallel_tool_calls`) and sends a reasoning model's thinking as `reasoning_content`, apart from its answer. `goethe run --reasoning` shows it; the next turn leaves it out.
+- Kernel packs: goethe asks goethe-engine which variants a pack has, what each downloads, its context ceiling and how many requests its fastest path serves, and installs the variant that runs here. `goethe install MODEL --engine goethe-engine|sglang` pins the engine. `goethe load --numerics invariant|tolerance` picks exact or faster kernels and is kept with the load.
+- VRAM fit is one rule for install, `goethe models`, recommend and load. Auto starts at the model's maximum context, lowers concurrency first, and keeps a context floor per user (36k for reasoning models, 8k otherwise). A pinned `--ctx` or `--max-conc` is never changed; a `--ctx` above the model's maximum is refused. `goethe run` loads with the same automatic context as `goethe load`.
+- Install never guesses a context length (config.json under any of its usual keys, else the catalog, else `--ctx`) and refuses an architecture the pinned SGLang cannot serve before registering it.
+- The model catalog is built, signed and published by CI from its source in the repository; goethe keeps no copy, falls back to its last verified one, and installs from the Hub only with a verified catalog. Custom model code (`--trust-remote-code`) runs only where the catalog states it. NInfer is an ordinary catalog row, offered only on the GPUs its build runs on.
+- Under SGLang the tool-call parser is picked from the model's chat template (`--tool-call-parser auto`); a model installed before keeps its card until `goethe install MODEL` runs again (no download).
+- The gateway refuses a route the model's engine does not serve, with the usual error, and waits up to an hour for a reply to start, so a long non-streamed request no longer ends in a 504 after 10 minutes.
+- Security: the engine API key reaches goethe-engine only through its environment, never its command line. goethed binds its socket owner-only without touching the process umask.
+- Failures are logged under fixed error codes (`MODEL_LOAD` among them) with one sentence on what to do, once a day each; a linked node reports them.
+- Ask is experimental: hidden from the menu and `goethe help` until ticked under Experimental.
+- `goethe remove` of a model in a folder of your own names the kept folder; a malformed model id is a usage error.
+- Pins: SGLang upstream 4817721 (Inkling 2) with the Marlin patch ported; goethe-engine 0.3.11.
+
 ## 0.3.6 (2026-11-23)
 
 - Goethe also comes as a container image, `ghcr.io/meshapplied/goethe`, for Linux on x86_64 and arm64 with NVIDIA GPUs. goethed is the container's main process and everything lives on the `/workspace` volume. On hosts without a terminal, `GOETHE_SETUP` (goethe commands, one per line), `GOETHE_API_KEY`, `GOETHE_HF_TOKEN` and `GOETHE_AUTHKEY` set it up. Every release publishes it, signed with cosign.
