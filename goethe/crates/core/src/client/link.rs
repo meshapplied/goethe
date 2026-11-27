@@ -170,7 +170,7 @@ pub fn install_key(home: &Path) -> Result<Secret, String> {
 }
 
 pub fn node_key(home: &Path) -> Result<goethe_proto::InstallKey, String> {
-    // This install's Ed25519 key (pkcs8, hex, 0600), made once like the install key: its public half goes up when linking, and it proves the node when it connects to goethe-server.
+    // This install's Ed25519 key (pkcs8, hex, 0600), made once like the install key: its public half goes up when linking, and it proves the node when it connects to the platform.
     let path = platform_dir(home).join("node_key");
     let parse = |t: &str| {
         let bytes: Option<Vec<u8>> = t.len().is_multiple_of(2).then(|| (0..t.len()).step_by(2).map(|i| u8::from_str_radix(&t[i..i + 2], 16).ok()).collect()).flatten();

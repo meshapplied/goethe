@@ -1,4 +1,4 @@
-// goethed heartbeat task: runs each step on the blocking pool, waits on a timer or a change signal, never on the request path, and passes on the goethe-server the console names.
+// goethed heartbeat task: runs each step on the blocking pool, waits on a timer or a change signal, never on the request path, and passes on the platform the console names.
 
 use goethe_core::client::heartbeat::{Outcome, Reason, Worker, DEBOUNCE, MIN_GAP};
 use goethe_core::client::link::{self, CHANGE_LINK};
@@ -10,7 +10,7 @@ use tokio::sync::{watch, Notify};
 use tokio::time::{sleep_until, Instant};
 
 pub fn spawn(home: PathBuf) -> watch::Receiver<Option<String>> {
-    // Install the change hook (a Notify permit, never blocking) and start the loop; the receiver follows the goethe-server URL of the last accepted heartbeat.
+    // Install the change hook (a Notify permit, never blocking) and start the loop; the receiver follows the platform URL of the last accepted heartbeat.
     let notify = Arc::new(Notify::new());
     let hook = notify.clone();
     link::set_change_hook(Box::new(move || hook.notify_one()));

@@ -1,4 +1,4 @@
-// The paid goethe-server connection: dial the server the console named, prove the install key, and serve the node routes on the upgraded stream.
+// The paid platform connection: dial the server the console named, prove the install key, and serve the node routes on the upgraded stream.
 
 use super::{link, serve, Gateway, Node};
 use http_body_util::{BodyExt, Empty};
@@ -88,7 +88,7 @@ fn refusal(status: StatusCode) -> Outcome {
     match status {
         StatusCode::PAYMENT_REQUIRED => Outcome::Unpaid,
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Outcome::Refused,
-        s => Outcome::Failed(format!("goethe-server answered {s}")),
+        s => Outcome::Failed(format!("the platform answered {s}")),
     }
 }
 
@@ -107,9 +107,9 @@ async fn nonce(t: &Target, token: &str) -> Result<String, Outcome> {
         return Err(refusal(resp.status()));
     }
     let body = http_body_util::Limited::new(resp.into_body(), NONCE_CAP).collect().await.map_err(|e| fail(e.to_string()))?.to_bytes();
-    let n: Nonce = serde_json::from_slice(&body).map_err(|_| fail("goethe-server sent no nonce".into()))?;
+    let n: Nonce = serde_json::from_slice(&body).map_err(|_| fail("the platform sent no nonce".into()))?;
     if n.nonce.is_empty() || n.nonce.len() > 256 || !n.nonce.chars().all(|c| c.is_ascii_graphic()) {
-        return Err(fail("goethe-server sent a malformed nonce".into()));
+        return Err(fail("the platform sent a malformed nonce".into()));
     }
     Ok(n.nonce)
 }
@@ -174,7 +174,7 @@ fn jitter(d: Duration) -> Duration {
 }
 
 pub async fn run(home: PathBuf, gateway: Gateway, mut url: watch::Receiver<Option<String>>) {
-    // Hold the connection while the console names a goethe-server (a paid workspace): reconnect with backoff, wait an hour after 402, five minutes after 401.
+    // Hold the connection while the console names the platform (a paid workspace): reconnect with backoff, wait an hour after 402, five minutes after 401.
     let mut backoff = RETRY_MIN;
     let mut said = String::new();
     loop {
@@ -188,13 +188,13 @@ pub async fn run(home: PathBuf, gateway: Gateway, mut url: watch::Receiver<Optio
         let (wait, note) = match &outcome {
             Outcome::Closed => {
                 backoff = RETRY_MIN;
-                (RETRY_MIN, format!("goethe-server: connection to {server} closed; reconnecting"))
+                (RETRY_MIN, format!("platform: connection to {server} closed; reconnecting"))
             }
-            Outcome::Unpaid => (UNPAID_WAIT, "goethe-server: this workspace is not on a paid plan; routing stays off".to_string()),
-            Outcome::Refused => (REFUSED_WAIT, "goethe-server: the node was refused (token or install key)".to_string()),
+            Outcome::Unpaid => (UNPAID_WAIT, "platform: this workspace is not on a paid plan; routing stays off".to_string()),
+            Outcome::Refused => (REFUSED_WAIT, "platform: the node was refused (token or install key)".to_string()),
             Outcome::Failed(e) => {
                 backoff = (backoff * 2).min(RETRY_MAX);
-                (backoff, format!("goethe-server: {e}"))
+                (backoff, format!("platform: {e}"))
             }
         };
         if note != said {
@@ -231,7 +231,7 @@ mod tests {
     }
 
     async fn fake_server(nonce_status: StatusCode, install_pub: String, hello: oneshot::Sender<serde_json::Value>) -> String {
-        // goethe-server's node side: a nonce, the proof check, 101, then an HTTP/2 client that reads the node's hello off GET /state.
+        // The platform's node side: a nonce, the proof check, 101, then an HTTP/2 client that reads the node's hello off GET /state.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let hello = Arc::new(std::sync::Mutex::new(Some(hello)));

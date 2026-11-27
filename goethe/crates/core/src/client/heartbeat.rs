@@ -43,7 +43,7 @@ pub struct Worker {
 
 impl Worker {
     pub fn stream_url(&self) -> Option<&str> {
-        // The goethe-server the console told this node to dial (a paid workspace), as of the last accepted heartbeat.
+        // The platform the console told this node to dial (a paid workspace), as of the last accepted heartbeat.
         self.stream_url.as_deref()
     }
 
