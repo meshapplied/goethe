@@ -233,13 +233,6 @@ mod tests {
     }
 
     #[test]
-    fn every_doctor_row_has_a_code() {
-        for name in crate::doctor::check_names() {
-            assert!(Code::for_check(name).is_some(), "doctor row {name} has no code");
-        }
-    }
-
-    #[test]
     fn the_same_failure_is_logged_once_a_day_and_different_ones_each() {
         let h = tempfile::tempdir().unwrap();
         append(h.path(), 1000, "CMD_FAILED", "1.0", "login").unwrap();

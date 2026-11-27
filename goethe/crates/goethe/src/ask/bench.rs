@@ -4,8 +4,8 @@ use super::embed::{HybridRetriever, RetrievalMode, ShortlistBackend, StaticModel
 use super::planner::{PendingDecision, PlanAction, PlanLine, PlanState, PlanStep};
 use super::schema::{build_catalog, IntentCard, Kind, Risk};
 use super::slots::World;
-use crate::Cli;
-use clap::{Arg, ArgAction, Command, CommandFactory, Parser};
+use crate::{ask_cli_validate as validate_cli, Cli};
+use clap::{Arg, ArgAction, Command, CommandFactory};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -28,10 +28,6 @@ fn fixture_world() -> World {
         log_targets: vec![("goethed".into(), "the daemon log".into()), ("gateway".into(), "the gateway log".into())],
         ..World::default()
     }
-}
-
-fn validate_cli(argv: &[String]) -> Result<(), clap::Error> {
-    Cli::try_parse_from(argv).map(|_| ())
 }
 
 fn bench_dir() -> PathBuf {
