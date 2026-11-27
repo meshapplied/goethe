@@ -63,7 +63,7 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
     let want_engines = (opts.engine || pyenv::engine_installed(home).is_some() || pyenv::has(home, Layer::Sglang)) && !cfg!(target_os = "macos");
     let (mut sglang, engine) = if want_engines { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
     let buildinfo = fetch_verified(pkg, &sums, "BUILDINFO", tmp).ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
-    let mut nginx = nginx_delta(home, &sums, &arch, buildinfo_value(&buildinfo, "nginx_version"));
+    let mut nginx = nginx_delta(home, &crate::nginx::nginx_bin(home), &sums, &arch, buildinfo_value(&buildinfo, "nginx_version"));
     let mut ask_model = ask_model_delta(home, &sums);
     if older_package(order, opts) && hold_back(&mut [&mut nginx, &mut ask_model, &mut sglang]) {
         println!("the published package is older than this goethe: its nginx, ask model and SGLang are not installed over yours (--allow-downgrade installs them)");
@@ -177,15 +177,14 @@ fn binaries_differ(home: &Path, sums: &Path, arch: &str) -> Result<bool, String>
     Ok(false)
 }
 
-fn nginx_delta(home: &Path, sums: &Path, arch: &str, published_version: Option<&str>) -> Option<Delta> {
-    // Bundled nginx when the package ships one and the on-disk binary differs (or is missing), named by version where both sides know it.
+fn nginx_delta(home: &Path, used: &Path, sums: &Path, arch: &str, published_version: Option<&str>) -> Option<Delta> {
+    // Bundled nginx when the package ships one and its copy under the home differs (or is missing); the installed side names the nginx goethe runs (nginx_bin, as doctor does), by version where both sides know it.
     let rel = format!("bin/{}/nginx", platform_dir(arch));
     let want = lookup_sum(sums, &rel).ok()?;
-    let dest = home.join("nginx-root/usr/sbin/nginx");
-    let have = sha256_file(&dest).ok();
-    let version = crate::nginx::nginx_version(&dest).map(|(a, b, c)| format!("{a}.{b}.{c}"));
-    let (installed, published) = nginx_labels(have.as_deref(), version.as_deref(), &want, published_version);
-    Some(Delta { installed: Some(installed), published, differs: have.as_deref() != Some(want.as_str()) })
+    let bundled = sha256_file(&home.join("nginx-root/usr/sbin/nginx")).ok();
+    let version = crate::nginx::nginx_version(used).map(|(a, b, c)| format!("{a}.{b}.{c}"));
+    let (installed, published) = nginx_labels(sha256_file(used).ok().as_deref(), version.as_deref(), &want, published_version);
+    Some(Delta { installed: Some(installed), published, differs: bundled.as_deref() != Some(want.as_str()) })
 }
 
 fn ask_model_delta(home: &Path, sums: &Path) -> Option<Delta> {
@@ -574,6 +573,18 @@ mod tests {
         assert_eq!(check_summary(&[("goethe", up)]), "everything is up to date");
         assert_eq!(check_summary(&[("goethe", due(true)), ("nginx", due(true)), ("SGLang", due(false))]), "2 updates available (goethe, nginx): run goethe update");
         assert_eq!(buildinfo_value("a=1\nnginx_version=1.30.7\n", "nginx_version"), Some("1.30.7"));
+    }
+
+    #[test]
+    fn update_names_the_nginx_doctor_finds() {
+        let t = tempfile::tempdir().unwrap();
+        let system = t.path().join("nginx");
+        fs::write(&system, "#!/bin/sh\necho 'nginx version: nginx/1.24.0' >&2\n").unwrap();
+        fs::set_permissions(&system, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let sums = t.path().join("SHA256SUMS");
+        fs::write(&sums, format!("{} bin/{}/nginx\n", "b".repeat(64), platform_dir("x86_64"))).unwrap();
+        let d = nginx_delta(t.path(), &system, &sums, "x86_64", Some("1.30.7")).unwrap();
+        assert_eq!((d.installed.as_deref(), d.published.as_str(), d.differs), (Some("1.24.0"), "1.30.7", true), "the system nginx in use, not \"missing\"");
     }
 
     #[test]
