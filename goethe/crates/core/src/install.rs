@@ -1084,6 +1084,9 @@ fn pack_card(home: &Path, p: &mut Planned, arch: &str, variant: &str, (cli_ctx, 
         p.notes.push(format!("ctx {} is longer than the kernels support; using {max}", cli_ctx.unwrap_or(max)));
     }
     p.ctx = p.ctx.min(max);
+    if sgl::has_flag(&p.extra, "--reasoning-parser") {
+        p.table.insert("reasoning".into(), toml::Value::Boolean(true));
+    }
     p.extra.clear();
     p.notes.retain(|n| !n.contains("SGLang") && !n.contains("--"));
     p.quant = None;
@@ -1140,7 +1143,11 @@ fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, S
         swa_kv_elems_per_request: 0,
         linear_state_bytes_per_request: 0,
     };
-    plan_engine(home, opts, t, facts, crate::engines::ninfer::ENGINE.id, ("fp8_e4m3", 1), Some("nvfp4".into()))
+    let mut p = plan_engine(home, opts, t, facts, crate::engines::ninfer::ENGINE.id, ("fp8_e4m3", 1), Some("nvfp4".into()))?;
+    if entry.is_some_and(|e| sgl::has_flag(&e.extra_sglang_args, "--reasoning-parser")) {
+        p.table.insert("reasoning".into(), toml::Value::Boolean(true));
+    }
+    Ok(p)
 }
 
 fn plan_gguf(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> {
@@ -1152,6 +1159,9 @@ fn plan_gguf(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, Str
     let mut p = plan_engine(home, opts, t, facts, crate::engines::llama_cpp::ENGINE.id, ("f16", 2), None)?;
     let rel = gguf.strip_prefix(dir).unwrap_or(&gguf).to_string_lossy().into_owned();
     p.table.insert("gguf".into(), toml::Value::String(rel));
+    if crate::engines::llama_cpp::reasons(&gguf) {
+        p.table.insert("reasoning".into(), toml::Value::Boolean(true));
+    }
     if crate::engines::llama_cpp::is_embedding(&gguf) {
         p.table.insert("task".into(), toml::Value::String("embed".into()));
     }
@@ -1335,11 +1345,15 @@ fn plan(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> 
         .strip_prefix(home)
         .map(|r| r.display().to_string())
         .map_err(|_| format!("{} is not under {}", dir.display(), home.display()))?;
+    let mut table = card_table(&card, existing.as_ref())?;
+    if sgl::reasons(dir) {
+        table.insert("reasoning".into(), toml::Value::Boolean(true));
+    }
     Ok(Planned {
         model_id: t.model_id.clone(),
         dir: dir.clone(),
         rel,
-        table: card_table(&card, existing.as_ref())?,
+        table,
         quant: sgl::quantization_summary(dir, &cfg),
         facts,
         vram,

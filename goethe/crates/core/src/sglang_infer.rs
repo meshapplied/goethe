@@ -271,6 +271,11 @@ pub fn infer_parsers(cfg: &Value, dir: &Path) -> Vec<(String, String, String)> {
     out
 }
 
+pub fn reasons(dir: &Path) -> bool {
+    // A chat template that opens a think block: the model writes reasoning before its answer, whichever engine serves it.
+    chat_template(dir).contains("<think>")
+}
+
 fn chat_template(dir: &Path) -> String {
     // Every chat template the model ships: chat_template.jinja, chat_template.json and tokenizer_config.json.
     let mut out = std::fs::read_to_string(dir.join("chat_template.jinja")).unwrap_or_default();

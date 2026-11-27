@@ -86,7 +86,11 @@ pub fn floor(extra_args: &[String]) -> u64 {
 }
 
 pub fn card_floor(card: &toml::Value) -> u64 {
-    floor(&crate::engines::sglang::card_extra_args(card))
+    // Any engine's card says `reasoning = true` (install writes it); an SGLang card's own parser flag counts too, since goethe load --save changes it.
+    match card.get("reasoning").and_then(|v| v.as_bool()) {
+        Some(true) => PROMPT_FLOOR + REASONING_OUTPUT,
+        _ => floor(&crate::engines::sglang::card_extra_args(card)),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -821,6 +825,14 @@ mod tests {
         assert_eq!(kv_tokens(131072, 4, 8192), 131072 + 3 * 8192);
         assert_eq!(kv_tokens(8192, 32, 36864), 32 * 8192, "a context under the floor is the floor");
         assert_eq!((floor(&[]), floor(&["--reasoning-parser=qwen3".to_string()])), (8192, 36864));
+        for (card, want) in [
+            ("runtime = \"goethe-engine\"\nreasoning = true", 36864),
+            ("runtime = \"llama.cpp\"", 8192),
+            ("extra_sglang_args = [\"--reasoning-parser\", \"qwen3\"]", 36864),
+            ("extra_sglang_args = []", 8192),
+        ] {
+            assert_eq!(card_floor(&toml::from_str(card).unwrap()), want, "{card}");
+        }
         let hybrid = MemorySpec { state_slots_per_request: 5, ..MemorySpec::default() };
         assert_eq!((state_slots(&hybrid, 1), state_slots(&hybrid, 8)), (5, 40));
     }

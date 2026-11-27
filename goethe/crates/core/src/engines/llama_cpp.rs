@@ -239,6 +239,11 @@ pub fn mmproj_in(dir: &Path) -> Option<PathBuf> {
     gguf_paths(dir).into_iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("mmproj")))
 }
 
+pub fn reasons(gguf: &Path) -> bool {
+    // A chat template that opens a think block: the model writes reasoning before its answer.
+    header(gguf).is_ok_and(|m| m.get("tokenizer.chat_template").is_some_and(|v| v.1.contains("<think>")))
+}
+
 pub fn has_audio_encoder(mmproj: &Path) -> bool {
     // A projector whose header says it carries an audio encoder (clip.has_audio_encoder, or any clip.audio.* key): the model transcribes speech.
     header(mmproj).is_ok_and(|m| m.iter().any(|(k, v)| (k == "clip.has_audio_encoder" && v.0.first() == Some(&1)) || k.starts_with("clip.audio.")))
@@ -670,6 +675,22 @@ mod tests {
         };
         assert!(!is_embedding(&d.path().join("g.gguf")));
         assert_eq!([0, 1, 2, 3, 4].map(|p| is(&format!("p{p}.gguf"), &[("llama.pooling_type", p)])), [false, true, true, true, false]);
+    }
+
+    #[test]
+    fn a_chat_template_that_opens_a_think_block_marks_a_reasoning_model() {
+        let d = tempfile::tempdir().unwrap();
+        let s = |v: &str| [(v.len() as u64).to_le_bytes().to_vec(), v.as_bytes().to_vec()].concat();
+        let head = [b"GGUF".to_vec(), 3u32.to_le_bytes().to_vec(), 0u64.to_le_bytes().to_vec(), 1u64.to_le_bytes().to_vec()].concat();
+        let p = d.path().join("m.gguf");
+        for (template, want) in [("{{ m }}<think>\n", true), ("{{ m }}", false)] {
+            std::fs::write(&p, [head.clone(), s("tokenizer.chat_template"), 8u32.to_le_bytes().to_vec(), s(template)].concat()).unwrap();
+            assert_eq!(reasons(&p), want, "{template}");
+        }
+        write_test_gguf(&p);
+        assert!(!reasons(&p), "no template");
+        std::fs::write(d.path().join("chat_template.jinja"), "{{ m }}<think>").unwrap();
+        assert!(crate::sglang_infer::reasons(d.path()), "a safetensors model's template counts the same way");
     }
 
     #[test]
