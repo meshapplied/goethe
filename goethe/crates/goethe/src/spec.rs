@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn cli_md_names_every_command_and_each_its_flags() {
-        // docs/cli.md is written by hand around examples; every command appears in it, and each flag in its command's section (the closest `### goethe ...` heading; global flags anywhere). O(commands x sections).
+        // docs/cli.md is written by hand around examples; every command appears in it, and each flag, long and short, in its command's section (the closest `### goethe ...` heading; global flags anywhere). O(commands x sections).
         let md = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/cli.md")).expect("docs/cli.md");
         let sections: Vec<(String, &str)> = md
             .split("\n### `")
@@ -562,7 +562,8 @@ mod tests {
                 missing.push(n.path.clone());
             }
             let text = if n.path == root.path { md.as_str() } else { section(&n.path) };
-            missing.extend(n.args.iter().filter_map(|a| a.long.as_ref()).filter(|l| !text.contains(&format!("--{l}"))).map(|l| format!("{} --{l}", n.path)));
+            let flags = n.args.iter().flat_map(|a| a.long.iter().map(|l| format!("--{l}")).chain(a.short.map(|c| format!("`-{c}`"))));
+            missing.extend(flags.filter(|f| !text.contains(f.as_str())).map(|f| format!("{} {f}", n.path)));
         }
         assert!(missing.is_empty(), "docs/cli.md does not document: {missing:?}");
     }
