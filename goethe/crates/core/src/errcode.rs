@@ -43,6 +43,7 @@ codes! {
     ModelFiles = "MODEL_FILES",
     ModelFit = "MODEL_FIT",
     ModelPack = "MODEL_PACK",
+    ModelLoad = "MODEL_LOAD",
     EnvDeps = "ENV_DEPS",
     EnvFix = "ENV_FIX",
     CmdFailed = "CMD_FAILED",

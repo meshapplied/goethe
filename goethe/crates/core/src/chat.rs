@@ -52,6 +52,11 @@ pub fn plain_text(raw: &str, thinking: bool, color: bool) -> String {
     }
 }
 
+pub(crate) fn assistant_turn(reply: &str) -> Value {
+    // A reply as the next request carries it: the answer only, its reasoning left out, whichever engine sent it.
+    json!({"role": "assistant", "content": split_think(reply, true).1})
+}
+
 pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     // The lines of text cut to the display width, a line break kept; a character wider than the width gets its own line.
     let mut out = Vec::new();
@@ -474,7 +479,7 @@ impl State {
         match result {
             Ok((reply, tokens)) => {
                 self.ui.count(tokens, first.map_or(0.0, |f| (end - f).as_secs_f64()));
-                self.msgs.push(json!({"role": "assistant", "content": reply}));
+                self.msgs.push(assistant_turn(&reply));
             }
             Err(e) => {
                 self.ui.entries.pop();
@@ -607,6 +612,13 @@ mod tests {
     fn typed(ui: &mut Ui, s: &str) {
         for c in s.chars() {
             ui.key(if c == ' ' { Input::Space } else { Input::Char(c) });
+        }
+    }
+
+    #[test]
+    fn the_next_turn_carries_the_answer_without_its_reasoning() {
+        for reply in ["<think>hm</think>Hi", "Hi"] {
+            assert_eq!(assistant_turn(reply), json!({"role": "assistant", "content": "Hi"}), "{reply}");
         }
     }
 

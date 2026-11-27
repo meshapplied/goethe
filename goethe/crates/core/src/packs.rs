@@ -186,6 +186,12 @@ pub(crate) fn wait_until_runnable(script: &Path) {
     }
 }
 
+fn answered(args: &[String], code: i32) -> bool {
+    // Exit 3 is an answer only from pack match (no pack has these weights) and pack runs (this GPU runs none); from a verify it is a failure.
+    let answers_no = args.first().is_some_and(|a| a == "pack") && args.get(1).is_some_and(|a| a == "match" || a == "runs");
+    code == 0 || (code == 3 && answers_no)
+}
+
 pub fn python_runner(home: &Path) -> impl Fn(&[String]) -> Result<(i32, String), String> {
     // The interpreter is looked up on every call: a runner made before the engine layer is installed uses the py-env python once it exists.
     let home = home.to_path_buf();
@@ -194,7 +200,7 @@ pub fn python_runner(home: &Path) -> impl Fn(&[String]) -> Result<(i32, String),
         let out = Command::new(&py).args(["-m", "goethe_engine"]).args(args).output().map_err(|e| format!("{}: {e}", py.display()))?;
         let err = String::from_utf8_lossy(&out.stderr);
         let code = out.status.code().unwrap_or(-1);
-        if code != 0 && code != 3 {
+        if !answered(args, code) {
             return Err(format!("goethe-engine {}: exit {code}: {}", args.iter().take(2).cloned().collect::<Vec<_>>().join(" "), err.trim()));
         }
         Ok((code, String::from_utf8_lossy(&out.stdout).into_owned()))
@@ -996,6 +1002,14 @@ mod tests {
     fn nothing_left(dir: &Path) {
         for f in [PACK_FILE.to_string(), format!("{PACK_FILE}.sig"), PACK_VERIFY.to_string(), "pack.prefix".to_string()] {
             assert!(!dir.join(&f).exists(), "{f} left behind");
+        }
+    }
+
+    #[test]
+    fn exit_3_is_an_answer_only_where_the_engine_defines_one() {
+        let a = |x: &str| x.split(' ').map(String::from).collect::<Vec<_>>();
+        for (args, code, ok) in [("pack match", 3, true), ("pack runs", 3, true), ("index verify", 3, false), ("pack verify", 3, false), ("pack plan", 0, true), ("pack match", 1, false)] {
+            assert_eq!(answered(&a(args), code), ok, "{args} exit {code}");
         }
     }
 

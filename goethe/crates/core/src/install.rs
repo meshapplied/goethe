@@ -1605,10 +1605,11 @@ pub fn run_load(params: Value, no_wait: bool, json_out: bool) -> Result<(), Stri
                 let _ = crate::rpc::call("unload", json!({"model_id": model_id, "all": false, "force": true}));
                 return run_load(params, no_wait, json_out);
             }
-            return Err(match failed.then(|| pack_failure_line(&home, &model_id, &log)).flatten() {
+            let why = match failed.then(|| pack_failure_line(&home, &model_id, &log)).flatten() {
                 Some(line) => format!("{e}\n{line}"),
                 None => e,
-            });
+            };
+            return Err(crate::errcode::coded(crate::errcode::Code::ModelLoad, why));
         }
     }
     let row = instance_row(&iid);

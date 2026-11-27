@@ -15,6 +15,7 @@ goethe <command> --help
 - GPUs are named as `goethe gpu` lists them: `gpu0`, `gpu1`, and so on. Flags that take GPUs accept several: `--gpu gpu2 gpu3`.
 - Model ids are Hugging Face repo names such as `zai-org/GLM-5.3-Flash`. Case doesn't matter, and the folder form `zai-org__GLM-5.3-Flash` works too. A mistyped id gets a suggestion.
 - Commands that list things accept `--json` for scripts.
+- `--verbose` (`-v`) on any command shows the output of every underlying process (also `GOETHE_VERBOSE=1`); it is always kept in `<home>/logs`.
 
 Exit codes:
 
@@ -127,6 +128,7 @@ Installed models, then catalog models, with whether each fits this machine and i
 |---|---|
 | `--installed` | Only installed models |
 | `--available` | Only catalog models |
+| `--all` | Every line; the default stops after 40 |
 | `--json` | JSON output |
 
 ### `goethe models alias`
@@ -430,6 +432,8 @@ Checks the machine and the setup: GPU and driver, compiler, FFmpeg, Python envir
 | `--json` | JSON output |
 | `--public` | Also test that the public address answers |
 | `--hardware` | Print the hardware profile instead of the checks |
+| `--fix` | Fix what doctor finds on this machine (NVIDIA driver, CUDA forward compatibility, a C++ compiler), asking before each change |
+| `--yes` | With `--fix`, make every change without asking |
 
 ### `goethe update [engine | rollback]`
 

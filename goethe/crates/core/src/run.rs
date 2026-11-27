@@ -218,7 +218,7 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
                 match api.chat(&model, &msgs, &mut |_| true) {
                     Ok((reply, _)) => {
                         println!("{}", shown(&reply, opts.thinking));
-                        msgs.push(json!({"role": "assistant", "content": reply}));
+                        msgs.push(crate::chat::assistant_turn(&reply));
                     }
                     Err(e) => {
                         msgs.pop();
@@ -296,7 +296,9 @@ pub(crate) struct Api {
 
 impl Api {
     fn req(&self, method: &str, path: &str) -> ureq::Request {
-        let req = crate::net::agent().request(method, &format!("{}{path}", self.base));
+        // An engine silent for 10 minutes (the gateway's wait too) is taken as hung, so run never waits forever.
+        let agent = crate::net::agent_builder().timeout_read(std::time::Duration::from_secs(600)).build();
+        let req = agent.request(method, &format!("{}{path}", self.base));
         match &self.key {
             Some(k) => req.set("Authorization", &format!("Bearer {k}")),
             None => req,
