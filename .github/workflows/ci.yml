@@ -28,13 +28,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - name: What the pull request touches (push/schedule/dispatch runs everything)
+      - name: What the pull request touches (push/schedule/dispatch runs everything but the image, which runs nightly; a release builds and smokes its own)
         id: flags
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           # Path buckets: unit/clippy, heavy e2e, and the container image.
-          rust=true e2e=true image=true
+          rust=true e2e=true image=false
+          [[ "${GITHUB_EVENT_NAME}" == schedule ]] && image=true
           if [[ -n "${BASE}" ]]; then
             rust=false e2e=false image=false
             while IFS= read -r f; do
@@ -43,7 +44,7 @@ jobs:
                 goethe/packaging/Dockerfile|goethe/packaging/build_image_tree.sh|goethe/tests/image_smoke.sh|goethe/crates/goethe/src/container.rs)
                   rust=true; e2e=true; image=true ;;
                 .github/*)
-                  rust=true; e2e=true; image=true ;;
+                  rust=true; e2e=true ;;
                 goethe/tests/*|goethe/pyenv/*|goethe/cdn/*|goethe/packaging/*|goethe/nginx/*|goethe/goethe-engine/*|goethe/llama-cpp/*|goethe/sglang/*)
                   rust=true; e2e=true ;;
                 goethe/crates/*|goethe/Cargo.toml|goethe/Cargo.lock|goethe/rust-toolchain*)

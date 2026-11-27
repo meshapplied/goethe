@@ -81,7 +81,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   build:
-    needs: [guard, ci]
+    needs: guard
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -128,7 +128,7 @@ jobs:
           retention-days: 30
 
   build-aarch64:
-    needs: [guard, ci]
+    needs: guard
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -160,7 +160,7 @@ jobs:
           retention-days: 30
 
   nginx-aarch64:
-    needs: [guard, ci]
+    needs: guard
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
@@ -177,7 +177,7 @@ jobs:
           retention-days: 30
 
   build-macos:
-    needs: [guard, ci]
+    needs: guard
     if: ${{ !cancelled() && !failure() }}
     runs-on: macos-latest
     timeout-minutes: 60
@@ -196,7 +196,7 @@ jobs:
           retention-days: 30
 
   merge:
-    needs: [guard, build, build-aarch64, nginx-aarch64, build-macos]
+    needs: [guard, ci, build, build-aarch64, nginx-aarch64, build-macos]
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
