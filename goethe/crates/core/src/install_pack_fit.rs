@@ -34,6 +34,11 @@ pub(super) struct PackWeights {
     pub(super) lanes: Option<u64>,
 }
 
+pub(super) fn reasons(flags: &[String], dir: &Path, turn: bool) -> bool {
+    // A reasoning model, whichever engine serves it: its flags name a reasoning parser, its chat template opens a think block, or goethe-engine's turn format of it has a reasoning part (turn).
+    crate::sglang_infer::has_flag(flags, "--reasoning-parser") || crate::sglang_infer::reasons(dir) || turn
+}
+
 pub(super) fn pack_input(cfg: &Value, entry: Option<&RegistryModel>, opts: &InstallOpts, arch: &str, w: &PackWeights, dir: &Path) -> Result<(crate::chooser::ChooserInput, Option<usize>), String> {
     // The budget input goethe load will build for this pack model: the card install would write (kernel-pack runtime, its context capped by the pack, the Marlin copy, the compute capabilities of the arch) through the same constructor and memory spec the load uses.
     let facts = model_facts::facts_from_config(cfg, w.bytes as f64 / GIB, entry.map(|e| e.architecture.as_str()), &opts.model_id)?;
@@ -43,9 +48,8 @@ pub(super) fn pack_input(cfg: &Value, entry: Option<&RegistryModel>, opts: &Inst
     let mut card = toml::Table::new();
     card.insert("runtime".into(), toml::Value::String(crate::engines::goethe_engine::ENGINE.id.into()));
     card.insert("kv_cache_dtype".into(), toml::Value::String("auto".into()));
-    let parser = entry.is_some_and(|e| crate::sglang_infer::has_flag(&e.extra_sglang_args, "--reasoning-parser"))
-        || crate::sglang_infer::infer_parsers(cfg).iter().any(|(f, _, _)| f == "--reasoning-parser");
-    if parser || crate::sglang_infer::reasons(dir) {
+    let flags: Vec<String> = entry.map(|e| e.extra_sglang_args.clone()).unwrap_or_default().into_iter().chain(crate::sglang_infer::infer_parsers(cfg).into_iter().flat_map(|(f, v, _)| [f, v])).collect();
+    if reasons(&flags, dir, false) {
         card.insert("reasoning".into(), toml::Value::Boolean(true));
     }
     card.insert("supported_sm".into(), toml::Value::Array(crate::packs::arch_ccs(arch).into_iter().map(toml::Value::String).collect()));
@@ -82,4 +86,22 @@ pub(super) fn pack_fit(view: &crate::recommend::View, cfg: &Value, entry: Option
     let free = fit.gpus.iter().filter_map(|g| view.gpus.iter().find(|x| x.index == *g)).map(|g| g.free_vram_mb as f64 / 1024.0).fold(f64::INFINITY, f64::min);
     let total = fit.need.total();
     Ok(format!("fit: {}; {total:.1} of {free:.1} GB {}, {:.1} GB spare", fit.describe(&input), if loading { "free" } else { "on the card" }, free - total))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_model_reasons_by_its_parser_its_template_or_its_engines_turn_format() {
+        let (plain, think) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(think.path().join("chat_template.jinja"), "{{ m }}<think>").unwrap();
+        let parser = ["--reasoning-parser".to_string(), "qwen3".to_string()];
+        for (flags, dir, turn, want) in [(&parser[..], plain.path(), false, true), (&[][..], think.path(), false, true), (&[][..], plain.path(), true, true), (&[][..], plain.path(), false, false)] {
+            assert_eq!(reasons(flags, dir, turn), want, "{flags:?} {dir:?} {turn}");
+        }
+        let said = |out: &str| crate::packs::turn_reasons(plain.path(), &|_: &[String]| Ok((0, out.to_string())));
+        assert_eq!((said(r#"{"reasoning": true, "tools": true}"#), said(r#"{"reasoning": false}"#), said("not json")), (true, false, false));
+    }
 }

@@ -1089,7 +1089,7 @@ fn pack_card(home: &Path, p: &mut Planned, arch: &str, variant: &str, (cli_ctx, 
         return Err(crate::errcode::coded(crate::errcode::Code::ModelFit, why));
     }
     p.ctx = p.ctx.min(max);
-    if sgl::has_flag(&p.extra, "--reasoning-parser") {
+    if install_pack_fit::reasons(&p.extra, &p.dir, crate::packs::turn_reasons(&p.dir, &run)) {
         p.table.insert("reasoning".into(), toml::Value::Boolean(true));
     }
     p.extra.clear();
