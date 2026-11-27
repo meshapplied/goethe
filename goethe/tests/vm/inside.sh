@@ -5,7 +5,9 @@ set -uo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 mkdir -p /work/apt/partial
-apt-get update -qq >/dev/null && apt-get install -y -qq -o Dir::Cache::archives=/work/apt qemu-system-x86 qemu-utils cloud-image-utils openssh-client python3 curl >/dev/null
+if ! { compgen -G "/work/apt/*.deb" >/dev/null && dpkg -i /work/apt/*.deb >/dev/null 2>&1 && command -v qemu-system-x86_64 cloud-localds >/dev/null; }; then
+  apt-get update -qq >/dev/null && apt-get install -y -qq -f -o Dir::Cache::archives=/work/apt qemu-system-x86 qemu-utils cloud-image-utils openssh-client python3 curl >/dev/null
+fi
 chmod -R a+rX /work/apt /work/images
 echo "qemu ready after ${SECONDS} s"
 ssh-keygen -q -t ed25519 -N "" -f /root/k

@@ -26,6 +26,9 @@ trap cleanup EXIT
 
 mkdir -p "${CDN}/bin" "${CDN}/v1"
 cp -R "${ROOT}/dist/cdn/bin/darwin-aarch64" "${CDN}/bin/"
+MACOSX_DEPLOYMENT_TARGET="$(sed -n 's/^export MACOSX_DEPLOYMENT_TARGET=//p' "${ROOT}/packaging/build_macos.sh")"
+[[ -n "${MACOSX_DEPLOYMENT_TARGET}" ]] || { echo "packaging/build_macos.sh sets no MACOSX_DEPLOYMENT_TARGET" >&2; exit 1; }
+export MACOSX_DEPLOYMENT_TARGET
 (cd "${ROOT}" && cargo build --release --locked --features goethe/test-release-key --bin goethe --bin goethed -q)
 cp "${ROOT}/target/release/goethe" "${ROOT}/target/release/goethed" "${CDN}/bin/darwin-aarch64/"
 for f in LICENSE NOTICE; do [[ -f "${REPO}/${f}" ]] && cp "${REPO}/${f}" "${CDN}/${f}"; done
