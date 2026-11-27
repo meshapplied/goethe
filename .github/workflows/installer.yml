@@ -1,22 +1,11 @@
-# The curl | bash install in a Rocky 9 VM (SELinux, systemd, sudo's PATH): root and user installs, reinstall, upgrade, tampering, pinning, uninstall.
+# The curl | bash install in a Rocky 9 VM (SELinux, systemd, sudo's PATH): root and user installs, reinstall, upgrade, tampering, pinning, uninstall. Pushes to dev and main alone save the caches pull requests restore.
 name: installer
 
 on:
+  push:
+    branches: [dev, main]
   pull_request:
     branches: [dev, main]
-    paths:
-      - "goethe/cdn/install.sh"
-      - "goethe/crates/core/src/setup.rs"
-      - "goethe/crates/core/src/fix.rs"
-      - "goethe/crates/core/src/fix_driver.sh"
-      - "goethe/crates/core/src/update.rs"
-      - "goethe/crates/core/src/service.rs"
-      - "goethe/crates/core/src/nginx.rs"
-      - "goethe/crates/core/src/release_key.rs"
-      - "goethe/packaging/build_nginx_linux.sh"
-      - "goethe/packaging/nginx_versions.sh"
-      - "goethe/tests/vm/**"
-      - ".github/workflows/installer.yml"
   workflow_dispatch:
 
 permissions:
@@ -24,28 +13,80 @@ permissions:
 
 concurrency:
   group: installer-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  vm:
+  changes:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 5
+    outputs:
+      vm: ${{ steps.flags.outputs.vm }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: ~/.cache/goethe-build
-          key: portable-${{ hashFiles('goethe/Cargo.lock', 'goethe/rust-toolchain.toml') }}
+          fetch-depth: 0
+      - name: What the pull request touches (push/dispatch runs everything)
+        id: flags
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # vm: anything the installed binaries, the installer or the package are made of.
+          vm=true
+          if [[ -n "${BASE}" ]]; then
+            vm=false
+            while IFS= read -r f; do
+              case "$f" in
+                goethe/crates/*|goethe/Cargo.toml|goethe/Cargo.lock|goethe/rust-toolchain*|goethe/cdn/*|goethe/packaging/*|goethe/pyenv/*|goethe/nginx/*|goethe/tests/vm/*|.github/workflows/installer.yml)
+                  vm=true ;;
+              esac
+            done <<<"$(git diff --name-only "${BASE}" HEAD)"
+          fi
+          echo "vm=${vm}" >>"${GITHUB_OUTPUT}"
+          echo "vm=${vm}"
+
+  vm:
+    needs: changes
+    if: ${{ needs.changes.outputs.vm == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      SAVE: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Cache keys (the cloud image and the apt packages refresh weekly)
+        id: keys
+        run: |
+          {
+            echo "portable=portable-${{ hashFiles('goethe/Cargo.lock', 'goethe/rust-toolchain.toml') }}"
+            echo "nginx=nginx-linux-${{ hashFiles('goethe/packaging/nginx_versions.sh', 'goethe/packaging/build_nginx_linux.sh') }}"
+            echo "vm=vm-rocky9-$(date -u +%G-%V)"
+          } >>"$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cache/goethe-build
+            goethe/target-portable
+          key: ${{ steps.keys.outputs.portable }}
           restore-keys: portable-
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: nginx
         with:
           path: goethe/dist/cdn/bin/linux-x86_64/nginx
-          key: nginx-linux-${{ hashFiles('goethe/packaging/nginx_versions.sh', 'goethe/packaging/build_nginx_linux.sh') }}
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+          key: ${{ steps.keys.outputs.nginx }}
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: goethe/tests/vm/.work/images
-          key: vm-images-rocky9-v1
+          path: |
+            goethe/tests/vm/.work/images
+            goethe/tests/vm/.work/apt
+          key: ${{ steps.keys.outputs.vm }}
+      - name: Rust toolchain from rust-toolchain.toml (the test registry is built on the host)
+        working-directory: goethe
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: goethe
+          shared-key: installer-host
+          save-if: ${{ env.SAVE == 'true' }}
       - name: Portable goethe and goethed with the test release key
         run: GOETHE_CARGO_FEATURES=goethe/test-release-key bash goethe/packaging/build_bin.sh
       - name: goethe's nginx
@@ -56,3 +97,38 @@ jobs:
       - name: VM console on failure
         if: failure()
         run: tail -n 60 goethe/tests/vm/.work/console-rocky.log goethe/tests/vm/.work/result-rocky.log 2>/dev/null || true
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: ${{ always() && env.SAVE == 'true' }}
+        with:
+          path: |
+            ~/.cache/goethe-build
+            goethe/target-portable
+          key: ${{ steps.keys.outputs.portable }}
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: ${{ always() && env.SAVE == 'true' && steps.nginx.outputs.cache-hit != 'true' }}
+        with:
+          path: goethe/dist/cdn/bin/linux-x86_64/nginx
+          key: ${{ steps.keys.outputs.nginx }}
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: ${{ always() && env.SAVE == 'true' }}
+        with:
+          path: |
+            goethe/tests/vm/.work/images
+            goethe/tests/vm/.work/apt
+          key: ${{ steps.keys.outputs.vm }}
+
+  # The one check the dev and main rulesets require of this workflow: the VM passed, or was skipped because nothing it tests changed.
+  installer-gate:
+    if: ${{ always() }}
+    needs: [changes, vm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed, or the VM was skipped for a false flag
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          VM: ${{ needs.vm.result }}
+          FLAG: ${{ needs.changes.outputs.vm }}
+        run: |
+          [[ "${CHANGES}" == success ]] || { echo "changes: ${CHANGES}"; exit 1; }
+          [[ "${VM}" == success || ( "${VM}" == skipped && "${FLAG}" != true ) ]] || { echo "vm: ${VM}"; exit 1; }

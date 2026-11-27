@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build goethe, goethed and a self-contained nginx (static OpenSSL, PCRE2) for Apple Silicon into dist/cdn/bin/darwin-aarch64.
+# Build goethe, goethed and a self-contained nginx (static OpenSSL, PCRE2) for Apple Silicon into dist/cdn/bin/darwin-aarch64; GOETHE_CARGO_FEATURES adds cargo features (CI: the test release key), and an nginx already there is kept only when its -V names the pinned versions.
 
 set -euo pipefail
 
@@ -25,29 +25,40 @@ fetch() {
 }
 
 mkdir -p "${OUT}" "${WORK}"
-(cd "${ROOT}" && cargo build --release --locked --bin goethe --bin goethed)
+(cd "${ROOT}" && cargo build --release --locked ${GOETHE_CARGO_FEATURES:+--features "${GOETHE_CARGO_FEATURES}"} --bin goethe --bin goethed)
 cp "${ROOT}/target/release/goethe" "${ROOT}/target/release/goethed" "${OUT}/"
 
-fetch "${NGINX_URL}" "${NGINX_SHA256}"
-fetch "${OPENSSL_URL}" "${OPENSSL_SHA256}"
-fetch "${PCRE2_URL}" "${PCRE2_SHA256}"
-(
-  cd "${WORK}/nginx-${NGINX_VERSION}"
-  ./configure \
-    --prefix=/usr/local/goethe-nginx \
-    --with-http_ssl_module \
-    --with-http_v2_module \
-    --with-http_realip_module \
-    --with-openssl="${WORK}/openssl-${OPENSSL_VERSION}" \
-    --with-openssl-opt="no-shared no-tests no-docs" \
-    --with-pcre="${WORK}/pcre2-${PCRE2_VERSION}" \
-    --with-pcre-jit \
-    --with-cc-opt="-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET} -O2" \
-    --with-ld-opt="-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}" >"${WORK}/nginx-configure.log"
-  make -j"$(sysctl -n hw.ncpu)" >"${WORK}/nginx-make.log"
-)
-cp "${WORK}/nginx-${NGINX_VERSION}/objs/nginx" "${OUT}/nginx"
-strip "${OUT}/nginx"
+pinned_nginx() {
+  # The nginx in OUT is this script's build of the pinned nginx, OpenSSL and PCRE2.
+  local v
+  v="$("${OUT}/nginx" -V 2>&1)" || return 1
+  grep -q "nginx/${NGINX_VERSION}" <<<"${v}" && grep -q "openssl-${OPENSSL_VERSION}" <<<"${v}" && grep -q "pcre2-${PCRE2_VERSION}" <<<"${v}"
+}
+
+if [[ -x "${OUT}/nginx" ]] && pinned_nginx; then
+  echo "nginx ${NGINX_VERSION} with OpenSSL ${OPENSSL_VERSION} and PCRE2 ${PCRE2_VERSION} already built; kept"
+else
+  fetch "${NGINX_URL}" "${NGINX_SHA256}"
+  fetch "${OPENSSL_URL}" "${OPENSSL_SHA256}"
+  fetch "${PCRE2_URL}" "${PCRE2_SHA256}"
+  (
+    cd "${WORK}/nginx-${NGINX_VERSION}"
+    ./configure \
+      --prefix=/usr/local/goethe-nginx \
+      --with-http_ssl_module \
+      --with-http_v2_module \
+      --with-http_realip_module \
+      --with-openssl="${WORK}/openssl-${OPENSSL_VERSION}" \
+      --with-openssl-opt="no-shared no-tests no-docs" \
+      --with-pcre="${WORK}/pcre2-${PCRE2_VERSION}" \
+      --with-pcre-jit \
+      --with-cc-opt="-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET} -O2" \
+      --with-ld-opt="-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}" >"${WORK}/nginx-configure.log"
+    make -j"$(sysctl -n hw.ncpu)" >"${WORK}/nginx-make.log"
+  )
+  cp "${WORK}/nginx-${NGINX_VERSION}/objs/nginx" "${OUT}/nginx"
+  strip "${OUT}/nginx"
+fi
 
 for b in goethe goethed nginx; do
   file "${OUT}/${b}" | grep -q "arm64" || { echo "${b} is not an arm64 binary" >&2; exit 1; }

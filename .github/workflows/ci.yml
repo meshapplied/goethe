@@ -135,7 +135,12 @@ jobs:
         with:
           workspaces: goethe
           shared-key: goethe-dev
-      - run: cargo test --locked
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2.90.11
+        with:
+          tool: cargo-nextest
+      - name: Unit tests (nextest, .config/nextest.toml kills a test past 60 s)
+        run: cargo nextest run --workspace --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo build --locked --features goethe/test-release-key
       - name: CPU gates (harness self-test, package signing and verification) on the dev build
@@ -164,6 +169,7 @@ jobs:
         with:
           workspaces: goethe
           shared-key: goethe-dev
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: The registry builds from registry.src.json; what it changes in the one served
         env:
           GOETHE_HOME: ${{ runner.temp }}/home
@@ -193,6 +199,7 @@ jobs:
         with:
           workspaces: goethe
           shared-key: goethe-dev
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: nginx, which goethe up starts
         run: sudo apt-get install -y -qq nginx >/dev/null
       - run: cargo build --locked --features goethe/test-release-key
@@ -217,6 +224,7 @@ jobs:
         with:
           workspaces: goethe
           shared-key: goethe-dev
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: nginx, which goethe up starts
         run: sudo apt-get install -y -qq nginx >/dev/null
       - run: bash tests/mutants/run.sh
@@ -250,7 +258,7 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           listed=$(jq -r 'keys[]' <<<"$NEEDS" | sort)
-          defined=$(awk '/^jobs:/{f=1;next} f&&/^  [a-z0-9-]+:/{gsub(/[ :]/,"");print}' .github/workflows/ci.yml | grep -vxE 'gate|package-smoke|mutants' | sort)
+          defined=$(awk '/^jobs:/{f=1;next} f&&/^  [a-z0-9-]+:/{gsub(/[ :]/,"");print}' .github/workflows/ci.yml | grep -vxE 'gate|package-smoke|mutants|coverage' | sort)
           [ "$listed" = "$defined" ] || { echo "gate.needs and the jobs of ci.yml differ:"; diff <(echo "$listed") <(echo "$defined"); exit 1; }
           bad=$(jq -r '
             .changes.outputs as $f
@@ -265,10 +273,40 @@ jobs:
             | "\(.key): \(.value.result)"' <<<"$NEEDS")
           [ -z "$bad" ] || { echo "$bad"; exit 1; }
 
+  # Line coverage per file of the unit tests, in the run summary: where the logic has no test yet.
+  coverage:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: goethe
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Rust toolchain from rust-toolchain.toml, with llvm-tools
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2.90.11
+        with:
+          tool: cargo-nextest,cargo-llvm-cov
+      - name: Coverage of the unit tests, lowest first
+        run: |
+          cargo llvm-cov nextest --workspace --locked --summary-only --json --output-path "$RUNNER_TEMP/cov.json"
+          python3 - "$RUNNER_TEMP/cov.json" >>"$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, os, sys
+          d = json.load(open(sys.argv[1]))["data"][0]
+          rows = sorted((f["summary"]["lines"]["percent"], f["summary"]["lines"]["count"], os.path.relpath(f["filename"])) for f in d["files"])
+          t = d["totals"]["lines"]
+          print(f"### Unit test line coverage: {t['percent']:.1f}% of {t['count']} lines\n\n| lines covered | lines | file |\n|---|---|---|")
+          for pct, n, name in rows:
+              print(f"| {pct:.1f}% | {n} | `{name}` |")
+          PY
+
   package-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Patched SGLang source at the pinned commit
