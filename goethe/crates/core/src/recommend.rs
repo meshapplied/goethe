@@ -59,6 +59,7 @@ impl Fit {
 pub struct View {
     pub hw: HardwareState,
     pub gpus: Vec<GpuPlacementInput>,
+    free_now_mb: Vec<(u32, u64)>,
     con: Option<Connection>,
     home: std::path::PathBuf,
 }
@@ -76,7 +77,7 @@ impl View {
             None => Default::default(),
         };
         let fresh = crate::hw::live_gpus().unwrap_or_default();
-        let gpus = hw
+        let gpus: Vec<GpuPlacementInput> = hw
             .gpus
             .iter()
             .filter(|g| !denied.contains(&g.index))
@@ -93,7 +94,8 @@ impl View {
                 }
             })
             .collect();
-        View { hw, gpus, con, home: home.to_path_buf() }
+        let free_now_mb = gpus.iter().map(|g| (g.index, g.free_vram_mb)).collect();
+        View { hw, gpus, free_now_mb, con, home: home.to_path_buf() }
     }
 
     pub fn capacity(home: &Path, hw: HardwareState) -> View {
@@ -124,13 +126,15 @@ impl View {
     }
 
     pub fn free_text(&self) -> String {
-        // "VRAM on allowed GPUs: 191.2 GB (gpu2 95.6, gpu3 95.6)" for a capacity view; a one-GPU host just says what is free.
+        // What is free on the allowed GPUs now, even in a capacity view that plans on them empty: "VRAM free on allowed GPUs: 191.2 GB (gpu2 95.6, gpu3 95.6)"; a one-GPU host just says what is free.
         let word = crate::gpu_kind::host_memory_word(&self.hw.gpus);
-        if self.hw.gpus.len() == 1 && self.gpus.len() == 1 {
-            return format!("{word} free: {:.1} GB", self.free_allowed_gb());
+        let gb = |mb: u64| mb as f64 / 1024.0;
+        let total = gb(self.free_now_mb.iter().map(|(_, mb)| mb).sum());
+        if self.hw.gpus.len() == 1 && self.free_now_mb.len() == 1 {
+            return format!("{word} free: {total:.1} GB");
         }
-        let each: Vec<String> = self.gpus.iter().map(|g| format!("gpu{} {:.1}", g.index, g.free_vram_mb as f64 / 1024.0)).collect();
-        format!("{word} on allowed GPUs: {:.1} GB ({})", self.free_allowed_gb(), each.join(", "))
+        let each: Vec<String> = self.free_now_mb.iter().map(|(i, mb)| format!("gpu{i} {:.1}", gb(*mb))).collect();
+        format!("{word} free on allowed GPUs: {total:.1} GB ({})", each.join(", "))
     }
 
     pub fn fit(&self, model_id: &str, input: &ChooserInput, pinned_tp: Option<usize>) -> Result<Fit, String> {
@@ -481,7 +485,8 @@ mod tests {
         assert!(!whole.gpus[0].foreign_process);
         let m = entry("nvidia/Llama-3.1-8B-Instruct-NVFP4", serde_json::json!({}));
         assert!(busy.fit(&m.id, &registry_input(&m), None).is_err() && whole.fit(&m.id, &registry_input(&m), None).is_ok());
-        assert_eq!(whole.free_text(), "VRAM free: 96.0 GB", "one GPU needs no list");
+        assert_eq!(whole.free_text(), busy.free_text(), "the header says what is free now, not the memory the plan assumes empty");
+        assert_eq!(busy.free_text(), "VRAM free: 2.0 GB", "one GPU needs no list");
     }
 
     #[test]
