@@ -1074,6 +1074,9 @@ fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, (cli_ctx, cli_conc): (
     drop(beat);
     let variant = variant?;
     crate::step::say(&crate::step::row("kernels", &format!("{} verified{}", c.offer.arch, crate::step::took(started.elapsed()))));
+    if plan.entry.untested {
+        crate::step::say(&crate::step::row("kernels", &format!("built for {} but not yet checked on one; if replies look wrong, install again with --engine sglang", c.offer.arch)));
+    }
     let lanes = plan.variants.iter().find(|v| v.id == variant).and_then(|v| v.lanes);
     pack_card(home, p, &c.offer.arch, &variant, (cli_ctx, cli_conc.or(lanes)))
 }
