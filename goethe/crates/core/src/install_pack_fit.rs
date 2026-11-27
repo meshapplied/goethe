@@ -31,6 +31,7 @@ pub(super) struct PackWeights {
     pub(super) bytes: u64,
     pub(super) marlin_gb: f64,
     pub(super) ctx_cap: Option<u64>,
+    pub(super) lanes: Option<u64>,
 }
 
 pub(super) fn pack_input(cfg: &Value, entry: Option<&RegistryModel>, opts: &InstallOpts, arch: &str, w: &PackWeights, dir: &Path) -> Result<(crate::chooser::ChooserInput, Option<usize>), String> {
@@ -40,6 +41,7 @@ pub(super) fn pack_input(cfg: &Value, entry: Option<&RegistryModel>, opts: &Inst
     let max_ctx = super::ctx_limit(&facts, entry, opts.ctx)?;
     let ctx = opts.ctx.unwrap_or_else(|| entry.and_then(|e| e.effective_max_ctx()).unwrap_or(max_ctx)).min(max_ctx).min(w.ctx_cap.unwrap_or(u64::MAX));
     let mut card = toml::Table::new();
+    card.insert("runtime".into(), toml::Value::String(crate::engines::goethe_engine::ENGINE.id.into()));
     card.insert("kv_cache_dtype".into(), toml::Value::String("auto".into()));
     card.insert("supported_sm".into(), toml::Value::Array(crate::packs::arch_ccs(arch).into_iter().map(toml::Value::String).collect()));
     if w.marlin_gb > 0.0 {
@@ -54,7 +56,7 @@ pub(super) fn pack_input(cfg: &Value, entry: Option<&RegistryModel>, opts: &Inst
         attention: facts.attention.clone(),
         max_ctx,
     };
-    let max_conc = opts.max_conc.or(entry.and_then(|e| e.default_max_conc)).unwrap_or(crate::chooser::DEFAULT_CONC);
+    let max_conc = opts.max_conc.or(w.lanes).unwrap_or(crate::chooser::DEFAULT_CONC);
     let input = crate::chooser::ChooserInput::from_card(installed, &card, crate::memory_spec::installed_from_config(cfg, &card, &[]), ctx, max_conc);
     Ok((input, opts.tp.or(entry.and_then(|e| e.default_tp)).filter(|t| *t > 0).map(|t| t as usize)))
 }

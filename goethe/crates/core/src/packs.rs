@@ -582,6 +582,7 @@ pub struct Variant {
     pub quant: String,
     pub files: Vec<String>,
     pub max_ctx: Option<u64>,
+    pub lanes: Option<u64>,
     pub why: Option<String>,
 }
 
@@ -677,7 +678,7 @@ pub fn plan(home: &Path, model_id: &str, arch: &str, quant: Option<&str>, broker
         let files: Vec<String> = x["files"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str().map(String::from)).collect();
         if !files.is_empty() && files.iter().all(|f| safe_name(f)) && !variants.iter().any(|v| v.files == files) {
             let why = (x["runs"] == false).then(|| x["why"].as_str().unwrap_or("this GPU runs none of its kernels").to_string());
-            variants.push(Variant { id: id.to_string(), quant: q.to_string(), files, max_ctx: x["max_ctx"].as_u64(), why });
+            variants.push(Variant { id: id.to_string(), quant: q.to_string(), files, max_ctx: x["max_ctx"].as_u64(), lanes: x["lanes"].as_u64(), why });
         }
     }
     if variants.is_empty() {
@@ -983,7 +984,7 @@ mod tests {
     }
 
     const PLANNED: &str = r#"{"variants": [
-        {"id": "q4", "role": "target", "quant": "q4_0", "source": {"hf_repo": "org/M-GGUF"}, "files": [{"name": "m-Q4_0.gguf"}], "max_ctx": 8192, "runs": true},
+        {"id": "q4", "role": "target", "quant": "q4_0", "source": {"hf_repo": "org/M-GGUF"}, "files": [{"name": "m-Q4_0.gguf"}], "max_ctx": 8192, "lanes": 1, "runs": true},
         {"id": "q8", "role": "target", "quant": null, "source": null, "files": [{"name": "m-Q8_0.gguf"}], "max_ctx": 4096, "runs": null},
         {"id": "st", "role": "target", "quant": "nvfp4", "source": {"hf_repo": "org/M"}, "files": [{"name": "model.safetensors"}], "max_ctx": 4096, "runs": true},
         {"id": "d", "role": "drafter", "quant": "bf16", "source": {"hf_repo": "org/M-GGUF"}, "files": [{"name": "d.gguf"}], "max_ctx": 4096, "runs": null}]}"#;
@@ -1057,6 +1058,7 @@ mod tests {
         let ids: Vec<(&str, &str, &[String], Option<u64>)> = p.variants.iter().map(|v| (v.id.as_str(), v.quant.as_str(), &v.files[..], v.max_ctx)).collect();
         assert_eq!(ids, [("q4", "q4_0", &["m-Q4_0.gguf".to_string()][..], Some(8192)), ("q8", "q8", &["m-Q8_0.gguf".to_string()][..], Some(4096))], "no drafter, no other repo's variant");
         assert!(p.variants.iter().all(|v| v.why.is_none()), "runs null (the engine saw no GPU) is not a refusal");
+        assert_eq!(p.variants.iter().map(|v| v.lanes).collect::<Vec<_>>(), [Some(1), None], "the lanes the engine reports, none from an older engine");
         assert!(!home.path().join("packs").read_dir().unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("plan")), "the prefix copy is removed");
         assert_eq!(p.prefix, b.pack.bytes[..p.prefix.len()]);
         let files = vec!["config.json".to_string(), "tokenizer.json".to_string()];
@@ -1076,7 +1078,7 @@ mod tests {
         let (home, _) = dirs();
         let b = fake();
         let base = engine(&b.pack, &[]);
-        let refused = PLANNED.replacen(r#""max_ctx": 8192, "runs": true"#, r#""max_ctx": 8192, "runs": false, "why": "no SKU for cc 8.9""#, 1);
+        let refused = PLANNED.replacen(r#""max_ctx": 8192, "lanes": 1, "runs": true"#, r#""max_ctx": 8192, "lanes": 1, "runs": false, "why": "no SKU for cc 8.9""#, 1);
         let run = |a: &[String]| if a[1] == "plan" { Ok((0, refused.clone())) } else { base(a) };
         let p = plan(home.path(), "org/m-gguf", "sm_120a", None, &b, &run).unwrap().unwrap();
         assert_eq!(p.variants.iter().map(|v| v.why.as_deref()).collect::<Vec<_>>(), [Some("no SKU for cc 8.9"), None]);
@@ -1085,7 +1087,7 @@ mod tests {
     #[test]
     fn the_download_is_a_variant_this_gpu_runs_with_its_files_in_the_repo_and_the_first_that_fits() {
         // Each row: the variants, the file missing from the repo, the variant that fits, the pick.
-        let v = |id: &str, why: Option<&str>| Variant { id: id.into(), quant: id.into(), files: vec![format!("{id}.gguf")], max_ctx: None, why: why.map(String::from) };
+        let v = |id: &str, why: Option<&str>| Variant { id: id.into(), quant: id.into(), files: vec![format!("{id}.gguf")], max_ctx: None, lanes: None, why: why.map(String::from) };
         let (big, small, cold) = (v("big", None), v("small", None), v("cold", Some("no SKU for cc 8.9")));
         let table = [
             (vec![big.clone(), small.clone()], "", "small", Ok("small")),

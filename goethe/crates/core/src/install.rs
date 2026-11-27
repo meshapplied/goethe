@@ -335,7 +335,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
                 (Ok(cfg), Ok(hw)) => {
                     let marlin = pack_marlin_gb(&cfg, &choice.offer.hf_repo, &rev, &files);
                     let view = if opts.load { crate::recommend::View::new(home, hw) } else { crate::recommend::View::capacity(home, hw) };
-                    crate::step::say(&pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: chosen.max_ctx }, &card_dir)?);
+                    crate::step::say(&pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: chosen.max_ctx, lanes: chosen.lanes }, &card_dir)?);
                 }
                 (Err(e), _) | (_, Err(e)) => crate::step::note(&format!("note: the per-GPU fit was not checked before the download: {e}")),
             }
@@ -854,10 +854,10 @@ fn register(home: &Path, opts: &InstallOpts, mut t: Target) -> Result<(), String
     // The card is written last: any failure before it (pack refused, SGLang setup failed) leaves no card behind.
     let mut planned = plan(home, opts, &t)?;
     let refused = match &t.pack {
-        Some(choice) => use_pack(home, &mut planned, choice, opts.ctx)?,
+        Some(choice) => use_pack(home, &mut planned, choice, (opts.ctx, opts.max_conc))?,
         None if planned.dir.join(PACK_VERIFY).is_file() => {
             let v: Value = serde_json::from_slice(&fs::read(planned.dir.join(PACK_VERIFY)).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-            pack_card(home, &mut planned, v["arch"].as_str().unwrap_or_default(), "", opts.ctx)?
+            pack_card(home, &mut planned, v["arch"].as_str().unwrap_or_default(), "", (opts.ctx, opts.max_conc))?
         }
         None => None,
     };
@@ -1057,7 +1057,7 @@ pub(crate) fn load_refusal(log: &str) -> Option<String> {
     Some(format!("kernel pack for {skus} does not run on {device} ({why})"))
 }
 
-fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) -> Result<Option<String>, String> {
+fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, (cli_ctx, cli_conc): (Option<u64>, Option<u64>)) -> Result<Option<String>, String> {
     // Pull with this node's login (goethe-engine verifies index, identity, pack and arch), then point the card at it.
     let token = || Ok(c.creds.token.expose().to_string());
     let broker = crate::packs::HttpBroker::new(&c.creds.platform_url, &token);
@@ -1069,11 +1069,12 @@ fn use_pack(home: &Path, p: &mut Planned, c: &PackChoice, cli_ctx: Option<u64>) 
     drop(beat);
     let variant = variant?;
     crate::step::say(&crate::step::row("kernels", &format!("{} verified{}", c.offer.arch, crate::step::took(started.elapsed()))));
-    pack_card(home, p, &c.offer.arch, &variant, cli_ctx)
+    let lanes = plan.variants.iter().find(|v| v.id == variant).and_then(|v| v.lanes);
+    pack_card(home, p, &c.offer.arch, &variant, (cli_ctx, cli_conc.or(lanes)))
 }
 
-fn pack_card(home: &Path, p: &mut Planned, arch: &str, variant: &str, cli_ctx: Option<u64>) -> Result<Option<String>, String> {
-    // The card of a verified pack: goethe-engine, the kernels' ctx cap, the pack arch's GPUs; Some(why) when this device runs no variant of it.
+fn pack_card(home: &Path, p: &mut Planned, arch: &str, variant: &str, (cli_ctx, conc): (Option<u64>, Option<u64>)) -> Result<Option<String>, String> {
+    // The card of a verified pack: goethe-engine, the kernels' ctx cap, the concurrency asked or the lanes the variant's fastest path serves, the pack arch's GPUs; Some(why) when this device runs no variant of it.
     let run = crate::packs::python_runner(home);
     if let Some(why) = refused_here(&p.dir, &run) {
         return Ok(Some(why));
@@ -1089,7 +1090,9 @@ fn pack_card(home: &Path, p: &mut Planned, arch: &str, variant: &str, cli_ctx: O
     p.kv_dtype = "auto".into();
     let t = &mut p.table;
     t.insert("runtime".into(), toml::Value::String("goethe-engine".into()));
+    p.max_conc = conc.unwrap_or(p.max_conc);
     t.insert("context_length".into(), toml::Value::Integer(p.ctx as i64));
+    t.insert("max_running_requests".into(), toml::Value::Integer(p.max_conc as i64));
     t.insert("extra_sglang_args".into(), toml::Value::Array(Vec::new()));
     t.insert("kv_cache_dtype".into(), toml::Value::String("auto".into()));
     t.insert("supported_sm".into(), toml::Value::Array(crate::packs::arch_ccs(arch).into_iter().map(toml::Value::String).collect()));
@@ -2087,7 +2090,7 @@ mod tests {
     #[test]
     fn a_download_only_install_checks_the_card_not_what_is_free_at_that_moment() {
         let home = tempfile::tempdir().unwrap();
-        let weights = || PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: Some(4096) };
+        let weights = || PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: Some(4096), lanes: None };
         let busy = card(9);
         let capacity = crate::recommend::View::capacity(home.path(), crate::hw::HardwareState { profiled_at: "t".into(), driver: "t".into(), gpus: vec![busy.clone()], links: vec![], unavailable: vec![], host: None, environment: None });
         let download_only = InstallOpts { model_id: "org/Transcribe-GGUF".into(), ..Default::default() };
@@ -2097,7 +2100,7 @@ mod tests {
         let err = pack_fit(&view_of(home.path(), busy), &llama_cfg(), None, &loading, "sm_120a", weights(), home.path()).unwrap_err();
         assert!(err.contains("9.0 GB free now") && err.contains("Stop what is using the GPU") && err.contains("--load"), "{err}");
         let tiny = InstallOpts { model_id: "org/Huge".into(), ..Default::default() };
-        let never = pack_fit(&capacity, &llama_cfg(), None, &tiny, "sm_120a", PackWeights { bytes: 60 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path()).unwrap_err();
+        let never = pack_fit(&capacity, &llama_cfg(), None, &tiny, "sm_120a", PackWeights { bytes: 60 << 30, marlin_gb: 0.0, ctx_cap: None, lanes: None }, home.path()).unwrap_err();
         assert!(never.contains("does not fit the allowed GPUs even when they are empty") && never.contains("32.0 GB in total"), "{never}");
     }
 
@@ -2105,9 +2108,9 @@ mod tests {
     fn a_model_that_cannot_fit_one_card_is_refused_before_a_byte_with_what_is_missing() {
         let home = tempfile::tempdir().unwrap();
         let opts = InstallOpts { model_id: "nvidia/Big-NVFP4".into(), load: true, ..Default::default() };
-        let line = pack_fit(&view_of(home.path(), card(31)), &llama_cfg(), None, &opts, "sm_120a", PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path()).unwrap();
+        let line = pack_fit(&view_of(home.path(), card(31)), &llama_cfg(), None, &opts, "sm_120a", PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: None, lanes: None }, home.path()).unwrap();
         assert!(line.starts_with("fit: tp=1 on GPU 0") && line.contains("GB per GPU (weights 20.0 + KV") && line.contains("of 31.0 GB free") && line.contains("GB spare"), "{line}");
-        let err = pack_fit(&view_of(home.path(), card(21)), &llama_cfg(), None, &opts, "sm_120a", PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path()).unwrap_err();
+        let err = pack_fit(&view_of(home.path(), card(21)), &llama_cfg(), None, &opts, "sm_120a", PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: None, lanes: None }, home.path()).unwrap_err();
         for part in ["does not fit the allowed GPUs now", "gpu0 NVIDIA GeForce RTX 5090 21.0 GB free", "nothing was downloaded", "safety margin", "missing", "--ctx", "goethe gpu deny"] {
             assert!(err.contains(part), "{part}: {err}");
         }
@@ -2122,7 +2125,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         fs::write(home.path().join("config.json"), cfg.to_string()).unwrap();
         let opts = InstallOpts { model_id: "nvidia/Big-NVFP4".into(), ..Default::default() };
-        let weights = PackWeights { bytes: 20 << 30, marlin_gb: 1.0701003707945347, ctx_cap: Some(4096) };
+        let weights = PackWeights { bytes: 20 << 30, marlin_gb: 1.0701003707945347, ctx_cap: Some(4096), lanes: None };
         let (input, _) = pack_input(&cfg, None, &opts, "sm_120a", &weights, home.path()).unwrap();
         let loaded = crate::chooser::ChooserInput::from_card(
             crate::chooser::CardFacts { static_vram_gb: input.static_vram_gb, kv_bytes_per_token: input.kv_bytes_per_token, num_attention_heads: input.num_attention_heads, num_kv_heads: input.num_kv_heads, attention: input.attention.clone(), max_ctx: input.max_ctx },
@@ -2141,10 +2144,20 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_load_serves_the_lanes_of_the_variants_fastest_path_unless_pinned() {
+        let home = tempfile::tempdir().unwrap();
+        let conc = |pin: Option<u64>, lanes: Option<u64>| {
+            let opts = InstallOpts { model_id: "org/m".into(), ctx: Some(4096), max_conc: pin, ..Default::default() };
+            install_pack_fit::pack_input(&llama_cfg(), None, &opts, "sm_120a", &PackWeights { bytes: 1 << 30, marlin_gb: 0.0, ctx_cap: None, lanes }, home.path()).unwrap().0.max_conc
+        };
+        assert_eq!((conc(None, Some(1)), conc(Some(4), Some(1)), conc(None, None)), (1, 4, crate::chooser::DEFAULT_CONC));
+    }
+
+    #[test]
     fn the_pack_fit_ignores_what_llama_cpp_learned_for_the_same_model() {
         let home = tempfile::tempdir().unwrap();
         let opts = InstallOpts { model_id: "nvidia/Big-NVFP4".into(), ctx: Some(4096), ..Default::default() };
-        let spare = |gpu: crate::hw::GpuState| pack_fit(&view_of(home.path(), gpu), &llama_cfg(), None, &opts, "sm_120a", PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: None }, home.path());
+        let spare = |gpu: crate::hw::GpuState| pack_fit(&view_of(home.path(), gpu), &llama_cfg(), None, &opts, "sm_120a", PackWeights { bytes: 20 << 30, marlin_gb: 0.0, ctx_cap: None, lanes: None }, home.path());
         let line = spare(card(31)).unwrap();
         let total: f64 = line.split(" GB per GPU").next().unwrap().rsplit(' ').next().unwrap().parse().unwrap();
         let tight = (total + 1.5 + 0.3).ceil() as u64;
