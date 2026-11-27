@@ -905,14 +905,18 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
     ]),
 ];
 
-fn top_help(model: &str) -> String {
-    // goethe help: one example line per command, grouped, with what it does; goethe help COMMAND has the details.
+fn is_ask(cmd: &str) -> bool {
+    matches!(cmd.split_whitespace().nth(1), Some("ask" | "?"))
+}
+
+fn top_help(model: &str, experimental: bool) -> String {
+    // goethe help: one example line per command, grouped, with what it does; goethe help COMMAND has the details. Ask, experimental, only when ticked on the menu.
     use goethe_core::term::{paint, Color};
     let width = HELP_SECTIONS.iter().flat_map(|(_, rows)| rows.iter()).map(|(c, _)| c.chars().count()).max().unwrap_or(0) + 2;
     let mut out = String::from("Goethe: serve models through OpenAI and Anthropic compatible gateways\n");
     for (title, rows) in HELP_SECTIONS {
         out.push_str(&format!("\n{}\n", paint(title, Color::Bold)));
-        for (cmd, what) in *rows {
+        for (cmd, what) in rows.iter().filter(|(c, _)| experimental || !is_ask(c)) {
             out.push_str(&format!("  {cmd:<width$}{}\n", paint(what, Color::Gray)));
         }
     }
@@ -962,7 +966,7 @@ fn main() {
         return;
     }
     if args.len() == 1 || (args.len() == 2 && matches!(args[1].as_str(), "-h" | "--help" | "help")) {
-        print!("{}", top_help(&goethe_core::onboard::suggested(true)));
+        print!("{}", top_help(&goethe_core::onboard::suggested(true), goethe_core::db::experimental(&goethe_home())));
         return;
     }
     if args.len() >= 2 && matches!(args[1].as_str(), "ask" | "?") {
@@ -2321,13 +2325,14 @@ mod tests {
     #[test]
     fn the_help_shows_every_command_with_an_example_that_parses() {
         use clap::CommandFactory;
-        let text = top_help("org/m");
+        let text = top_help("org/m", false);
         for c in Cli::command().get_subcommands().filter(|c| !c.is_hide_set()) {
             assert!(text.contains(&format!("goethe {}", c.get_name())), "{} is missing from goethe help", c.get_name());
         }
+        assert!(!text.contains("goethe ask") && top_help("org/m", true).contains("goethe ask REQUEST"), "Ask shows only with experimental features on");
         for (_, rows) in HELP_SECTIONS {
             for (cmd, _) in *rows {
-                if matches!(cmd.split_whitespace().nth(1), Some("ask" | "?")) {
+                if is_ask(cmd) {
                     continue;
                 }
                 let words: Vec<&str> = cmd.split_whitespace().skip(1).map(|w| match w { "MODEL" => "org/m", "FOLDER" => "f", "KEY_ID" => "a1", "DOMAIN" => "a.example.com", w => w }).collect();

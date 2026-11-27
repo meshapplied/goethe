@@ -441,7 +441,7 @@ pub fn reference() -> Result<Node, String> {
     let mut doc = node(&root, "goethe");
     let mut lines = Vec::new();
     examples(&root, &mut lines);
-    lines.extend(crate::HELP_SECTIONS.iter().flat_map(|(_, rows)| rows.iter()).map(|(c, _)| c.to_string()).filter(|c| !matches!(c.split_whitespace().nth(1), Some("ask" | "?") | None)));
+    lines.extend(crate::HELP_SECTIONS.iter().flat_map(|(_, rows)| rows.iter()).map(|(c, _)| c.to_string()).filter(|c| c.split_whitespace().nth(1).is_some() && !crate::is_ask(c)));
     for ex in lines {
         let path = example_path(&root, &ex)?;
         let at = doc.find_mut(&path).ok_or_else(|| format!("{ex}: no command {path:?} in the reference"))?;
