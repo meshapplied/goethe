@@ -29,6 +29,8 @@ struct ModelRow {
     optimised: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    featured: bool,
     #[serde(skip)]
     verdict: Verdict,
 }
@@ -109,6 +111,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
                 custom: is_custom_model(&m.id, reg.as_ref()).then_some(true),
                 optimised: (m.runtime == "goethe-engine").then_some(true),
                 runtime: Some(m.runtime.clone()),
+                featured: is_featured(&m.id, reg.as_ref()),
                 verdict,
             });
         }
@@ -129,6 +132,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
                 custom: None,
                 optimised: packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id)).then_some(true),
                 runtime: Some(if linked && packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id)) { "goethe-engine" } else { m.effective_runtime() }.to_string()),
+                featured: m.featured.unwrap_or(false),
                 verdict,
             });
         }
@@ -152,6 +156,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
                 custom: None,
                 optimised: Some(true),
                 runtime: Some("goethe-engine".to_string()),
+                featured: false,
                 verdict: Verdict::Unknown,
             });
         }
@@ -280,19 +285,31 @@ pub fn engine_label(runtime: Option<&str>) -> String {
     .to_string()
 }
 
+fn is_featured(id: &str, reg: Option<&Registry>) -> bool {
+    // A model the catalog features (its `featured` flag): listed first, in its own section.
+    reg.is_some_and(|r| r.models.iter().any(|m| m.featured == Some(true) && m.id.eq_ignore_ascii_case(id)))
+}
+
 fn list_text(rows: &[ModelRow], free_gb: Option<String>) -> String {
-    // Installed models, then available ones grouped by the VRAM they take, then those that do not fit and why.
+    // Featured models first, then installed models, available ones grouped by the VRAM they take, then those that do not fit and why.
     use crate::term::{paint, Color, Table};
     let mut out = String::new();
     if let Some(free) = free_gb {
         out.push_str(&format!("{free}\n\n"));
     }
+    let (featured, rest): (Vec<&ModelRow>, Vec<&ModelRow>) = rows.iter().partition(|r| r.featured);
+    let rows: Vec<&ModelRow> = rest;
     let row = |r: &ModelRow| {
         let tag = if r.optimised.is_some() && r.runtime.as_deref() != Some("goethe-engine") { OPTIMISED } else { "" };
         vec![format!("{}{tag}", r.id), crate::term::status(&r.status), engine_label(r.runtime.as_deref()), format!("{:.1} GB", r.gb), fit_colored(&r.fit)]
     };
     let header = ["MODEL", "STATUS", "ENGINE", "DISK", "FIT ON THIS MACHINE"];
-    let (installed, available): (Vec<&ModelRow>, Vec<&ModelRow>) = rows.iter().partition(|r| r.status != "available");
+    if !featured.is_empty() {
+        let mut table = Table::new(&header);
+        featured.iter().for_each(|r| table.row(row(r)));
+        out.push_str(&format!("{}\n{}\n\n", paint("Featured models", Color::Bold), table.render()));
+    }
+    let (installed, available): (Vec<&ModelRow>, Vec<&ModelRow>) = rows.iter().copied().partition(|r| r.status != "available");
     if !installed.is_empty() {
         let mut table = Table::new(&header);
         installed.iter().for_each(|r| table.row(row(r)));
@@ -329,6 +346,7 @@ pub struct PickRow {
     pub installed: bool,
     pub gated: bool,
     pub optimised: bool,
+    pub featured: bool,
 }
 
 pub struct PickData {
@@ -354,7 +372,7 @@ fn disk_space_gb(path: &Path) -> Option<(f64, f64)> {
 }
 
 pub fn picker_data(home: &Path) -> Result<PickData, String> {
-    // The install table of the goethe menu: the machine's VRAM and storage, then each model that fits all of its GPUs (installed ones always).
+    // The install table of the goethe menu: the machine's VRAM and storage, featured models first, then each model that fits all of its GPUs (installed ones always, and one with a kernel pack for this machine even when the SGLang estimate does not fit: the pack decides at install).
     let con = db::open(home).map_err(|e| e.to_string())?;
     let installed = installed_rows(home, &con)?;
     let disk = disk_gb_by_model(&con);
@@ -380,6 +398,7 @@ pub fn picker_data(home: &Path) -> Result<PickData, String> {
             installed: true,
             gated: false,
             optimised: m.runtime == "goethe-engine",
+            featured: is_featured(&m.id, reg.as_ref()),
         });
     }
     for m in reg.iter().flat_map(|r| r.models.iter()).filter(|m| !m.manual_download.unwrap_or(false)) {
@@ -387,7 +406,8 @@ pub fn picker_data(home: &Path) -> Result<PickData, String> {
             continue;
         }
         let pinned = m.default_tp.filter(|t| *t > 0).map(|t| t as usize);
-        if let Some((vram, gpus)) = need(&m.id, &registry_input(m), pinned) {
+        let optimised = packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id));
+        if let Some((vram, gpus)) = need(&m.id, &registry_input(m), pinned).or_else(|| optimised.then_some((m.static_vram_gb, 1))) {
             rows.push(PickRow {
                 id: m.id.clone(),
                 size_gb: m.download_gb.unwrap_or(m.static_vram_gb),
@@ -395,11 +415,12 @@ pub fn picker_data(home: &Path) -> Result<PickData, String> {
                 gpus,
                 installed: false,
                 gated: m.gated.unwrap_or(false),
-                optimised: packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id)),
+                optimised,
+                featured: m.featured.unwrap_or(false),
             });
         }
     }
-    rows.sort_by(|a, b| a.vram_gb.total_cmp(&b.vram_gb).then_with(|| a.id.cmp(&b.id)));
+    rows.sort_by(|a, b| b.featured.cmp(&a.featured).then_with(|| a.vram_gb.total_cmp(&b.vram_gb)).then_with(|| a.id.cmp(&b.id)));
     let space = disk_space_gb(&home.join("models")).or_else(|| disk_space_gb(home));
     Ok(PickData {
         total_vram_gb: whole.free_allowed_gb(),
@@ -890,6 +911,7 @@ mod tests {
             custom: None,
             optimised: None,
             runtime: None,
+            featured: false,
             verdict: Verdict::Fits { per_gpu: 5.0, total: 5.0, ctx: 8192, max_conc: 4 },
         };
         let text = list_text(&[row("org/open", "fits: 5.0 GB per GPU".into()), row("org/closed", format!("fits: 5.0 GB per GPU{GATED_FIT}"))], None);
@@ -900,8 +922,27 @@ mod tests {
     }
 
     #[test]
+    fn a_featured_model_is_listed_first_in_its_own_section_and_not_again() {
+        let row = |id: &str, featured: bool| ModelRow {
+            id: id.into(),
+            status: "available".into(),
+            gb: 5.0,
+            fit: "fits: 5.0 GB per GPU".into(),
+            custom: None,
+            optimised: None,
+            runtime: None,
+            featured,
+            verdict: Verdict::Fits { per_gpu: 5.0, total: 5.0, ctx: 8192, max_conc: 4 },
+        };
+        let text = list_text(&[row("org/plain", false), row("org/star", true)], None);
+        let (head, star, plain) = (text.find("Featured models").unwrap(), text.find("org/star").unwrap(), text.find("org/plain").unwrap());
+        assert!(head < star && star < plain && text.matches("org/star").count() == 1, "{text}");
+        assert!(!list_text(&[row("org/plain", false)], None).contains("Featured"), "no section without a featured model");
+    }
+
+    #[test]
     fn an_installed_row_names_its_runtime_in_json() {
-        let row = ModelRow { id: "org/m".into(), status: "installed".into(), gb: 1.0, fit: "fits".into(), custom: None, optimised: Some(true), runtime: Some("goethe-engine".into()), verdict: Verdict::Unknown };
+        let row = ModelRow { id: "org/m".into(), status: "installed".into(), gb: 1.0, fit: "fits".into(), custom: None, optimised: Some(true), runtime: Some("goethe-engine".into()), featured: false, verdict: Verdict::Unknown };
         let v = serde_json::to_value(&row).unwrap();
         assert_eq!((v["runtime"].as_str(), v["optimised"].as_bool()), (Some("goethe-engine"), Some(true)));
         let avail = ModelRow { runtime: None, ..row };

@@ -1935,9 +1935,17 @@ impl Picker {
         let gpus_head = if multi { format!("{:>4}{GAP}", "GPUS") } else { String::new() };
         let head = format!("    {:<mw$}  {GAP}{:>NUM$}{GAP}{:>NUM$}{GAP}{gpus_head}{}", "MODEL", "SIZE", mem, if nw >= 8 { "NOTE" } else { "" });
         let mut out = vec![paint(head.trim_end(), Color::Bold)];
+        let featured = self.data.rows.iter().take_while(|r| r.featured).count();
+        let rows = if featured > 0 { rows.saturating_sub(2).max(1) } else { rows };
         let at = self.at.min(self.data.rows.len().saturating_sub(1));
         let start = window(self.data.rows.len(), at, rows);
         for (i, r) in self.data.rows.iter().enumerate().skip(start).take(rows) {
+            if i == 0 && featured > 0 {
+                out.push(format!("    {}", paint("Featured models", Color::Bold)));
+            }
+            if i == featured && featured > 0 && start < featured {
+                out.push(String::new());
+            }
             let (here, picked) = (i == self.at, self.chosen[i]);
             let cursor = if here { sgr(&hl(), "\u{27a4}") } else { " ".to_string() };
             let mark = match (picked, r.installed) {
@@ -2169,7 +2177,7 @@ mod tests {
     use super::*;
 
     fn row(id: &str, installed: bool) -> PickRow {
-        PickRow { id: id.into(), size_gb: 16.4, vram_gb: 21.0, gpus: 1, installed, gated: false, optimised: false }
+        PickRow { id: id.into(), size_gb: 16.4, vram_gb: 21.0, gpus: 1, installed, featured: false, gated: false, optimised: false }
     }
 
     fn picker() -> Picker {
@@ -2186,6 +2194,18 @@ mod tests {
         });
         p.account = None;
         p
+    }
+
+    #[test]
+    fn featured_models_come_first_under_their_own_heading_then_an_empty_row() {
+        let mut p = picker();
+        p.data.rows.insert(0, PickRow { featured: true, optimised: true, ..row("org/star", false) });
+        p.chosen.insert(0, false);
+        let t = text(p.table(120, 20));
+        let at = |s: &str| t.iter().position(|l| l.contains(s)).unwrap_or_else(|| panic!("{s} missing: {t:?}"));
+        assert!(at("Featured models") < at("org/star") && at("org/star") < at("org/small"), "{t:?}");
+        assert_eq!(t[at("org/star") + 1].trim(), "", "an empty row parts the featured models from the rest: {t:?}");
+        assert!(!text(picker().table(120, 20)).iter().any(|l| l.contains("Featured")), "no heading without a featured model");
     }
 
     fn text(lines: Vec<String>) -> Vec<String> {
