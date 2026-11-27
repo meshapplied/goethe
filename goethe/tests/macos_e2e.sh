@@ -34,7 +34,7 @@ grep -E '^version\s*=' "${ROOT}/crates/goethe/Cargo.toml" | head -n1 | sed 's/.*
 openssl ecparam -genkey -name prime256v1 -noout -out "${WORK}/test.key"
 openssl ec -in "${WORK}/test.key" -pubout -out "${WORK}/test_pub.pem" 2>/dev/null
 export GOETHE_RELEASE_PUB="${WORK}/test_pub.pem"
-(cd "${ROOT}" && cargo run --locked -q -p goethe-core --example registry -- build registry.src.json "${CDN}/v1/registry.json")
+(cd "${ROOT}" && cargo run --release --locked -q -p goethe-core --example registry -- build registry.src.json "${CDN}/v1/registry.json")
 openssl dgst -sha256 -sign "${WORK}/test.key" -out "${CDN}/v1/registry.json.sig" "${CDN}/v1/registry.json"
 bash "${ROOT}/packaging/subst_install_pubkey.sh" "${ROOT}/cdn/install.sh" "${WORK}/test_pub.pem" "${CDN}/install.sh"
 (cd "${CDN}" && find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
