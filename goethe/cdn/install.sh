@@ -137,6 +137,15 @@ get() {
   curl -fsSL --proto-redir -all,https --retry 3 --retry-delay 2 -K <(auth_conf) "${BASE}/$1" -o "$2"
 }
 
+get_fresh() {
+  # The same file past the package host's cache (a query it has never seen); a file:// package has no cache.
+  if [[ "${BASE}" == file://* ]]; then get "$1" "$2"; else get "$1?fresh=$(date +%s)-${RANDOM}" "$2"; fi
+}
+
+list_signed() {
+  openssl dgst -sha256 -verify "${TMP}/release_pub.pem" -signature "${TMP}/SHA256SUMS.sig" "${TMP}/SHA256SUMS" >/dev/null 2>&1
+}
+
 check_pkg_url() {
   # https or file:// only; plain http just for a loopback host, or a test host with GOETHE_ALLOW_HTTP=1, because the package token travels with every request.
   local host
@@ -172,18 +181,19 @@ pick_base() {
 }
 
 verify_package() {
-  # SHA256SUMS signed by the release key embedded above, then goethe for this platform against it.
+  # SHA256SUMS signed by the release key embedded above, then goethe for this platform against it; a mismatch fetches once more past the host's cache, which may hold files of two releases for a few minutes after one is published.
   local want
   [[ "${GOETHE_RELEASE_PUB_PEM}" != *"__GOETHE_RELEASE_PUB_PEM__"* ]] || die INSTALL_NO_KEY "this install.sh has no release key; use the one from ${DEFAULT_PKG_URL}"
   printf '%s\n' "${GOETHE_RELEASE_PUB_PEM}" >"${TMP}/release_pub.pem"
   get SHA256SUMS "${TMP}/SHA256SUMS" || die INSTALL_DOWNLOAD "could not download ${BASE}/SHA256SUMS${VERSION:+ (is ${VERSION} a published version?)}"
   get SHA256SUMS.sig "${TMP}/SHA256SUMS.sig" || die INSTALL_DOWNLOAD "could not download ${BASE}/SHA256SUMS.sig"
-  openssl dgst -sha256 -verify "${TMP}/release_pub.pem" -signature "${TMP}/SHA256SUMS.sig" "${TMP}/SHA256SUMS" >/dev/null 2>&1 ||
+  list_signed || { get_fresh SHA256SUMS "${TMP}/SHA256SUMS" && get_fresh SHA256SUMS.sig "${TMP}/SHA256SUMS.sig" && list_signed; } ||
     die INSTALL_SIGNATURE "the package list is not signed by the Goethe release key; nothing was installed"
   echo "  SHA256SUMS signed by the Goethe release key; every download is checked against it"
   want="$(awk -v p="bin/${PLATFORM}/goethe" '$2 == p { print $1; exit }' "${TMP}/SHA256SUMS")"
   [[ -n "${want}" ]] || die INSTALL_NO_BUILD "this release has no goethe for ${PLATFORM}"
   get "bin/${PLATFORM}/goethe" "${TMP}/goethe" || die INSTALL_DOWNLOAD "could not download goethe for ${PLATFORM}"
+  [[ "$(sha256_of "${TMP}/goethe")" == "${want}" ]] || get_fresh "bin/${PLATFORM}/goethe" "${TMP}/goethe" || die INSTALL_DOWNLOAD "could not download goethe for ${PLATFORM}"
   [[ "$(sha256_of "${TMP}/goethe")" == "${want}" ]] || die INSTALL_SIGNATURE "the downloaded goethe does not match the signed package list; nothing was installed"
   chmod +x "${TMP}/goethe"
   "${TMP}/goethe" --version >/dev/null 2>&1 || die INSTALL_BINARY "the downloaded goethe does not run on this machine; nothing was installed"
