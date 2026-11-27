@@ -249,6 +249,14 @@ fn verdict(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<u
     }
 }
 
+fn least(view: &View, id: &str, input: &ChooserInput, pinned: Option<usize>, runtime: Option<&str>) -> Option<(f64, usize)> {
+    // The least VRAM in total and the GPUs a model runs in here: one user at the floor context (auto's last rung), not the most auto would take.
+    match verdict(Some(view), id, &crate::chooser::bottom(input), pinned, runtime) {
+        Verdict::Fits { total, per_gpu, .. } => Some((total, (total / per_gpu).round().max(1.0) as usize)),
+        _ => None,
+    }
+}
+
 const OPTIMISED: &str = " (optimised kernels available)";
 const GATED_FIT: &str = " (gated: needs your Hugging Face token or access)";
 
@@ -391,10 +399,7 @@ pub fn picker_data(home: &Path) -> Result<PickData, String> {
     let index = crate::packs::catalog(home);
     let linked = crate::client::link::load_credentials(home).ok().flatten().is_some();
     let packs = index.as_deref().map(|ix| crate::packs::offers_any(ix, &archs)).unwrap_or_default();
-    let need = |id: &str, input: &ChooserInput, pinned: Option<usize>, runtime: Option<&str>| match verdict(Some(&whole), id, input, pinned, runtime) {
-        Verdict::Fits { total, per_gpu, .. } => Some((total, (total / per_gpu).round().max(1.0) as usize)),
-        _ => None,
-    };
+    let need = |id: &str, input: &ChooserInput, pinned: Option<usize>, runtime: Option<&str>| least(&whole, id, input, pinned, runtime);
     let mut rows = Vec::new();
     for m in &installed {
         let pinned = (m.default_tp > 0).then_some(m.default_tp as usize);
@@ -902,6 +907,36 @@ mod tests {
         assert_eq!(cut.lines().count(), 41);
         assert!(cut.ends_with("... 15 more lines; all of them: goethe models --all\n"), "{cut}");
         assert_eq!(cap_screen("a\nb\n", 40), "a\nb\n");
+    }
+
+    #[test]
+    fn the_install_table_shows_the_least_vram_not_auto_s_most() {
+        // A 1M-context model on a 95 GB GPU: auto takes its full context for four users, the table shows one user at the floor.
+        let gpu = crate::hw::GpuState {
+            index: 0,
+            uuid: "test-0".into(),
+            name: "TEST".into(),
+            compute_capability: "12.0".into(),
+            vram_total_mb: 96 * 1024,
+            vram_used_mb: 1024,
+            vram_free_mb: 95 * 1024,
+            pcie_gen: 4,
+            pcie_width: 16,
+            pcie_gen_max: 4,
+            pcie_width_max: 16,
+            running_processes: vec![],
+            unified_memory: false,
+            numa_node: None,
+        };
+        let hw = crate::hw::HardwareState { profiled_at: "t".into(), driver: "t".into(), gpus: vec![gpu], links: vec![], unavailable: vec![], host: None, environment: None };
+        let tmp = tempfile::tempdir().unwrap();
+        let view = View::new(tmp.path(), hw);
+        let m: crate::registry::RegistryModel = serde_json::from_value(json!({"id": "org/long", "static_vram_gb": 18.0, "kv_elems_per_token": 16384,
+            "max_ctx": 1048576, "supported_sm": ["12.0"], "num_attention_heads": 24, "num_kv_heads": 8})).unwrap();
+        let input = registry_input(&m);
+        let Verdict::Fits { total: most, .. } = verdict(Some(&view), &m.id, &input, None, None) else { panic!("fits") };
+        let (min, gpus) = least(&view, &m.id, &input, None, None).unwrap();
+        assert!(most > 50.0 && min < 22.0 && gpus == 1, "auto {most:.1} GB, least {min:.1} GB");
     }
 
     #[test]
