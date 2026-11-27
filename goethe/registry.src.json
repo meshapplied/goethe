@@ -300,6 +300,9 @@
   {
    "id": "nvidia/DeepSeek-V3.1-NVFP4",
    "revision": "68b4a17cce1482e94030ca00dacda3dec4c6359d",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
    "supported_sm": [
     "8.6",
     "12.0",
@@ -315,6 +318,9 @@
   {
    "id": "nvidia/DeepSeek-V3-0324-NVFP4",
    "revision": "d03662cdc34b56eab1315d4557e395e6b4944782",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
    "supported_sm": [
     "8.6",
     "12.0",
@@ -369,6 +375,9 @@
   {
    "id": "nvidia/DeepSeek-R1-NVFP4",
    "revision": "4bedb8a695a119b1a38d16a675c4665e58708aea",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
    "supported_sm": [
     "8.6",
     "12.0",
@@ -485,6 +494,9 @@
   {
    "id": "microsoft/Phi-4-multimodal-instruct",
    "revision": "93f923e1a7727d1c4f446756212d9d3e8fcc5d81",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
    "supported_sm": [
     "8.6",
     "12.0",
@@ -587,6 +599,9 @@
   {
    "id": "inclusionAI/Ling-3.1-flash",
    "revision": "e5623f6e4c34e9f2ca40bec867b9210db42ac76c",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
    "supported_sm": [
     "8.9",
     "9.0",
@@ -658,6 +673,9 @@
   {
    "id": "moonshotai/Kimi-K2.6",
    "revision": "7eb5002f6aadc958aed6a9177b7ed26bb94011bb",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
    "supported_sm": [
     "8.6",
     "12.0",
@@ -675,6 +693,9 @@
   {
    "id": "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
    "revision": "fb0ee0bc6b3f70342afd8d84cb80dbadbaa8a1fe",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
    "supported_sm": [
     "8.9",
     "9.0",
@@ -694,6 +715,9 @@
   {
    "id": "moonshotai/Kimi-K2.7-Code",
    "revision": "74797c9c62378b951a1f6fcf5c4631024e9b8bef",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
    "supported_sm": [
     "8.6",
     "12.0",
@@ -711,6 +735,9 @@
   {
    "id": "inclusionAI/Ling-3.0-flash",
    "revision": "fcc60a52b34c69c6271d0ac8a8cb0815020b6a43",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
    "supported_sm": [
     "8.6",
     "12.0",
