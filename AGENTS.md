@@ -6,7 +6,7 @@ How to work on Goethe with a coding agent: what is where, the rules a change mus
 - `goethe/crates/goethe`: the `goethe` CLI (commands, menu, `goethe ask`).
 - `goethe/crates/goethed`: the daemon (engine supervisor, gateway mux, heartbeat).
 - `goethe/crates/core`: the shared library (install, models, engines, packs, console link, doctor, usage and error logs).
-- `goethe/crates/proto`: the wire contract between a node, goethe-server and the console (state events, signed commands, sealed secrets).
+- `goethe/crates/proto`: the wire contract between a node, the platform and the console (state events, signed commands, sealed secrets).
 - `goethe/cdn`: `install.sh` (Linux, macOS, WSL) and `install.ps1` (Windows: enables WSL2, then runs `install.sh`; never duplicate install logic in PowerShell).
 - `goethe/packaging`: release build, signing, container image, ask model build.
 - `goethe/nginx`, `goethe/sglang`, `goethe/llama-cpp`, `goethe/goethe-engine`, `goethe/pyenv`: gateway templates, engine pins and patches, Python environment layers.

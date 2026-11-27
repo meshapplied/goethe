@@ -129,7 +129,7 @@ fn handle_client(stream: UnixStream) {
 }
 
 fn bind_socket(sock: &std::path::Path) -> TokioUnixListener {
-    // Bind goethe.sock owner-only from the first instant: inside a fresh 0700 folder, chmod 600, then renamed into place (a process-wide umask would race other threads' files); failing that, refuse to serve. The instance lock already cleared any stale file.
+    // Bind goethe.sock owner-only from the first instant: inside a fresh 0700 folder (a short name: macOS allows 104 bytes for a socket path), chmod 600, then renamed into place (a process-wide umask would race other threads' files); failing that, refuse to serve. The instance lock already cleared any stale file.
     use std::os::unix::fs::PermissionsExt;
     let parent = sock.parent().unwrap_or(std::path::Path::new("."));
     let _ = std::fs::create_dir_all(parent);
@@ -137,7 +137,7 @@ fn bind_socket(sock: &std::path::Path) -> TokioUnixListener {
         eprintln!("bind {}: {e}", sock.display());
         std::process::exit(1)
     };
-    let dir = goethe_core::paths::private_dir_in(parent, ".sock").unwrap_or_else(|e| die(e));
+    let dir = goethe_core::paths::private_dir_in(parent, ".s").unwrap_or_else(|e| die(e));
     let tmp = dir.join("s");
     let bound = UnixListener::bind(&tmp).and_then(|l| {
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
@@ -298,7 +298,7 @@ mod tests {
             assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         }
         assert!(racer.join().unwrap());
-        let ours = format!(".sock-{pid}-");
+        let ours = format!(".s-{pid}-");
         assert!(std::fs::read_dir(&tmp).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(&ours)), "the bind folder is gone");
         let _ = std::fs::remove_file(&path);
     }
