@@ -64,7 +64,7 @@ fn vram_bar(goethe_mb: u64, used_mb: u64, total_mb: u64) -> String {
     )
 }
 
-pub fn legend() -> String {
+fn legend() -> String {
     format!(
         "{} goethe models   \u{2588} other processes   {} free   {} {}",
         sgr(&crate::theme::main(), "\u{2588}"),
@@ -218,7 +218,7 @@ pub enum Proc {
     Part(u32, String),
 }
 
-pub fn group_processes(procs: &[(u32, bool)], owner: impl Fn(u32) -> Option<(i32, String)>, role: impl Fn(u32) -> String) -> Vec<Proc> {
+fn group_processes(procs: &[(u32, bool)], owner: impl Fn(u32) -> Option<(i32, String)>, role: impl Fn(u32) -> String) -> Vec<Proc> {
     // A goethe instance's leader with its model, then each of its other processes on this GPU marked by role (the scheduler); other processes one each.
     let mut ours: Vec<(u32, u32, String)> = Vec::new();
     let mut rest = Vec::new();
@@ -335,7 +335,7 @@ pub fn width_for(terminal: usize) -> usize {
     terminal.saturating_sub(4).min(MAX_WIDTH)
 }
 
-pub fn summary_line(s: &Summary, width: usize) -> String {
+fn summary_line(s: &Summary, width: usize) -> String {
     // Status, environment, GPUs, VRAM (GPU memory when unified), disk and OS on one line; the last items give way when the terminal is narrow.
     let state = if s.running { paint("running", Color::Green) } else { paint("stopped", Color::Red) };
     let label = |t: &str| paint(t, Color::Gray);
@@ -357,7 +357,7 @@ pub fn summary_line(s: &Summary, width: usize) -> String {
     parts.join(GAP)
 }
 
-pub fn gpu_lines(gpus: &[GpuLine], width: usize) -> Vec<String> {
+fn gpu_lines(gpus: &[GpuLine], width: usize) -> Vec<String> {
     // One block per GPU: VRAM used, a 10-block bar and the total, then each process on its own line, the status, and the bandwidth bar with its percent.
     let used_w = gpus.iter().map(|g| gb(g.used_mb).len()).max().unwrap_or(7);
     let total_w = gpus.iter().map(|g| gb(g.total_mb).len()).max().unwrap_or(7);
@@ -425,7 +425,7 @@ pub(crate) fn strip(s: &str) -> String {
     out
 }
 
-pub fn cpu_lines(c: &Cpu, width: usize) -> Vec<String> {
+fn cpu_lines(c: &Cpu, width: usize) -> Vec<String> {
     let row = |label: &str, f: f64| format!("{:<7}{} {:>6}", label, bar(f, HALF_SEGMENTS), format!("{:.1}%", f * 100.0));
     let mut out = vec![section("\u{25a3}", "CPU", width), row("Total", c.total)];
     for (i, f) in &c.top {
@@ -435,7 +435,7 @@ pub fn cpu_lines(c: &Cpu, width: usize) -> Vec<String> {
     out
 }
 
-pub fn memory_lines(m: &Memory, width: usize) -> Vec<String> {
+fn memory_lines(m: &Memory, width: usize) -> Vec<String> {
     let total = m.total_kb.max(1) as f64;
     let used = m.total_kb.saturating_sub(m.available_kb) as f64;
     let kgb = |kb: f64| format!("{:.1} GB", kb / 1024.0 / 1024.0);
@@ -455,7 +455,7 @@ pub fn render(v: &StatusView, width: usize) -> Vec<String> {
     let mut out = vec![String::new(), format!("  {}", summary_line(&v.summary, w)), String::new(), String::new(), String::new(), String::new()];
     out.extend(gpu_lines(&v.gpus, w).into_iter().map(|l| format!("  {l}")));
     out.push(String::new());
-    let half = (w - GAP.len()) / 2;
+    let half = w.saturating_sub(GAP.len()) / 2;
     let (left, right) = (cpu_lines(&v.cpu, half), memory_lines(&v.memory, half));
     for i in 0..left.len().max(right.len()) {
         let l = left.get(i).map(|s| clip(s, half)).unwrap_or_default();
@@ -477,7 +477,7 @@ pub fn run_gpus() -> Result<(), String> {
     })
 }
 
-pub fn gpu_render(v: &StatusView, width: usize) -> Vec<String> {
+fn gpu_render(v: &StatusView, width: usize) -> Vec<String> {
     // goethe gpu: the GPU table of the Status page and its legend.
     let w = width_for(width);
     let mut out = vec![String::new()];
@@ -566,6 +566,9 @@ mod tests {
             assert_eq!(rule.chars().count(), 2 + width_for(w), "the GPU rule spans the table: {rule}");
             let cpu = t.iter().find(|l| l.contains("\u{25a3} CPU")).unwrap();
             assert_eq!(cpu.chars().count(), 2 + width_for(w) - (width_for(w) - GAP.len()) % 2, "CPU and memory together span the same width");
+        }
+        for tiny in 0..12 {
+            render(&v, tiny);
         }
     }
 

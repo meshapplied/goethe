@@ -24,17 +24,35 @@ pub fn children(pid: i32) -> Vec<i32> {
     pids().into_iter().filter(|p| stat(*p).is_some_and(|s| s.ppid == pid)).collect()
 }
 
+pub fn unix_secs() -> i64 {
+    // Wall clock seconds since the Unix epoch; 0 when the clock reads before 1970.
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+pub fn unix_ms() -> u64 {
+    // Wall clock milliseconds since the Unix epoch; 0 when the clock reads before 1970.
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
 pub fn random_bytes(buf: &mut [u8]) {
-    // Kernel randomness: getrandom on Linux, getentropy (256 bytes per call) on macOS.
+    // Kernel randomness: getrandom on Linux, getentropy (256 bytes per call) on macOS; a failure panics, since zeros would still look like a valid key.
     #[cfg(target_os = "linux")]
-    unsafe {
-        libc::getrandom(buf.as_mut_ptr().cast(), buf.len(), 0);
+    {
+        let mut done = 0;
+        while done < buf.len() {
+            let n = unsafe { libc::getrandom(buf[done..].as_mut_ptr().cast(), buf.len() - done, 0) };
+            let err = std::io::Error::last_os_error();
+            if n < 0 && err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            assert!(n > 0, "kernel randomness unavailable: {err}");
+            done += n as usize;
+        }
     }
     #[cfg(target_os = "macos")]
     for chunk in buf.chunks_mut(256) {
-        unsafe {
-            libc::getentropy(chunk.as_mut_ptr().cast(), chunk.len());
-        }
+        let rc = unsafe { libc::getentropy(chunk.as_mut_ptr().cast(), chunk.len()) };
+        assert_eq!(rc, 0, "kernel randomness unavailable: {}", std::io::Error::last_os_error());
     }
 }
 
@@ -58,7 +76,7 @@ mod imp {
         parse_stat(&text)
     }
 
-    pub fn parse_stat(text: &str) -> Option<ProcStat> {
+    fn parse_stat(text: &str) -> Option<ProcStat> {
         let rest = text.get(text.rfind(')')? + 2..)?;
         let fields: Vec<&str> = rest.split_whitespace().collect();
         Some(ProcStat { state: fields.first()?.chars().next()?, ppid: fields.get(1)?.parse().ok()?, start_ticks: fields.get(19)?.parse().ok()? })
@@ -93,7 +111,7 @@ mod imp {
         std::fs::metadata(format!("/proc/{pid}")).ok().map(|m| m.uid())
     }
 
-    pub fn rss_bytes(pid: i32) -> Option<u64> {
+    pub(crate) fn rss_bytes(pid: i32) -> Option<u64> {
         let text = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
         let kb: u64 = text.lines().find(|l| l.starts_with("VmRSS:"))?.split_whitespace().nth(1)?.parse().ok()?;
         Some(kb * 1024)
@@ -117,11 +135,6 @@ mod imp {
     pub fn boot_epoch() -> Option<i64> {
         let text = std::fs::read_to_string("/proc/stat").ok()?;
         text.lines().find_map(|l| l.strip_prefix("btime ")).and_then(|v| v.trim().parse().ok())
-    }
-
-    pub fn ticks_per_second() -> u64 {
-        let t = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-        if t > 0 { t as u64 } else { 100 }
     }
 
     pub fn memory() -> Memory {
@@ -201,7 +214,7 @@ mod imp {
         parse_procargs(&buf)
     }
 
-    pub fn parse_procargs(buf: &[u8]) -> Option<(Vec<String>, Vec<String>)> {
+    pub(crate) fn parse_procargs(buf: &[u8]) -> Option<(Vec<String>, Vec<String>)> {
         let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?).max(0) as usize;
         let mut at = 4;
         while at < buf.len() && buf[at] != 0 {
@@ -303,10 +316,6 @@ mod imp {
         (rc == 0).then_some(tv.tv_sec)
     }
 
-    pub fn ticks_per_second() -> u64 {
-        1_000_000
-    }
-
     pub fn memory() -> Memory {
         // available = free + speculative + the larger of inactive or file-backed + purgeable; cached = file-backed.
         let total = sysctl_u64("hw.memsize").unwrap_or(0);
@@ -390,6 +399,13 @@ mod tests {
     fn our_own_environment_can_be_read_back() {
         let me = std::process::id() as i32;
         assert!(environ(me).is_some_and(|e| e.iter().any(|kv| kv.starts_with("PATH="))));
+    }
+
+    #[test]
+    fn wall_clock_reads_after_boot_in_seconds_and_milliseconds() {
+        let (s, ms) = (unix_secs(), unix_ms());
+        assert!(boot_epoch().is_some_and(|b| b > 0 && b <= s));
+        assert!((ms / 1000).abs_diff(s as u64) <= 1);
     }
 
     #[test]

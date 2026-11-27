@@ -117,6 +117,7 @@ class World:
     serial: int = 7
     bad_sig: bool = False
     pack_401: bool = False
+    store_down: bool = False
     polls: int = 0
     heartbeats: int = 0
     requests: list[str] = field(default_factory=list)
@@ -299,6 +300,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, f.read_bytes(), "application/octet-stream") if f.is_file() else self.reply(404)
         if path == "/packs/v2/index.json":
             return self.reply(200, w.index())
+        if w.store_down and path == "/packs/v2/index.sig":
+            return self.reply(503, {"error": "store_unavailable"})
         if path == "/packs/v2/index.sig":
             return self.reply(200, (b"0" * 64 if w.bad_sig else sha(w.index()).encode()), "text/plain")
         if w.pack_401 and path.startswith("/packs/v2/pack/"):
@@ -503,12 +506,9 @@ class Cell:
 
     @staticmethod
     def engine_version() -> str:
-        text = (ENGINE / "crates/core/src/pyenv.rs").read_text()
-        return (
-            re.search(r"ENGINE_VERSION: &str = \"([0-9.]+)\"", text).group(1)
-            if re.search(r"ENGINE_VERSION: &str = \"([0-9.]+)\"", text)
-            else "0.3.0"
-        )
+        """The goethe-engine version goethe pins: goethe-engine/PIN, the one place it is written."""
+        pin = (ENGINE / "goethe-engine/PIN").read_text()
+        return re.search(r"^GOETHE_ENGINE_VERSION=([0-9.]+)$", pin, re.M).group(1)
 
     def run(
         self, *args: str, timeout: float = 120, env: dict | None = None, interrupt_after: float | None = None

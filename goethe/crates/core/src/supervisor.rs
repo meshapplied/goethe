@@ -36,7 +36,7 @@ use supervisor_load::tree_cpu_ticks;
 
 #[path = "supervisor_lifecycle.rs"]
 mod supervisor_lifecycle;
-pub use supervisor_lifecycle::{graceful_shutdown, handle_ps, handle_unload, reconcile_on_start};
+pub use supervisor_lifecycle::{graceful_shutdown, handle_ps, handle_unload, handle_unload_instance, reconcile_on_start};
 use supervisor_lifecycle::stop_processes;
 
 static SLOT_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
@@ -50,7 +50,7 @@ const HTTP_PROBE_SECS: u64 = 25;
 const WARM_UP_SECS: u64 = 900;
 const USER_GATE_WAIT: Duration = Duration::from_secs(590);
 
-pub type LoadErr = (i32, String, Value);
+type LoadErr = (i32, String, Value);
 
 pub(super) fn slot_lock(key: &str) -> Arc<Mutex<()>> {
     let map = SLOT_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -87,6 +87,8 @@ pub struct LoadParams {
     pub slot_key: Option<String>,
     #[serde(default)]
     pub replica: bool,
+    #[serde(default)]
+    pub numerics: Option<goethe_proto::Numerics>,
 }
 
 struct InstRow {
@@ -258,7 +260,7 @@ pub fn handle_load(params: LoadParams) -> Result<(Value, String), LoadErr> {
 }
 
 fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
-    // Under the planning lock: slot and replica checks, plan on live VRAM, then fit, notice and gate.
+    // Under the planning lock: slot and replica checks (a copy still starting is waited for like a fresh load, so "already loaded" names an engine that answers; one in crash backoff counts at once), plan on live VRAM, then fit, notice and gate.
     let model_id = &req.params.model_id;
     if let Some(slot) = req.params.slot_key.as_deref() {
         let live = format!("SELECT 1 FROM loaded_instances WHERE slot_key = ?1 AND status IN {LIVE} AND pid > 0");
@@ -271,6 +273,9 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
     }
     let copies = copies_of(con, model_id);
     if let (None, false, Some(first)) = (&req.params.slot_key, req.params.replica, copies.first()) {
+        if first.1 == "STARTING" {
+            return Ok(Step::Wait(parse_gpu_csv(&first.2)));
+        }
         let differs = copy_mismatch(&req.params, &req.pinned, &first.2, first.4);
         let message = if differs.is_empty() {
             format!("already loaded: {} on GPU {} (port {}); use --replica to start another copy", first.0, first.2, first.3)
@@ -309,7 +314,7 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
     let runtime = crate::engine_overhead::card_runtime(&req.card);
     let learned_at =
         |t: usize, first: u32| crate::engine_overhead::read_learned(con, model_id, &gpu_name(&snap, first), t as u64, &runtime);
-    let mut plan = match chooser::plan_with(&base, &netted, req.hw.as_ref(), tp, pinned, &learned_at) {
+    let plan = match chooser::plan_with(&base, &netted, req.hw.as_ref(), tp, pinned, &learned_at) {
         Ok(plan) => plan,
         Err(e) => chooser::plan_with(&base, &raw, req.hw.as_ref(), tp, pinned, &learned_at)
             .map_err(|_| missing_error(e.message, &foreign::foreign_on(&snap, &e.gpus, &managed, &live)))?,
@@ -324,14 +329,10 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
         })
         .collect();
     let gpu_name = gpu_name(&snap, plan.gpus[0]);
-    let fit_ctx = plan.ctx;
     let min_free = free.values().copied().fold(f64::INFINITY, f64::min);
     let mut card = req.card.clone();
     if plan.disable_marlin {
         set_card_env(&mut card, "GOETHE_MARLIN", "0");
-    }
-    if req.params.ctx.is_none() {
-        plan.ctx = chooser::cap_default_ctx(&chooser_input_on(req, &card, plan.ctx, plan.max_conc), plan.tp, &plan.cc, min_free);
     }
     let input = chooser_input_on(req, &card, plan.ctx, plan.max_conc);
     let learned = crate::engine_overhead::read_learned(con, model_id, &gpu_name, plan.tp as u64, &runtime);
@@ -356,8 +357,8 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
         calc::describe(&need)
     );
     let mut reduced = Vec::new();
-    if fit_ctx < req.ctx {
-        reduced.push(format!("context {fit_ctx} (asked {})", req.ctx));
+    if plan.ctx < req.ctx {
+        reduced.push(format!("context {} (asked {})", plan.ctx, req.ctx));
     }
     if plan.max_conc < req.max_conc {
         reduced.push(format!("{} parallel requests (asked {})", plan.max_conc, req.max_conc));
@@ -380,12 +381,6 @@ fn plan_and_start(req: &LoadReq, con: &Connection) -> Result<Step, LoadErr> {
             notices.push_str(&line);
             notices.push('\n');
         }
-    }
-    if plan.ctx < fit_ctx {
-        notices.push_str(&format!(
-            "context capped to {} (the KV cache would take over 40% of the {min_free:.1} GB free); --ctx raises it\n",
-            plan.ctx
-        ));
     }
     let starting = start_engine(req, con, &plan, FitSpawn { need, learned, min_free, gpu_name, card })?;
     Ok(Step::Started(Box::new(starting), notices))
@@ -466,6 +461,8 @@ fn start_engine(req: &LoadReq, con: &Connection, plan: &LoadPlan, fit: FitSpawn)
         port,
         ctx: plan.ctx,
         max_conc: plan.max_conc,
+        pool_tokens: chooser::kv_tokens(plan.ctx, plan.max_conc, chooser::card_floor(&card)),
+        numerics: req.params.numerics,
         tp,
         mem_frac,
         gpus: &plan.gpus,
@@ -512,7 +509,7 @@ fn start_engine(req: &LoadReq, con: &Connection, plan: &LoadPlan, fit: FitSpawn)
         stop_one(&req.home, &identity);
         return Err(err1(format!("record instance: {e}; engine stopped")));
     }
-    crate::platform::state_changed();
+    crate::client::link::state_changed();
     let hold = coordinator::reserve(&instance_id, &plan.gpus, budget);
     if let Err(e) = crate::logs::append_spawn_index(&req.home, &instance_id, model_id, &log_path) {
         eprintln!("append_spawn_index({instance_id}): {e}");
@@ -588,7 +585,10 @@ fn fetch_installed(con: &Connection, model_id: &str) -> Result<InstRow, String> 
             })
         },
     )
-    .map_err(|_| format!("model {model_id} not installed"))
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => format!("model {model_id} not installed"),
+        e => format!("model {model_id}: the installed models table cannot be read: {e}"),
+    })
 }
 
 fn default_ctx(row: &InstRow) -> u64 {
@@ -596,14 +596,8 @@ fn default_ctx(row: &InstRow) -> u64 {
 }
 
 fn kv_bytes_per_token(row: &InstRow, card: &toml::Value) -> u64 {
-    // KV bytes per token for the card's kv_cache_dtype; auto keeps the installed figure (model dtype).
     let elems = row.kv_elems_per_token.unwrap_or(row.kv_bytes_per_token).max(0) as u64;
-    match card.get("kv_cache_dtype").and_then(|v| v.as_str()).map(str::to_ascii_lowercase) {
-        Some(d) if d.contains("fp8") => elems,
-        Some(d) if d.contains("fp4") => elems.div_ceil(2),
-        Some(d) if d.contains("16") => elems * 2,
-        _ => row.kv_bytes_per_token.max(0) as u64,
-    }
+    crate::install::card_kv_bytes(card, elems, row.kv_bytes_per_token.max(0) as u64)
 }
 
 fn chooser_input(req: &LoadReq, ctx: u64, max_conc: u64) -> ChooserInput {
@@ -627,7 +621,7 @@ fn chooser_input_on(req: &LoadReq, card: &toml::Value, ctx: u64, max_conc: u64) 
         ctx,
         max_conc,
     );
-    crate::engines::llama_cpp::with_header_kv(input, &req.model_path, card)
+    crate::engines::llama_cpp::with_header_kv(input.pin(req.params.ctx, req.params.max_conc), &req.model_path, card)
 }
 
 fn set_card_env(card: &mut toml::Value, key: &str, val: &str) {
@@ -768,10 +762,7 @@ pub(super) fn warm_up(s: &Starting) {
         .set("Content-Type", "application/json")
         .send_string(&body.to_string());
     let outcome = match res {
-        Ok(_) => {
-            crate::progress::record_warmup(&s.home, &s.params.model_id, started.elapsed().as_secs());
-            format!("warm-up request took {:.0} s", started.elapsed().as_secs_f64())
-        }
+        Ok(_) => format!("warm-up request took {:.0} s", started.elapsed().as_secs_f64()),
         Err(e) => format!("warm-up request skipped ({e})"),
     };
     append_goethed_log(&s.home, &format!("{}: {outcome}\n", s.instance_id));
@@ -797,13 +788,6 @@ pub(super) fn log_file_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
-pub(super) fn now_epoch_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 pub fn watchdog_tick() {
     // Probe RUNNING engines; restart dead ones within budget, else stop them (verified) and mark FAILED.
     let _guard = match WATCHDOG_TICK_LOCK.try_lock() {
@@ -819,7 +803,7 @@ pub fn watchdog_tick() {
         return;
     };
     retry_stuck_stops(&con, &home);
-    let now = now_epoch_secs();
+    let now = crate::sys::unix_secs();
     for i in insts(&con, "status = 'RUNNING'", &[]).unwrap_or_default() {
         let alive = i.identity.as_ref().is_some_and(proc_ident::leader_alive);
         if !alive && i.identity.as_ref().is_some_and(proc_ident::leader_unreadable) {
@@ -863,7 +847,7 @@ pub fn watchdog_tick() {
         let params = load_params_for_slot(&con, &i.slot_key, &i.model_id);
         let backoff = crate::watchdog_policy::restart_backoff_secs(i.restarts);
         if params.is_some() {
-            next_attempts().insert(i.slot_key.clone(), now_epoch_secs() + backoff as i64);
+            next_attempts().insert(i.slot_key.clone(), crate::sys::unix_secs() + backoff as i64);
         }
         let to = if params.is_some() { "RESTARTING" } else { "FAILED" };
         match (retire(&con, &home, &i, "STOPPING", to), params) {
@@ -892,7 +876,7 @@ fn retry_stuck_stops(con: &Connection, home: &Path) {
             match load_params_for_slot(con, &i.slot_key, &i.model_id) {
                 Some(params) => {
                     let backoff = crate::watchdog_policy::restart_backoff_secs(i.restarts);
-                    next_attempts().insert(i.slot_key.clone(), now_epoch_secs() + backoff as i64);
+                    next_attempts().insert(i.slot_key.clone(), crate::sys::unix_secs() + backoff as i64);
                     schedule_restart(params, i.restarts, backoff);
                 }
                 None => {
@@ -924,7 +908,7 @@ fn retire(con: &Connection, home: &Path, i: &Inst, from: &str, to: &str) -> bool
     );
     let _ = con.execute("DELETE FROM watchdog_probe_state WHERE instance_id = ?1", [&i.instance_id]);
     load_slot::clear_instance_notices(&i.instance_id);
-    crate::platform::state_changed();
+    crate::client::link::state_changed();
     true
 }
 
@@ -1038,7 +1022,7 @@ fn watchdog_may_restart(con: &Connection, slot_key: &str) -> bool {
         )
         .ok();
     let (start, count) = row.map(|(s, c)| (Some(s), c)).unwrap_or((None, 0));
-    match crate::watchdog_policy::decide_restart(now_epoch_secs(), start, count) {
+    match crate::watchdog_policy::decide_restart(crate::sys::unix_secs(), start, count) {
         crate::watchdog_policy::RestartDecision::DenyFailed => false,
         crate::watchdog_policy::RestartDecision::Allow {
             new_window_start,
@@ -1054,28 +1038,29 @@ fn watchdog_may_restart(con: &Connection, slot_key: &str) -> bool {
     }
 }
 
-fn load_params_for_slot(con: &Connection, slot_key: &str, model_id: &str) -> Option<LoadParams> {
+pub(crate) fn load_params_for_slot(con: &Connection, slot_key: &str, model_id: &str) -> Option<LoadParams> {
     // Load parameters recorded for exactly this desired slot.
-    let (gpus, ctx, max_conc, tp, extra): (Option<String>, Option<i64>, Option<i64>, Option<i64>, String) = con
-        .query_row(
-            "SELECT gpus, ctx, max_conc, tp, extra_sglang_args FROM desired_loads WHERE slot_key = ?1",
-            [slot_key],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )
-        .ok()?;
-    Some(LoadParams {
-        model_id: model_id.to_string(),
-        gpus,
-        ctx: ctx.map(|v| v as u64),
-        max_conc: max_conc.map(|v| v as u64),
-        tp: tp.map(|v| v as u64),
-        extra_sglang_args: serde_json::from_str(&extra).unwrap_or_default(),
-        force: true,
-        yes: true,
-        restart_count: None,
-        slot_key: Some(slot_key.to_string()),
-        replica: false,
-    })
+    con.query_row(
+        "SELECT gpus, ctx, max_conc, tp, extra_sglang_args, numerics FROM desired_loads WHERE slot_key = ?1",
+        [slot_key],
+        |r| {
+            Ok(LoadParams {
+                model_id: model_id.to_string(),
+                gpus: r.get(0)?,
+                ctx: r.get::<_, Option<i64>>(1)?.map(|v| v as u64),
+                max_conc: r.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                tp: r.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                extra_sglang_args: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+                force: true,
+                yes: true,
+                restart_count: None,
+                slot_key: Some(slot_key.to_string()),
+                replica: false,
+                numerics: r.get::<_, Option<String>>(5)?.as_deref().and_then(goethe_proto::Numerics::parse),
+            })
+        },
+    )
+    .ok()
 }
 
 fn uuid_simple() -> String {
@@ -1089,6 +1074,14 @@ fn uuid_simple() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_row_is_not_installed_and_any_other_read_error_keeps_its_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = |con: &Connection| fetch_installed(con, "org/m").err().unwrap();
+        assert_eq!(e(&db::open(dir.path()).unwrap()), "model org/m not installed");
+        assert!(e(&Connection::open_in_memory().unwrap()).contains("no such table: installed_models"));
+    }
 
     #[test]
     fn each_task_warms_up_with_a_request_it_answers() {
@@ -1187,6 +1180,31 @@ mod tests {
     }
 
     #[test]
+    fn unloading_one_instance_keeps_the_other_and_its_slot() {
+        with_temp_home(|_home, con| {
+            let (mut child, ticks) = sleeper();
+            insert_running(con, "i1", child.id() as i32, ticks + 5, 30001);
+            insert_running(con, "i2", child.id() as i32, ticks + 5, 30002);
+            con.execute("UPDATE loaded_instances SET slot_key = 'm|1|1' WHERE instance_id = 'i2'", []).unwrap();
+            con.execute("INSERT INTO desired_loads (slot_key, model_id) VALUES ('m|0|0', 'm'), ('m|1|1', 'm')", []).unwrap();
+            handle_unload_instance("i1", false).expect("unload");
+            let left: Vec<(String, String)> = con
+                .prepare("SELECT instance_id, status FROM loaded_instances")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            let desired: Vec<String> =
+                con.prepare("SELECT slot_key FROM desired_loads").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+            assert_eq!(left, [("i2".to_string(), "RUNNING".to_string())]);
+            assert_eq!(desired, ["m|1|1"]);
+            child.kill().unwrap();
+            child.wait().unwrap();
+        });
+    }
+
+    #[test]
     fn unload_clears_desired_even_without_instances() {
         with_temp_home(|_home, con| {
             con.execute("INSERT INTO desired_loads (slot_key, model_id) VALUES ('m|0|0', 'm')", []).unwrap();
@@ -1252,6 +1270,7 @@ mod tests {
                 restart_count: Some(1),
                 slot_key: Some("m|0|0".to_string()),
                 replica: false,
+                numerics: None,
             };
             let (code, msg, _) = handle_load(params).unwrap_err();
             assert_eq!(code, 1);
@@ -1317,6 +1336,7 @@ mod tests {
             restart_count: None,
             slot_key: None,
             replica,
+            numerics: None,
         }
     }
 
@@ -1328,6 +1348,22 @@ mod tests {
             let (result, message) = handle_load(user_load(false)).expect("already loaded is not an error");
             assert_eq!(message, "already loaded: i-first on GPU 0 (port 30007); use --replica to start another copy");
             assert_eq!(result, json!({"instance_id": "i-first", "status": "RUNNING", "already_loaded": true}));
+        });
+    }
+
+    #[test]
+    fn a_load_that_finds_a_copy_still_starting_waits_until_it_runs() {
+        // A load returns once the model answers, also when another copy of it is still starting: "already loaded" never points at an engine that is not ready.
+        with_temp_home(|home, con| {
+            install_m(home, con);
+            insert_running(con, "i-boot", i32::MAX, 1, 30009);
+            con.execute("UPDATE loaded_instances SET status = 'STARTING' WHERE instance_id = 'i-boot'", []).unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || tx.send(handle_load(user_load(false))).unwrap());
+            assert!(rx.recv_timeout(Duration::from_millis(1500)).is_err(), "no answer while the copy is still starting");
+            con.execute("UPDATE loaded_instances SET status = 'RUNNING' WHERE instance_id = 'i-boot'", []).unwrap();
+            let (result, _) = rx.recv_timeout(Duration::from_secs(10)).expect("answers once it runs").expect("already loaded");
+            assert_eq!(result, json!({"instance_id": "i-boot", "status": "RUNNING", "already_loaded": true}));
         });
     }
 
@@ -1366,7 +1402,7 @@ mod tests {
             assert_eq!(row(con), ("RESTARTING".to_string(), 0));
             let ps = handle_ps().unwrap();
             let next = ps[0]["next_attempt_at"].as_i64().expect("next attempt time in ps");
-            assert!(next >= now_epoch_secs());
+            assert!(next >= crate::sys::unix_secs());
             let failed = (0..60).any(|_| {
                 thread::sleep(Duration::from_millis(250));
                 row(con).0 == "FAILED"

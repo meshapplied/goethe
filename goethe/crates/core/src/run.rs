@@ -25,7 +25,7 @@ impl Loaded {
         if !keep {
             watch_signals();
         }
-        Loaded { models: Vec::new(), keep, unload: Box::new(unload_model) }
+        Loaded { models: Vec::new(), keep, unload: Box::new(unload_quietly) }
     }
 
     pub(crate) fn add(&mut self, model: &str) {
@@ -77,7 +77,7 @@ fn watch_signals() {
             unsafe { libc::signal(sig, handler) };
         }
         let read_end = fds[0];
-        std::thread::spawn(move || signal_worker(read_end, &BY_THIS_RUN, &unload_model, &|code| std::process::exit(code)));
+        std::thread::spawn(move || signal_worker(read_end, &BY_THIS_RUN, &unload_quietly, &|code| std::process::exit(code)));
     });
 }
 
@@ -93,10 +93,6 @@ fn signal_worker(read_end: i32, models: &Mutex<Vec<String>>, unload: &dyn Fn(&st
     leave(128 + byte as i32);
 }
 
-fn unload_model(model: &str) {
-    unload_quietly(model);
-}
-
 pub(crate) fn unload_quietly(model: &str) {
     // Hand the unload to a detached goethe unload: run leaves at once and says nothing, the model drains and goes in the background.
     use std::os::unix::process::CommandExt;
@@ -105,7 +101,7 @@ pub(crate) fn unload_quietly(model: &str) {
     let _ = std::process::Command::new(exe).args(["unload", model]).stdin(null()).stdout(null()).stderr(null()).process_group(0).spawn();
 }
 
-pub fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, String> {
+fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, String> {
     // Whether run must load the model first: no when it serves, yes when installed, else the install hint (run never installs).
     match (loaded, installed) {
         (true, _) => Ok(false),
@@ -113,8 +109,6 @@ pub fn load_need(loaded: bool, installed: bool, model: &str) -> Result<bool, Str
         (false, false) => Err(format!("{model} is not installed: goethe install {model}")),
     }
 }
-
-pub const RUN_CTX: u64 = 100_000;
 
 pub(crate) fn wait_routed(home: &std::path::Path, model: &str) -> std::sync::Arc<crate::gateway_cache::Snapshot> {
     // The gateway view once the model serves, or after 15 minutes (target then says it is not loaded).
@@ -129,15 +123,9 @@ pub(crate) fn wait_routed(home: &std::path::Path, model: &str) -> std::sync::Arc
     }
 }
 
-pub(crate) fn run_ctx(home: &std::path::Path, model: &str) -> Option<u64> {
-    // The context run loads a model with: RUN_CTX, or the model's maximum when that is smaller; None (the load default) when unknown.
-    let con = crate::db::open(home).ok()?;
-    let max: i64 = con.query_row("SELECT COALESCE(max_ctx, default_ctx) FROM installed_models WHERE model_id = ?1", [model], |r| r.get(0)).ok()?;
-    run_ctx_for(max)
-}
-
-fn run_ctx_for(max: i64) -> Option<u64> {
-    (max > 0).then(|| RUN_CTX.min(max as u64))
+fn load_params(model: &str) -> Value {
+    // The load run sends: everything auto, as goethe load MODEL, so it settles at what the GPUs have free.
+    json!({"model_id": model, "gpus": null, "ctx": null, "max_conc": null, "tp": null, "force": false, "yes": false, "extra_sglang_args": [], "async_finish": true})
 }
 
 pub(crate) struct Target {
@@ -197,9 +185,7 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
             eprintln!("{model} is still loading; waiting for it (it stays loaded after this run)");
         } else {
             loaded.add(&model);
-            let ctx = run_ctx(&home, &model);
-            let params = json!({"model_id": model, "gpus": null, "ctx": ctx, "max_conc": null, "tp": null, "force": false, "yes": false, "extra_sglang_args": [], "async_finish": true});
-            if let Err(e) = crate::install::run_load(params, false, false) {
+            if let Err(e) = crate::install::run_load(load_params(&model), false, false) {
                 loaded.forget(&model);
                 return Err(e);
             }
@@ -232,7 +218,7 @@ pub fn run(args: &[String], opts: Opts) -> Result<(), String> {
                 match api.chat(&model, &msgs, &mut |_| true) {
                     Ok((reply, _)) => {
                         println!("{}", shown(&reply, opts.thinking));
-                        msgs.push(json!({"role": "assistant", "content": reply}));
+                        msgs.push(crate::chat::assistant_turn(&reply));
                     }
                     Err(e) => {
                         msgs.pop();
@@ -310,7 +296,9 @@ pub(crate) struct Api {
 
 impl Api {
     fn req(&self, method: &str, path: &str) -> ureq::Request {
-        let req = crate::net::agent().request(method, &format!("{}{path}", self.base));
+        // An engine silent past the gateway's wait is taken as hung, so run never waits forever.
+        let agent = crate::net::agent_builder().timeout_read(std::time::Duration::from_secs(crate::nginx::read_timeout_s() + 10)).build();
+        let req = agent.request(method, &format!("{}{path}", self.base));
         match &self.key {
             Some(k) => req.set("Authorization", &format!("Bearer {k}")),
             None => req,
@@ -340,7 +328,7 @@ impl Api {
             let body = json!({"model": model, "messages": [{"role": "user", "content": part}], "stream": false});
             return Ok(self.call("POST", "/chat/completions", Some(body))?["choices"][0]["message"]["content"].as_str().unwrap_or_default().trim().to_string());
         }
-        let (b, name) = ("goethe-run-boundary", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        let (b, name) = ("goethe-run-boundary", form_filename(path));
         let mut body = format!("--{b}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").into_bytes();
         body.extend(audio);
         body.extend(format!("\r\n--{b}--\r\n").as_bytes());
@@ -352,21 +340,39 @@ impl Api {
         // Streams the reply piece by piece into the sink (which says false to stop); returns it whole with its completion tokens (the usage chunk, else the content chunks).
         let body = json!({"model": model, "messages": msgs, "stream": true, "stream_options": {"include_usage": true}}).to_string();
         let r = self.req("POST", "/chat/completions").set("Content-Type", "application/json").send_string(&body).map_err(fail)?;
-        let (mut out, mut chunks, mut usage) = (String::new(), 0, None);
+        let (mut out, mut chunks, mut usage, mut thinking) = (String::new(), 0, None, false);
         for line in BufReader::new(r.into_reader()).lines() {
             let line = line.map_err(|e| e.to_string())?;
             let Some(data) = line.strip_prefix("data:").map(str::trim).filter(|d| *d != "[DONE]") else { continue };
-            let v = serde_json::from_str::<Value>(data).unwrap_or_default();
+            let v = serde_json::from_str::<Value>(data).map_err(|e| format!("the gateway sent a reply that is not JSON: {e}"))?;
+            if let Some(err) = v.get("error") {
+                return Err(err["message"].as_str().map_or_else(|| err.to_string(), str::to_string));
+            }
             usage = v["usage"]["completion_tokens"].as_u64().or(usage);
-            let piece = v["choices"][0]["delta"]["content"].as_str().unwrap_or_default();
+            let piece;
+            (piece, thinking) = reply_piece(&v["choices"][0]["delta"], thinking);
             chunks += u64::from(!piece.is_empty());
-            out.push_str(piece);
-            if !sink(piece) {
+            out.push_str(&piece);
+            if !sink(&piece) {
                 break;
             }
         }
         Ok((out, usage.unwrap_or(chunks)))
     }
+}
+
+fn reply_piece(delta: &Value, thinking: bool) -> (String, bool) {
+    // A streamed delta in the one reply shape chat reads, and whether reasoning is open after it: reasoning an engine sends apart (reasoning_content) goes in think tags, as models that inline it write it.
+    let (think, text) = (delta["reasoning_content"].as_str().unwrap_or_default(), delta["content"].as_str().unwrap_or_default());
+    let open = if think.is_empty() || thinking { "" } else { crate::chat::OPEN };
+    let close = if text.is_empty() || !(thinking || !think.is_empty()) { "" } else { crate::chat::CLOSE };
+    (format!("{open}{think}{close}{text}"), if text.is_empty() { thinking || !think.is_empty() } else { false })
+}
+
+fn form_filename(path: &std::path::Path) -> String {
+    // The audio file's name as a multipart filename: quotes, backslashes and control characters cannot end the header or add one.
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    name.chars().map(|c| if c == '"' || c == '\\' || c.is_control() { '_' } else { c }).collect()
 }
 
 pub(crate) fn embed_line(e: &[f64]) -> String {
@@ -377,15 +383,7 @@ pub(crate) fn embed_line(e: &[f64]) -> String {
 
 fn base64(bytes: &[u8]) -> String {
     // Standard base64 with padding.
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for c in bytes.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            out.push(if i <= c.len() { T[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
-        }
-    }
-    out
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
 }
 
 fn reply(r: Result<ureq::Response, ureq::Error>) -> Result<Value, String> {
@@ -408,6 +406,20 @@ fn fail(e: ureq::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_sent_apart_reads_like_inline_think_tags() {
+        let fold = |ds: &[Value]| ds.iter().fold((String::new(), false), |(s, t), d| { let (p, t) = reply_piece(d, t); (s + &p, t) }).0;
+        let (r, c) = (|s: &str| json!({"reasoning_content": s}), |s: &str| json!({"content": s}));
+        assert_eq!(fold(&[r("a"), r("b"), c("x"), json!({}), c("y")]), "<think>ab</think>xy");
+        assert_eq!(fold(&[c("<think>a</think>"), c("x")]), "<think>a</think>x", "inline reasoning passes unchanged");
+    }
+
+    #[test]
+    fn an_audio_file_name_cannot_break_the_form() {
+        assert_eq!(form_filename(std::path::Path::new("/a/talk.wav")), "talk.wav");
+        assert_eq!(form_filename(std::path::Path::new("/a/x\"\r\nContent-Type: y.wav")), "x___Content-Type: y.wav");
+    }
 
     #[test]
     fn a_signal_unloads_what_this_run_loaded_and_leaves_with_the_shell_code() {
@@ -526,10 +538,9 @@ mod tests {
     }
 
     #[test]
-    fn run_loads_with_a_100k_context_or_the_model_maximum_when_smaller() {
-        assert_eq!(run_ctx_for(262_144), Some(100_000));
-        assert_eq!(run_ctx_for(32_768), Some(32_768));
-        assert_eq!(run_ctx_for(0), None);
+    fn run_loads_like_goethe_load_and_pins_nothing() {
+        let p = load_params("org/m");
+        assert!(["ctx", "max_conc", "tp", "gpus"].iter().all(|k| p[k].is_null()), "{p}");
     }
 
     #[test]

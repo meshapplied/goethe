@@ -23,7 +23,7 @@ pub fn migrate_retired_pkg_env(home: &Path) -> Result<(), String> {
     )
 }
 
-pub fn env_file_text(pkg: &str, registry: Option<&str>, token: Option<&str>, keep_file_url: bool) -> String {
+fn env_file_text(pkg: &str, registry: Option<&str>, token: Option<&str>, keep_file_url: bool) -> String {
     // GOETHE_HOME/goethe.env holds only what differs from the defaults; a file:// package is a one-off unless asked to keep it.
     let pkg = pkg.trim_end_matches('/');
     let mut out = String::new();
@@ -40,7 +40,7 @@ pub fn env_file_text(pkg: &str, registry: Option<&str>, token: Option<&str>, kee
     out
 }
 
-pub fn write_env_file(home: &Path, text: &str) -> Result<(), String> {
+fn write_env_file(home: &Path, text: &str) -> Result<(), String> {
     // Mode 0600 because a package token may be in it; no file at all when everything is the default.
     let path = home.join("goethe.env");
     if text.is_empty() {
@@ -49,16 +49,16 @@ pub fn write_env_file(home: &Path, text: &str) -> Result<(), String> {
             _ => Ok(()),
         };
     }
-    crate::platform::write_private(&path, text.as_bytes())
+    crate::client::link::write_private(&path, text.as_bytes())
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct LinkPlan {
+struct LinkPlan {
     pub dir: PathBuf,
     pub on_path: bool,
 }
 
-pub fn link_dir(path_env: &str, user_home: &Path, root: bool, writable: &dyn Fn(&Path) -> bool) -> LinkPlan {
+fn link_dir(path_env: &str, user_home: &Path, root: bool, writable: &dyn Fn(&Path) -> bool) -> LinkPlan {
     // Root: /usr/local/bin, on every login PATH even when sudo's secure_path hides it. Others: the first usual folder on PATH they can write, else ~/.local/bin.
     let system = PathBuf::from("/usr/local/bin");
     if root && writable(&system) {
@@ -74,12 +74,12 @@ pub fn link_dir(path_env: &str, user_home: &Path, root: bool, writable: &dyn Fn(
     LinkPlan { dir: local, on_path: false }
 }
 
-pub fn dir_writable(dir: &Path) -> bool {
+fn dir_writable(dir: &Path) -> bool {
     let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).unwrap_or_default();
     dir.is_dir() && unsafe { libc::access(c.as_ptr(), libc::W_OK) } == 0
 }
 
-pub fn link_commands(home: &Path, dir: &Path) -> Result<(), String> {
+fn link_commands(home: &Path, dir: &Path) -> Result<(), String> {
     // goethe and goethed both point into GOETHE_HOME/bin, so a copied binary can never shadow the one the service runs.
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for name in ["goethe", "goethed"] {
@@ -95,9 +95,9 @@ pub fn link_commands(home: &Path, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub const PATH_MARK: &str = "# added by goethe setup";
+const PATH_MARK: &str = "# added by goethe setup";
 
-pub fn rc_file(user_home: &Path, shell: &str, macos: bool) -> PathBuf {
+fn rc_file(user_home: &Path, shell: &str, macos: bool) -> PathBuf {
     // The file a new terminal of this shell reads: zsh ~/.zprofile on a Mac and ~/.zshrc elsewhere, bash ~/.bash_profile on a Mac and ~/.bashrc elsewhere.
     let name = Path::new(shell).file_name().and_then(|n| n.to_str()).unwrap_or("");
     let file = match (name, macos) {
@@ -110,12 +110,12 @@ pub fn rc_file(user_home: &Path, shell: &str, macos: bool) -> PathBuf {
     user_home.join(file)
 }
 
-pub fn path_line(dir: &Path, user_home: &Path) -> String {
+fn path_line(dir: &Path, user_home: &Path) -> String {
     let shown = dir.strip_prefix(user_home).map_or_else(|_| dir.display().to_string(), |rel| format!("$HOME/{}", rel.display()));
     format!("export PATH=\"{shown}:$PATH\" {PATH_MARK}")
 }
 
-pub fn add_to_rc(rc: &Path, line: &str) -> Result<bool, String> {
+fn add_to_rc(rc: &Path, line: &str) -> Result<bool, String> {
     // Append the PATH line once; false when a goethe line is already there.
     let text = fs::read_to_string(rc).unwrap_or_default();
     if text.contains(PATH_MARK) {
@@ -216,13 +216,13 @@ fn link_step(home: &Path, macos: bool) {
 
 fn heartbeat_check(home: &Path) {
     // A linked node with goethed up: wait up to 20 s for the platform to accept a heartbeat, and say plainly when it refuses one.
-    if !crate::platform_cli::is_linked(home) || !crate::service::goethed_running() {
+    if !crate::client::login::is_linked(home) || !crate::service::goethed_running() {
         return;
     }
-    let path = crate::platform::platform_dir(home).join("platform_state.json");
+    let path = crate::client::link::platform_dir(home).join("platform_state.json");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while std::time::Instant::now() < deadline {
-        let state: crate::platform::PlatformState = fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let state: crate::client::link::PlatformState = fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         if state.last_ok_at.is_some() && state.last_error.is_none() {
             say("the console accepted this node's heartbeat");
             return;
@@ -235,9 +235,9 @@ fn heartbeat_check(home: &Path) {
     }
 }
 
-pub fn login_question(link: &crate::platform_cli::Link) -> Option<&'static str> {
+fn login_question(link: &crate::client::login::Link) -> Option<&'static str> {
     // Asked when the node is not linked, or its login was revoked or expired (uninstall logs out, so a reinstall lands here); a working link is left alone.
-    use crate::platform_cli::Link;
+    use crate::client::login::Link;
     match link {
         Link::Linked { revoked: false, .. } | Link::Unreadable(_) => None,
         Link::Linked { revoked: true, .. } => Some("\nThis node's console login was revoked or has expired. Log in again now?"),
@@ -266,7 +266,7 @@ fn login_step(home: &Path, platform_url: Option<&str>) {
         }
         return;
     }
-    let Some(question) = login_question(&crate::platform_cli::link_state(home, false)) else {
+    let Some(question) = login_question(&crate::client::login::link_state(home, false)) else {
         return;
     };
     let later = "run goethe login any time to link this node to the Goethe console (logged-in nodes get optimised kernels for supported models)";
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn login_is_offered_unless_the_link_works() {
-        use crate::platform_cli::Link;
+        use crate::client::login::Link;
         let linked = |revoked| Link::Linked { workspace: "w".into(), revoked, heartbeat: String::new(), ok: true };
         assert!(login_question(&Link::NotLinked).unwrap().contains("Log in to the Goethe console now?"));
         assert!(login_question(&linked(true)).unwrap().contains("revoked or has expired"), "a token uninstall revoked");
@@ -444,7 +444,7 @@ mod tests {
         fs::create_dir_all(home).unwrap();
         #[cfg(unix)]
         fs::set_permissions(home, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
-        crate::platform::write_private(&home.join("goethe.env"), b"GOETHE_PKG_URL=https://pkg.meshapplied.com\nGOETHE_PKG_TOKEN=tok\n").unwrap();
+        crate::client::link::write_private(&home.join("goethe.env"), b"GOETHE_PKG_URL=https://pkg.meshapplied.com\nGOETHE_PKG_TOKEN=tok\n").unwrap();
         migrate_retired_pkg_env(home).unwrap();
         let text = fs::read_to_string(home.join("goethe.env")).unwrap_or_default();
         assert!(!text.contains("pkg.meshapplied.com"), "{text}");

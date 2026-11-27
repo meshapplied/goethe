@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 pub const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-pub const SHAPE_MAX: u64 = 1 << 24;
+const SHAPE_MAX: u64 = 1 << 24;
 const SHAPE_KEYS: &[&str] = &[
     "num_hidden_layers", "n_layer", "num_attention_heads", "n_head", "num_key_value_heads", "multi_query_group_num",
     "num_global_key_value_heads", "swa_num_key_value_heads", "head_dim", "global_head_dim", "v_head_dim", "swa_head_dim",
@@ -20,7 +20,7 @@ pub struct ModelFacts {
     pub architecture: String,
     pub static_vram_gb: f64,
     pub kv_elems_per_token: u64,
-    pub max_ctx: u64,
+    pub max_ctx: Option<u64>,
     pub num_attention_heads: u64,
     pub num_kv_heads: u64,
     pub attention: String,
@@ -34,6 +34,8 @@ pub struct LayerPlan {
     pub swa: u64,
     pub linear: u64,
 }
+
+const CTX_KEYS: &[&str] = &["max_position_embeddings", "n_positions", "max_sequence_length", "seq_length", "max_seq_len", "model_max_length"];
 
 const LM_KEYS: &[&str] = &[
     "text_config",
@@ -104,9 +106,9 @@ pub fn facts_from_config(
         Some(n) => n,
         None => require_u64(lm, cfg, &["num_hidden_layers", "n_layer"], model_id)?,
     };
-    let max_ctx = read_u64(lm, cfg, &["max_position_embeddings", "n_positions"]).unwrap_or(4096);
+    let max_ctx = read_u64(lm, cfg, CTX_KEYS);
     let plan = layer_plan(lm, layers);
-    let kv = attention_kv(cfg, lm, layers, plan, max_ctx, num_attention_heads, model_id)?;
+    let kv = attention_kv(cfg, lm, layers, plan, num_attention_heads, model_id)?;
     let architecture = registry_arch
         .map(String::from)
         .unwrap_or_else(|| infer_architecture(cfg, lm, model_id));
@@ -164,11 +166,28 @@ pub fn layer_plan(lm: &Value, layers: u64) -> LayerPlan {
     if let Some(n) = lm.get("full_attention_interval").and_then(|v| v.as_u64()).filter(|n| *n > 1) {
         return LayerPlan { full: layers / n, swa: 0, linear: layers - layers / n };
     }
+    if let Some(local) = lm.get("local_layer_ids").and_then(|v| v.as_array()) {
+        let local: BTreeSet<u64> = local.iter().filter_map(|v| v.as_u64()).collect();
+        let swa = |ids: std::ops::Range<u64>| ids.filter(|i| local.contains(i)).count() as u64;
+        let (core, repeats) = looped_core(lm);
+        let all = layers + repeats * (core.end - core.start);
+        let local_n = swa(0..layers) + repeats * swa(core);
+        return LayerPlan { full: all - local_n, swa: local_n, linear: 0 };
+    }
     let pattern = lm.get("sliding_window_pattern").and_then(|v| v.as_u64()).filter(|n| *n > 1);
     if let (Some(n), Some(_)) = (pattern, lm.get("sliding_window").and_then(|v| v.as_u64())) {
         return LayerPlan { full: layers / n, swa: layers - layers / n, linear: 0 };
     }
     LayerPlan { full: layers, swa: 0, linear: 0 }
+}
+
+fn looped_core(lm: &Value) -> (std::ops::Range<u64>, u64) {
+    // Layers a looped model runs again and how many extra times; every extra pass keeps its own KV cache (the engines' default).
+    let l = &lm["loop_config"];
+    match (l["core_start"].as_u64(), l["core_end"].as_u64(), l["num_passes"].as_u64()) {
+        (Some(s), Some(e), Some(n)) if s < e && n > 1 => (s..e, n - 1),
+        _ => (0..0, 0),
+    }
 }
 
 struct KvShape {
@@ -178,12 +197,20 @@ struct KvShape {
     swa_elems: u64,
 }
 
+pub(crate) fn swa_window(lm: &Value, cfg: &Value, model_id: &str) -> Result<u64, String> {
+    // Tokens a sliding-window layer keeps: its window capped by the context, the whole context when no window is stated, refused when neither is.
+    let max = read_u64(lm, cfg, CTX_KEYS);
+    match read_u64(lm, cfg, &["sliding_window", "sliding_window_size"]).or(max) {
+        Some(w) => Ok(w.min(max.unwrap_or(w))),
+        None => Err(format!("{model_id}: sliding-window layers, but config.json states neither sliding_window nor max_position_embeddings")),
+    }
+}
+
 fn attention_kv(
     cfg: &Value,
     lm: &Value,
     layers: u64,
     plan: LayerPlan,
-    max_ctx: u64,
     num_attention_heads: u64,
     model_id: &str,
 ) -> Result<KvShape, String> {
@@ -219,7 +246,7 @@ fn attention_kv(
     }
     let full_heads = read_u64(lm, cfg, &["num_global_key_value_heads"]).unwrap_or(kv_heads);
     let full_dim = read_u64(lm, cfg, &["global_head_dim"]).unwrap_or(head_dim);
-    let window = read_u64(lm, cfg, &["sliding_window"]).unwrap_or(max_ctx).min(max_ctx);
+    let window = if plan.swa > 0 { swa_window(lm, cfg, model_id)? } else { 0 };
     Ok(KvShape {
         elems: mul(&[2, plan.full, full_heads, full_dim]),
         heads: full_heads,
@@ -270,7 +297,7 @@ pub fn linear_state_bytes_as(lm: &Value, plan: LayerPlan, ssm_dtype_bytes: Optio
     0
 }
 
-pub fn infer_architecture(cfg: &Value, lm: &Value, model_id: &str) -> String {
+fn infer_architecture(cfg: &Value, lm: &Value, model_id: &str) -> String {
     if is_moe(cfg, lm, model_id) {
         "moe".to_string()
     } else {
@@ -423,7 +450,41 @@ mod tests {
         let f = facts_from_config(&gpt2, 0.0, None, "gpt2").unwrap();
         assert_eq!(f.kv_elems_per_token, 2 * 12 * 12 * 64);
         assert_eq!(f.num_kv_heads, 12);
-        assert_eq!(f.max_ctx, 1024);
+        assert_eq!(f.max_ctx, Some(1024));
+    }
+
+    #[test]
+    fn a_config_without_a_context_length_states_none() {
+        let no_ctx = json!({"num_hidden_layers": 2, "num_attention_heads": 4, "head_dim": 64});
+        assert_eq!(facts_from_config(&no_ctx, 0.0, None, "m").unwrap().max_ctx, None);
+        let sglang_keys = json!({"text_config": {"num_hidden_layers": 2, "num_attention_heads": 4, "head_dim": 64, "model_max_length": 1048576}});
+        assert_eq!(facts_from_config(&sglang_keys, 0.0, None, "m").unwrap().max_ctx, Some(1048576), "the keys SGLang reads, after goethe's own");
+    }
+
+    #[test]
+    fn swa_window_is_stated_or_refused() {
+        let swa = |extra: Value| {
+            let mut cfg = json!({"num_hidden_layers": 2, "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 64,
+                "layer_types": ["sliding_attention", "full_attention"]});
+            cfg.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            facts_from_config(&cfg, 0.0, None, "m").map(|f| f.swa_kv_elems_per_request)
+        };
+        assert_eq!(swa(json!({"sliding_window": 1024, "max_position_embeddings": 512})), Ok(2 * 2 * 64 * 512));
+        assert_eq!(swa(json!({"sliding_window": 1024})), Ok(2 * 2 * 64 * 1024));
+        assert_eq!(swa(json!({"max_position_embeddings": 4096})), Ok(2 * 2 * 64 * 4096));
+        assert!(swa(json!({})).unwrap_err().contains("neither sliding_window"));
+    }
+
+    #[test]
+    fn local_layer_ids_and_a_looped_core_shape_the_kv() {
+        let cfg = json!({"text_config": {"num_hidden_layers": 6, "num_attention_heads": 8, "num_key_value_heads": 2, "head_dim": 64,
+            "local_layer_ids": [0, 2, 3, 4], "sliding_window_size": 128, "loop_config": {"core_start": 2, "core_end": 4, "num_passes": 3}}});
+        let lm = resolve_language_config(&cfg).unwrap();
+        assert_eq!(layer_plan(lm, 6), LayerPlan { full: 2, swa: 8, linear: 0 }, "layers 1 and 5 full; 2, 3 run twice more, both local");
+        let f = facts_from_config(&cfg, 0.0, None, "m").unwrap();
+        assert_eq!((f.kv_elems_per_token, f.swa_kv_elems_per_request), (2 * 2 * 2 * 64, 2 * 8 * 2 * 64 * 128));
+        let flat = json!({"num_hidden_layers": 6, "num_attention_heads": 8, "num_key_value_heads": 2, "head_dim": 64, "local_layer_ids": []});
+        assert_eq!(layer_plan(&flat, 6), LayerPlan { full: 6, swa: 0, linear: 0 }, "no local layers: all full, as before");
     }
 
     #[test]
@@ -439,7 +500,7 @@ mod tests {
         assert_eq!((f.num_attention_heads, f.num_kv_heads), (24, 4));
         assert_eq!(f.attention, "hybrid");
         assert_eq!(f.architecture, "dense");
-        assert_eq!(f.max_ctx, 262144);
+        assert_eq!(f.max_ctx, Some(262144));
         let per_layer = 48 * 128 * 128 * 4 + (2 * 16 * 128 + 48 * 128) * 3 * 2;
         assert_eq!(f.linear_state_bytes_per_request, 48 * per_layer);
     }

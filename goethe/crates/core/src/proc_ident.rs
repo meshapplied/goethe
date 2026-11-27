@@ -43,16 +43,12 @@ pub fn boot_id() -> &'static str {
     BOOT.get_or_init(crate::sys::boot_id)
 }
 
-fn read_stat(pid: i32) -> Option<crate::sys::ProcStat> {
-    crate::sys::stat(pid)
-}
-
 pub fn start_ticks(pid: i32) -> Option<u64> {
-    read_stat(pid).map(|s| s.start_ticks)
+    crate::sys::stat(pid).map(|s| s.start_ticks)
 }
 
 pub fn ppid(pid: i32) -> Option<i32> {
-    read_stat(pid).map(|s| s.ppid)
+    crate::sys::stat(pid).map(|s| s.ppid)
 }
 
 pub fn capture(instance_id: &str, pid: i32) -> Option<Identity> {
@@ -146,12 +142,12 @@ pub fn signal(id: &Identity, pid: i32, sig: i32) -> bool {
 }
 
 fn running(pid: i32, ticks: u64) -> bool {
-    read_stat(pid).is_some_and(|s| s.start_ticks == ticks && s.state != 'Z' && s.state != 'X')
+    crate::sys::stat(pid).is_some_and(|s| s.start_ticks == ticks && s.state != 'Z' && s.state != 'X')
 }
 
 fn reap_leader(id: &Identity) {
     // Collect our own zombie leader through its pidfd, so a recycled pid is never waited on.
-    if !read_stat(id.pid).is_some_and(|s| s.state == 'Z') {
+    if !crate::sys::stat(id.pid).is_some_and(|s| s.state == 'Z') {
         return;
     }
     let pinned = pin(id.pid);
@@ -179,7 +175,7 @@ pub fn leader_alive(id: &Identity) -> bool {
 pub fn leader_unreadable(id: &Identity) -> bool {
     // The process table could not be read for this pid (EMFILE, hidepid) while the pid still exists: liveness is unknown, not dead.
     let probe = if unsafe { libc::kill(id.pid, 0) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0)) };
-    unknown_when(id.pid > 1 && read_stat(id.pid).is_some(), probe)
+    unknown_when(id.pid > 1 && crate::sys::stat(id.pid).is_some(), probe)
 }
 
 fn unknown_when(stat_read: bool, signal0: Result<(), i32>) -> bool {
@@ -238,7 +234,7 @@ fn wait_gone(ids: &[Identity], procs: &[(usize, i32, u64)], until: Instant) -> b
 }
 
 fn leader_present(id: &Identity) -> bool {
-    read_stat(id.pid).is_some_and(|s| s.start_ticks == id.start_ticks)
+    crate::sys::stat(id.pid).is_some_and(|s| s.start_ticks == id.start_ticks)
 }
 
 fn deferred() -> &'static Mutex<Vec<Identity>> {
@@ -404,7 +400,7 @@ mod tests {
         let stopped = terminate(&ids);
         assert!(stopped.survivors.is_empty());
         for id in &ids {
-            let left = read_stat(id.pid).is_some_and(|s| s.start_ticks == id.start_ticks);
+            let left = crate::sys::stat(id.pid).is_some_and(|s| s.start_ticks == id.start_ticks);
             assert!(!left, "leader {} was left behind (alive or zombie)", id.pid);
         }
     }

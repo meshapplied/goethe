@@ -4,21 +4,21 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
-pub const ENGINE_LOG_MAX_BYTES: u64 = 256 * 1024 * 1024;
-pub const ENGINE_LOG_KEEP_BYTES: u64 = 64 * 1024 * 1024;
-pub const DAEMON_LOG_MAX_BYTES: u64 = 100 * 1024 * 1024;
-pub const NGINX_LOG_MAX_BYTES: u64 = 100 * 1024 * 1024;
-pub const ENGINE_LOG_MAX_AGE_DAYS: i64 = 14;
-pub const ENGINE_LOG_KEEP_NEWEST: usize = 30;
+const ENGINE_LOG_MAX_BYTES: u64 = 256 * 1024 * 1024;
+const ENGINE_LOG_KEEP_BYTES: u64 = 64 * 1024 * 1024;
+const DAEMON_LOG_MAX_BYTES: u64 = 100 * 1024 * 1024;
+const NGINX_LOG_MAX_BYTES: u64 = 100 * 1024 * 1024;
+const ENGINE_LOG_MAX_AGE_DAYS: i64 = 14;
+const ENGINE_LOG_KEEP_NEWEST: usize = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrunePlan {
+struct PrunePlan {
     pub delete_paths: Vec<PathBuf>,
 }
 
-pub fn engine_logs_to_prune(
+fn engine_logs_to_prune(
     all_engine_logs: &[(PathBuf, i64, bool)],
     now_secs: i64,
     max_age_days: i64,
@@ -45,7 +45,7 @@ pub fn engine_logs_to_prune(
     }
 }
 
-pub fn rotate_file_copytruncate(path: &Path, max_bytes: u64, keep_tail_bytes: u64) -> Result<bool, String> {
+fn rotate_file_copytruncate(path: &Path, max_bytes: u64, keep_tail_bytes: u64) -> Result<bool, String> {
     let meta = fs::metadata(path).map_err(|e| e.to_string())?;
     if meta.len() <= max_bytes {
         return Ok(false);
@@ -80,7 +80,7 @@ fn mtime_secs(path: &Path) -> i64 {
         .unwrap_or(0)
 }
 
-pub fn list_engine_logs(logs_dir: &Path, loaded_instance_ids: &HashSet<String>) -> Vec<(PathBuf, i64, bool)> {
+fn list_engine_logs(logs_dir: &Path, loaded_instance_ids: &HashSet<String>) -> Vec<(PathBuf, i64, bool)> {
     let mut out = Vec::new();
     let Ok(rd) = fs::read_dir(logs_dir) else {
         return out;
@@ -162,15 +162,11 @@ pub fn run_rotation_pass(home: &Path) -> Result<(), String> {
         }
     }
     rotate_nginx_logs(home, NGINX_LOG_MAX_BYTES);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs() as i64;
-    let _ = run_prune_pass(home, now);
+    let _ = run_prune_pass(home, crate::sys::unix_secs());
     Ok(())
 }
 
-pub fn rotate_nginx_logs(home: &Path, max_bytes: u64) -> bool {
+fn rotate_nginx_logs(home: &Path, max_bytes: u64) -> bool {
     // Rename oversized nginx access/error logs to .1, then have our verified master reopen its files.
     let dir = crate::nginx::nginx_prefix(home).join("logs");
     let mut rotated = false;

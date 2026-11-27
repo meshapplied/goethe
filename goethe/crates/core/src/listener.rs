@@ -83,7 +83,7 @@ fn holder(inode: u64) -> Option<i32> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn parse_lsof(text: &str) -> Vec<(i32, String, String)> {
+fn parse_lsof(text: &str) -> Vec<(i32, String, String)> {
     // `lsof -F pcn`: each p<pid> starts a process, c<name> is its command, every n<address> is one of its listeners.
     let (mut out, mut pid, mut cmd) = (Vec::new(), 0, String::new());
     for line in text.lines() {

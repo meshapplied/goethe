@@ -13,11 +13,11 @@ pub fn mark_desired(con: &Connection, params: &LoadParams) -> rusqlite::Result<(
     let extra = serde_json::to_string(&params.extra_sglang_args).unwrap_or_else(|_| "[]".to_string());
     let slot = params.slot_key.clone().unwrap_or_else(|| params.model_id.clone());
     con.execute(
-        "INSERT INTO desired_loads (slot_key, model_id, gpus, ctx, max_conc, tp, extra_sglang_args)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO desired_loads (slot_key, model_id, gpus, ctx, max_conc, tp, extra_sglang_args, numerics)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(slot_key) DO UPDATE SET model_id = excluded.model_id, gpus = excluded.gpus,
            ctx = excluded.ctx, max_conc = excluded.max_conc, tp = excluded.tp,
-           extra_sglang_args = excluded.extra_sglang_args",
+           extra_sglang_args = excluded.extra_sglang_args, numerics = excluded.numerics",
         rusqlite::params![
             slot,
             params.model_id,
@@ -26,6 +26,7 @@ pub fn mark_desired(con: &Connection, params: &LoadParams) -> rusqlite::Result<(
             params.max_conc.map(|c| c as i64),
             params.tp.map(|c| c as i64),
             extra,
+            params.numerics.map(goethe_proto::Numerics::name),
         ],
     )?;
     Ok(())
@@ -36,18 +37,11 @@ pub fn desired_exists(con: &Connection, slot_key: &str) -> bool {
         .is_ok()
 }
 
-pub fn restore_enabled(home: &Path) -> bool {
+fn restore_enabled(home: &Path) -> bool {
     let Ok(con) = db::open(home) else {
         return true;
     };
-    let Ok(v) = con.query_row(
-        "SELECT value FROM goethe_settings WHERE key = 'restore_desired'",
-        [],
-        |r| r.get::<_, String>(0),
-    ) else {
-        return true;
-    };
-    v != "off"
+    db::setting(&con, "restore_desired").is_none_or(|v| v != "off")
 }
 
 pub fn spawn_restore_background() {
@@ -84,7 +78,7 @@ fn desired_rows(con: &Connection) -> Result<Vec<LoadParams>, String> {
     // Desired slots in creation order, as load parameters for restore.
     let mut stmt = con
         .prepare(
-            "SELECT model_id, gpus, ctx, max_conc, tp, extra_sglang_args, slot_key FROM desired_loads
+            "SELECT model_id, gpus, ctx, max_conc, tp, extra_sglang_args, slot_key, numerics FROM desired_loads
              ORDER BY created_at, rowid",
         )
         .map_err(|e| e.to_string())?;
@@ -109,6 +103,7 @@ fn desired_rows(con: &Connection) -> Result<Vec<LoadParams>, String> {
                 restart_count: None,
                 slot_key: r.get(6)?,
                 replica: false,
+                numerics: r.get::<_, Option<String>>(7)?.as_deref().and_then(goethe_proto::Numerics::parse),
             })
         })
         .map_err(|e| e.to_string())?;
@@ -132,6 +127,7 @@ mod tests {
             restart_count: None,
             slot_key: Some(slot.to_string()),
             replica: false,
+            numerics: None,
         }
     }
 
@@ -154,5 +150,16 @@ mod tests {
             .unwrap();
         assert_eq!((created, ctx), (100, 8192));
         assert!(desired_exists(&con, "m|3|0") && !desired_exists(&con, "q|3|0"));
+    }
+
+    #[test]
+    fn a_pinned_numerics_is_restored_with_its_slot() {
+        let td = tempfile::tempdir().unwrap();
+        let con = db::open(td.path()).unwrap();
+        mark_desired(&con, &LoadParams { numerics: Some(goethe_proto::Numerics::Tolerance), ..params("t|3|0", 4096) }).unwrap();
+        mark_desired(&con, &params("n|3|0", 4096)).unwrap();
+        let got: Vec<_> = desired_rows(&con).unwrap().into_iter().map(|p| (p.slot_key.unwrap(), p.numerics)).collect();
+        assert_eq!(got, [("t|3|0".to_string(), Some(goethe_proto::Numerics::Tolerance)), ("n|3|0".to_string(), None)]);
+        assert_eq!(crate::supervisor::load_params_for_slot(&con, "t|3|0", "t").unwrap().numerics, Some(goethe_proto::Numerics::Tolerance));
     }
 }

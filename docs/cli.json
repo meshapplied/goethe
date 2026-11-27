@@ -193,7 +193,7 @@
           "value": "number",
           "required": false,
           "multiple": false,
-          "help": "Default max concurrent requests."
+          "help": "Default max concurrent requests (4)."
         },
         {
           "id": "no_wait",
@@ -259,7 +259,21 @@
           "long": "fallback",
           "required": false,
           "multiple": false,
-          "help": "If the model's kernel pack cannot run here, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also GOETHE_ALLOW_FALLBACK=1."
+          "help": "Serve the model with its plain runtime (llama.cpp or SGLang) when its kernel pack cannot run here, even with GOETHE_ALLOW_FALLBACK=0 (the plain runtime takes over by default)."
+        },
+        {
+          "id": "engine",
+          "kind": "flag",
+          "long": "engine",
+          "value_name": "goethe-engine|sglang",
+          "value": "choice",
+          "required": false,
+          "multiple": false,
+          "possible_values": [
+            "goethe-engine",
+            "sglang"
+          ],
+          "help": "Serve with this engine instead of the automatic choice (a kernel pack when one runs here, else SGLang); refused when it cannot serve the weights. Installing again without it chooses again."
         },
         {
           "id": "extra",
@@ -385,7 +399,7 @@
           "value": "number",
           "required": false,
           "multiple": false,
-          "help": "Context length for this load."
+          "help": "Context length for this load, used exactly (without it: the largest that fits)."
         },
         {
           "id": "max_conc",
@@ -395,7 +409,7 @@
           "value": "number",
           "required": false,
           "multiple": false,
-          "help": "Max concurrent requests."
+          "help": "Max concurrent requests, used exactly (without it: the default, fewer when only that fits)."
         },
         {
           "id": "ep",
@@ -406,6 +420,20 @@
           "required": false,
           "multiple": false,
           "help": "Expert parallel size (SGLang --ep-size)."
+        },
+        {
+          "id": "numerics",
+          "kind": "flag",
+          "long": "numerics",
+          "value_name": "invariant|tolerance",
+          "value": "choice",
+          "required": false,
+          "multiple": false,
+          "possible_values": [
+            "invariant",
+            "tolerance"
+          ],
+          "help": "Kernel pack numerics, kept across restarts: invariant (the same output whatever else is batched; the pack's default) or tolerance (faster kernels within a bounded error where the pack has them). Only for models served with a kernel pack."
         },
         {
           "id": "save",
@@ -445,7 +473,7 @@
           "long": "fallback",
           "required": false,
           "multiple": false,
-          "help": "If the model's kernel pack fails to open, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also GOETHE_ALLOW_FALLBACK=1."
+          "help": "Serve the model with its plain runtime (llama.cpp or SGLang) when its kernel pack fails to open, even with GOETHE_ALLOW_FALLBACK=0 (the plain runtime takes over by default)."
         },
         {
           "id": "no_wait",
@@ -1683,7 +1711,9 @@
           "does": {
             "risk": "change",
             "needs": [],
-            "gives": [],
+            "gives": [
+              "gpu"
+            ],
             "confirms": false,
             "terminal": false
           },
@@ -1955,6 +1985,170 @@
       },
       "examples": [
         "goethe logout"
+      ]
+    },
+    {
+      "path": "goethe remote",
+      "about": "Which console changes this node accepts, and the passkeys allowed to sign them; every kind is off until allowed here.",
+      "does": {
+        "risk": "read",
+        "needs": [],
+        "gives": [],
+        "confirms": false,
+        "terminal": false
+      },
+      "commands": [
+        {
+          "path": "goethe remote allow",
+          "about": "Accept signed console commands of this kind: change, network, keys, update, destructive or trust.",
+          "does": {
+            "risk": "network",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "examples": [
+            "goethe remote allow change"
+          ],
+          "args": [
+            {
+              "id": "kind",
+              "kind": "positional",
+              "value_name": "KIND",
+              "value": "choice",
+              "required": true,
+              "multiple": false,
+              "possible_values": [
+                "change",
+                "network",
+                "keys",
+                "update",
+                "destructive",
+                "trust"
+              ],
+              "help": "The kind of change: change (load, unload, GPUs), network, keys, update, destructive or trust (pin passkeys)."
+            }
+          ]
+        },
+        {
+          "path": "goethe remote deny",
+          "about": "Refuse console commands of this kind again.",
+          "does": {
+            "risk": "change",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "examples": [
+            "goethe remote deny change"
+          ],
+          "args": [
+            {
+              "id": "kind",
+              "kind": "positional",
+              "value_name": "KIND",
+              "value": "choice",
+              "required": true,
+              "multiple": false,
+              "possible_values": [
+                "change",
+                "network",
+                "keys",
+                "update",
+                "destructive",
+                "trust"
+              ],
+              "help": "The kind of change: change, network, keys, update, destructive or trust."
+            }
+          ]
+        },
+        {
+          "path": "goethe remote status",
+          "about": "Each kind on or off, and the pinned passkeys.",
+          "does": {
+            "risk": "read",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          }
+        },
+        {
+          "path": "goethe remote trust",
+          "about": "The passkeys this node trusts: list, add one from a pairing string, or remove one.",
+          "does": {
+            "risk": "read",
+            "needs": [],
+            "gives": [],
+            "confirms": false,
+            "terminal": false
+          },
+          "commands": [
+            {
+              "path": "goethe remote trust list",
+              "about": "The pinned passkeys: key id, user, cap and fingerprint.",
+              "does": {
+                "risk": "read",
+                "needs": [],
+                "gives": [],
+                "confirms": false,
+                "terminal": false
+              }
+            },
+            {
+              "path": "goethe remote trust add",
+              "about": "Pin a passkey from the pairing string the console shows; its signature is checked first.",
+              "does": {
+                "risk": "network",
+                "needs": [],
+                "gives": [],
+                "confirms": false,
+                "terminal": false
+              },
+              "examples": [
+                "goethe remote trust add <pairing>"
+              ],
+              "args": [
+                {
+                  "id": "pairing",
+                  "kind": "positional",
+                  "value_name": "PAIRING",
+                  "value": "text",
+                  "required": true,
+                  "multiple": false,
+                  "help": "The pairing string from the console."
+                }
+              ]
+            },
+            {
+              "path": "goethe remote trust remove",
+              "about": "Stop trusting a pinned passkey.",
+              "does": {
+                "risk": "change",
+                "needs": [],
+                "gives": [],
+                "confirms": false,
+                "terminal": false
+              },
+              "examples": [
+                "goethe remote trust remove <key-id>"
+              ],
+              "args": [
+                {
+                  "id": "key_id",
+                  "kind": "positional",
+                  "value_name": "KEY_ID",
+                  "value": "trust_key",
+                  "required": true,
+                  "multiple": false,
+                  "help": "The key id, as goethe remote trust list shows it."
+                }
+              ]
+            }
+          ]
+        }
       ]
     },
     {

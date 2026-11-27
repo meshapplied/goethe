@@ -15,6 +15,7 @@ goethe <command> --help
 - GPUs are named as `goethe gpu` lists them: `gpu0`, `gpu1`, and so on. Flags that take GPUs accept several: `--gpu gpu2 gpu3`.
 - Model ids are Hugging Face repo names such as `zai-org/GLM-5.3-Flash`. Case doesn't matter, and the folder form `zai-org__GLM-5.3-Flash` works too. A mistyped id gets a suggestion.
 - Commands that list things accept `--json` for scripts.
+- `--verbose` (`-v`) on any command shows the output of every underlying process (also `GOETHE_VERBOSE=1`); it is always kept in `<home>/logs`.
 
 Exit codes:
 
@@ -33,7 +34,7 @@ Exit codes:
 - [API access](#api-access): `api`, `api keys`, `api expose`, `api allow`, `api domain`, `api share`
 - [Learning and traces](#learning-and-traces): `learn`, `trace`
 - [GPUs and system](#gpus-and-system): `gpu`, `doctor`, `update`, `uninstall`, `completion`, `--version`
-- [Console](#console): `login`, `logout`
+- [Console](#console): `login`, `logout`, `remote`
 
 ## Start and stop
 
@@ -49,6 +50,7 @@ On a terminal, plain `goethe` opens the menu on its own screen:
 | API keys and gateway | API keys (create, scope, new secret or delete), network exposure (local, VPN or private network, public) and the public address ([`goethe api share`](#goethe-api-share-duration)) |
 | Status | Whether Goethe runs, the environment, then live tables of the GPUs (VRAM, processes, allowed or denied, memory bandwidth), CPU and memory |
 | Metrics | From the [usage log](#usage-log), over the last hour, 24 hours, 7 days, this month (from the 1st), 30 or 90 days (↑ the next, longer range, ↓ back): per model the requests, errors (client and server errors, rate limits, cancelled), prompt and generated tokens, average time to first token, average decode speed and the 95th-percentile latency, with a total row; per GPU the average and peak utilisation, memory bandwidth, average VRAM, average power against its limit, peak temperature and any throttling, with the host's CPU, RAM and free disk; and per API key the requests and tokens, by whole days. Requests for a model Goethe does not serve and requests refused by a key's rate limit have their own rows |
+| Experimental | A tick box for experimental features. Ticked, Ask (describe what you want in plain English; also `goethe ask REQUEST`) shows at the top of the menu and in `goethe help`; it is off by default |
 
 ↑↓ move, Enter opens, ← goes back, `q` quits. On the main menu 1, 2 and 3 pick a color theme (default, sea, earth); the choice is remembered. Without a terminal, `goethe` prints the commands.
 
@@ -96,13 +98,14 @@ Downloads a model from Hugging Face, or registers a model folder on this machine
 | `--load` | Load the model after installing it |
 | `--no-wait` | With `--load`, return without waiting until it's ready |
 | `--ctx <N>` | Default context length (default: the model's full context window; a load uses the largest that fits in VRAM) |
-| `--max-conc <N>` | Default number of requests served at the same time |
+| `--max-conc <N>` | Default number of requests served at the same time (default 4; a load serves fewer when only that fits) |
 | `--gpu <gpuN>...` | Default GPUs; several split the model across them |
 | `--trust-remote-code` | Allow Python code that ships with the model; only for models you trust |
 | `--hf-token` | Ask for a Hugging Face token, for gated or private models; used for this download only, never stored |
 | `--yes` | Don't ask: download without confirming, and with `--load` load next to other programs on the GPU |
 | `--force` | Download again, or replace an existing install, and rebuild the model's saved settings from the defaults |
 | `--fallback` | Serve the model with its plain runtime (llama.cpp or SGLang) when its kernel pack cannot run here, even with `GOETHE_ALLOW_FALLBACK=0` (the plain runtime takes over by default) |
+| `--engine <goethe-engine\|sglang>` | Serve with this engine instead of the automatic choice (a kernel pack when one runs here, else SGLang); refused when it cannot serve the weights. Installing again without it chooses again |
 | `--name <id>` | Id for a local folder |
 | `--copy` | Copy a local folder instead of linking to it |
 | `-- <options>` | Extra engine options, after `--`, saved with the model |
@@ -125,6 +128,7 @@ Installed models, then catalog models, with whether each fits this machine and i
 |---|---|
 | `--installed` | Only installed models |
 | `--available` | Only catalog models |
+| `--all` | Every line; the default stops after 40 |
 | `--json` | JSON output |
 
 ### `goethe models alias`
@@ -160,8 +164,9 @@ Loads a model and waits until it answers. Goethe picks the GPUs and sizes the me
 | `--gpu <gpuN>...` | GPUs to load on; the number given is the split |
 | `--tp <N>` | Split the model across N GPUs that Goethe picks (not with `--gpu`) |
 | `--ep <N>` | Expert-parallel size, for mixture-of-experts models |
-| `--ctx <N>` | Context length |
-| `--max-conc <N>` | Requests served at the same time |
+| `--ctx <N>` | Context length, used exactly (without it: the largest that fits) |
+| `--max-conc <N>` | Requests served at the same time, used exactly (without it: the default, fewer when only that fits) |
+| `--numerics <invariant\|tolerance>` | Kernel pack numerics, kept across restarts: `invariant` (the same output whatever else is batched; the pack's default) or `tolerance` (faster kernels within a bounded error where the pack has them); only for models served with a kernel pack |
 | `--save` | Keep `--gpu`, `--ctx`, `--max-conc` and the options after `--` as the model's defaults; a bare `--` clears the saved options |
 | `--dry-run` | Show where the model would be placed now and the memory it needs, and load nothing; with `--save` it only stores the defaults |
 | `--replica` | Start another copy, to serve more traffic |
@@ -191,7 +196,7 @@ Stops a model. Requests in progress finish first.
 
 ### `goethe run [MODEL] [INPUT]`
 
-Tries a model by hand. Without MODEL or INPUT on a terminal, a list of the installed models opens at the top of the screen (loaded ones first, marked `loaded`): ↑↓ move, Enter runs the chosen one (one that is not loaded loads right there, its bar beside it), `q` or ← leaves. With text it prints one reply (a text model), an embedding summary (`dims= norm= [first 4]`) or, for an audio file, its transcript. With no INPUT on a terminal it opens an ephemeral chat screen; with no terminal, or `--plain`, a plain `> ` prompt (a speech model takes an audio file as INPUT). An installed model that is not loaded is loaded first, like `goethe load` but with a 100,000-token context (or the model's maximum when smaller; reduced when the GPU cannot fit it), and unloaded quietly in the background when run ends unless `--keep`. A model that was loaded (or loading) before run started stays loaded; run never installs. It talks to the model's own engine on 127.0.0.1 with its engine key, not through the gateway, and creates no API key.
+Tries a model by hand. Without MODEL or INPUT on a terminal, a list of the installed models opens at the top of the screen (loaded ones first, marked `loaded`): ↑↓ move, Enter runs the chosen one (one that is not loaded loads right there, its bar beside it), `q` or ← leaves. With text it prints one reply (a text model), an embedding summary (`dims= norm= [first 4]`) or, for an audio file, its transcript. With no INPUT on a terminal it opens an ephemeral chat screen; with no terminal, or `--plain`, a plain `> ` prompt (a speech model takes an audio file as INPUT). An installed model that is not loaded is loaded first, as `goethe load` loads it (the largest context that fits), and unloaded quietly in the background when run ends unless `--keep`. A model that was loaded (or loading) before run started stays loaded; run never installs. It talks to the model's own engine on 127.0.0.1 with its engine key, not through the gateway, and creates no API key.
 
 | Option | Description |
 |---|---|
@@ -366,9 +371,9 @@ The recipient verifies the gateway with the certificate goethe prints, `GOETHE_H
 
 ## Learning and traces
 
-### `goethe trace [on | off]`
+### `goethe trace [on | off | status]`
 
-Records every generation request and reply, grouped into sessions, as a corpus for training later. `off` stops recording and keeps the chosen keys; `on` resumes with them (every key the first time). Without `on` or `off` it shows what is recorded, the folder, its size and the free disk. Changes apply to the next request. The format is in [traces.md](traces.md).
+Records every generation request and reply, grouped into sessions, as a corpus for training later. `off` stops recording and keeps the chosen keys; `on` resumes with them (every key the first time). `status` (or no action) shows what is recorded, the folder, its size and the free disk. Changes apply to the next request. The format is in [traces.md](traces.md).
 
 | Option | Description |
 |---|---|
@@ -382,11 +387,12 @@ Records every generation request and reply, grouped into sessions, as a corpus f
 goethe trace on
 goethe trace on --key my-app
 goethe trace off
+goethe trace status
 ```
 
-### `goethe learn [on | off]`
+### `goethe learn [on | off | status]`
 
-Lets a session keep what context compaction would drop, in a small note that goes into the prompt after each compaction. Sessions are told apart by the client's `X-Session-Id` header. Without `on` or `off` it shows the scope and the sessions kept. Changes apply to the next request. `on` warns about models with a context under 100k tokens. See [learn.md](learn.md).
+Lets a session keep what context compaction would drop, in a small note that goes into the prompt after each compaction. Sessions are told apart by the client's `X-Session-Id` header. `status` (or no action) shows the scope and the sessions kept. Changes apply to the next request. `on` warns about models with a context under 100k tokens. See [learn.md](learn.md).
 
 | Option | Description |
 |---|---|
@@ -398,6 +404,7 @@ Lets a session keep what context compaction would drop, in a small note that goe
 goethe learn on
 goethe learn on --model my-model
 goethe learn off --model my-model
+goethe learn status
 goethe learn --print my-session-id
 ```
 
@@ -425,6 +432,8 @@ Checks the machine and the setup: GPU and driver, compiler, FFmpeg, Python envir
 | `--json` | JSON output |
 | `--public` | Also test that the public address answers |
 | `--hardware` | Print the hardware profile instead of the checks |
+| `--fix` | Fix what doctor finds on this machine (NVIDIA driver, CUDA forward compatibility, a C++ compiler), asking before each change |
+| `--yes` | With `--fix`, make every change without asking |
 
 ### `goethe update [engine | rollback]`
 
@@ -455,13 +464,13 @@ Folders of your own files stay: for a model registered in place only Goethe's li
 | `--keep-models` | Keep the installed models |
 | `--yes` | Don't ask |
 
-### `goethe completion [install | remove]`
+### `goethe completion [install | remove | status]`
 
 Tab completion for bash, zsh and fish. Commands, subcommands and flags complete, and so do live values: installed models (by full id, by the name after the organisation, in any case, and by alias), GPU names, API key ids and names, network interfaces and listen addresses. The shell asks `goethe` for them at each Tab, so they are always current.
 
 | Command | Description |
 |---|---|
-| `goethe completion` | Whether it is on for each shell |
+| `goethe completion status` | Whether it is on for each shell (also without an action) |
 | `goethe completion install` | Turn it on for your shell (`--shell bash\|zsh\|fish` for another) |
 | `goethe completion remove` | Turn it off again |
 
@@ -473,7 +482,7 @@ Prints the version, and the upgrade command when a newer version is available. `
 
 ## Console
 
-Linking is optional. A node that is not linked never contacts the console. A linked node's goethed sends a health snapshot every 10 seconds, and right after a model loads or unloads: hostname, OS, environment (bare metal, VM, container, cloud), network addresses, the gateway address (and the public gateway's address and end time while [`goethe api share`](#goethe-api-share-duration) is open), GPUs with memory use, installed and loaded models, the node's API key inventory (id, name, prefix, model scope, expiry — never the raw key), and the finished minutes of the [usage log](#usage-log) the console has not confirmed yet (per model, GPU and host; never per API key, never prompt or reply text). It never sends API key secrets, engine keys, prompts, traces, file paths, environment variables or command lines. Inference never depends on the console.
+Linking is optional. A node that is not linked never contacts the console. A linked node's goethed sends a health snapshot every 10 seconds, and right after a model loads or unloads: hostname, OS, environment (bare metal, VM, container, cloud), network addresses, the gateway address (and the public gateway's address and end time while [`goethe api share`](#goethe-api-share-duration) is open), GPUs with memory use, installed and loaded models, the node's API key inventory (id, name, prefix, model scope, expiry — never the raw key), and the finished minutes of the [usage log](#usage-log) the console has not confirmed yet (per model, GPU and host; never per API key, never prompt or reply text), and the error rows of failed installs, setup steps and doctor checks: a fixed code such as `MODEL_DOWNLOAD`, the Goethe version, the time and one scrubbed line (no paths, addresses, URLs, emails or typed values). Those rows are first written to `GOETHE_HOME/errors.log` (at most 64 KB; the same failure at most once a day), also when the node is not linked, and are sent once the node is linked. It never sends API key secrets, engine keys, prompts, traces, file paths, environment variables or command lines. Inference never depends on the console.
 
 ### Usage log
 
@@ -498,3 +507,20 @@ The credentials and the heartbeat state live in `GOETHE_HOME/platform/` (directo
 ### `goethe logout`
 
 Ends this node's login and deletes the local credentials. The console keeps the node, offline and with its token revoked, so the next `goethe login` to that workspace links the same node again; remove it on the console to delete it and its analytics. When the console cannot be reached, the local link is still removed and the node shows offline on the console.
+
+### `goethe remote`
+
+Which console changes this node accepts, and whose passkeys may sign them. A console command names one action from a fixed catalog (no shell), is signed in the browser with a person's passkey, and is checked on the node: it must be for this node and its workspace, signed by a pinned passkey over `console.goethe.sh` with user verification, unexpired, not a reused command id, of a kind this node allows, and within the cap of the passkey that signed it. Every kind is off until you allow it here; a refusal is logged in `GOETHE_HOME/errors.log` under its `REMOTE_*` code. This release keeps the policy and the pinned passkeys; it does not receive console commands yet.
+
+Kinds, from least to most powerful: `change` (load, unload, GPU allow and deny), `network`, `keys` (create, rotate and revoke API keys; a new secret is encrypted to the browser that asked), `update`, `destructive`, `trust` (pin and remove passkeys).
+
+| Command | Does |
+|---|---|
+| `goethe remote` or `goethe remote status` | Each kind on or off, and the pinned passkeys |
+| `goethe remote allow <kind>` | Accept signed commands of that kind |
+| `goethe remote deny <kind>` | Refuse them again |
+| `goethe remote trust list` | The pinned passkeys: key id, user, cap and fingerprint |
+| `goethe remote trust add <pairing>` | Pin a passkey from the pairing string the console shows; the string is signed by that passkey over its key id, key, user and cap, and is refused when the signature does not verify |
+| `goethe remote trust remove <key-id>` | Stop trusting a passkey |
+
+The policy and the pinned passkeys live in `GOETHE_HOME/remote.json` (0600); a copy other users can read or change is refused, and then nothing is accepted. Each pin and removal is logged in the same file.

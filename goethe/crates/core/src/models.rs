@@ -59,6 +59,7 @@ struct Installed {
     input: ChooserInput,
     default_tp: i64,
     runtime: String,
+    present: bool,
 }
 
 const SCREEN_LINES: usize = 40;
@@ -81,7 +82,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
     let loaded = loaded_instances(&con);
     let installed = installed_rows(&home, &con)?;
     let disk = disk_gb_by_model(&con);
-    let reg = fetch(&registry_url()).ok();
+    let reg = fetch(&registry_url()).map_err(|e| (!installed_only).then(|| crate::step::note(&format!("note: {e}")))).ok();
     let view = crate::placement::load_hw(&home).map(|hw| View::capacity(&home, hw));
     let packs = if installed_only {
         Vec::new()
@@ -89,7 +90,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
         let archs = crate::packs::local_archs(&home);
         crate::packs::catalog(&home).map(|ix| crate::packs::offers_any(&ix, &archs)).unwrap_or_default()
     };
-    let linked = crate::platform::load_credentials(&home).ok().flatten().is_some();
+    let linked = crate::client::link::load_credentials(&home).ok().flatten().is_some();
     let mut rows = Vec::new();
     if !available_only {
         for m in &installed {
@@ -97,6 +98,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
             let verdict = verdict(view.as_ref(), &m.id, &m.input, pinned);
             let (status, fit) = match loaded.get(&m.id) {
                 Some(live) => loaded_state(live),
+                None if !m.present => ("files missing".to_string(), "does not fit: its files are gone; goethe install brings them back".to_string()),
                 None => ("installed".to_string(), verdict.label()),
             };
             rows.push(ModelRow {
@@ -129,32 +131,6 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
                 runtime: Some(if linked && packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id)) { "goethe-engine" } else { m.effective_runtime() }.to_string()),
                 verdict,
             });
-        }
-        let missing = !installed.iter().any(|i| i.id == crate::engines::ninfer::NINFER_ID);
-        if let Some(view) = view.as_ref().filter(|_| missing) {
-            if let Some(row) = crate::recommend::ninfer_row(view) {
-                rows.push(ModelRow {
-                    id: row.model_id,
-                    status: "available".to_string(),
-                    gb: row.vram_per_gpu_gb * row.tp as f64,
-                    fit: Verdict::Fits {
-                        per_gpu: row.vram_per_gpu_gb,
-                        total: row.vram_per_gpu_gb * row.tp as f64,
-                        ctx: row.ctx,
-                        max_conc: row.max_conc,
-                    }
-                    .label(),
-                    custom: None,
-                    optimised: None,
-                    runtime: Some(crate::engines::ninfer::ENGINE.id.to_string()),
-                    verdict: Verdict::Fits {
-                        per_gpu: row.vram_per_gpu_gb,
-                        total: row.vram_per_gpu_gb * row.tp as f64,
-                        ctx: row.ctx,
-                        max_conc: row.max_conc,
-                    },
-                });
-            }
         }
     }
     let pack_only: Vec<&crate::packs::Offer> = packs
@@ -256,7 +232,7 @@ fn verdict(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<u
     let Some(view) = view else {
         return Verdict::Unknown;
     };
-    if !view.hw.gpus.iter().any(|g| crate::gpu_arch::model_runs_on(&input.supported_sm, &g.compute_capability)) {
+    if !view.hw.gpus.iter().any(|g| crate::gpu_arch::model_runs_on(&input.supported_sm, &g.compute_capability, input.prebuilt)) {
         return Verdict::Unsupported;
     }
     match view.fit(id, input, pinned) {
@@ -459,27 +435,25 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
             let kv_bytes: i64 = r.get(2)?;
             let default_ctx: i64 = r.get(3)?;
             let max_ctx = r.get::<_, Option<i64>>(6)?.unwrap_or(default_ctx).max(1) as u64;
-            let card = card_value(&home.join(r.get::<_, String>(11)?));
+            let path = home.join(r.get::<_, String>(11)?);
+            let card = card_value(&path);
             let elems = r.get::<_, Option<i64>>(10)?.unwrap_or(kv_bytes).max(0) as u64;
+            let facts = crate::chooser::CardFacts {
+                static_vram_gb: r.get(1)?,
+                kv_bytes_per_token: install::card_kv_bytes(&card, elems, kv_bytes.max(0) as u64).max(1),
+                num_attention_heads: r.get::<_, Option<i64>>(7)?.unwrap_or(1) as u64,
+                num_kv_heads: r.get::<_, Option<i64>>(8)?.unwrap_or(1) as u64,
+                attention: r.get::<_, Option<String>>(9)?.unwrap_or_else(|| "gqa".to_string()),
+                max_ctx,
+            };
+            let memory = crate::memory_spec::installed(&path, &card, &[]);
+            let input = ChooserInput::from_card(facts, &card, memory, (default_ctx.max(1) as u64).min(max_ctx), r.get::<_, i64>(4)?.max(1) as u64);
             Ok(Installed {
                 id: r.get(0)?,
+                present: path.exists(),
                 default_tp: r.get(5)?,
                 runtime: card.get("runtime").and_then(|v| v.as_str()).unwrap_or("sglang").to_string(),
-                input: crate::engines::llama_cpp::with_header_kv(ChooserInput {
-                    window_gb_per_request: 0.0,
-                    static_vram_gb: r.get(1)?,
-                    kv_bytes_per_token: card_kv_bytes(&card, elems, kv_bytes.max(0) as u64).max(1),
-                    num_attention_heads: r.get::<_, Option<i64>>(7)?.unwrap_or(1) as u64,
-                    num_kv_heads: r.get::<_, Option<i64>>(8)?.unwrap_or(1) as u64,
-                    attention: r.get::<_, Option<String>>(9)?.unwrap_or_else(|| "gqa".to_string()),
-                    max_ctx,
-                    ctx: (default_ctx.max(1) as u64).min(max_ctx),
-                    max_conc: r.get::<_, i64>(4)?.max(1) as u64,
-                    marlin_extra_gb: install::card_marlin_extra_gb(&card),
-                    supported_sm: install::card_supported_sm(&card),
-                    memory: crate::memory_spec::installed(&home.join(r.get::<_, String>(11)?), &card, &[]),
-                    overhead_gb: crate::engines::of_card(&card).map_or(crate::calc::BASE_OVERHEAD_GB, |e| e.overhead_gb),
-                }, &home.join(r.get::<_, String>(11)?), &card),
+                input: crate::engines::llama_cpp::with_header_kv(input, &path, &card),
             })
         })
         .map_err(|e| e.to_string())?;
@@ -509,16 +483,6 @@ fn card_value(dir: &Path) -> toml::Value {
         .ok()
         .and_then(|t| toml::from_str(&t).ok())
         .unwrap_or_else(|| toml::Value::Table(Default::default()))
-}
-
-fn card_kv_bytes(card: &toml::Value, elems: u64, installed_bytes: u64) -> u64 {
-    // KV bytes per token for the card's kv_cache_dtype, as goethed computes them; auto keeps the installed figure.
-    match card.get("kv_cache_dtype").and_then(|v| v.as_str()).map(str::to_ascii_lowercase) {
-        Some(d) if d.contains("fp8") => elems,
-        Some(d) if d.contains("fp4") => elems.div_ceil(2),
-        Some(d) if d.contains("16") => elems * 2,
-        _ => installed_bytes,
-    }
 }
 
 fn loaded_instances(con: &Connection) -> HashMap<String, Vec<(String, String)>> {
@@ -575,13 +539,11 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool, delete_traces: Option<
         return Err(format!("{model_id} is not installed (goethe models --installed lists installed models)"));
     };
     let plan = removal_plan(&home, &con, model_id, &local_path, managed != 0)?;
-    let instances: i64 = con
-        .query_row(
-            &format!("SELECT COUNT(*) FROM loaded_instances WHERE model_id = ?1 AND {LIVE}"),
-            [model_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| format!("state.db: {e}"))?;
+    let live = |con: &Connection| -> Result<i64, String> {
+        con.query_row(&format!("SELECT COUNT(*) FROM loaded_instances WHERE model_id = ?1 AND {LIVE}"), [model_id], |r| r.get(0))
+            .map_err(|e| format!("state.db: {e}"))
+    };
+    let instances = live(&con)?;
     let mut steps = Vec::new();
     if instances > 0 {
         let how = if force { "immediately, without draining" } else { "after draining in-flight requests" };
@@ -614,6 +576,7 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool, delete_traces: Option<
             ))?
         }
     };
+    let instances = live(&con)?;
     let compact = crate::step::compact();
     let progress = |done: usize, of: usize| {
         if compact {
@@ -644,10 +607,7 @@ pub fn run_remove(model_id: &str, yes: bool, force: bool, delete_traces: Option<
         progress(i + 1 + usize::from(instances > 0), steps);
     }
     match &plan.source {
-        Some(src) => crate::step::say(&format!(
-            "removed {model_id} from goethe; its files were not deleted. To delete them run:\n  rm -rf {}",
-            shell_quote(src)
-        )),
+        Some(src) => crate::step::say(&format!("removed {model_id} from goethe; your files in {src} stay on disk")),
         None => crate::step::say(&format!("removed {model_id}")),
     }
     if drop_traces {
@@ -747,10 +707,6 @@ pub fn uninstall_plan(home: &Path) -> Result<UninstallModels, String> {
     Ok(out)
 }
 
-pub fn delete_owned(home: &Path, p: &Path) -> Result<(), String> {
-    remove_owned(home, p)
-}
-
 fn source_of(dir: &Path) -> Option<String> {
     // Where an in-place install's files live: the card's source_dir, a legacy link, or a farm link.
     if let Ok(card) = install::read_card(dir) {
@@ -769,7 +725,7 @@ fn is_link_or_farm(dir: &Path) -> bool {
     fs::symlink_metadata(dir).map(|m| m.file_type().is_symlink()).unwrap_or(false) || install::is_farm(dir)
 }
 
-fn remove_owned(home: &Path, p: &Path) -> Result<(), String> {
+pub fn remove_owned(home: &Path, p: &Path) -> Result<(), String> {
     // Delete a path inside models/; a symlink is removed itself, never followed.
     let p = contained_in_models(home, p)?;
     let meta = fs::symlink_metadata(&p).map_err(|e| format!("{}: {e}", p.display()))?;
@@ -876,6 +832,25 @@ pub fn installed_ids(home: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_installed_model_whose_folder_is_gone_is_marked_so() {
+        // A cleaned disk leaves rows behind: a model counts as present only while its folder is there.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let con = db::open(home).unwrap();
+        for id in ["org/here", "org/gone"] {
+            con.execute(
+                "INSERT INTO installed_models (model_id, local_path, architecture, static_vram_gb, kv_bytes_per_token, default_ctx, default_max_conc, default_tp) VALUES (?1, ?2, 'a', 1.0, 1, 4096, 1, 0)",
+                rusqlite::params![id, format!("models/{}", id.replace('/', "__"))],
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(home.join("models/org__here")).unwrap();
+        let rows = installed_rows(home, &con).unwrap();
+        let present = |id: &str| rows.iter().find(|m| m.id == id).map(|m| m.present);
+        assert_eq!((present("org/here"), present("org/gone")), (Some(true), Some(false)));
+    }
+
     #[test]
     fn words_find_models_by_any_part_of_their_name() {
         let ids: Vec<String> = ["meshapplied/Qwen3.8-27B-NVFP4-NInfer", "nvidia/Qwen3.8-27B-NVFP4", "nvidia/Qwen2.5-VL-7B-Instruct-NVFP4"].iter().map(|s| s.to_string()).collect();

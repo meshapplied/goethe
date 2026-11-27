@@ -27,7 +27,7 @@ pub fn header_tensor_bytes(header: &[u8], pred: &dyn Fn(&str) -> bool) -> Result
     Ok(total)
 }
 
-pub fn tensor_bytes_in_file(path: &Path, pred: &dyn Fn(&str) -> bool) -> Result<u64, String> {
+fn tensor_bytes_in_file(path: &Path, pred: &dyn Fn(&str) -> bool) -> Result<u64, String> {
     // Read only the JSON header of one safetensors file.
     let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut len_buf = [0u8; 8];

@@ -42,7 +42,7 @@ pub fn unregister(home: &Path, instance_id: &str) {
     let _ = fs::remove_file(entry_path(home, instance_id));
 }
 
-pub fn list_entries(home: &Path) -> Vec<Identity> {
+pub(crate) fn list_entries(home: &Path) -> Vec<Identity> {
     // Parse every run entry; files without a readable identity can never be verified and are dropped.
     let Ok(rd) = fs::read_dir(run_dir(home)) else {
         return Vec::new();

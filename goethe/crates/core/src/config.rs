@@ -34,10 +34,12 @@ pub fn validate_limits(home: &Path, model_id: &str, ctx: Option<u64>, max_conc: 
         .optional()
         .map_err(|e| format!("state.db: {e}"))?
         .flatten();
-    match max.filter(|m| *m > 0) {
-        Some(m) if ctx > m as u64 => Err(format!("--ctx {ctx} is above the maximum context of {model_id} ({m} tokens)")),
-        _ => Ok(()),
-    }
+    max.filter(|m| *m > 0).and_then(|m| ctx_above_max(Some(ctx), m as u64)).map_or(Ok(()), Err)
+}
+
+pub fn ctx_above_max(pin: Option<u64>, max: u64) -> Option<String> {
+    // A --ctx pin longer than the model's maximum is refused, never lowered: goethe load and goethe install alike.
+    pin.filter(|p| *p > max).map(|p| format!("--ctx {p} is above this model's maximum context ({max} tokens); pass --ctx {max} or less"))
 }
 
 pub fn run(opts: ConfigOpts) -> Result<(), String> {
@@ -159,7 +161,8 @@ fn config_summary(opts: &ConfigOpts, new_args: &[String], table: &toml::Table, k
 fn find_model_dir(home: &Path, model_id: &str) -> Result<PathBuf, String> {
     // Cards placed under models/ without a state.db row are found by their model_id.
     let models = home.join("models");
-    for entry in std::fs::read_dir(&models).map_err(|_| format!("model {model_id} is not installed"))? {
+    let unread = |e: std::io::Error| if e.kind() == std::io::ErrorKind::NotFound { format!("model {model_id} is not installed") } else { format!("{}: {e}", models.display()) };
+    for entry in std::fs::read_dir(&models).map_err(unread)? {
         let path = entry.map_err(|e| e.to_string())?.path();
         let Ok(text) = std::fs::read_to_string(path.join(CARD_FILE)) else {
             continue;
@@ -179,6 +182,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn no_models_dir_is_not_installed_and_an_unreadable_one_names_its_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(find_model_dir(dir.path(), "org/m").unwrap_err(), "model org/m is not installed");
+        std::fs::write(dir.path().join("models"), "").unwrap();
+        let err = find_model_dir(dir.path(), "org/m").unwrap_err();
+        assert!(err.starts_with(&dir.path().join("models").display().to_string()) && !err.contains("not installed"), "{err}");
+    }
+
+    #[test]
     fn limits_follow_the_installed_max_ctx() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
@@ -195,7 +207,7 @@ mod tests {
         .unwrap();
         assert!(validate_limits(home, "org/m", Some(1024), Some(4)).is_ok());
         let err = validate_limits(home, "org/m", Some(999_999_999), None).unwrap_err();
-        assert!(err.contains("above the maximum context of org/m (1024 tokens)"), "{err}");
+        assert_eq!(err, "--ctx 999999999 is above this model's maximum context (1024 tokens); pass --ctx 1024 or less");
         assert!(validate_limits(home, "org/other", Some(1 << 30), None).is_ok());
     }
 

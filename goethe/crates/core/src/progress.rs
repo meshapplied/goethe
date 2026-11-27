@@ -20,23 +20,6 @@ impl<R: Read> Read for Counted<R> {
     }
 }
 
-pub fn weights_in(dir: &Path) -> (usize, u64) {
-    // The files of a model directory and their bytes; the downloader's hidden bookkeeping is not counted.
-    let mut found = (0, 0);
-    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let hidden = e.file_name().to_string_lossy().starts_with('.');
-        match e.metadata() {
-            Ok(m) if m.is_dir() && !hidden => {
-                let inner = weights_in(&e.path());
-                found = (found.0 + inner.0, found.1 + inner.1);
-            }
-            Ok(m) if m.is_file() && !hidden => found = (found.0 + 1, found.1 + m.len()),
-            _ => {}
-        }
-    }
-    found
-}
-
 pub fn dir_bytes(dir: &Path) -> u64 {
     // Every byte under a directory, partial downloads included.
     std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| match e.metadata() {
@@ -90,7 +73,7 @@ pub fn line(label: &str, done: u64, total: Option<u64>, bytes_per_s: f64) -> Str
     }
 }
 
-pub fn spaced(every: Duration, running: Duration) -> Duration {
+fn spaced(every: Duration, running: Duration) -> Duration {
     // A plain-line cadence (5 s) widens to 8 s after the first minute, so a long download stays near one line per 8 s; a terminal's 1 s line does not change.
     if every >= INTERVAL && running > Duration::from_secs(60) {
         Duration::from_secs(8)
@@ -147,7 +130,7 @@ impl Ticker {
 }
 
 impl Ticker {
-    pub fn start_with(every: Duration, value: impl Fn() -> u64 + Send + 'static, say: impl Fn(u64) + Send + 'static) -> Ticker {
+    fn start_with(every: Duration, value: impl Fn() -> u64 + Send + 'static, say: impl Fn(u64) + Send + 'static) -> Ticker {
         // Calls `say` with `value()` every interval until dropped.
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
@@ -224,32 +207,11 @@ pub fn eprint_line(text: String) {
 static UPDATING: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
-pub fn updating() -> bool {
-    // Whether an updating line is on the terminal now.
-    UPDATING.load(Ordering::Relaxed)
-}
-
 pub fn end_line() {
     // Ends an updating line left on a terminal, so the next line starts clean.
     if UPDATING.swap(false, Ordering::Relaxed) {
         eprintln!();
     }
-}
-
-fn warmup_file(home: &Path) -> std::path::PathBuf {
-    home.join("warmup.json")
-}
-
-pub fn warmup_secs(home: &Path, model_id: &str) -> Option<u64> {
-    // How long this model's last warm-up request took.
-    let text = std::fs::read_to_string(warmup_file(home)).ok()?;
-    serde_json::from_str::<serde_json::Value>(&text).ok()?[model_id].as_u64()
-}
-
-pub fn record_warmup(home: &Path, model_id: &str, secs: u64) {
-    let mut all: serde_json::Value = std::fs::read_to_string(warmup_file(home)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| serde_json::json!({}));
-    all[model_id] = secs.into();
-    let _ = std::fs::write(warmup_file(home), all.to_string());
 }
 
 
@@ -309,15 +271,12 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_counts_partial_files_and_the_warmup_is_remembered() {
+    fn a_directory_counts_partial_files() {
         let d = std::env::temp_dir().join(format!("goethe-progress-{}", std::process::id()));
         std::fs::create_dir_all(d.join(".cache/dl")).unwrap();
         std::fs::write(d.join("a"), [0u8; 10]).unwrap();
         std::fs::write(d.join(".cache/dl/b.incomplete"), [0u8; 5]).unwrap();
         assert_eq!(dir_bytes(&d), 15);
-        assert_eq!(warmup_secs(&d, "m"), None);
-        record_warmup(&d, "m", 42);
-        assert_eq!(warmup_secs(&d, "m"), Some(42));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

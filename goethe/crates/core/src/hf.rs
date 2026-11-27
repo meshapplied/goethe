@@ -97,7 +97,7 @@ pub fn preflight_model(model_id: &str, revision: Option<&str>) -> Result<ModelPr
 
 pub const GATED_WAYS: &str = "accept the license, then goethe install ID --hf-token, or goethe install DIR --name ID for weights you already have";
 
-pub fn gated_guidance(model_id: &str) -> String {
+pub(crate) fn gated_guidance(model_id: &str) -> String {
     format!("{model_id} {}: {}", crate::messages::GATED, GATED_WAYS.replace("ID", model_id))
 }
 
@@ -198,7 +198,7 @@ pub fn has_weight_files(siblings: &[HfSibling]) -> bool {
     })
 }
 
-pub fn download_excludes(siblings: &[HfSibling]) -> Vec<String> {
+fn download_excludes(siblings: &[HfSibling]) -> Vec<String> {
     // Skip original/ checkpoints, non-safetensors duplicates, consolidated copies of sharded weights, and goethe's own files: a repo never writes the card or the verify cache.
     let names: Vec<&str> = siblings.iter().map(|s| s.rfilename.as_str()).collect();
     let mut ex = vec!["original/*".to_string(), "goethe_card.toml*".to_string(), ".goethe_*".to_string()];
@@ -217,7 +217,7 @@ pub fn download_excludes(siblings: &[HfSibling]) -> Vec<String> {
     ex
 }
 
-pub fn glob_match(pattern: &str, name: &str) -> bool {
+fn glob_match(pattern: &str, name: &str) -> bool {
     // fnmatch-style match where '*' spans any characters, including '/'.
     let Some((head, rest)) = pattern.split_once('*') else {
         return pattern == name;
@@ -324,7 +324,7 @@ pub fn ensure_model(home: &Path, model_id: &str, local_dir: &Path, opts: &Downlo
     verify_model(local_dir, &revision, &files, home, model_id, &excludes)
 }
 
-pub fn only_excludes(siblings: &[HfSibling], keep: &[String]) -> Vec<String> {
+fn only_excludes(siblings: &[HfSibling], keep: &[String]) -> Vec<String> {
     // Every repo file but the kept weight files and small root metadata (tokenizer, config, chat template, license).
     let meta = |n: &str| {
         !n.contains('/')
@@ -338,7 +338,7 @@ pub fn only_excludes(siblings: &[HfSibling], keep: &[String]) -> Vec<String> {
         .collect()
 }
 
-pub fn is_installed_fast(local_dir: &Path, revision: &str, no_verify: bool) -> bool {
+fn is_installed_fast(local_dir: &Path, revision: &str, no_verify: bool) -> bool {
     if !local_dir.join("config.json").exists() || read_revision(local_dir).as_deref() != Some(revision) {
         return false;
     }
@@ -396,14 +396,14 @@ pub fn disk_preflight(home: &Path, needed: u64) -> Result<(), String> {
     Ok(())
 }
 
-pub fn native_download() -> bool {
+fn native_download() -> bool {
     // goethe's own downloader: always on macOS (no Python there), on Linux only when GOETHE_NATIVE_DOWNLOAD=1.
     cfg!(target_os = "macos") || std::env::var("GOETHE_NATIVE_DOWNLOAD").is_ok_and(|v| v == "1")
 }
 
 static FETCHED: AtomicU64 = AtomicU64::new(0);
 
-pub fn resolve_url(model_id: &str, revision: &str, file: &str) -> String {
+fn resolve_url(model_id: &str, revision: &str, file: &str) -> String {
     let path: Vec<String> = file.split('/').map(|p| p.replace('%', "%25").replace(' ', "%20").replace('#', "%23").replace('?', "%3F")).collect();
     format!("{}/{model_id}/resolve/{revision}/{}", hf_endpoint(), path.join("/"))
 }
@@ -535,7 +535,7 @@ fn refuse_option_like(model_id: &str, revision: &str) -> Result<(), String> {
     }
 }
 
-pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: &str, excludes: &[String], total: u64) -> Result<(), String> {
+fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: &str, excludes: &[String], total: u64) -> Result<(), String> {
     // hf download resumes partial files and is cheap when everything is already present; every 5 s a line says how far it is.
     refuse_option_like(model_id, revision)?;
     let program = hf_binary(home)?;
@@ -576,7 +576,7 @@ pub fn run_hf_download(home: &Path, model_id: &str, local_dir: &Path, revision: 
     let (status, tail) = outcome.map_err(|e| format!("hf download failed to start: {e}"))?;
     if !status.success() {
         let log = crate::step::log_path().map_or(String::new(), |p| format!("\nfull log: {}", p.display()));
-        return Err(format!("{}{log}", download_failure(&status, &tail)));
+        return Err(crate::errcode::coded(crate::errcode::Code::ModelDownload, format!("{}{log}", download_failure(&status, &tail))));
     }
     Ok(())
 }
@@ -718,7 +718,7 @@ fn python_of_script(script: &Path) -> Option<PathBuf> {
     (name.starts_with("python") && interp.is_file()).then_some(interp)
 }
 
-pub fn hf_binary(home: &Path) -> Result<PathBuf, String> {
+fn hf_binary(home: &Path) -> Result<PathBuf, String> {
     // The py-env hf CLI, then one next to GOETHE_PYTHON, then PATH.
     let hf = home.join("py-env/bin/hf");
     if hf.is_file() {

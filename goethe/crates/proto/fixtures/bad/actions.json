@@ -1,0 +1,17 @@
+[
+  {"action":"shell.run","args":{"cmd":"id"}},
+  {"action":"model.load","args":{"model_id":"qwen3-8b","numerics":"fast"}},
+  {"action":"model.load","args":{"model_id":"m","extra":1}},
+  {"action":"model.load","args":{}},
+  {"action":"model.load","args":{"model_id":"m","gpus":[]}},
+  {"action":"gpu.allow","args":{"gpus":[]}},
+  {"action":"api.key.create","args":{"name":"x","browser_pub":"short"}},
+  {"action":"api.expose","args":{"mode":"everyone"}},
+  {"action":"api.allow","args":{"add":["0.0.0.0/0"]}},
+  {"action":"api.share","args":{"keys":["key_1"],"allow":[],"ttl_s":3600}},
+  {"action":"api.share","args":{"keys":["key_1"],"allow":["::/0"],"ttl_s":3600}},
+  {"action":"api.share","args":{"keys":["key_1"],"allow":["203.0.113.7/32"],"ttl_s":604801}},
+  {"action":"api.share","args":{"keys":[],"allow":["203.0.113.7/32"],"ttl_s":3600}},
+  {"action":"goethe.update.rollback","args":{"version":"0.3.5"}},
+  {"action":"trust.add","args":{"key_id":"k","public_key":"BBKv0P4kp3XhXgzVgcdR9cUWbdaoLskd3UOUf9KYbKcMeqDm9ZCLvq8v5BCF5TfCZf7ZbWkOt5wLXPnpzcUrAhU","user_id":"u","cap":"root"}}
+]

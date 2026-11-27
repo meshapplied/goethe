@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 
 const COMPILED: &str = include_str!("../../../packaging/release_pub.pem");
 
-pub const MISMATCH: &str = "the signature does not match this goethe's release key; update goethe with the installer (curl -fsSL https://goethe.sh/install.sh | bash)";
+pub const MISMATCH: &str = "the signature does not match this goethe's release key; update goethe with the installer (curl -fsSL https://goethe.sh/install | bash)";
 
 pub fn verify(what: &str, body: &[u8], sig: &[u8]) -> Result<(), String> {
     // Ok when `sig` is the release key's signature of `body` (package list, registry); goethe-engine pins and checks the pack keys itself, install.sh embeds this same key and still writes it to the home for old tools that nothing here reads.
@@ -81,7 +81,7 @@ pub(crate) mod test_key {
     static KEY: Mutex<Option<String>> = Mutex::new(None);
     static SERIAL: Mutex<()> = Mutex::new(());
 
-    pub struct Held(#[allow(dead_code)] MutexGuard<'static, ()>);
+    pub(crate) struct Held(#[allow(dead_code)] MutexGuard<'static, ()>);
 
     impl Drop for Held {
         fn drop(&mut self) {

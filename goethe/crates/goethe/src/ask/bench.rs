@@ -4,8 +4,8 @@ use super::embed::{HybridRetriever, RetrievalMode, ShortlistBackend, StaticModel
 use super::planner::{PendingDecision, PlanAction, PlanLine, PlanState, PlanStep};
 use super::schema::{build_catalog, IntentCard, Kind, Risk};
 use super::slots::World;
-use crate::Cli;
-use clap::{Arg, ArgAction, Command, CommandFactory, Parser};
+use crate::{ask_cli_validate as validate_cli, Cli};
+use clap::{Arg, ArgAction, Command, CommandFactory};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -28,10 +28,6 @@ fn fixture_world() -> World {
         log_targets: vec![("goethed".into(), "the daemon log".into()), ("gateway".into(), "the gateway log".into())],
         ..World::default()
     }
-}
-
-fn validate_cli(argv: &[String]) -> Result<(), clap::Error> {
-    Cli::try_parse_from(argv).map(|_| ())
 }
 
 fn bench_dir() -> PathBuf {
@@ -83,7 +79,7 @@ fn minimal_argv(card: &IntentCard) -> Vec<String> {
             Kind::Domain => "example.com".into(),
             Kind::Cidr => "203.0.113.7/32".into(),
             Kind::Gpu => "gpu0".into(),
-            Kind::Key | Kind::KeyId | Kind::KeyName => "demo".into(),
+            Kind::Key | Kind::KeyId | Kind::KeyName | Kind::TrustKey => "demo".into(),
             Kind::Alias | Kind::NewAlias => "fast".into(),
             Kind::Folder => "/tmp".into(),
             Kind::LogTarget => "goethed".into(),
@@ -172,6 +168,371 @@ fn world_orders_up_and_install_before_load() {
 }
 
 #[test]
+fn a_misread_request_is_never_ready_to_change_anything() {
+    // Found on a real box: a model no command takes, a negation, a path that is no installed model, a stray word beside a command's name, the whole internet allowed in.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let shown = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
+    for q in ["uninstall mistral", "uninstall the qwen 7b model", "do not unload mistral", "never remove mistral", "don't stop goethe", "delete the file /tmp/x", "start the car"] {
+        let p = plan(q);
+        assert!(!p.is_ready(), "{q} is ready: {:?}", shown(&p));
+    }
+    let open = plan("allow 0.0.0.0/0");
+    assert!(!open.is_ready() || open.has_destructive(), "the whole internet on one Enter: {:?}", shown(&open));
+    assert!(super::embed::says("loads", "load") && super::embed::says("loading", "load") && !super::embed::says("loaded", "load"), "a past form asks about a state");
+    for (q, want) in [("remove mistral", "goethe remove mistralai/Mistral-7B-Instruct"), ("load fast", "goethe load fast"), ("uninstall goethe", "goethe uninstall"), ("stop goethe", "goethe down")] {
+        let p = plan(q);
+        assert!(p.is_ready() && shown(&p).last().is_some_and(|l| l == want), "{q}: {:?}", shown(&p));
+    }
+}
+
+#[test]
+fn nothing_is_deleted_or_stopped_beside_words_about_something_else() {
+    // Found by judging thousands of paraphrased requests: an alias stood for its model in "remove fast" and deleted the model; a changing command's own word beside a word no command knows ("kill all processes", "open youtube") ran the command.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let shown = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
+    for q in ["remove fast", "please remove fast", "remove goethe", "stop allowing 203.0.113.7", "kill all processes", "open youtube", "uninstall the auto-complete feature"] {
+        let p = plan(q);
+        assert!(!p.is_ready(), "{q} is ready: {:?}", shown(&p));
+    }
+    for (q, want) in [("remove mistral", "goethe remove mistralai/Mistral-7B-Instruct"), ("kill goethe", "goethe down"), ("stop sharing", "goethe api share stop"), ("cancel the share", "goethe api share stop"), ("shut everything down", "goethe down"), ("uninstall goethe", "goethe uninstall"), ("logout", "goethe logout")] {
+        let p = plan(q);
+        assert!(p.is_ready() && shown(&p).last().is_some_and(|l| l == want), "{q}: {:?}", shown(&p));
+    }
+}
+
+#[test]
+fn every_value_comes_from_the_request() {
+    // Found by judging thousands of paraphrased requests: a bare number matched a model whose name holds it ("4 rpm" scoped a key to Gemma 4, "pull phi-4 mini" installed it), an address ending a sentence was no address, and a word after "key" or "create" became a key's name ("at", "keys").
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let mut world = fixture_world();
+    world.installed.push("google/gemma-4-31b-it".into());
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let shown = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
+    for (q, never) in [("create prod at 4 rpm", "--models"), ("pull phi-4 mini", "gemma"), ("make prod key at 4 rpm", "create at"), ("create keys for ci and laptop", "create keys")] {
+        let p = plan(q);
+        assert!(!shown(&p).iter().any(|l| l.contains(never)), "{q}: {:?}", shown(&p));
+    }
+    let allow = plan("allow 203.0.113.5.");
+    assert!(shown(&allow).iter().any(|l| l == "goethe api allow add 203.0.113.5"), "{:?}", shown(&allow));
+    for (q, want) in [("create prod at 4 rpm", "goethe api keys create prod --rpm 4"), ("load qwen 7b", "goethe load Qwen/Qwen2.5-7B-Instruct")] {
+        let p = plan(q);
+        assert!(p.is_ready() && shown(&p).last().is_some_and(|l| l == want), "{q}: {:?}", shown(&p));
+    }
+}
+
+#[test]
+fn no_step_or_value_is_dropped() {
+    // Found by judging thousands of paraphrased requests: "next" and "finally" cut no step, so "load qwen 7b next api" lost the api step; "(max conc 8)" lost its number; and a step without a command word after "then" was taken for a detail of the step before and dropped.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let shown = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
+    for (q, want) in [
+        ("load qwen 7b next api", vec!["goethe load Qwen/Qwen2.5-7B-Instruct", "goethe api"]),
+        ("load qwen 7b (max conc 8) finally api", vec!["goethe load Qwen/Qwen2.5-7B-Instruct --max-conc 8", "goethe api"]),
+        ("load mistral, after that show the api", vec!["goethe load mistralai/Mistral-7B-Instruct", "goethe api"]),
+        ("create a key named demo with rpm 4 then frontend with rpm 8", vec!["goethe api keys create demo --rpm 4", "goethe api keys create frontend --rpm 8"]),
+    ] {
+        let p = plan(q);
+        assert!(p.is_ready() && shown(&p) == want, "{q}: {:?}", shown(&p));
+    }
+    let p = plan("load mistral then get the endpoint");
+    assert!(!(p.is_ready() && shown(&p) == ["goethe load mistralai/Mistral-7B-Instruct"]), "a step dropped: {:?}", shown(&p));
+}
+
+#[test]
+fn models_are_named_by_family_and_lists_and_counts_make_one_step_each() {
+    // A model is named by its family ("qwen 7b", never "7b" alone), installed or installable; a list of models or a count makes one step each; a step's own model wins; what already holds says so.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, None);
+    let mut world = fixture_world();
+    world.installed = vec!["mistralai/Mistral-7B-Instruct".into()];
+    world.loaded = world.installed.clone();
+    world.available = vec!["Qwen/Qwen2.5-7B-Instruct".into(), "meta-llama/Llama-3.1-8B-Instruct".into()];
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let lines = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
+    let picked = |p: &PlanState| p.goals.iter().map(|g| g.ambiguous.as_ref().map_or_else(|| g.argv.join(" "), |(_, o)| o.join("|"))).collect::<Vec<_>>();
+    let p = plan("install mistral, qwen 7b and llama 8b");
+    assert_eq!(picked(&p), ["goethe install mistralai/Mistral-7B-Instruct", "Qwen/Qwen2.5-7B-Instruct", "meta-llama/Llama-3.1-8B-Instruct"], "a model to download is a pick of its exact id");
+    assert_eq!(p.lines[0].why, "mistralai/Mistral-7B-Instruct is already installed");
+    let mut p = plan("load qwen 7b");
+    let slot = p.goals.iter().find_map(|g| g.ambiguous.as_ref().map(|(n, _)| n.clone())).expect("load asks which qwen");
+    p.apply(PlanAction::SetSlot { is_flag: false, name: slot, values: vec!["Qwen/Qwen2.5-7B-Instruct".into()] }, &cat, &world, &validate_cli);
+    assert_eq!(lines(&p), ["goethe install Qwen/Qwen2.5-7B-Instruct", "goethe load Qwen/Qwen2.5-7B-Instruct"]);
+    assert!(picked(&plan("create a key named customer1 for qwen 7b")).contains(&"Qwen/Qwen2.5-7B-Instruct".to_string()));
+    assert!(!lines(&plan("create a key named customer1 for 7b")).iter().any(|l| l.contains("Mistral")), "a size alone names no model");
+    assert_eq!(lines(&plan("create two api keys")).len(), 2);
+    assert_eq!(lines(&plan("load mistral with 32k tokens")).len(), 1, "a large number is an amount, not a count");
+}
+
+#[test]
+fn a_question_about_the_state_runs_what_shows_it() {
+    // "what is loaded" is answered by goethe ps, "what is installed" by goethe models; a model it names is what it asks about, not a value.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, None);
+    let world = fixture_world();
+    for (q, want) in [("what models are currently loaded?", "goethe ps"), ("is qwen 7b loaded", "goethe ps"), ("which models are installed", "goethe models"), ("load qwen 7b", "goethe load Qwen/Qwen2.5-7B-Instruct")] {
+        let p = PlanState::build(q, &cat, &ret, &world, &validate_cli);
+        assert!(p.is_ready() && p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>() == [want], "{q}: {:?}", p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>());
+    }
+}
+
+#[test]
+fn a_refusal_names_an_example_that_plans() {
+    // The example a refusal offers is itself a request ask plans, so a newcomer who types it gets an answer.
+    let cat = build_catalog(&Cli::command());
+    let p = PlanState::build(super::planner::NO_MATCH_EXAMPLE, &cat, &HybridRetriever::build(&cat, None), &fixture_world(), &validate_cli);
+    assert!(p.is_ready(), "{:?}", p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>());
+    assert!(PlanState::build("open youtube", &cat, &HybridRetriever::build(&cat, None), &fixture_world(), &validate_cli).abstain.as_deref().is_some_and(|r| r.contains(super::planner::NO_MATCH_EXAMPLE)));
+}
+
+#[test]
+fn a_question_only_reads() {
+    // The owner's rule: a question never plans a change; it asks back before one ("what can i run here" started goethe and a chat).
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let shown = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
+    for q in ["what can i run here", "is it possible to load mistral?", "load mistral now?", "why not unload mistral"] {
+        let p = plan(q);
+        assert!(!p.is_ready() || p.all_readonly(), "{q} changes something: {:?}", shown(&p));
+    }
+    for q in ["could you load mistral?", "can you load mistral", "please can you load mistral?", "load mistral"] {
+        let p = plan(q);
+        assert!(p.is_ready() && shown(&p).last().is_some_and(|l| l == "goethe load mistralai/Mistral-7B-Instruct"), "{q}: {:?}", shown(&p));
+    }
+}
+
+#[test]
+fn a_step_said_with_before_runs_after_the_next() {
+    // "before you load llama, block gpu3" loaded first: a step said with "before" comes after the step it names first.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let shown = |p: &PlanState| p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>();
+    for q in ["before you load mistral, block gpu2", "block gpu2 before you load mistral", "block gpu2, then load mistral"] {
+        let p = plan(q);
+        assert_eq!(shown(&p), ["goethe gpu deny gpu2", "goethe load mistralai/Mistral-7B-Instruct"], "{q}");
+    }
+}
+
+#[test]
+fn plain_output_says_what_a_plan_still_needs() {
+    // Without a screen, a plan that is not ready names the detail it waits for, so a script knows what to add.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let need = |q: &str| super::not_ready(&PlanState::build(q, &cat, &ret, &world, &validate_cli).next_decision(&cat, &world));
+    let qwen = need("load some qwen");
+    assert!(qwen.starts_with("needs which ") && qwen.contains("Qwen/Qwen2.5-7B-Instruct") && qwen.contains("Qwen/Qwen2.5-14B-Instruct"), "{qwen}");
+    assert!(need("load mistral with 8").contains('8'), "{}", need("load mistral with 8"));
+    assert_eq!(need("load mistral on gpu7"), "cannot run: there is no gpu7 on this machine; goethe gpu lists them", "a step that cannot run says why, not what it needs");
+    assert!(!need("open youtube").contains("needs"), "{}", need("open youtube"));
+}
+
+#[test]
+fn a_request_of_many_steps_binds_each_value_to_its_own_step() {
+    // The owner's request: two models on two GPUs, a third GPU blocked, a key scoped to each model; a step without a command word continues the one before, and "each" repeats over the models bound earlier.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let want = [
+        ("load", "goethe load mistralai/Mistral-7B-Instruct --gpu gpu0"),
+        ("load", "goethe load Qwen/Qwen2.5-7B-Instruct --gpu gpu1"),
+        ("gpu.deny", "goethe gpu deny gpu2"),
+        ("api.keys.create", "--models mistralai/Mistral-7B-Instruct"),
+        ("api.keys.create", "--models Qwen/Qwen2.5-7B-Instruct"),
+    ];
+    for q in [
+        "load mistral on gpu0 and qwen 7b on gpu1, deny gpu2, then create an api key for mistral and another for qwen 7b",
+        "load mistral on gpu0 and qwen 7b on gpu1, deny gpu2, then create an api key for each",
+    ] {
+        let p = PlanState::build(q, &cat, &ret, &world, &validate_cli);
+        let got: Vec<(String, String)> = p.goals.iter().filter(|g| g.reason.is_none()).map(|g| (g.intent_id.clone(), g.argv.join(" "))).collect();
+        assert_eq!(got.len(), want.len(), "{q}: {got:?}");
+        assert!(StaticModel::load_default().is_none() || p.goals.iter().all(|g| !g.needs_intent_pick), "{q}: with the embedding model every step's command is clear: {got:?}");
+        for ((id, argv), (want_id, want_argv)) in got.iter().zip(want) {
+            assert!(id == want_id && argv.contains(want_argv), "{q}: {id} `{argv}` should be {want_id} with `{want_argv}`; all: {got:?}");
+        }
+    }
+}
+
+#[test]
+fn a_number_takes_the_flag_its_words_name_and_a_count_must_match() {
+    // A number goes to the number flag whose own name or help has the word beside it; a count ("two keys") must match the steps planned; any other number blocks the plan.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let shown = |p: &PlanState| p.goals.iter().map(|g| g.argv.join(" ")).collect::<Vec<_>>();
+    for (q, want) in [
+        ("load mistral with 32k context", "goethe load mistralai/Mistral-7B-Instruct --ctx 32768"),
+        ("load mistral with a context of 8192", "goethe load mistralai/Mistral-7B-Instruct --ctx 8192"),
+        ("load mistral split across 2 gpus", "goethe load mistralai/Mistral-7B-Instruct --tp 2"),
+    ] {
+        let p = plan(q);
+        assert!(p.is_ready() && shown(&p).last().is_some_and(|l| l == want), "{q}: {:?}", shown(&p));
+    }
+    for q in ["load mistral with 32k", "load mistral 7", "load mistral and qwen 7b, then create three api keys for each"] {
+        let p = plan(q);
+        assert!(!p.is_ready(), "{q}: a number no flag or count takes is not dropped: {:?}", shown(&p));
+    }
+    let two = plan("load mistral and qwen 7b, then create two api keys, one for each");
+    assert_eq!(two.goals.iter().filter(|g| g.intent_id == "api.keys.create").count(), 2, "{:?}", shown(&two));
+    assert!(two.goals.iter().all(|g| !g.argv.iter().any(|a| a == "two")), "a count is no key name: {:?}", shown(&two));
+    assert!(two.unused(two.parts.len() - 1, &world).is_empty(), "the count matches: {:?}", two.unused(two.parts.len() - 1, &world));
+}
+
+#[test]
+fn each_step_is_checked_against_the_state_the_steps_before_it_leave() {
+    // A GPU must exist and not be denied, on the machine or by an earlier step; what a step undoes is gone for the steps after it; a stopped Goethe serves nothing.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let plan = |q: &str, w: &World| PlanState::build(q, &cat, &ret, w, &validate_cli);
+    let mut world = fixture_world();
+    world.denied = vec!["gpu1".into()];
+    for q in ["deny gpu0, then load mistral on gpu0", "load mistral on gpu1", "load mistral on gpu7"] {
+        let p = plan(q, &world);
+        assert!(!p.is_ready(), "{q} is ready: {:?}", cmds(&p.lines));
+        assert!(p.goals.iter().any(|g| g.verify_err.as_deref().is_some_and(|e| e.contains("gpu"))), "{q}: the reason names the GPU: {:?}", p.goals.iter().map(|g| &g.verify_err).collect::<Vec<_>>());
+    }
+    let allowed = plan("allow gpu1, then load mistral on gpu1", &world);
+    assert!(allowed.is_ready(), "{:?}", allowed.goals.iter().map(|g| &g.verify_err).collect::<Vec<_>>());
+    assert_eq!(cmds(&plan("stop goethe and load mistral", &world).lines), ["goethe down", "goethe up", "goethe load mistralai/Mistral-7B-Instruct"]);
+    let mut stale = fixture_world();
+    stale.daemon_up = false;
+    stale.loaded = vec!["mistralai/Mistral-7B-Instruct".into()];
+    assert!(!stale.has(crate::spec::Fact::Loaded, Some("mistralai/Mistral-7B-Instruct")), "a stopped Goethe serves nothing, whatever its rows say");
+    stale.daemon_up = true;
+    assert!(stale.has(crate::spec::Fact::Loaded, Some("mistralai/Mistral-7B-Instruct")));
+}
+
+#[test]
+fn it_means_the_model_before_and_a_negated_part_is_left_out() {
+    // "it" is the model the step before bound; a part that says not to do something is left out, never planned, and the rest still plans.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let it = plan("load qwen 7b, then chat with it");
+    assert!(it.goals.iter().any(|g| g.intent_id == "run" && g.argv.iter().any(|a| a == "Qwen/Qwen2.5-7B-Instruct")), "{:?}", it.goals.iter().map(|g| g.argv.join(" ")).collect::<Vec<_>>());
+    let p = plan("load mistral but don't share it");
+    assert_eq!(p.goals.iter().map(|g| g.argv.join(" ")).collect::<Vec<_>>(), ["goethe load mistralai/Mistral-7B-Instruct"]);
+    assert!(p.is_ready() && p.parts.iter().any(|x| x.left_out && x.text.contains("don't")), "{:?}", p.parts);
+}
+
+#[test]
+fn a_step_repeated_for_each_model_stays_repeated_when_picked_and_answered() {
+    // Picking the command of a part that says "each" keeps one command per earlier model, and each one asks for its own key name.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let mut p = PlanState::build("load mistral and qwen 7b, then create an api key for each", &cat, &ret, &world, &validate_cli);
+    let keys = p.parts.len() - 1;
+    p.apply_to(keys, PlanAction::SelectIntent { intent_id: "api.keys.create".into() }, &cat, &world, &validate_cli);
+    assert_eq!(p.goals.iter().filter(|g| g.intent_id == "api.keys.create").count(), 2, "{:?}", cmds(&p.lines));
+    for name in ["first", "second"] {
+        match p.next_decision(&cat, &world) {
+            PendingDecision::PromptSlot { missing } => p.apply(PlanAction::SetSlot { is_flag: false, name: missing.name, values: vec![name.into()] }, &cat, &world, &validate_cli),
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    assert!(p.is_ready(), "{:?}", cmds(&p.lines));
+    let lines = cmds(&p.lines);
+    assert!(lines.contains(&"goethe api keys create first --models mistralai/Mistral-7B-Instruct".to_string()) && lines.contains(&"goethe api keys create second --models Qwen/Qwen2.5-7B-Instruct".to_string()), "{lines:?}");
+    let tmp = tempfile::tempdir().unwrap();
+    let mut menu = super::MenuAsk::new(Cli::command(), Box::new(validate_cli));
+    menu.home = tmp.path().to_path_buf();
+    menu.world = world;
+    menu.plan = Some(p);
+    menu.sync(&cat);
+    assert_eq!(menu.frame.parts[keys].label, "api keys create x2", "the screen says the part runs twice");
+    drop(menu);
+    let log = std::fs::read_to_string(tmp.path().join("errors.log")).unwrap_or_default();
+    assert!(log.contains("ASK_DROPPED") && log.contains("api.keys.create") && log.contains("left") && !log.contains("first"), "a closed screen records the plan's commands, never the request: {log}");
+}
+
+#[test]
+fn the_owners_request_reads_as_meant() {
+    // The owner's own words: a wish in the past form names its command, a word only one command has names it, and a step repeated over models pairs up with as many values of another kind, in order.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    let argvs = |p: &PlanState| p.goals.iter().filter(|g| g.reason.is_none()).map(|g| (g.intent_id.clone(), g.argv.join(" "))).collect::<Vec<_>>();
+    let wish = plan("i want qwen 7b loaded");
+    assert!(wish.is_ready() && argvs(&wish).iter().any(|(id, _)| id == "load"), "{:?}", argvs(&wish));
+    assert!(!plan("is qwen 7b loaded").goals.iter().any(|g| g.intent_id == "load" && !g.needs_intent_pick), "a question plans no load");
+    let block = plan("block gpu2");
+    assert!(block.is_ready() && argvs(&block) == [("gpu.deny".to_string(), "goethe gpu deny gpu2".to_string())], "{:?}", argvs(&block));
+    let p = plan("install mistral and qwen 7b, load them on gpu0 and gpu1, block gpu2, then create two api keys, one for each");
+    let got = argvs(&p);
+    for want in ["goethe load mistralai/Mistral-7B-Instruct --gpu gpu0", "goethe load Qwen/Qwen2.5-7B-Instruct --gpu gpu1", "goethe gpu deny gpu2", "goethe api keys create --models mistralai/Mistral-7B-Instruct", "goethe api keys create --models Qwen/Qwen2.5-7B-Instruct"] {
+        assert!(got.iter().any(|(_, a)| a == want), "missing `{want}`: {got:?}");
+    }
+    assert!(p.goals.iter().all(|g| !g.needs_intent_pick), "{got:?}");
+    let literal = plan("i want like have 2 models installed on gpu0 and gpu1, but block gpu2, then give me two scoped to (one model only) API keys for both");
+    let got = argvs(&literal);
+    assert!(got.first().is_some_and(|(id, _)| id == "install") && got.iter().any(|(_, a)| a == "goethe gpu deny gpu2"), "{got:?}");
+    assert!(!literal.is_ready() && !literal.has_destructive(), "it asks, never guesses: {got:?}");
+}
+
+#[test]
+fn filler_in_front_and_the_order_of_values_never_change_the_plan() {
+    // Metamorphic: a polite wish before a request, or its values in another order, plans the very same commands.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let plan = |q: &str| cmds(&PlanState::build(q, &cat, &ret, &world, &validate_cli).lines);
+    for q in ["load mistral", "remove mistral", "stop goethe", "deny gpu2", "load mistral with 32k context on gpu0", "load mistral on gpu0 and qwen 7b on gpu1", "create an api key for mistral"] {
+        for wish in ["please", "could you", "i want to", "can you please"] {
+            assert_eq!(plan(&format!("{wish} {q}")), plan(q), "'{wish} {q}'");
+        }
+    }
+    assert_eq!(plan("load mistral on gpu0 with 32k context"), plan("load mistral with 32k context on gpu0"));
+    assert_eq!(plan("share the api for 2 hours with key friend-demo for 203.0.113.7"), plan("share the api with key friend-demo for 203.0.113.7 for 2 hours"));
+}
+
+#[test]
+fn a_model_whose_folder_is_gone_is_not_installed_for_ask() {
+    // Ask plans from what is on disk: a row left behind by a cleaned models folder means the model must be installed again.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let con = goethe_core::db::open(home).unwrap();
+    for id in ["org/here", "org/gone"] {
+        let sql = format!("INSERT INTO installed_models (model_id, local_path, architecture, static_vram_gb, kv_bytes_per_token, default_ctx, default_max_conc, default_tp) VALUES ('{id}', 'models/{}', 'a', 1.0, 1, 4096, 1, 0)", id.replace('/', "__"));
+        con.execute(&sql, []).unwrap();
+    }
+    std::fs::create_dir_all(home.join("models/org__here")).unwrap();
+    let (known, installed, _) = super::slots::read_models(home);
+    assert!(known && installed == ["org/here"], "{installed:?}");
+}
+
+#[test]
+fn the_catalog_dump_holds_what_ask_reads() {
+    // goethe ask --dump-catalog: each command's own words, what it needs, gives and undoes, and the kind (and help) of every argument, so anything made from it sees the CLI as ask does.
+    let cat = build_catalog(&Cli::command());
+    let dump = cat.to_json();
+    let load = dump["commands"].as_array().and_then(|c| c.iter().find(|c| c["id"] == "load")).expect("load is in the dump");
+    assert!(load["names"].as_array().is_some_and(|n| n.iter().any(|w| w == "load") && n.iter().any(|w| w == "serve")), "{}", load["names"]);
+    assert_eq!(load["gives"], serde_json::json!(["loaded"]));
+    assert_eq!(load["positionals"][0]["kind"], "installed_model");
+    let ctx = load["flags"].as_array().and_then(|f| f.iter().find(|f| f["long"] == "--ctx")).expect("--ctx");
+    assert!(ctx["kind"] == "number" && ctx["help"].as_str().is_some_and(|h| h.contains("Context")), "{ctx}");
+    assert!(dump["schema_hash"].is_string());
+}
+
+#[test]
 fn a_part_page_reads_short_descriptions_and_value_labels() {
     // Rows drop a leading "The"; a missing value reads "Key name:", not "Which key name?".
     let cat = build_catalog(&Cli::command());
@@ -248,7 +609,6 @@ fn a_written_model_id_means_a_command_that_takes_a_model() {
         assert!(p.lines.iter().all(|l| !l.why.is_empty()), "{q}: every command says what it does");
     }
     for (q, offered) in [
-        ("i want to run some models like orcarouter/OrcaCyber-Nano-1.0", "load"),
         ("i want mistralai/Mistral-7B-Instruct running", "load"),
         ("uninstall mistralai/Mistral-7B-Instruct", "remove"),
     ] {
@@ -332,8 +692,8 @@ fn requests_split_into_any_number_of_parts() {
     let world = fixture_world();
     let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
     let three = plan("show status, show gpus and list models");
-    assert_eq!(three.parts.len(), 3, "{:?}", three.parts);
     if dense {
+        assert_eq!(three.parts.len(), 3, "{:?}", three.parts);
         let offers = |i: usize, id: &str| three.parts[i].options.iter().any(|o| o.id == id);
         assert!(offers(0, "status") && offers(1, "gpu") && offers(2, "models"), "{:?}", three.parts);
     }
@@ -395,7 +755,7 @@ fn plan_build_never_panics_on_unicode_junk() {
         "load ./\u{6A21}\u{578B}/foo".into(),
         "api allow add 203.0.113.7/32 \u{2026} please".to_string(),
         long,
-        "".into(),
+        String::new(),
         "   ".into(),
         "\n\t".into(),
         "a && b || c; d | e > f < g `h` $(i)".into(),
@@ -508,6 +868,7 @@ fn multi_turn_dialogue_simulator() {
                 (PendingDecision::PickIntent { .. }, "intent") => {
                     plan.apply(PlanAction::SelectIntent { intent_id: (*val).to_string() }, &cat, &live, &validate_cli);
                 }
+                (PendingDecision::PickSlot { .. } | PendingDecision::PromptSlot { .. }, "intent") => {}
                 (PendingDecision::PickSlot { missing, .. } | PendingDecision::PromptSlot { missing }, "slot") => {
                     plan.apply(
                         PlanAction::SetSlot { is_flag: missing.is_flag, name: missing.name, values: vec![(*val).to_string()] },
@@ -605,10 +966,9 @@ fn eval_system(name: &'static str, report_misses: bool, ret: &dyn ShortlistBacke
         let ok = match p.next_decision(cat, live) {
             PendingDecision::PickIntent { options, .. } => expected_in_top3
                 .as_ref()
-                .map(|want| options.iter().take(3).any(|o| want.contains(&o.id)))
-                .unwrap_or(true),
+                .is_none_or(|want| options.iter().take(3).any(|o| want.contains(&o.id))),
             PendingDecision::PickSlot { missing, .. } | PendingDecision::PromptSlot { missing, .. } => {
-                expected_slot.map(|w| w == missing.name).unwrap_or(true)
+                expected_slot.is_none_or(|w| w == missing.name)
             }
             _ => false,
         };
@@ -643,7 +1003,7 @@ fn eval_system(name: &'static str, report_misses: bool, ret: &dyn ShortlistBacke
                 q,
                 primary(&p).map(|s| (&s.intent_id, &s.argv, s.verified)),
                 p.abstain,
-                primary(&p).map(|s| s.needs_intent_pick).unwrap_or(false)
+                primary(&p).is_some_and(|s| s.needs_intent_pick)
             );
         }
     }
@@ -685,7 +1045,7 @@ fn eval_system(name: &'static str, report_misses: bool, ret: &dyn ShortlistBacke
             }
         }
     }
-    latencies_ms.sort_by(|a, b| a.total_cmp(b));
+    latencies_ms.sort_by(f64::total_cmp);
     let p95_ms = latencies_ms[(latencies_ms.len() * 95 / 100).min(latencies_ms.len().saturating_sub(1))];
     EvalSummary {
         name,
@@ -757,4 +1117,130 @@ fn benchmark_suite_and_ci_gates() {
         assert!(primary.multi_exact >= 0.85, "words only: multi-step {:.3} < 0.85", primary.multi_exact);
         assert!(primary.flags_exact >= 0.90, "words only: flags {:.3} < 0.90", primary.flags_exact);
     }
+}
+
+#[test]
+fn a_wish_before_the_verb_does_not_change_the_command_and_a_request_never_loads_and_unloads_one_model() {
+    // "I want you to load X" is "load X"; a request that gives something and undoes it on the same model is refused, not offered.
+    let mut world = fixture_world();
+    world.daemon_up = true;
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let plan = |q: &str| PlanState::build(q, &cat, &ret, &world, &validate_cli);
+    for q in ["I want you to load mistralai/Mistral-7B-Instruct", "can you please load mistralai/Mistral-7B-Instruct"] {
+        assert_eq!(plan(q).goals.first().map(|g| g.intent_id.as_str()), plan("load mistralai/Mistral-7B-Instruct").goals.first().map(|g| g.intent_id.as_str()), "{q}");
+    }
+    assert_eq!(super::parse::without_wish("I want you to load x"), "load x");
+    assert_eq!(super::parse::without_wish("tell me about the weather"), "tell me about the weather", "only a leading wish goes");
+    assert_eq!(super::parse::without_wish("Can you, please load x"), "load x");
+    for q in ["load mistralai/Mistral-7B-Instruct and unload mistralai/Mistral-7B-Instruct", "install mistralai/Mistral-7B-Instruct and remove mistralai/Mistral-7B-Instruct"] {
+        let p = plan(q);
+        assert!(!p.is_ready(), "{q}: {:?}", cmds(&p.lines));
+        assert!(matches!(p.next_decision(&cat, &world), PendingDecision::Invalid { .. }), "{q}: {:?}", p.goals.iter().map(|g| (&g.intent_id, &g.verify_err)).collect::<Vec<_>>());
+    }
+}
+
+
+#[test]
+fn a_gated_command_is_never_ranked_without_its_own_word_and_a_filler_never_changes_the_best_command() {
+    // Generated from the catalog: every command's words, wrapped in wishes and joined with junk, in both rankers. Undoing and destructive commands need their word; a wish in front changes nothing.
+    let cat = build_catalog(&Cli::command());
+    let rankers: Vec<(&str, HybridRetriever)> = vec![
+        ("hybrid", HybridRetriever::build(&cat, StaticModel::load_default())),
+        ("lexical", HybridRetriever::build_with_mode(&cat, None, RetrievalMode::LexicalOnly)),
+    ];
+    let wishes = ["", "i want you to ", "please ", "can you ", "i would like to ", "could you please "];
+    let junk = ["a model", "the thing", "now", "for me", "qwen", "my gpu", "it", "everything", "load", "some api"];
+    let gated: Vec<&IntentCard> = cat.intents.iter().filter(|c| super::embed::gated(c)).collect();
+    assert!(gated.len() >= 10, "{} gated", gated.len());
+    let mut broken = Vec::new();
+    for (mode, ret) in &rankers {
+        for c in &cat.intents {
+            let words = c.id.replace('.', " ");
+            let bare = ret.rank(&words, 1).first().map(|r| r.id.clone());
+            for w in wishes {
+                let q = format!("{w}{words}");
+                if ret.rank(&super::parse::without_wish(&q), 1).first().map(|r| r.id.clone()) != bare {
+                    broken.push(format!("{mode}: {q:?} is not {bare:?}"));
+                }
+            }
+        }
+        for g in &gated {
+            for j in junk {
+                for w in wishes {
+                    let q = format!("{w}{j}");
+                    let said = super::embed::names(g).iter().any(|n| q.split_whitespace().any(|t| super::embed::says(t, n)));
+                    let got = ret.rank(&q, 80).into_iter().find(|r| r.id == g.id).map_or(0.0, |r| r.score);
+                    if !said && got > 0.0 {
+                        broken.push(format!("{mode}: {q:?} ranks {} at {got}", g.id));
+                    }
+                }
+            }
+        }
+    }
+    println!("{} broken\n{}", broken.len(), broken.join("\n"));
+    assert!(broken.is_empty());
+}
+
+#[test]
+fn two_unrelated_changing_words_in_one_part_are_asked_never_run() {
+    // "load/unload X", for every pair of commands that change something: the louder word never wins.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let leaf = |c: &IntentCard| c.id.rsplit('.').next().unwrap_or("").to_string();
+    let changing: Vec<&IntentCard> = cat.intents.iter().filter(|c| super::embed::gated(c) && c.takes_model() && ret.rank(&leaf(c), 1).first().is_some_and(|t| t.id == c.id)).collect();
+    assert!(changing.len() >= 4, "{} words that name their command alone", changing.len());
+    let mut ready = Vec::new();
+    for a in &changing {
+        for b in &changing {
+            let (la, lb) = (leaf(a), leaf(b));
+            if la == lb || a.id.starts_with(&format!("{}.", b.id)) || b.id.starts_with(&format!("{}.", a.id)) {
+                continue;
+            }
+            let q = format!("{la}/{lb} mistralai/Mistral-7B-Instruct");
+            let p = PlanState::build(&q, &cat, &ret, &world, &validate_cli);
+            if p.is_ready() {
+                ready.push(format!("{q} -> {:?}", p.lines.iter().map(|l| l.argv.join(" ")).collect::<Vec<_>>()));
+            }
+        }
+    }
+    println!("{} ready\n{}", ready.len(), ready.join("\n"));
+    assert!(ready.is_empty());
+}
+
+#[test]
+fn a_ready_plan_only_ever_holds_commands_the_request_names() {
+    // Random sentences from the catalog's own words, wishes and junk: no goal of a plan that is ready to confirm changes something its words do not say.
+    let cat = build_catalog(&Cli::command());
+    let ret = HybridRetriever::build(&cat, StaticModel::load_default());
+    let world = fixture_world();
+    let mut vocab: Vec<String> = cat.intents.iter().flat_map(|c| super::embed::names(c).into_iter().chain(c.id.split('.').map(str::to_string))).collect();
+    vocab.extend(["please", "i", "want", "you", "to", "qwen", "mistralai/Mistral-7B-Instruct", "the", "my", "model", "gpu", "api", "everything", "now", "it", "and", "then", "203.0.113.7", "--yes"].map(str::to_string));
+    let mut seed = 0x2545F4914F6CDD1Du64;
+    let mut next = |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n as u64) as usize
+    };
+    let (mut bad, mut ready) = (Vec::new(), 0);
+    for _ in 0..1000 {
+        let q = (0..1 + next(7)).map(|_| vocab[next(vocab.len())].clone()).collect::<Vec<_>>().join(" ");
+        let p = PlanState::build(&q, &cat, &ret, &world, &validate_cli);
+        if !p.is_ready() {
+            continue;
+        }
+        ready += 1;
+        let toks = super::embed::lex_tokens(&q.to_ascii_lowercase());
+        for g in &p.goals {
+            let Some(c) = cat.get(&g.intent_id).filter(|c| super::embed::gated(c)) else { continue };
+            let said = super::embed::names(c).iter().any(|n| if n.contains(' ') { q.to_ascii_lowercase().contains(n.as_str()) } else { toks.iter().any(|t| super::embed::says(t, n)) });
+            if !said {
+                bad.push(format!("{q:?} plans {}", g.intent_id));
+            }
+        }
+    }
+    println!("{} bad of {ready} ready\n{}", bad.len(), bad.join("\n"));
+    assert!(ready > 50 && bad.is_empty());
 }

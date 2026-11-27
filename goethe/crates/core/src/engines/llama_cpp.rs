@@ -24,7 +24,7 @@ type Get<'a> = &'a dyn Fn(&str) -> Result<Box<dyn Read>, String>;
 
 pub const ENGINE: super::Engine = super::Engine {
     id: "llama.cpp",
-    overhead_gb: crate::calc::METAL_OVERHEAD_GB,
+    overhead_gb: crate::calc::LIGHT_OVERHEAD_GB,
     layer: None,
     params: Some(&[
         "temperature", "top_p", "top_k", "min_p", "max_tokens", "max_completion_tokens", "n", "stop", "seed",
@@ -32,6 +32,9 @@ pub const ENGINE: super::Engine = super::Engine {
         "response_format", "tools", "tool_choice", "parallel_tool_calls", "ignore_eos", "json_schema", "grammar",
         "n_probs", "chat_template_kwargs", "reasoning_format", "encoding_format", "embd_normalize",
     ]),
+    routes: super::TEXT_ROUTES,
+    numerics: false,
+    prebuilt: false,
     command: llama_command,
 };
 
@@ -54,7 +57,7 @@ pub fn pinned<'a>(asset: (&'a str, &'a str), arch: &str) -> Option<(&'a str, &'a
     (arch == "x86_64" && url.starts_with("https://") && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())).then_some(asset)
 }
 
-pub fn pinned_macos<'a>(asset: (&'a str, &'a str), arch: &str) -> Option<(&'a str, &'a str)> {
+fn pinned_macos<'a>(asset: (&'a str, &'a str), arch: &str) -> Option<(&'a str, &'a str)> {
     // The upstream macOS arm64 build (Metal) of the pin, for Apple Silicon.
     let (url, sha) = asset;
     (arch == "aarch64" && url.starts_with("https://") && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())).then_some(asset)
@@ -238,6 +241,11 @@ pub fn mmproj_in(dir: &Path) -> Option<PathBuf> {
     gguf_paths(dir).into_iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().contains("mmproj")))
 }
 
+pub fn reasons(gguf: &Path) -> bool {
+    // A chat template that opens a think block: the model writes reasoning before its answer.
+    header(gguf).is_ok_and(|m| m.get("tokenizer.chat_template").is_some_and(|v| v.1.contains("<think>")))
+}
+
 pub fn has_audio_encoder(mmproj: &Path) -> bool {
     // A projector whose header says it carries an audio encoder (clip.has_audio_encoder, or any clip.audio.* key): the model transcribes speech.
     header(mmproj).is_ok_and(|m| m.iter().any(|(k, v)| (k == "clip.has_audio_encoder" && v.0.first() == Some(&1)) || k.starts_with("clip.audio.")))
@@ -245,7 +253,7 @@ pub fn has_audio_encoder(mmproj: &Path) -> bool {
 
 const SWA_BATCH: u64 = 512;
 
-pub fn sliding_layers(arch: &str, layers: usize, window: u64, pattern: &[u64]) -> Vec<bool> {
+fn sliding_layers(arch: &str, layers: usize, window: u64, pattern: &[u64]) -> Vec<bool> {
     // Which layers attend over a sliding window, as llama.cpp reads them: a per-layer pattern, a period (every n-th layer is full), or the period it builds in for its architecture.
     let period = |n: usize| (0..layers).map(|i| (i + 1) % n != 0).collect();
     match (window, pattern) {
@@ -303,7 +311,7 @@ pub fn facts(dir: &Path, gguf: &Path) -> Result<crate::model_facts::ModelFacts, 
         architecture: if max("expert_count") > 0 { "moe" } else { "dense" }.into(),
         static_vram_gb: bytes as f64 / crate::model_facts::GIB,
         kv_elems_per_token: full.max(1),
-        max_ctx: max("context_length"),
+        max_ctx: Some(max("context_length")),
         num_attention_heads: heads,
         num_kv_heads: kv.iter().copied().max().unwrap_or(0),
         attention: "gqa".into(),
@@ -386,7 +394,7 @@ fn llama_command(spec: &EngineSpec) -> Result<Command, String> {
         .arg("--alias")
         .arg(spec.served_name)
         .arg("-c")
-        .arg(crate::chooser::kv_tokens(spec.ctx, spec.max_conc).to_string())
+        .arg(spec.pool_tokens.to_string())
         .arg("-np")
         .arg(spec.max_conc.to_string())
         .arg("-kvu")
@@ -413,7 +421,7 @@ pub fn write_test_gguf(path: &Path) {
 }
 
 #[cfg(test)]
-pub fn write_test_gguf_with(path: &Path, extra: &[(&str, u32)]) {
+pub(crate) fn write_test_gguf_with(path: &Path, extra: &[(&str, u32)]) {
     // A llama header: 2 layers, 8 heads of 64, per-layer KV heads 2 and 4, context 4096, a token list to skip, and extra u32 keys.
     let s = |v: &str| [(v.len() as u64).to_le_bytes().to_vec(), v.as_bytes().to_vec()].concat();
     let arr = |t: u32, items: Vec<Vec<u8>>| [t.to_le_bytes().to_vec(), (items.len() as u64).to_le_bytes().to_vec(), items.concat()].concat();
@@ -496,12 +504,12 @@ mod tests {
             std::fs::write(d.path().join(f), b"x").unwrap();
         }
         let card: toml::Value = toml::from_str("runtime = \"llama.cpp\"").unwrap();
-        let c = command(&test_spec(d.path(), &card, &[2])).unwrap();
+        let c = command(&EngineSpec { pool_tokens: 9_999, ..test_spec(d.path(), &card, &[2]) }).unwrap();
         let a: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         let at = |f: &str| a[a.iter().position(|x| x == f).unwrap() + 1].clone();
         assert!(at("-m").ends_with("m-Q4_K_M.gguf"));
         assert_eq!((at("--host").as_str(), at("--alias").as_str(), at("-np").as_str()), ("127.0.0.1", "org/m", "4"));
-        assert_eq!((at("-c"), at("--kv-unified-per-slot")), (crate::chooser::kv_tokens(4096, 4).to_string(), "4096".to_string()));
+        assert_eq!((at("-c"), at("--kv-unified-per-slot")), ("9999".to_string(), "4096".to_string()), "the KV pool goethe budgeted");
         assert!(!a.iter().any(|x| x == "--embeddings"));
         assert!(!a.iter().any(|x| x == "--api-key"), "key stays off argv: {a:?}");
         let env = |k: &str| c.get_envs().find(|(n, _)| *n == k).and_then(|(_, v)| v).map(|v| v.to_string_lossy().into_owned());
@@ -549,8 +557,7 @@ mod tests {
     }
 
     fn sha(bytes: &[u8]) -> String {
-        use sha2::Digest;
-        format!("{:x}", sha2::Sha256::digest(bytes))
+        crate::sha::digest_hex(bytes)
     }
 
     const URL: &str = "https://example.invalid/llama-b1-bin.tar.gz";
@@ -673,6 +680,22 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_template_that_opens_a_think_block_marks_a_reasoning_model() {
+        let d = tempfile::tempdir().unwrap();
+        let s = |v: &str| [(v.len() as u64).to_le_bytes().to_vec(), v.as_bytes().to_vec()].concat();
+        let head = [b"GGUF".to_vec(), 3u32.to_le_bytes().to_vec(), 0u64.to_le_bytes().to_vec(), 1u64.to_le_bytes().to_vec()].concat();
+        let p = d.path().join("m.gguf");
+        for (template, want) in [("{{ m }}<think>\n", true), ("{{ m }}", false)] {
+            std::fs::write(&p, [head.clone(), s("tokenizer.chat_template"), 8u32.to_le_bytes().to_vec(), s(template)].concat()).unwrap();
+            assert_eq!(reasons(&p), want, "{template}");
+        }
+        write_test_gguf(&p);
+        assert!(!reasons(&p), "no template");
+        std::fs::write(d.path().join("chat_template.jinja"), "{{ m }}<think>").unwrap();
+        assert!(crate::sglang_infer::reasons(d.path()), "a safetensors model's template counts the same way");
+    }
+
+    #[test]
     fn a_projector_with_an_audio_encoder_marks_a_speech_model() {
         let d = tempfile::tempdir().unwrap();
         write_test_gguf(&d.path().join("m.Q4_K_M.gguf"));
@@ -731,7 +754,7 @@ mod tests {
         std::fs::create_dir(d.path().join("Q4_K_M")).unwrap();
         write_test_gguf(&d.path().join("Q4_K_M/m.gguf"));
         let f = facts(d.path(), &gguf_in(d.path(), &toml::Value::Table(Default::default()), None).unwrap()).unwrap();
-        assert_eq!((f.kv_elems_per_token, f.max_ctx, f.num_attention_heads, f.num_kv_heads), ((2 + 4) * 128, 4096, 8, 4));
+        assert_eq!((f.kv_elems_per_token, f.max_ctx, f.num_attention_heads, f.num_kv_heads), ((2 + 4) * 128, Some(4096), 8, 4));
         assert_eq!(f.architecture, "dense");
         let names = ["m-Q8_0.gguf", "Q4_K_M/m-Q4_K_M-00002-of-00002.gguf", "Q4_K_M/m-Q4_K_M-00001-of-00002.gguf", "mmproj-m.gguf", "m.mmproj-f16.gguf", "README.md"];
         let split = ["Q4_K_M/m-Q4_K_M-00001-of-00002.gguf", "Q4_K_M/m-Q4_K_M-00002-of-00002.gguf"];

@@ -7,7 +7,7 @@ use serde_json::Value;
 const BF16: u64 = 2;
 const DSV4_PAGE: u64 = 256;
 const SWA_EVICTION_INTERVAL: u64 = 128;
-pub const CHUNKED_PREFILL: u64 = 8192;
+const CHUNKED_PREFILL: u64 = 8192;
 const LOAD_PEAK_LAYERS: f64 = 7.0;
 const EXTRA_BUFFER_ARCHS: &[&str] = &[
     "KimiLinearForCausalLM",
@@ -112,21 +112,9 @@ pub fn installed_from_config(cfg: &Value, card: &toml::Value, load_extra: &[Stri
     Some(spec)
 }
 
-fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    // The last value given for flag, as `--flag value` or `--flag=value`.
-    let mut found = None;
-    for (i, a) in args.iter().enumerate() {
-        if a == flag {
-            found = args.get(i + 1).map(String::as_str);
-        } else if let Some(v) = a.strip_prefix(flag).and_then(|r| r.strip_prefix('=')) {
-            found = Some(v);
-        }
-    }
-    found
-}
-
 pub fn apply_engine_args(spec: &mut MemorySpec, cfg: Option<&Value>, args: &[String]) {
     // Engine-allocated linear state: --mamba-ssm-dtype sets its dtype, speculative decoding adds one per draft token.
+    let flag_value = crate::sglang_infer::flag_value;
     if spec.state_bytes_per_slot == 0 {
         return;
     }
@@ -139,7 +127,7 @@ pub fn apply_engine_args(spec: &mut MemorySpec, cfg: Option<&Value>, args: &[Str
             spec.state_bytes_per_slot = state;
         }
     }
-    let algo = flag_value(args, "--speculative-algorithm").unwrap_or("");
+    let algo = flag_value(args, "--speculative-algorithm").unwrap_or_default();
     if algo.is_empty() || algo.eq_ignore_ascii_case("none") {
         return;
     }
@@ -165,7 +153,7 @@ pub fn from_config(cfg: &Value, kv_dtype: Option<&str>) -> Result<MemorySpec, St
     } else if lm.pointer("/sparse_attention_config/use_sparse_attention").and_then(|v| v.as_bool()) == Some(true) {
         minimax_sparse(lm, cfg, layers)
     } else {
-        mha(lm, cfg, plan)
+        mha(lm, cfg, plan)?
     };
     spec.load_peak_bytes = fp4_expert_load_peak(cfg, lm, model_type);
     let state = model_facts::linear_state_bytes(lm, plan);
@@ -283,12 +271,12 @@ fn minimax_sparse(lm: &Value, cfg: &Value, layers: u64) -> MemorySpec {
     MemorySpec {
         kv_bytes_per_token: mul(&[layers, 2, kv_heads, head, BF16]),
         kv_heads,
-        kv_replicated_bytes_per_token: (2 * index_kv + k_only) * index_dim * BF16,
+        kv_replicated_bytes_per_token: mul(&[mul(&[2, index_kv]).saturating_add(k_only), index_dim, BF16]),
         ..MemorySpec::default()
     }
 }
 
-fn mha(lm: &Value, cfg: &Value, plan: model_facts::LayerPlan) -> MemorySpec {
+fn mha(lm: &Value, cfg: &Value, plan: model_facts::LayerPlan) -> Result<MemorySpec, String> {
     // K and V per KV head on full layers; window layers in their own pool (Gemma 4 full layers use the global shape).
     let heads = read_u64(lm, cfg, &["num_key_value_heads", "multi_query_group_num"])
         .or_else(|| read_u64(lm, cfg, &["num_attention_heads"]))
@@ -311,10 +299,10 @@ fn mha(lm: &Value, cfg: &Value, plan: model_facts::LayerPlan) -> MemorySpec {
         let swa_v = read_u64(lm, cfg, &["swa_v_head_dim"]).unwrap_or(if lm.get("swa_head_dim").is_some() { v_head } else { head });
         spec.swa_bytes_per_token = mul(&[swa_heads, swa_head + swa_v, BF16, plan.swa]);
         spec.swa_heads = swa_heads;
-        spec.swa_window = read_u64(lm, cfg, &["sliding_window", "sliding_window_size"]).unwrap_or(4096);
+        spec.swa_window = model_facts::swa_window(lm, cfg, "model")?;
         spec.chunked_prefill = CHUNKED_PREFILL;
     }
-    spec
+    Ok(spec)
 }
 
 #[cfg(test)]

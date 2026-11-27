@@ -6,9 +6,12 @@ use std::process::Command;
 
 pub const ENGINE: super::Engine = super::Engine {
     id: "goethe-engine",
-    overhead_gb: crate::calc::METAL_OVERHEAD_GB,
+    overhead_gb: crate::calc::LIGHT_OVERHEAD_GB,
     layer: Some(crate::pyenv::Layer::Engine),
     params: None,
+    routes: &["/chat/completions", "/completions", "/embeddings", "/audio/transcriptions"],
+    numerics: true,
+    prebuilt: false,
     command: goethe_engine_command,
 };
 
@@ -16,7 +19,7 @@ pub const PACK_FILE: &str = "pack.gcpack";
 pub const PACK_VERIFY: &str = "pack.verify.json";
 
 fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
-    // The pack and the weights its verification listed (in order), both next to the tokenizer in the model dir; GOETHE_ENGINE_ALLOW_UNSIGNED (it disables signature checks) is never passed on.
+    // The pack and the weights its verification listed (in order), both next to the tokenizer in the model dir (one drafter file as itself, such as an MTP file beside the checkpoint, drafter shards as their folder); the engine key only in the environment (argv is world-readable); GOETHE_ENGINE_ALLOW_UNSIGNED (it disables signature checks) is never passed on.
     let dir = spec.model_path;
     let text = std::fs::read_to_string(dir.join(PACK_VERIFY)).map_err(|e| format!("{}: {e}; run goethe install again", dir.join(PACK_VERIFY).display()))?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{PACK_VERIFY}: {e}"))?;
@@ -28,8 +31,11 @@ fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
         weights = vec![dir.to_path_buf()];
     }
     let drafter: Vec<PathBuf> = v["drafter"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).map(|f| dir.join(f)).filter(|f| f.is_file()).collect();
-    let shards = !drafter.is_empty() && drafter.iter().all(|w| w.extension().is_some_and(|x| x == "safetensors"));
-    weights.extend(if shards { vec![dir.join("drafter")] } else { drafter });
+    weights.extend(match &drafter[..] {
+        [one] => vec![one.clone()],
+        [first, ..] => first.parent().map(PathBuf::from).into_iter().collect(),
+        [] => Vec::new(),
+    });
     let mut cmd = Command::new(resolve_python(spec.home));
     cmd.args(["-m", "goethe_engine", "serve", "--host", "127.0.0.1", "--port"])
         .arg(spec.port.to_string())
@@ -39,14 +45,15 @@ fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
         .arg(spec.max_conc.to_string())
         .arg("--served-model-name")
         .arg(spec.served_name)
-        .arg("--api-key")
-        .arg(spec.engine_key)
         .arg("--pack")
         .arg(dir.join(PACK_FILE))
         .arg("--weights")
         .args(&weights)
         .arg("--tokenizer")
         .arg(dir);
+    if let Some(n) = spec.numerics {
+        cmd.arg("--numerics").arg(n.name());
+    }
     for o in crate::pack_update::installed_overlays(dir) {
         cmd.arg("--overlay").arg(dir.join("overlays").join(o));
     }
@@ -94,6 +101,26 @@ mod tests {
     }
 
     #[test]
+    fn a_drafter_file_beside_the_checkpoint_is_passed_as_itself_and_shards_as_their_folder() {
+        let d = model_dir(&["model-00001-of-00001.safetensors", "mtp.safetensors"]);
+        let dir = d.path().to_string_lossy().into_owned();
+        let args = |v: serde_json::Value| {
+            std::fs::write(d.path().join(PACK_VERIFY), v.to_string()).unwrap();
+            let a: Vec<String> = cmd_in(d.path(), "runtime = \"goethe-engine\"").unwrap().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            let at = |f: &str| a.iter().position(|x| x == f).unwrap();
+            a[at("--weights") + 1..at("--tokenizer")].to_vec()
+        };
+        let local = args(serde_json::json!({"weights": ["model-00001-of-00001.safetensors"], "drafter": ["mtp.safetensors"]}));
+        assert_eq!(local, [dir.clone(), format!("{dir}/mtp.safetensors")]);
+        std::fs::create_dir(d.path().join("drafter")).unwrap();
+        for s in ["d-00001-of-00002.safetensors", "d-00002-of-00002.safetensors"] {
+            std::fs::write(d.path().join("drafter").join(s), b"w").unwrap();
+        }
+        let shards = args(serde_json::json!({"weights": ["model-00001-of-00001.safetensors"], "drafter": ["drafter/d-00001-of-00002.safetensors", "drafter/d-00002-of-00002.safetensors"]}));
+        assert_eq!(shards, [dir.clone(), format!("{dir}/drafter")]);
+    }
+
+    #[test]
     fn launches_the_engine_with_the_pack_the_listed_weights_and_the_tokenizer_dir() {
         let d = model_dir(&["t.gguf", "d.gguf"]);
         let c = cmd_in(d.path(), "runtime = \"goethe-engine\"").unwrap();
@@ -105,6 +132,23 @@ mod tests {
         assert_eq!(a[at("--weights") + 1..at("--tokenizer")], [format!("{dir}/t.gguf"), format!("{dir}/d.gguf")]);
         assert_eq!(a[at("--tokenizer") + 1], dir);
         assert_eq!(a[at("--max-running-requests") + 1], "4");
+        assert!(!a.iter().any(|x| x == "--api-key" || x.contains("kkkk")), "the engine key never goes on argv: {a:?}");
+        assert!(c.get_envs().any(|(k, v)| k == "GOETHE_ENGINE_API_KEY" && v.is_some_and(|v| v.len() == 32)));
+    }
+
+    #[test]
+    fn a_pinned_numerics_reaches_the_engine_and_none_leaves_its_default() {
+        let d = model_dir(&["t.gguf"]);
+        let card: toml::Value = toml::from_str("runtime = \"goethe-engine\"").unwrap();
+        let args = |n| command(&EngineSpec { numerics: n, ..test_spec(d.path(), &card, &[3]) }).unwrap().get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        let a = args(Some(goethe_proto::Numerics::Tolerance));
+        assert_eq!(a[a.iter().position(|x| x == "--numerics").unwrap() + 1], "tolerance");
+        assert!(!args(None).iter().any(|x| x == "--numerics"));
+        for plain in ["sglang", "llama.cpp", "ninfer"] {
+            let card: toml::Value = toml::from_str(&format!("runtime = \"{plain}\"")).unwrap();
+            let e = command(&EngineSpec { numerics: Some(goethe_proto::Numerics::Invariant), ..test_spec(d.path(), &card, &[3]) }).unwrap_err();
+            assert!(e.contains("--numerics invariant needs a kernel pack"), "{plain}: {e}");
+        }
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-pub const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 1;
 
 const DDL: &str = r"
 CREATE TABLE IF NOT EXISTS installed_models (
@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS desired_loads (
     max_conc INTEGER,
     tp INTEGER,
     extra_sglang_args TEXT NOT NULL DEFAULT '[]',
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    numerics TEXT
 );
 
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -127,6 +128,30 @@ CREATE TABLE IF NOT EXISTS watchdog_probe_state (
     cheap_ok_once INTEGER NOT NULL DEFAULT 0
 );
 ";
+
+pub fn setting(con: &Connection, key: &str) -> Option<String> {
+    con.query_row("SELECT value FROM goethe_settings WHERE key = ?1", [key], |r| r.get(0)).ok()
+}
+
+pub fn setting_json<T: Default + serde::de::DeserializeOwned>(con: &Connection, key: &str) -> T {
+    // A JSON setting, or the default when it is missing or does not parse.
+    setting(con, key).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
+}
+
+const EXPERIMENTAL: &str = "experimental";
+
+pub fn experimental(home: &Path) -> bool {
+    // Whether experimental features (Ask) show on the menu and in goethe help; off until ticked on the menu, and reading it creates no state.db.
+    home.join("state.db").is_file() && open(home).ok().and_then(|c| setting(&c, EXPERIMENTAL)).is_some_and(|v| v == "1")
+}
+
+pub fn set_experimental(home: &Path, on: bool) -> Result<(), String> {
+    open(home).and_then(|c| set_setting(&c, EXPERIMENTAL, if on { "1" } else { "0" })).map_err(|e| format!("experimental features: {e}"))
+}
+
+pub fn set_setting(con: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    con.execute("INSERT OR REPLACE INTO goethe_settings (key, value) VALUES (?1, ?2)", [key, value]).map(|_| ())
+}
 
 pub fn open(home: &Path) -> rusqlite::Result<Connection> {
     // Open state.db; the schema is checked once per process and never rewritten when current.
@@ -213,11 +238,15 @@ fn init_schema(con: &Connection) -> rusqlite::Result<()> {
 }
 
 fn ensure_columns(con: &Connection) -> rusqlite::Result<()> {
-    // Columns and tables added after schema version 1, without a version bump so an older goethe still opens the database; api_keys.token held raw secrets up to 0.3.5 and is kept but emptied.
+    // Columns and tables added after schema version 1, without a version bump so an older goethe still opens the database (desired_loads.numerics); api_keys.token held raw secrets up to 0.3.5 and is kept but emptied.
     crate::usage_log::ensure_tables(con)?;
     let has_token = || con.prepare("SELECT token FROM api_keys LIMIT 0").is_ok();
     if !has_token() {
         con.execute_batch("ALTER TABLE api_keys ADD COLUMN token TEXT;").or_else(|e| if has_token() { Ok(()) } else { Err(e) })?;
+    }
+    let has_numerics = || con.prepare("SELECT numerics FROM desired_loads LIMIT 0").is_ok();
+    if !has_numerics() {
+        con.execute_batch("ALTER TABLE desired_loads ADD COLUMN numerics TEXT;").or_else(|e| if has_numerics() { Ok(()) } else { Err(e) })?;
     }
     let raw: bool = con.query_row("SELECT EXISTS (SELECT 1 FROM api_keys WHERE token IS NOT NULL)", [], |r| r.get(0))?;
     if raw {
@@ -250,6 +279,16 @@ mod tests {
             .unwrap()
             .filter_map(|r| r.ok())
             .collect()
+    }
+
+    #[test]
+    fn experimental_features_are_off_until_ticked_and_reading_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!experimental(dir.path()) && !dir.path().join("state.db").exists(), "a fresh home: off, and no state.db");
+        set_experimental(dir.path(), true).unwrap();
+        assert!(experimental(dir.path()));
+        set_experimental(dir.path(), false).unwrap();
+        assert!(!experimental(dir.path()));
     }
 
     #[test]
@@ -287,6 +326,15 @@ mod tests {
         init_schema(&other).unwrap();
         let after: i64 = watcher.query_row("PRAGMA data_version", [], |r| r.get(0)).unwrap();
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn a_database_from_before_numerics_gets_the_column() {
+        let dir = tempfile::tempdir().unwrap();
+        open(dir.path()).unwrap().execute_batch("ALTER TABLE desired_loads DROP COLUMN numerics;").unwrap();
+        let con = Connection::open(dir.path().join("state.db")).unwrap();
+        init_schema(&con).unwrap();
+        assert!(con.prepare("SELECT numerics FROM desired_loads LIMIT 0").is_ok());
     }
 
     #[test]

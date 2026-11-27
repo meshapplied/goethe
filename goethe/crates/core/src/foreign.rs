@@ -95,7 +95,7 @@ fn user_name(uid: u32) -> String {
         .into_owned()
 }
 
-pub fn process_owner(pid: i32) -> (String, String, Option<u32>) {
+fn process_owner(pid: i32) -> (String, String, Option<u32>) {
     // Command name, owning user name and uid of a process from the process table ("unknown" when it is gone or hidden).
     let argv0 = crate::sys::argv(pid).and_then(|argv| {
         let first = argv.into_iter().next()?;

@@ -12,6 +12,9 @@ pub const SGLANG: super::Engine = super::Engine {
     overhead_gb: crate::calc::BASE_OVERHEAD_GB,
     layer: Some(crate::pyenv::Layer::Sglang),
     params: None,
+    routes: super::TEXT_ROUTES,
+    numerics: false,
+    prebuilt: false,
     command: |spec| Ok(sglang_command(spec)),
 };
 
@@ -53,7 +56,7 @@ fn multi_tokenizer(args: &[String]) -> bool {
 
 fn memory_args(spec: &EngineSpec, extras: &[String]) -> Vec<String> {
     let Some(m) = crate::memory_spec::installed(spec.model_path, spec.card, spec.load_extra) else { return Vec::new() };
-    let args = crate::chooser::engine_args(&m, spec.ctx, spec.max_conc);
+    let args = crate::chooser::engine_args(&m, spec.max_conc, spec.pool_tokens);
     let user_chunk = extras.iter().any(|a| a.starts_with("--chunked-prefill-size"));
     args.chunks(2).filter(|p| !(user_chunk && p[0] == "--chunked-prefill-size")).flatten().cloned().collect()
 }
@@ -61,7 +64,7 @@ fn memory_args(spec: &EngineSpec, extras: &[String]) -> Vec<String> {
 const SGLANG_BOOT: &str = "import os, runpy, sys\n\nif __name__ == '__main__':\n    sys.argv = ['sglang.launch_server', *sys.argv[1:], '--api-key', os.environ['GOETHE_ENGINE_API_KEY']]\n    runpy.run_module('sglang.launch_server', run_name='__main__')\n";
 
 fn graph_args(max_conc: u64, extras: &[String]) -> Vec<String> {
-    // Decode graphs up to concurrency. Prefill capture lives outside the static pool; skip it (ponytail: else OOM on tight cards).
+    // Decode graphs up to concurrency. Prefill capture lives outside the static pool; skip it, or tight cards run out of memory.
     let theirs = extras.iter().any(|a| a.starts_with("--cuda-graph") || a == "--disable-cuda-graph");
     if theirs {
         return Vec::new();

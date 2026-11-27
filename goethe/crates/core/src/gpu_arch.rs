@@ -84,14 +84,14 @@ pub const SUPPORTED: &[Arch] = &[
     },
 ];
 
-pub struct Recognised {
+struct Recognised {
     pub major: u32,
     pub minor: u32,
     pub family: &'static str,
     pub reason: &'static str,
 }
 
-pub const RECOGNISED_UNSUPPORTED: &[Recognised] = &[
+const RECOGNISED_UNSUPPORTED: &[Recognised] = &[
     Recognised {
         major: 7,
         minor: 0,
@@ -182,8 +182,8 @@ pub fn nvfp4_dual_copy(cc: &str) -> bool {
     lookup(cc).is_some_and(|a| a.nvfp4 == Nvfp4Path::MarlinSmall)
 }
 
-pub fn model_runs_on(model_sm: &[String], gpu_cc: &str) -> bool {
-    // Listed for this capability, or one on the same NVFP4 path with no more shared memory; empty means any (Metal: none or metal).
+pub fn model_runs_on(model_sm: &[String], gpu_cc: &str, prebuilt: bool) -> bool {
+    // Listed for this capability, or (unless the engine ships a prebuilt artifact) one on the same NVFP4 path with no more shared memory; empty means any (Metal: none or metal).
     if is_apple(gpu_cc) {
         return model_sm.is_empty() || model_sm.iter().any(|s| is_apple(s));
     }
@@ -191,7 +191,7 @@ pub fn model_runs_on(model_sm: &[String], gpu_cc: &str) -> bool {
         return false;
     };
     model_sm.is_empty()
-        || model_sm.iter().any(|s| same_cc(s, gpu_cc) || arch.covered_by.iter().any(|c| same_cc(s, c)))
+        || model_sm.iter().any(|s| same_cc(s, gpu_cc) || !prebuilt && arch.covered_by.iter().any(|c| same_cc(s, c)))
 }
 
 #[cfg(test)]
@@ -205,9 +205,9 @@ mod tests {
     #[test]
     fn an_apple_gpu_is_supported_and_runs_models_that_name_no_nvidia_capability() {
         assert!(is_supported("metal") && unsupported_reason("metal").is_none());
-        assert!(model_runs_on(&[], "metal") && model_runs_on(&sm(&["metal"]), "metal"));
-        assert!(!model_runs_on(&sm(&["12.0"]), "metal"), "a kernel built for NVIDIA does not run on a Mac");
-        assert!(!model_runs_on(&sm(&["metal"]), "12.0"));
+        assert!(model_runs_on(&[], "metal", false) && model_runs_on(&sm(&["metal"]), "metal", false));
+        assert!(!model_runs_on(&sm(&["12.0"]), "metal", false), "a kernel built for NVIDIA does not run on a Mac");
+        assert!(!model_runs_on(&sm(&["metal"]), "12.0", false));
     }
 
     #[test]
@@ -237,12 +237,21 @@ mod tests {
     #[test]
     fn validation_carries_over_to_architectures_on_the_same_path() {
         let consumer = sm(&["12.0", "12.1"]);
-        assert!(model_runs_on(&consumer, "10.0") && model_runs_on(&consumer, "10.3"));
-        assert!(!model_runs_on(&consumer, "8.6") && !model_runs_on(&consumer, "9.0"));
+        assert!(model_runs_on(&consumer, "10.0", false) && model_runs_on(&consumer, "10.3", false));
+        assert!(!model_runs_on(&consumer, "8.6", false) && !model_runs_on(&consumer, "9.0", false));
         let ampere = sm(&["8.6"]);
-        assert!(model_runs_on(&ampere, "8.0") && model_runs_on(&ampere, "9.0") && model_runs_on(&ampere, "8.6"));
-        assert!(!model_runs_on(&ampere, "12.0"), "consumer Blackwell needs its own validation");
-        assert!(!model_runs_on(&sm(&["10.0"]), "12.0"), "coverage is one way");
+        assert!(model_runs_on(&ampere, "8.0", false) && model_runs_on(&ampere, "9.0", false) && model_runs_on(&ampere, "8.6", false));
+        assert!(!model_runs_on(&ampere, "12.0", false), "consumer Blackwell needs its own validation");
+        assert!(!model_runs_on(&sm(&["10.0"]), "12.0", false), "coverage is one way");
+    }
+
+    #[test]
+    fn a_prebuilt_engine_is_offered_only_on_the_architectures_its_model_lists() {
+        // (runtime, model sm, gpu, runs)
+        for (runtime, sms, gpu, runs) in [("ninfer", &["12.0", "12.1"][..], "12.0", true), ("ninfer", &["12.0", "12.1"], "10.0", false), ("sglang", &["12.0", "12.1"], "10.0", true), ("sglang", &["12.0", "12.1"], "12.1", true)] {
+            let prebuilt = crate::engines::by_id(runtime).unwrap().prebuilt;
+            assert_eq!(model_runs_on(&sm(sms), gpu, prebuilt), runs, "{runtime} on {gpu}");
+        }
     }
 
     #[test]
@@ -251,12 +260,12 @@ mod tests {
         assert!(unsupported_reason("7.5").unwrap().contains("start at Ampere (SM 8.0)"));
         assert!(unsupported_reason("6.1").unwrap().starts_with("SM 6.1 is not supported (need 8.0, 8.6"));
         assert_eq!(unsupported_reason("9.0"), None);
-        assert!(!model_runs_on(&[], "7.5") && !model_runs_on(&sm(&["7.5"]), "7.5"), "never placed");
+        assert!(!model_runs_on(&[], "7.5", false) && !model_runs_on(&sm(&["7.5"]), "7.5", false), "never placed");
     }
 
     #[test]
     fn an_empty_list_means_every_supported_gpu() {
-        assert!(model_runs_on(&[], "9.0") && model_runs_on(&[], "12.1"));
-        assert!(!model_runs_on(&[], "7.5") && !model_runs_on(&sm(&["7.5"]), "7.5"), "unsupported GPUs never run");
+        assert!(model_runs_on(&[], "9.0", false) && model_runs_on(&[], "12.1", false));
+        assert!(!model_runs_on(&[], "7.5", false) && !model_runs_on(&sm(&["7.5"]), "7.5", false), "unsupported GPUs never run");
     }
 }

@@ -26,6 +26,7 @@ pub enum RetrievalMode {
 
 pub trait ShortlistBackend {
     fn rank(&self, query: &str, top_k: usize) -> Vec<ScoredIntent>;
+    fn knows(&self, word: &str) -> bool;
 }
 
 pub struct StaticModel {
@@ -200,6 +201,8 @@ pub struct HybridRetriever {
     idf: HashMap<String, f32>,
     model: Option<StaticModel>,
     card_vecs: Vec<Vec<f32>>,
+    witness: Vec<Option<Vec<String>>>,
+    reach: Vec<Option<Vec<String>>>,
     mode: RetrievalMode,
 }
 
@@ -209,7 +212,7 @@ impl HybridRetriever {
     }
 
     pub fn dense_dim(&self) -> usize {
-        self.model.as_ref().map(StaticModel::dim).unwrap_or(0)
+        self.model.as_ref().map_or(0, StaticModel::dim)
     }
 
     pub fn build(catalog: &CliCatalog, model: Option<StaticModel>) -> Self {
@@ -227,7 +230,7 @@ impl HybridRetriever {
         let mut exact_phrases = Vec::with_capacity(catalog.intents.len());
         for card in &catalog.intents {
             ids.push(card.id.clone());
-            cmd_tokens.push(card.id.split('.').map(|s| s.to_ascii_lowercase()).collect());
+            cmd_tokens.push(card.id.split('.').map(str::to_ascii_lowercase).collect());
             let mut phrases = vec![card.id.replace('.', " ")];
             if card.argv_prefix.len() > 1 {
                 phrases.push(card.argv_prefix[1..].join(" "));
@@ -254,7 +257,9 @@ impl HybridRetriever {
             Some(m) => catalog.intents.iter().map(|c| m.embed(&c.embed_text)).collect(),
             None => Vec::new(),
         };
-        HybridRetriever { ids, cmd_tokens, exact_phrases, doc_tf, doc_len, avg_len, idf, model, card_vecs, mode }
+        let witness = catalog.intents.iter().map(|c| gated(c).then(|| names(c))).collect();
+        let reach = catalog.intents.iter().map(|c| (c.risk == super::schema::Risk::Network).then(|| c.id.split('.').map(str::to_string).collect())).collect();
+        HybridRetriever { ids, cmd_tokens, exact_phrases, doc_tf, doc_len, avg_len, idf, model, card_vecs, witness, reach, mode }
     }
 
     fn bm25_score(&self, q_lower: &str, q_toks: &[String], idx: usize) -> f32 {
@@ -282,7 +287,7 @@ impl HybridRetriever {
         }
         let mut norm = if max_possible > 0.0 { (raw / max_possible).clamp(0.0, 1.0) } else { 0.0 };
         let cmd = &self.cmd_tokens[idx];
-        let hits = cmd.iter().filter(|ct| q_toks.iter().any(|qt| qt == *ct)).count();
+        let hits = cmd.iter().enumerate().filter(|(k, ct)| q_toks.iter().any(|qt| qt == *ct || (k + 1 < cmd.len() && same_word(qt, ct)))).count();
         if hits == cmd.len() && hits > 0 {
             let cov = (hits as f32 / q_toks.len().max(1) as f32).clamp(0.15, 1.0);
             if hits >= 2 {
@@ -305,9 +310,14 @@ impl HybridRetriever {
 }
 
 impl ShortlistBackend for HybridRetriever {
+    fn knows(&self, word: &str) -> bool {
+        // Whether any command's words hold this one.
+        self.idf.contains_key(word)
+    }
+
     fn rank(&self, query: &str, top_k: usize) -> Vec<ScoredIntent> {
         // BM25 and embedding similarity, fused by reciprocal rank and blended with both scores.
-        let head = query.split_once(" -- ").map(|(l, _)| l).unwrap_or(query);
+        let head = query.split_once(" -- ").map_or(query, |(l, _)| l);
         let q_lower = head.trim().to_ascii_lowercase();
         let q_toks = lex_tokens(&q_lower);
         let n = self.ids.len();
@@ -339,14 +349,69 @@ impl ShortlistBackend for HybridRetriever {
                     }
                     RetrievalMode::Hybrid => lex,
                 };
-                ScoredIntent { id: self.ids[i].clone(), score }
+                let said = self.witness[i].as_ref().is_none_or(|w| w.iter().any(|n| if n.contains(' ') { contains_phrase(&q_lower, n) } else { q_toks.iter().any(|t| says(t, n)) }))
+                    && self.reach[i].as_ref().is_none_or(|path| q_toks.iter().any(|t| path.iter().any(|w| says(t, w) || same_word(t, w))));
+                ScoredIntent { id: self.ids[i].clone(), score: if said { score } else { 0.0 } }
             })
             .collect();
+        self.tie_contradictions(&q_toks, &mut out);
         out.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
         out.truncate(top_k);
         out
     }
 
+}
+
+pub(super) fn gated(card: &super::schema::IntentCard) -> bool {
+    // Anything that changes something is never a guess: the request must say the command's own word or one of its aliases, because a vector puts "load" beside "unload"; one that changes who reaches the API must also say a word of its own path ("open youtube" is no api share).
+    card.risk != super::schema::Risk::ReadOnly
+}
+
+pub(super) fn names(card: &super::schema::IntentCard) -> Vec<String> {
+    card.id.rsplit('.').next().into_iter().map(str::to_string).chain(card.aliases.iter().map(|a| a.to_ascii_lowercase())).chain(card.does.says.iter().map(ToString::to_string)).collect()
+}
+
+pub(super) fn same_word(a: &str, b: &str) -> bool {
+    // One word, singular or plural: "key" names the `keys` in `api keys create`; a command's own last word is still said as itself.
+    a == b || a.strip_suffix('s') == Some(b) || b.strip_suffix('s') == Some(a)
+}
+
+pub(super) fn says(token: &str, name: &str) -> bool {
+    // The word itself or a plain inflection of it (unloads, unloading), never a longer word that merely contains it; a past form ("is qwen loaded") asks about a state, it does not ask for a change.
+    let stem = name.strip_suffix('e').unwrap_or(name);
+    token == name || token.strip_prefix(stem).is_some_and(|end| matches!(end, "s" | "es" | "ing"))
+}
+
+impl HybridRetriever {
+    fn leaf_at(&self, i: usize, q_toks: &[String]) -> Vec<usize> {
+        // Where the query says the command's own name exactly, when only that command has it ("on" and "remove" name several, so they never make a rival).
+        let leaf = self.ids[i].rsplit('.').next().unwrap_or("");
+        if self.ids.iter().filter(|id| id.rsplit('.').next() == Some(leaf)).count() > 1 {
+            return Vec::new();
+        }
+        (0..q_toks.len()).filter(|&k| q_toks[k] == leaf).collect()
+    }
+
+    fn tie_contradictions(&self, q_toks: &[String], out: &mut [ScoredIntent]) {
+        // A part that says two unrelated state-changing words ("load/unload") is not a request for the louder one: they tie, so the plan asks.
+        let gated = (0..out.len()).filter(|&i| self.witness[i].is_some());
+        let Some(top) = gated.max_by(|&a, &b| out[a].score.total_cmp(&out[b].score)).filter(|&i| out[i].score > 0.0) else {
+            return;
+        };
+        let said: Vec<usize> = (0..q_toks.len()).filter(|&k| self.witness[top].iter().flatten().any(|n| says(&q_toks[k], n))).collect();
+        let related = |a: &str, b: &str| a.starts_with(&format!("{b}.")) || b.starts_with(&format!("{a}."));
+        let top_score = out[top].score;
+        let rivals: Vec<usize> = (0..out.len())
+            .filter(|&i| i != top && out[i].score > 0.0 && self.witness[i].is_some() && !related(&self.ids[i], &self.ids[top]))
+            .filter(|&i| {
+                let own = self.leaf_at(i, q_toks);
+                !own.is_empty() && own.iter().all(|k| !said.contains(k))
+            })
+            .collect();
+        for i in rivals {
+            out[i].score = top_score;
+        }
+    }
 }
 
 fn rank_order(scores: &[f32]) -> Vec<usize> {
@@ -384,7 +449,7 @@ pub fn lex_tokens(text: &str) -> Vec<String> {
     // Normalized lexical tokens for BM25, dropping tiny stop words and paths/URLs.
     const STOP: &[&str] = &["the", "and", "for", "with", "that", "this", "from", "into", "your", "please", "can", "you"];
     text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .map(|s| s.to_ascii_lowercase())
+        .map(str::to_ascii_lowercase)
         .filter(|s| s.len() >= 2 && !STOP.contains(&s.as_str()))
         .collect()
 }

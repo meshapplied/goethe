@@ -323,7 +323,6 @@ enum Phase {
 
 pub(crate) struct LoadJob {
     pub(crate) model: String,
-    ctx: Option<u64>,
     gpus: Vec<u32>,
     phase: Phase,
     frac: f64,
@@ -465,8 +464,8 @@ fn goethe_cmd() -> std::process::Command {
 }
 
 impl LoadJob {
-    pub(crate) fn new(model: String, ctx: Option<u64>) -> LoadJob {
-        LoadJob { model, ctx, gpus: Vec::new(), phase: Phase::Up(None), frac: 0.0, shown: 0, ticks: 0 }
+    pub(crate) fn new(model: String) -> LoadJob {
+        LoadJob { model, gpus: Vec::new(), phase: Phase::Up(None), frac: 0.0, shown: 0, ticks: 0 }
     }
 
 
@@ -485,7 +484,7 @@ impl LoadJob {
                 Ok(Some(st)) if !st.success() => Phase::Failed("goethed did not start; goethe up shows why".to_string()),
                 _ => Phase::Up(Some(c)),
             },
-            Phase::Start => match goethe_cmd().args(["load", &self.model, "--no-wait", "--json", "--yes"]).args(self.ctx.map(|c| format!("--ctx={c}"))).args(gpu_flag(&self.gpus)).output() {
+            Phase::Start => match goethe_cmd().args(["load", &self.model, "--no-wait", "--json", "--yes"]).args(gpu_flag(&self.gpus)).output() {
                 Ok(o) if o.status.success() => match crate::rpc::parse_load_instance_id(&String::from_utf8_lossy(&o.stdout)) {
                     Some(instance) => Phase::Loading { instance, gpus: Vec::new(), need_mb: 0, base_mb: 0 },
                     None if String::from_utf8_lossy(&o.stdout).contains("already loaded") => {
@@ -646,7 +645,7 @@ impl Page for Menu {
             }
             let detail = match (&self.ask_line, i) {
                 _ if side.is_some() => "",
-                (Some(line), ASK_ROW) if self.top => line.as_str(),
+                (Some(line), _) if self.top && c.title == ASK => line.as_str(),
                 _ => c.detail,
             };
             out.push(match (i == self.at, focused) {
@@ -690,7 +689,7 @@ impl Page for Menu {
                     self.gpus = Some(g);
                 }
                 Some(true) => {
-                    let mut job = LoadJob::new(g.model, None);
+                    let mut job = LoadJob::new(g.model);
                     job.gpus = g.marked;
                     self.job = Some(job);
                 }
@@ -823,24 +822,29 @@ impl Page for SchemaPage {
     }
 }
 
-const ASK_ROW: usize = 0;
+const ASK: &str = "Ask";
+const EXPERIMENTAL: &str = "Experimental";
 
-fn main_menu() -> Menu {
+fn main_menu(experimental: bool) -> Menu {
+    // The top menu; Ask is there only while experimental features are ticked.
+    let mut items = vec![
+        Choice { title: ASK, detail: "(experimental) describe what you want in plain English", side: None },
+        Choice { title: "Quick setup", detail: "install a model, serve it and open the API", side: None },
+        Choice { title: "Load/Unload", detail: "load an installed model, unload loaded ones", side: Some(Side::Models) },
+        Choice { title: "Install models", detail: "pick models that fit your GPUs", side: None },
+        Choice { title: "API keys and gateway", detail: "keys, who can reach the API, a public address", side: None },
+        Choice { title: "Status", detail: "Goethe, the API and the models it serves", side: None },
+        Choice { title: "Metrics", detail: "requests, tokens and GPU use over time", side: None },
+        Choice { title: EXPERIMENTAL, detail: if experimental { "[x] experimental features (Ask)" } else { "[ ] experimental features (Ask)" }, side: None },
+    ];
+    items.retain(|c| experimental || c.title != ASK);
     Menu {
         heading: Vec::new(),
-        items: vec![
-            Choice { title: "Ask", detail: "describe what you want in plain English", side: None },
-            Choice { title: "Quick setup", detail: "install a model, serve it and open the API", side: None },
-            Choice { title: "Load/Unload", detail: "load an installed model, unload loaded ones", side: Some(Side::Models) },
-            Choice { title: "Install models", detail: "pick models that fit your GPUs", side: None },
-            Choice { title: "API keys and gateway", detail: "keys, who can reach the API, a public address", side: None },
-            Choice { title: "Status", detail: "Goethe, the API and the models it serves", side: None },
-            Choice { title: "Metrics", detail: "requests, tokens and GPU use over time", side: None },
-        ],
+        gap_before: items.iter().position(|c| c.title == "Status"),
+        items,
         at: 0,
         hint: "\u{2191}\u{2193} move   Enter open   q quit",
         top: true,
-        gap_before: Some(5),
         side: None,
         off: Vec::new(),
         job: None,
@@ -941,7 +945,7 @@ impl Page for ModelPick {
             Input::Up | Input::Char('k') => self.at = (self.at + n - 1) % n,
             Input::Down | Input::Char('j') => self.at = (self.at + 1) % n,
             Input::Enter if self.models[self.at].1 => return Flow::Pick(self.at),
-            Input::Enter => self.job = Some(LoadJob::new(self.models[self.at].0.clone(), crate::run::run_ctx(&goethe_home(), &self.models[self.at].0))),
+            Input::Enter => self.job = Some(LoadJob::new(self.models[self.at].0.clone())),
             Input::Left | Input::Esc | Input::Interrupt | Input::Char('q') => return Flow::Quit,
             _ => {}
         }
@@ -1139,9 +1143,12 @@ impl<'a> AskPage<'a> {
     }
 
     fn reset(&mut self, frame: AskFrame) {
-        // A new plan: start on the first part while any part still needs an answer, else the confirm page.
+        // A new plan: start on the first part while any part still needs an answer, else the confirm page; a refusal has nothing to confirm, so the request stays the field.
         self.frame = frame;
         self.page = if self.frame.parts.iter().any(AskPart::open) { 0 } else { self.confirm_page() };
+        if self.frame.parts.is_empty() {
+            self.edit = Field::Request;
+        }
         self.place();
     }
 
@@ -1512,13 +1519,26 @@ pub fn run(mut hooks: MenuHooks) -> Result<(), String> {
         return Err("goethe alone needs a terminal; goethe help lists the commands".to_string());
     }
     let mut tty = Tty::open()?;
-    let mut menu = main_menu();
+    let home = goethe_home();
+    let mut menu = main_menu(crate::db::experimental(&home));
     loop {
         menu.refresh_off();
-        match tty.run(&mut menu)? {
+        let picked = tty.run(&mut menu)?.map(|i| menu.items[i].title);
+        match picked {
             None if menu.ask_run.is_some() => menu.note = Some("Ask is still running commands; open Ask to follow them, or press Ctrl-C there to stop them.".into()),
             None => return Ok(()),
-            Some(ASK_ROW) => {
+            Some(EXPERIMENTAL) => {
+                let on = !crate::db::experimental(&home);
+                if let Err(e) = crate::db::set_experimental(&home, on) {
+                    menu.note = Some(e);
+                    continue;
+                }
+                let (run, line) = (menu.ask_run.take(), menu.ask_line.take());
+                menu = main_menu(on);
+                (menu.ask_run, menu.ask_line) = (run, line);
+                menu.at = menu.items.iter().position(|c| c.title == EXPERIMENTAL).unwrap_or(0);
+            }
+            Some(ASK) => {
                 menu.ask_run = None;
                 menu.ask_line = None;
                 if ask_on(&mut tty, hooks.ask.as_mut(), AskHost::Menu)? {
@@ -1527,16 +1547,16 @@ pub fn run(mut hooks: MenuHooks) -> Result<(), String> {
                 menu.ask_run = hooks.ask.progress();
                 menu.ask_line = menu.ask_run.as_ref().map(|p| p().0);
             }
-            Some(1) => quick_setup(&mut tty)?,
-            Some(2) => {}
-            Some(3) => install_page(&mut tty)?,
-            Some(4) => access_page(&mut tty)?,
-            Some(5) => {
+            Some("Quick setup") => quick_setup(&mut tty)?,
+            Some("Install models") => install_page(&mut tty)?,
+            Some("API keys and gateway") => access_page(&mut tty)?,
+            Some("Status") => {
                 tty.draw(&Notice("Reading the GPUs...".to_string()));
                 let mut page = StatusPage(crate::status_view::StatusView::new());
                 tty.run(&mut page)?;
             }
-            Some(_) => drop(tty.run(&mut MetricsPage(crate::metrics_view::MetricsView::new()))?),
+            Some("Metrics") => drop(tty.run(&mut MetricsPage(crate::metrics_view::MetricsView::new()))?),
+            Some(_) => {}
         }
         if tty.quit {
             return Ok(());
@@ -1551,7 +1571,13 @@ fn access_page(tty: &mut Tty) -> Result<(), String> {
             None => return Ok(()),
             Some(0) => {
                 match crate::keys_menu::session() {
-                    Ok(session) => tty.quit = session.exit,
+                    Ok(session) => match session.summary() {
+                        Some(text) => tty.inside(|| {
+                            println!("{text}");
+                            Ok(())
+                        })?,
+                        None => tty.quit = session.exit,
+                    },
                     Err(e) => report(Err(e)),
                 }
                 tty.resume()?;
@@ -1624,7 +1650,7 @@ impl SharePage {
         let home = goethe_home();
         self.shared = crate::public_share::shared(&home);
         self.url = crate::public_share::active(&home).map(|s| {
-            let ip = crate::platform::lookup_public_ip(&home).map(|i| i.to_string()).unwrap_or_else(|_| "<public IP>".into());
+            let ip = crate::client::link::lookup_public_ip(&home).map(|i| i.to_string()).unwrap_or_else(|_| "<public IP>".into());
             let host = if ip.contains(':') { format!("[{ip}]") } else { ip };
             format!("https://{host}:{}/v1", s.port)
         });
@@ -1711,7 +1737,7 @@ impl SharePage {
                 self.say(
                     format!(
                         "Shared {name} until {}; send {} with the key.{clients}{warn}",
-                        share::local_time(share::now() + secs),
+                        share::local_time(crate::sys::unix_secs() + secs),
                         o.cert.display()
                     ),
                     false,
@@ -1756,7 +1782,7 @@ impl Page for SharePage {
         let nw = self.shared.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
         for (i, (name, g)) in self.shared.iter().enumerate() {
             let from = if g.allow.is_empty() { "any address".to_string() } else { g.allow.join(", ") };
-            let left = g.until - share::now();
+            let left = g.until - crate::sys::unix_secs();
             let left = if left >= 86_400 { format!("{}d {}h", left / 86_400, left % 86_400 / 3600) } else { format!("{}h {}m", left / 3600, left % 3600 / 60) };
             let row = format!("{name:<nw$}{GAP}until {} ({left} left){GAP}from {from}", share::local_time(g.until));
             let row = if here == Slot::Shared(i) { sgr(&hl(), &row) } else { row };
@@ -2124,12 +2150,14 @@ fn apply_picks(removals: &[String], installs: &[String]) -> Result<(), String> {
             reset: false,
             quant: None,
             fallback: false,
+            engine: None,
         };
         if let Err(e) = crate::install::run(opts) {
             report(Err(e));
             failed.push(id.clone());
         }
     }
+    crate::step::set_compact(false);
     match failed.len() {
         0 => Ok(()),
         _ => Err(format!("not done: {}", failed.join(", "))),
@@ -2191,6 +2219,10 @@ mod tests {
             self.frame.clone()
         }
         fn submit(&mut self, line: &str) -> AskFrame {
+            if line.contains("pizza") {
+                self.frame = AskFrame { said: line.to_string(), note: Some("No Goethe command matches that request".into()), ..AskFrame::default() };
+                return self.frame.clone();
+            }
             let parts = line
                 .split(" and ")
                 .enumerate()
@@ -2284,6 +2316,25 @@ mod tests {
         assert!(matches!(page.key(Input::Enter), Flow::Stay));
         assert_eq!(page.driver.frame().said, "load quick q obs");
         assert!(matches!(page.key(Input::Esc), Flow::Leave));
+    }
+
+    #[test]
+    fn a_request_ask_cannot_match_stays_editable() {
+        // After the red refusal the request is still the field: Backspace edits it and Enter sends it again, also when the screen opens on one.
+        let mut driver = Said::default();
+        let mut page = asked(&mut driver, "order pizza");
+        assert!(page.frame.note.is_some() && page.frame.parts.is_empty());
+        for _ in 0.."pizza".len() {
+            page.key(Input::Backspace);
+        }
+        typed(&mut page, "x");
+        assert_eq!(page.request.get(), "order x");
+        page.key(Input::Enter);
+        assert_eq!(page.driver.frame().said, "order x");
+        let mut opened = Said { frame: AskFrame { said: "order pizza".into(), note: Some("n".into()), ..AskFrame::default() }, ..Said::default() };
+        let mut page = AskPage::new(&mut opened, AskHost::Menu);
+        page.key(Input::Backspace);
+        assert_eq!(page.request.get(), "order pizz");
     }
 
     #[test]
@@ -2421,19 +2472,19 @@ mod tests {
 
     #[test]
     fn the_menu_lists_the_choices_together_with_the_keys_right_under_them() {
-        let t = text(main_menu().render(100, 40));
+        let t = text(main_menu(true).render(100, 40));
         assert_eq!(t[1].trim_end(), format!("  {}", LOGO[0]).trim_end());
         assert_eq!(t[5].trim(), format!("Website: {SITE}"));
         let first = t.iter().position(|l| l.contains("Ask") && l.contains("plain English")).unwrap();
         for (i, title) in ["Ask", "Quick setup", "Load/Unload", "Install models", "API keys and gateway"].iter().enumerate() {
             assert!(t[first + i].contains(title), "no gap between choices: {t:?}");
         }
-        assert!(t[first + 5].is_empty() && t[first + 6].contains("Status") && t[first + 7].contains("Metrics"), "an empty line before Status: {t:?}");
+        assert!(t[first + 5].is_empty() && t[first + 6].contains("Status") && t[first + 7].contains("Metrics") && t[first + 8].contains("Experimental"), "an empty line before Status: {t:?}");
         assert!(t[first].starts_with('\u{27a4}'));
-        assert!(t[first + 8].is_empty() && t[first + 9].contains("Enter open"), "the keys line follows the menu: {t:?}");
-        assert!(t[first + 9].contains("theme  ") && t[first + 9].contains("2 sea") && t[first + 9].contains("3 earth"), "{}", t[first + 9]);
+        assert!(t[first + 9].is_empty() && t[first + 10].contains("Enter open"), "the keys line follows the menu: {t:?}");
+        assert!(t[first + 10].contains("theme  ") && t[first + 10].contains("2 sea") && t[first + 10].contains("3 earth"), "{}", t[first + 10]);
         let active = crate::theme::current().name();
-        assert!(t[first + 9].contains(&format!("{active}|")), "a bar marks the active theme: {}", t[first + 9]);
+        assert!(t[first + 10].contains(&format!("{active}|")), "a bar marks the active theme: {}", t[first + 10]);
         assert!(!text(access_menu().render(100, 40)).iter().any(|l| l.contains("theme  ")), "themes only on the main menu");
         assert_eq!(t.len(), 40);
     }
@@ -2469,7 +2520,7 @@ mod tests {
     }
 
     fn models_menu() -> Menu {
-        let mut m = main_menu();
+        let mut m = main_menu(true);
         m.at = 2;
         m.side = Some(SideState {
             kind: Side::Models,
@@ -2561,9 +2612,9 @@ mod tests {
 
     #[test]
     fn load_unload_is_gray_and_skipped_until_a_model_is_installed() {
-        let mut m = main_menu();
+        let mut m = main_menu(true);
         m.at = 1;
-        m.off = vec![false, false, true, false, false, false, false];
+        m.off = vec![false, false, true, false, false, false, false, false];
         let t = text(m.render(160, 40));
         assert!(t.iter().any(|l| l.contains("Load/Unload") && l.contains("(install a model first)")), "{t:?}");
         m.key(Input::Down);
@@ -2574,7 +2625,7 @@ mod tests {
 
     #[test]
     fn a_load_climbs_one_percent_at_a_time_on_a_bar_no_wider() {
-        let mut j = LoadJob::new("org/m".into(), None);
+        let mut j = LoadJob::new("org/m".into());
         j.phase = Phase::Loading { instance: "i".into(), gpus: vec![3], need_mb: 1000, base_mb: 0 };
         j.frac = 0.3;
         j.ticks = 1;
@@ -2630,10 +2681,20 @@ mod tests {
     }
 
     #[test]
+    fn ask_shows_only_while_experimental_features_are_ticked() {
+        let titles = |m: &Menu| m.items.iter().map(|c| c.title).collect::<Vec<_>>();
+        let (off, on) = (main_menu(false), main_menu(true));
+        assert!(!titles(&off).contains(&ASK) && titles(&on)[0] == ASK, "{:?}", titles(&off));
+        assert_eq!((off.items.last().unwrap().title, on.items.last().unwrap().title), (EXPERIMENTAL, EXPERIMENTAL));
+        assert!(off.items.last().unwrap().detail.starts_with("[ ]") && on.items.last().unwrap().detail.starts_with("[x]"));
+        assert_eq!((off.gap_before, on.gap_before), (Some(4), Some(5)), "the gap stays before Status");
+    }
+
+    #[test]
     fn digits_and_enter_pick_and_q_leaves() {
-        let mut m = main_menu();
+        let mut m = main_menu(true);
         m.key(Input::Up);
-        assert!(matches!(m.key(Input::Enter), Flow::Pick(6)), "up from the first wraps to the last");
+        assert!(matches!(m.key(Input::Enter), Flow::Pick(7)), "up from the first wraps to the last");
         assert!(matches!(m.key(Input::Right), Flow::Stay), "only Enter opens a choice without a submenu");
         assert!(matches!(m.key(Input::Left), Flow::Stay), "the left arrow on the top menu does not quit goethe");
         assert!(matches!(m.key(Input::Char('q')), Flow::Quit), "q quits goethe");
@@ -2785,7 +2846,7 @@ mod tests {
 
     #[test]
     fn the_public_page_lists_shared_keys_and_takes_a_key_a_time_and_addresses() {
-        let soon = crate::public_share::now() + 3 * 3600;
+        let soon = crate::sys::unix_secs() + 3 * 3600;
         let mut p = share_page(&[("app", soon, &["203.0.113.7/32"])]);
         let t = text(p.render(140, 40));
         assert!(t.iter().any(|l| l.contains("Gateway") && l.contains("https://203.0.113.1:8444/v1")), "{t:?}");
@@ -2809,7 +2870,7 @@ mod tests {
 
     #[test]
     fn stopping_a_key_or_the_gateway_asks_twice() {
-        let soon = crate::public_share::now() + 3600;
+        let soon = crate::sys::unix_secs() + 3600;
         let mut p = share_page(&[("app", soon, &[])]);
         p.at = 0;
         assert_eq!(p.slot(), Slot::Shared(0));
@@ -2835,7 +2896,7 @@ mod tests {
         p.data.rows.push(row("some-organisation/a-very-long-model-name-that-goes-on-and-on-NVFP4", false));
         p.chosen.push(false);
         for w in [60, 80, 100, 160] {
-            for l in p.render(w, 24).iter().chain(main_menu().render(w, 30).iter()) {
+            for l in p.render(w, 24).iter().chain(main_menu(true).render(w, 30).iter()) {
                 assert!(crate::term::visible_width(l) <= w, "{w}: {l}");
             }
         }

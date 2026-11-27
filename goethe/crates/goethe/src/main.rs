@@ -5,7 +5,7 @@ mod complete;
 mod container;
 mod spec;
 use clap::{CommandFactory, Parser, Subcommand};
-use spec::{ArgMeta, CmdMeta, Fact::{Daemon, Installed, Key, Loaded}};
+use spec::{ArgMeta, CmdMeta, Fact::{Daemon, Gpu, Installed, Key, Loaded}};
 use goethe_core::alias;
 use goethe_core::config::{self, ConfigOpts};
 use goethe_core::db;
@@ -15,7 +15,6 @@ use goethe_core::install::{self, InstallOpts};
 use goethe_core::models;
 use goethe_core::nginx;
 use goethe_core::paths::{ensure_layout, goethe_home, validate_model_id};
-use goethe_core::registry;
 use goethe_core::recommend;
 use goethe_core::rpc;
 use goethe_core::security;
@@ -26,6 +25,7 @@ use serde_json::{json, Value};
 
 const CTX_MAX: u64 = 1 << 24;
 const MAX_CONC: u64 = 4096;
+const MAX_GPUS: u64 = 64;
 
 const KEY_HELP: &str = "On a terminal, goethe api keys alone opens a menu to add, scope, show or delete keys.
 
@@ -91,6 +91,15 @@ Public always needs --allow <their-ip>/32 and a confirm (--yes, or y on a termin
 
 goethe api expose alone shows where the API listens and who may connect.";
 
+const REMOTE_HELP: &str = "Console commands are signed with a person's passkey and checked here. This node runs one only when its kind is allowed and the passkey is pinned with a cap that covers it:
+
+\t→ goethe remote allow change
+\t→ goethe remote deny change
+\t→ goethe remote trust add <pairing>
+\t→ goethe remote trust remove <key-id>
+
+Kinds, least to most powerful: change, network, keys, update, destructive, trust. goethe remote alone shows the policy and the pinned passkeys.";
+
 const SHARE_HELP: &str = "Examples:
 
 \t→ goethe api share 5h --key my-app --allow <their-ip>/32
@@ -119,12 +128,12 @@ struct Cli {
 enum Commands {
     #[command(add = CmdMeta::change().terminal(), display_order = 0, about = "Quick setup: install a model, serve it and open the API, step by step (needs a terminal).")]
     Start,
-    #[command(add = CmdMeta::change().gives(&[Daemon]), display_order = 1, about = "Start Goethe now and at every boot; models loaded last time come back.")]
+    #[command(add = CmdMeta::change().gives(&[Daemon]).says(&["start", "boot", "launch"]), display_order = 1, about = "Start Goethe now and at every boot; models loaded last time come back.")]
     Up {
         #[arg(long = "no-boot", help = "Start now without turning on start at boot.")]
         no_boot: bool,
     },
-    #[command(add = CmdMeta::destructive(), display_order = 2, about = "Stop Goethe and its models, and stop starting at boot (models come back on the next up).")]
+    #[command(add = CmdMeta::destructive().undoes(&[Daemon]).says(&["shut down", "shutdown", "stop", "halt", "kill"]), display_order = 2, about = "Stop Goethe and its models, and stop starting at boot (models come back on the next up).")]
     Down {
         #[arg(long = "keep-engines", help = "Leave loaded engines serving; the next goethed adopts them.")]
         keep_engines: bool,
@@ -133,12 +142,12 @@ enum Commands {
     Status,
     #[command(add = CmdMeta::read(), display_order = 3, about = "Requests, tokens, speed and GPU use per model and API key over a chosen range, from the local usage log.")]
     Metrics,
-    #[command(add = CmdMeta::read(), display_order = 4, about = "Running models in detail: GPUs, port, memory, requests and speed.")]
+    #[command(add = CmdMeta::read().shows(&[Loaded]), display_order = 4, about = "Running models in detail: GPUs, port, memory, requests and speed.")]
     Ps {
         #[arg(long, help = "JSON rows with instance_id, slot_key, status, restarts.")]
         json: bool,
     },
-    #[command(add = CmdMeta::download().needs(&[Daemon]).gives(&[Installed]),
+    #[command(add = CmdMeta::download().needs(&[Daemon]).gives(&[Installed]).says(&["download", "fetch", "pull"]),
         display_order = 5,
         about = "Download a model from Hugging Face or local path; --load serves it too.",
         after_help = "Extra engine flags go after --, and are stored as the model's defaults:\n\n\t→ goethe install org/name --load -- --chunked-prefill-size 4096"
@@ -152,7 +161,7 @@ enum Commands {
         gpu: Vec<u32>,
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=CTX_MAX), help = "Default context length.")]
         ctx: Option<u64>,
-        #[arg(long = "max-conc", value_parser = clap::value_parser!(u64).range(1..=MAX_CONC), help = "Default max concurrent requests.")]
+        #[arg(long = "max-conc", value_parser = clap::value_parser!(u64).range(1..=MAX_CONC), help = "Default max concurrent requests (4).")]
         max_conc: Option<u64>,
         #[arg(long, help = "With --load, return once the engine starts instead of waiting until it answers.")]
         no_wait: bool,
@@ -168,12 +177,14 @@ enum Commands {
         name: Option<String>,
         #[arg(long, help = "Copy a local folder instead of linking to it.")]
         copy: bool,
-        #[arg(long, help = "If the model's kernel pack cannot run here, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also GOETHE_ALLOW_FALLBACK=1.")]
+        #[arg(long, help = "Serve the model with its plain runtime (llama.cpp or SGLang) when its kernel pack cannot run here, even with GOETHE_ALLOW_FALLBACK=0 (the plain runtime takes over by default).")]
         fallback: bool,
+        #[arg(long, value_name = "goethe-engine|sglang", value_parser = clap::builder::PossibleValuesParser::new(install::PINNED_ENGINES), help = "Serve with this engine instead of the automatic choice (a kernel pack when one runs here, else SGLang); refused when it cannot serve the weights. Installing again without it chooses again.")]
+        engine: Option<String>,
         #[arg(last = true, help = "Extra engine flags, only after --.")]
         extra: Vec<String>,
     },
-    #[command(add = CmdMeta::destructive().confirms(), display_order = 6, about = "Unload and delete an installed model (a folder of your own is only unregistered).")]
+    #[command(add = CmdMeta::destructive().confirms().undoes(&[Installed]).says(&["delete", "erase", "purge", "wipe", "uninstall"]), display_order = 6, about = "Unload and delete an installed model (a folder of your own is only unregistered).")]
     Remove {
         #[arg(add = ArgMeta::of(spec::Value::InstalledModel), value_name = "MODEL", required = true, help = "Installed models to remove: ids, aliases or words from a name, one argument each.")]
         model: Vec<String>,
@@ -184,7 +195,7 @@ enum Commands {
         #[arg(long, value_name = "keep|delete", value_parser = ["keep", "delete"], help = "What happens to the traces recorded with the model (asked on a terminal; keep with --yes).")]
         traces: Option<String>,
     },
-    #[command(add = CmdMeta::change().needs(&[Daemon, Installed]).gives(&[Loaded]),
+    #[command(add = CmdMeta::change().needs(&[Daemon, Installed]).gives(&[Loaded]).says(&["serve", "mount"]),
         display_order = 7,
         about = "Serve an installed model on the GPUs and wait until it answers.",
         after_help = "Extra engine flags go after --, for example:\n\n\t→ goethe load deepseek-ai/DeepSeek-V4.1-Flash-1017 --ctx 32768 -- --chunked-prefill-size 4096\n\n\
@@ -196,14 +207,16 @@ enum Commands {
         model: Vec<String>,
         #[arg(add = ArgMeta::of(spec::Value::Gpu), long = "gpu", num_args = 1.., value_delimiter = ',', value_name = "GPU", value_parser = parse_gpu_name, help = "GPUs to load on, as goethe gpu lists them: --gpu gpu3, or --gpu gpu2 gpu3 to split the model across both.")]
         gpu: Vec<u32>,
-        #[arg(long, value_name = "N", conflicts_with = "gpu", help = "Split the model across N GPUs that goethe picks (with --gpu, the number of GPUs given is used).")]
+        #[arg(long, value_name = "N", conflicts_with = "gpu", value_parser = clap::value_parser!(u64).range(1..=MAX_GPUS), help = "Split the model across N GPUs that goethe picks (with --gpu, the number of GPUs given is used).")]
         tp: Option<u64>,
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=CTX_MAX), help = "Context length for this load.")]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=CTX_MAX), help = "Context length for this load, used exactly (without it: the largest that fits).")]
         ctx: Option<u64>,
-        #[arg(long = "max-conc", value_parser = clap::value_parser!(u64).range(1..=MAX_CONC), help = "Max concurrent requests.")]
+        #[arg(long = "max-conc", value_parser = clap::value_parser!(u64).range(1..=MAX_CONC), help = "Max concurrent requests, used exactly (without it: the default, fewer when only that fits).")]
         max_conc: Option<u64>,
-        #[arg(long, help = "Expert parallel size (SGLang --ep-size).")]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=MAX_GPUS), help = "Expert parallel size (SGLang --ep-size).")]
         ep: Option<u64>,
+        #[arg(long, value_name = "invariant|tolerance", value_parser = clap::builder::PossibleValuesParser::new(goethe_proto::Numerics::ALL.map(goethe_proto::Numerics::name)), help = "Kernel pack numerics, kept across restarts: invariant (the same output whatever else is batched; the pack's default) or tolerance (faster kernels within a bounded error where the pack has them). Only for models served with a kernel pack.")]
+        numerics: Option<String>,
         #[arg(long, help = "Keep --gpu, --ctx, --max-conc and the flags after -- as the model's defaults.")]
         save: bool,
         #[arg(long = "dry-run", help = "Show where the model would be placed now, and load nothing.")]
@@ -212,7 +225,7 @@ enum Commands {
         yes: bool,
         #[arg(long, help = "Start another instance even when the model is already loaded.")]
         replica: bool,
-        #[arg(long, help = "If the model's kernel pack fails to open, serve it with the plain runtime (llama.cpp or SGLang) instead of failing; also GOETHE_ALLOW_FALLBACK=1.")]
+        #[arg(long, help = "Serve the model with its plain runtime (llama.cpp or SGLang) when its kernel pack fails to open, even with GOETHE_ALLOW_FALLBACK=0 (the plain runtime takes over by default).")]
         fallback: bool,
         #[arg(long, help = "Return once the engine starts instead of waiting until it answers.")]
         no_wait: bool,
@@ -221,7 +234,7 @@ enum Commands {
         #[arg(last = true, help = "Extra engine flags, only after --.")]
         extra: Vec<String>,
     },
-    #[command(add = CmdMeta::change(), display_order = 8, about = "Stop serving a model.")]
+    #[command(add = CmdMeta::change().undoes(&[Loaded]).says(&["stop", "evict", "free", "release", "eject"]), display_order = 8, about = "Stop serving a model.")]
     Unload {
         #[arg(add = ArgMeta::of(spec::Value::InstalledModel), value_name = "MODEL", conflicts_with = "all", required_unless_present = "all", help = "Models to unload (every instance): ids, aliases or words from a name, one argument each.")]
         model: Vec<String>,
@@ -230,7 +243,7 @@ enum Commands {
         #[arg(long, help = "Skip connection draining and tear down immediately.")]
         force: bool,
     },
-    #[command(add = CmdMeta::change().needs(&[Daemon, Installed]).terminal(), display_order = 9, about = "Try a model by hand: a chat screen on a terminal without INPUT, else one reply, an embedding summary or an audio file's transcript. Loads an installed model that is not loaded and unloads it again.")]
+    #[command(add = CmdMeta::change().needs(&[Daemon, Installed]).terminal().says(&["try", "chat"]), display_order = 9, about = "Try a model by hand: a chat screen on a terminal without INPUT, else one reply, an embedding summary or an audio file's transcript. Loads an installed model that is not loaded and unloads it again.")]
     Run {
         #[arg(add = ArgMeta::of(spec::Value::ModelInput), value_name = "MODEL", num_args = 0..=2, help = "[MODEL] [INPUT]: without either, on a terminal, a list of the installed models opens to pick from; with INPUT alone, MODEL may be left out when one model is loaded.")]
         args: Vec<String>,
@@ -241,7 +254,7 @@ enum Commands {
         #[arg(long, help = "Show the model's reasoning (dimmed) with the answer.")]
         thinking: bool,
     },
-    #[command(add = CmdMeta::read(), display_order = 10,
+    #[command(add = CmdMeta::read().shows(&[Installed]), display_order = 10,
         about = "Installed and catalog models; also recommend, scan and alias.",
         visible_alias = "list",
         args_conflicts_with_subcommands = true
@@ -279,16 +292,16 @@ enum Commands {
     },
     #[command(add = CmdMeta::read(), display_order = 13, about = "Let sessions keep what context compaction would drop: on or off, for every model or for some.", after_help = LEARN_HELP)]
     Learn(LearnArgs),
-    #[command(add = CmdMeta::change(), display_order = 14, about = "Record requests and replies as training traces: on or off, per API key, and the size.", after_help = TRACE_HELP)]
+    #[command(add = CmdMeta::change().says(&["record"]), display_order = 14, about = "Record requests and replies as training traces: on or off, per API key, and the size.", after_help = TRACE_HELP)]
     Trace(TraceArgs),
-    #[command(add = CmdMeta::read(), args_conflicts_with_subcommands = true, display_order = 15, about = "GPUs with memory, processes and bandwidth, live; allow or deny one.")]
+    #[command(add = CmdMeta::read().shows(&[Gpu]), args_conflicts_with_subcommands = true, display_order = 15, about = "GPUs with memory, processes and bandwidth, live; allow or deny one.")]
     Gpu {
         #[arg(long, help = "Emit JSON.")]
         json: bool,
         #[command(subcommand)]
         cmd: Option<GpuCommands>,
     },
-    #[command(add = CmdMeta::read(), display_order = 16, about = "Check the machine and the setup, with a fix for each problem.")]
+    #[command(add = CmdMeta::read().says(&["diagnose", "diagnostics", "health"]), display_order = 16, about = "Check the machine and the setup, with a fix for each problem.")]
     Doctor {
         #[arg(long, help = "Also check that the API is reachable from the internet.")]
         public: bool,
@@ -310,14 +323,14 @@ enum Commands {
         #[command(subcommand)]
         cmd: Option<UpdateCommands>,
     },
-    #[command(add = CmdMeta::destructive().confirms(), display_order = 18, about = "Remove Goethe with its models, engines and kernel packs (folders of your own stay).")]
+    #[command(add = CmdMeta::destructive().confirms().says(&["remove", "delete", "purge", "wipe"]), display_order = 18, about = "Remove Goethe with its models, engines and kernel packs (folders of your own stay).")]
     Uninstall {
         #[arg(long, help = "Keep the installed models in GOETHE_HOME/models.")]
         keep_models: bool,
         #[arg(long, help = "Skip confirmation.")]
         yes: bool,
     },
-    #[command(add = CmdMeta::change(), display_order = 19, about = "Link this node to the Goethe console (optional): a browser login, or --authkey for headless machines.")]
+    #[command(add = CmdMeta::change().says(&["log in", "sign in", "signin", "link", "connect"]), display_order = 19, about = "Link this node to the Goethe console (optional): a browser login, or --authkey for headless machines.")]
     Login {
         #[arg(add = ArgMeta::of(spec::Value::Url), long = "platform-url", value_name = "URL", help = "Platform to link to (default: the GOETHE_PLATFORM_URL setting, else https://goethe.sh).")]
         platform_url: Option<String>,
@@ -326,8 +339,13 @@ enum Commands {
         #[arg(add = ArgMeta::of(spec::Value::When), long, value_name = "WHEN", help = "How long the login lasts: never, or 12h, 30d, 4w; on a linked node it only changes that.")]
         lifetime: Option<String>,
     },
-    #[command(add = CmdMeta::destructive(), display_order = 20, about = "Unlink this node from the Goethe console and remove its local credentials.")]
+    #[command(add = CmdMeta::destructive().says(&["log out", "sign out", "signout", "unlink", "disconnect"]), display_order = 20, about = "Unlink this node from the Goethe console and remove its local credentials.")]
     Logout,
+    #[command(add = CmdMeta::read(), display_order = 20, args_conflicts_with_subcommands = true, about = "Which console changes this node accepts, and the passkeys allowed to sign them; every kind is off until allowed here.", after_help = REMOTE_HELP)]
+    Remote {
+        #[command(subcommand)]
+        cmd: Option<RemoteCommands>,
+    },
     #[command(hide = true, about = "Finish an install: run by install.sh once it verified this goethe; safe to run again to repair or upgrade.")]
     Setup {
         #[arg(long = "pkg-url", value_name = "URL", help = "The package host to keep using (default pkg.goethe.sh).")]
@@ -353,16 +371,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: Option<CompletionCommands>,
     },
-    #[command(hide = true, about = "Catalog maintenance: validate, generate or merge registry entries.")]
-    Registry {
-        #[command(subcommand)]
-        cmd: RegistryCommands,
-    },
 }
 
 #[derive(Subcommand)]
 enum ApiCommands {
-    #[command(add = CmdMeta::read(), about = "List API keys, create or revoke one; on a terminal without arguments, a menu.", after_help = KEY_HELP)]
+    #[command(add = CmdMeta::read().shows(&[Key]), about = "List API keys, create or revoke one; on a terminal without arguments, a menu.", after_help = KEY_HELP)]
     Keys(KeyArgs),
     #[command(add = CmdMeta::network(), about = "Who can reach the API: local, vpn, public, or one address or interface.", after_help = EXPOSE_HELP)]
     Expose(ExposeArgs),
@@ -370,7 +383,7 @@ enum ApiCommands {
     Allow(AllowArgs),
     #[command(add = CmdMeta::read(), about = "How to reach the API by a domain name; check DOMAIN tests that it works.")]
     Domain(DomainArgs),
-    #[command(add = CmdMeta::network(), about = "Open the API on a public address for a while, for chosen API keys; stop closes it.", after_help = SHARE_HELP)]
+    #[command(add = CmdMeta::network().says(&["open"]), about = "Open the API on a public address for a while, for chosen API keys; stop closes it.", after_help = SHARE_HELP)]
     Share(ShareArgs),
 }
 
@@ -381,7 +394,7 @@ enum ModelsCommands {
         #[arg(long, help = "Emit JSON instead of a table.")]
         json: bool,
     },
-    #[command(add = CmdMeta::change(), about = "Register model folders you downloaded yourself and moved into GOETHE_HOME/models.")]
+    #[command(add = CmdMeta::change().says(&["register"]), about = "Register model folders you downloaded yourself and moved into GOETHE_HOME/models.")]
     Scan {
         #[arg(add = ArgMeta::of(spec::Value::Folder), value_name = "FOLDER", help = "One folder inside GOETHE_HOME/models (default: all of them).")]
         dir: Option<String>,
@@ -396,12 +409,12 @@ enum ModelsCommands {
 
 #[derive(Subcommand)]
 enum GpuCommands {
-    #[command(add = CmdMeta::change(), about = "Let new models use these GPUs again.")]
+    #[command(add = CmdMeta::change().gives(&[Gpu]), about = "Let new models use these GPUs again.")]
     Allow {
         #[arg(add = ArgMeta::of(spec::Value::Gpu), value_name = "GPU", required = true, value_parser = parse_gpu_name, help = "GPUs as goethe gpu lists them, for example gpu0 gpu1.")]
         gpus: Vec<u32>,
     },
-    #[command(add = CmdMeta::change(), about = "Keep new models off these GPUs; running ones stay.")]
+    #[command(add = CmdMeta::change().undoes(&[Gpu]).says(&["exclude", "block", "forbid", "off"]), about = "Keep new models off these GPUs; running ones stay.")]
     Deny {
         #[arg(add = ArgMeta::of(spec::Value::Gpu), value_name = "GPU", required = true, value_parser = parse_gpu_name, help = "GPUs as goethe gpu lists them, for example gpu0 gpu1.")]
         gpus: Vec<u32>,
@@ -427,15 +440,57 @@ enum UpdateCommands {
         #[arg(long, help = "Skip confirmation.")]
         yes: bool,
     },
-    #[command(add = CmdMeta::change(), about = "Put back the previous kernel pack of every model that has one.")]
+    #[command(add = CmdMeta::change().says(&["roll back", "revert", "undo"]), about = "Put back the previous kernel pack of every model that has one.")]
     Rollback,
+}
+
+#[derive(Subcommand)]
+enum RemoteCommands {
+    #[command(add = CmdMeta::network().says(&["enable", "accept", "permit"]), about = "Accept signed console commands of this kind: change, network, keys, update, destructive or trust.")]
+    Allow {
+        #[arg(value_name = "KIND", value_parser = REMOTE_KINDS, help = "The kind of change: change (load, unload, GPUs), network, keys, update, destructive or trust (pin passkeys).")]
+        kind: String,
+    },
+    #[command(add = CmdMeta::change().says(&["disable", "refuse", "block"]), about = "Refuse console commands of this kind again.")]
+    Deny {
+        #[arg(value_name = "KIND", value_parser = REMOTE_KINDS, help = "The kind of change: change, network, keys, update, destructive or trust.")]
+        kind: String,
+    },
+    #[command(add = CmdMeta::read(), about = "Each kind on or off, and the pinned passkeys.")]
+    Status,
+    #[command(add = CmdMeta::read(), about = "The passkeys this node trusts: list, add one from a pairing string, or remove one.")]
+    Trust(TrustArgs),
+}
+
+const REMOTE_KINDS: [&str; 6] = ["change", "network", "keys", "update", "destructive", "trust"];
+
+#[derive(clap::Args)]
+struct TrustArgs {
+    #[command(subcommand)]
+    cmd: Option<TrustCommands>,
+}
+
+#[derive(Subcommand)]
+enum TrustCommands {
+    #[command(add = CmdMeta::read(), about = "The pinned passkeys: key id, user, cap and fingerprint.")]
+    List,
+    #[command(add = CmdMeta::network().says(&["pin", "pair"]), about = "Pin a passkey from the pairing string the console shows; its signature is checked first.")]
+    Add {
+        #[arg(add = ArgMeta::of(spec::Value::Text), value_name = "PAIRING", help = "The pairing string from the console.")]
+        pairing: String,
+    },
+    #[command(add = CmdMeta::change().says(&["unpin", "delete", "revoke"]), about = "Stop trusting a pinned passkey.")]
+    Remove {
+        #[arg(add = ArgMeta::of(spec::Value::TrustKey), value_name = "KEY_ID", help = "The key id, as goethe remote trust list shows it.")]
+        key_id: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum CompletionCommands {
     #[command(add = CmdMeta::change(), about = "Install tab completion for your shell.")]
     Install,
-    #[command(add = CmdMeta::change(), about = "Remove tab completion from your shell.")]
+    #[command(add = CmdMeta::change().says(&["delete", "uninstall"]), about = "Remove tab completion from your shell.")]
     Remove,
     #[command(add = CmdMeta::read(), about = "Whether tab completion is on, for each shell.")]
     Status,
@@ -464,14 +519,14 @@ struct AllowArgs {
 
 #[derive(Subcommand)]
 enum AllowCommands {
-    #[command(add = CmdMeta::network(), about = "Allow client addresses or ranges.")]
+    #[command(add = CmdMeta::network().says(&["allow"]), about = "Allow client addresses or ranges.")]
     Add {
         #[arg(add = ArgMeta::of(spec::Value::Cidr), value_name = "CIDR", required = true, help = "Client addresses or ranges, such as 203.0.113.7/32.")]
         cidrs: Vec<String>,
         #[arg(add = ArgMeta::of(spec::Value::Text), long, value_name = "TEXT", help = "A note stored with the new entries.")]
         note: Option<String>,
     },
-    #[command(add = CmdMeta::network(), about = "Stop allowing client addresses or ranges.")]
+    #[command(add = CmdMeta::network().says(&["delete", "revoke", "drop"]), about = "Stop allowing client addresses or ranges.")]
     Remove {
         #[arg(add = ArgMeta::of(spec::Value::Cidr), value_name = "CIDR", required = true, help = "Client addresses or ranges, such as 203.0.113.7/32.")]
         cidrs: Vec<String>,
@@ -489,13 +544,13 @@ struct KeyArgs {
 
 #[derive(Subcommand)]
 enum KeyCommands {
-    #[command(add = CmdMeta::change().gives(&[Key]), about = "Create an API key.")]
+    #[command(add = CmdMeta::change().gives(&[Key]).says(&["make", "new", "generate"]), about = "Create an API key.")]
     Create {
         #[arg(add = ArgMeta::of(spec::Value::KeyName), value_name = "KEY_NAME", help = "A name for the key, such as my-app.")]
         name: String,
         #[arg(add = ArgMeta::of(spec::Value::When), long, value_name = "WHEN", help = "Expiry, days from now like 30d, or a date like 2026-12-31.")]
         expires: Option<String>,
-        #[arg(long, value_name = "N", help = "Requests per minute (default 120, 0 = unlimited).")]
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(i64).range(0..), help = "Requests per minute (default 120, 0 = unlimited).")]
         rpm: Option<i64>,
         #[arg(add = ArgMeta::of(spec::Value::InstalledModel), long, value_name = "IDS", help = "Only these models, comma-separated.")]
         models: Option<String>,
@@ -511,7 +566,7 @@ enum KeyCommands {
         #[arg(long, help = "Print only the new key, for scripts.")]
         raw: bool,
     },
-    #[command(add = CmdMeta::destructive(), about = "Revoke an API key, or several, by id.")]
+    #[command(add = CmdMeta::destructive().says(&["delete", "disable", "invalidate"]), about = "Revoke an API key, or several, by id.")]
     Revoke {
         #[arg(add = ArgMeta::of(spec::Value::KeyId), value_name = "KEY_ID", required = true, help = "Key ids, as goethe api keys lists them.")]
         ids: Vec<String>,
@@ -526,14 +581,14 @@ struct AliasArgs {
 
 #[derive(Subcommand)]
 enum AliasCommands {
-    #[command(add = CmdMeta::change(), about = "Give an installed model a short name for clients.")]
+    #[command(add = CmdMeta::change().says(&["point", "alias"]), about = "Give an installed model a short name for clients.")]
     Set {
         #[arg(add = ArgMeta::of(spec::Value::NewAlias), value_name = "ALIAS", help = "The short name, such as fast.")]
         alias: String,
         #[arg(add = ArgMeta::of(spec::Value::InstalledModel), value_name = "MODEL", help = "Installed model: id, alias or words from its name.")]
         model: String,
     },
-    #[command(add = CmdMeta::destructive(), about = "Remove short model names.")]
+    #[command(add = CmdMeta::destructive().says(&["delete", "drop"]), about = "Remove short model names.")]
     Remove {
         #[arg(add = ArgMeta::of(spec::Value::Alias), value_name = "ALIAS", required = true, help = "Short names to remove, as goethe models alias lists them.")]
         aliases: Vec<String>,
@@ -561,7 +616,7 @@ struct LearnScope {
 enum LearnCommands {
     #[command(add = CmdMeta::change(), about = "Let sessions keep what compaction would drop.")]
     On(LearnScope),
-    #[command(add = CmdMeta::change(), about = "Stop keeping what compaction would drop.")]
+    #[command(add = CmdMeta::change().says(&["disable", "stop"]), about = "Stop keeping what compaction would drop.")]
     Off(LearnScope),
     #[command(add = CmdMeta::read(), about = "Which models keep what compaction would drop.")]
     Status,
@@ -581,14 +636,14 @@ struct TraceArgs {
 
 #[derive(Subcommand)]
 enum TraceCommands {
-    #[command(add = CmdMeta::change(), about = "Record requests and replies as training traces.")]
+    #[command(add = CmdMeta::change().says(&["record"]), about = "Record requests and replies as training traces.")]
     On {
         #[arg(add = ArgMeta::of(spec::Value::Key), long, num_args = 1.., value_name = "KEY", help = "Add these API keys (name or id).")]
         key: Vec<String>,
         #[arg(long = "all-keys", conflicts_with = "key", help = "Record every API key, clearing the chosen keys and exceptions.")]
         all_keys: bool,
     },
-    #[command(add = CmdMeta::change(), about = "Stop recording; with --key, leave those keys out and keep recording the others.")]
+    #[command(add = CmdMeta::change().says(&["disable", "stop"]), about = "Stop recording; with --key, leave those keys out and keep recording the others.")]
     Off {
         #[arg(add = ArgMeta::of(spec::Value::Key), long, num_args = 1.., value_name = "KEY", help = "Leave these API keys (name or id) out, and keep recording the others.")]
         key: Vec<String>,
@@ -610,7 +665,7 @@ struct ExposeArgs {
 
 #[derive(Subcommand)]
 enum ExposeCommands {
-    #[command(add = CmdMeta::network().confirms(), about = "This machine only.")]
+    #[command(add = CmdMeta::network().confirms().says(&["locally", "private"]), about = "This machine only.")]
     Local {
         #[arg(long, help = "Apply without questions.")]
         yes: bool,
@@ -626,7 +681,7 @@ enum ExposeCommands {
         #[arg(long, help = "Apply without questions.")]
         yes: bool,
     },
-    #[command(add = CmdMeta::network().confirms(), about = "A public network, for allowlisted clients only.")]
+    #[command(add = CmdMeta::network().confirms().says(&["publicly"]), about = "A public network, for allowlisted clients only.")]
     Public {
         #[arg(add = ArgMeta::of(spec::Value::Cidr).asked(), long, value_name = "CIDR", num_args = 1.., value_delimiter = ',', help = "Client ranges to allow: their public addresses, such as 203.0.113.7/32.")]
         allow: Vec<String>,
@@ -656,55 +711,10 @@ struct ShareArgs {
 
 #[derive(Subcommand)]
 enum ShareCommands {
-    #[command(add = CmdMeta::network(), aliases = ["shutdown", "close", "off"], about = "Close the public address now, or stop sharing some keys.")]
+    #[command(add = CmdMeta::network().says(&["end", "cancel", "revoke"]), aliases = ["shutdown", "close", "off"], about = "Close the public address now, or stop sharing some keys.")]
     Stop {
         #[arg(add = ArgMeta::of(spec::Value::Key), long, value_name = "NAME_OR_ID", num_args = 1.., value_delimiter = ',', help = "Stop sharing only these API keys; the others stay shared.")]
         key: Vec<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum RegistryCommands {
-    #[command(about = "Check a registry JSON file (local path or URL).")]
-    Validate {
-        #[arg(long, value_name = "PATH_OR_URL", help = "Registry JSON to check.")]
-        source: String,
-        #[arg(long, help = "Fetch remote sha256 metadata.")]
-        online: bool,
-        #[arg(long, help = "Allow non-org Hugging Face repos.")]
-        allow_individuals: bool,
-        #[arg(long, help = "Validate SGLang flag names.")]
-        check_sglang: bool,
-    },
-    #[command(about = "Generate registry stub entries for repo ids.")]
-    Entry {
-        #[arg(long = "repo", value_name = "ID", help = "Hugging Face repo id (repeatable).")]
-        repo_ids: Vec<String>,
-        #[arg(long, help = "Runtime, such as sglang (the default).")]
-        runtime: Option<String>,
-        #[arg(long, help = "Git revision or branch.")]
-        revision: Option<String>,
-        #[arg(long, help = "Read repo ids from a file.")]
-        ids_file: Option<String>,
-        #[arg(long, help = "Fail on validation warnings.")]
-        strict: bool,
-    },
-    #[command(about = "Register models from a registry JSON file.")]
-    Add {
-        #[arg(long = "repo", value_name = "ID", help = "Hugging Face repo id to add from the file (repeatable).")]
-        repo_ids: Vec<String>,
-        #[arg(long, help = "Read repo ids from a file.")]
-        ids_file: Option<String>,
-        #[arg(long, help = "Path or URL to the registry JSON source.")]
-        file: String,
-        #[arg(long, help = "Optional overlay JSON path.")]
-        overlay: Option<String>,
-        #[arg(long, help = "Update existing entries.")]
-        update: bool,
-        #[arg(long, help = "Print merge result without writing.")]
-        dry_run: bool,
-        #[arg(long, help = "Fail on validation warnings.")]
-        strict: bool,
     },
 }
 
@@ -888,20 +898,25 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("goethe uninstall", "remove Goethe and the models it installed"),
         ("goethe login", "link this node to the Goethe console (optional)"),
         ("goethe logout", "unlink it and remove its local credentials"),
+        ("goethe remote allow change", "accept signed console commands of a kind (deny refuses them)"),
         ("goethe completion install", "tab completion for your shell"),
-        ("goethe ask REQUEST", "turn a request in plain English into Goethe commands (also Ask on the main menu)"),
+        ("goethe ask REQUEST", "(experimental) turn a request in plain English into Goethe commands (also Ask on the main menu)"),
         ("goethe ?", "same as goethe ask"),
     ]),
 ];
 
-fn top_help(model: &str) -> String {
-    // goethe help: one example line per command, grouped, with what it does; goethe help COMMAND has the details.
+fn is_ask(cmd: &str) -> bool {
+    matches!(cmd.split_whitespace().nth(1), Some("ask" | "?"))
+}
+
+fn top_help(model: &str, experimental: bool) -> String {
+    // goethe help: one example line per command, grouped, with what it does; goethe help COMMAND has the details. Ask, experimental, only when ticked on the menu.
     use goethe_core::term::{paint, Color};
     let width = HELP_SECTIONS.iter().flat_map(|(_, rows)| rows.iter()).map(|(c, _)| c.chars().count()).max().unwrap_or(0) + 2;
     let mut out = String::from("Goethe: serve models through OpenAI and Anthropic compatible gateways\n");
     for (title, rows) in HELP_SECTIONS {
         out.push_str(&format!("\n{}\n", paint(title, Color::Bold)));
-        for (cmd, what) in *rows {
+        for (cmd, what) in rows.iter().filter(|(c, _)| experimental || !is_ask(c)) {
             out.push_str(&format!("  {cmd:<width$}{}\n", paint(what, Color::Gray)));
         }
     }
@@ -951,7 +966,7 @@ fn main() {
         return;
     }
     if args.len() == 1 || (args.len() == 2 && matches!(args[1].as_str(), "-h" | "--help" | "help")) {
-        print!("{}", top_help(&goethe_core::onboard::suggested(true)));
+        print!("{}", top_help(&goethe_core::onboard::suggested(true), goethe_core::db::experimental(&goethe_home())));
         return;
     }
     if args.len() >= 2 && matches!(args[1].as_str(), "ask" | "?") {
@@ -1001,6 +1016,7 @@ fn main() {
             name,
             copy,
             fallback,
+            engine,
             extra,
         } => {
             if hf_token {
@@ -1038,12 +1054,17 @@ fn main() {
                 reset: force,
                 quant,
                 fallback,
+                engine,
             })
         }
         Commands::Remove { model, yes, force, traces } => {
             let traces = traces.map(|t| t == "delete");
+            let aliases = alias::list().unwrap_or_default();
             each(model, |id| {
-                let id = if yes { exact_installed(&id, &models::installed_ids(&goethe_home()), &alias::list().unwrap_or_default())? } else { installed_id(&id, false) };
+                if !aliases.iter().any(|(a, _)| *a == id) {
+                    checked_id(&id);
+                }
+                let id = if yes { exact_installed(&id, &models::installed_ids(&goethe_home()), &aliases)? } else { installed_id(&id, false) };
                 models::run_remove(&id, yes, force, traces)
             })
         }
@@ -1054,6 +1075,7 @@ fn main() {
             ctx,
             max_conc,
             ep,
+            numerics,
             save,
             dry_run,
             yes,
@@ -1092,6 +1114,7 @@ fn main() {
                     max_conc,
                     tp,
                     ep,
+                    numerics,
                     yes,
                     replica,
                     fallback,
@@ -1119,11 +1142,11 @@ fn main() {
         Commands::Logs { target, follow, lines } => {
             let target = target.join(" ");
             match target.as_str() {
-                "goethed" | "daemon" => goethe_core::logs::run_logs(None, follow, lines, true, false, false),
-                "gateway" => goethe_core::logs::run_logs(None, follow, lines, false, true, false),
+                "goethed" | "daemon" => goethe_core::logs::run_logs(goethe_core::logs::LogTarget::Daemon, follow, lines),
+                "gateway" => goethe_core::logs::run_logs(goethe_core::logs::LogTarget::Gateway, follow, lines),
                 t => {
                     let t = if t.starts_with("inst-") { t.to_string() } else { installed_id(t, false) };
-                    goethe_core::logs::run_logs(Some(&t), follow, lines, false, false, false)
+                    goethe_core::logs::run_logs(goethe_core::logs::LogTarget::Model(&t), follow, lines)
                 }
             }
         }
@@ -1207,14 +1230,15 @@ fn main() {
         },
         Commands::Uninstall { keep_models, yes } => goethe_core::uninstall::run(goethe_core::uninstall::UninstallOpts { keep_models, yes }),
         Commands::Login { platform_url, authkey, lifetime } => {
-            let linked = goethe_core::platform_cli::is_linked(&goethe_home());
-            let login = if linked && lifetime.is_some() { Ok(()) } else { goethe_core::platform_cli::login(platform_url.as_deref(), authkey.as_deref()) };
+            let linked = goethe_core::client::login::is_linked(&goethe_home());
+            let login = if linked && lifetime.is_some() { Ok(()) } else { goethe_core::client::login::login(platform_url.as_deref(), authkey.as_deref()) };
             match (login, lifetime) {
-                (Ok(()), Some(l)) if goethe_core::platform_cli::is_linked(&goethe_home()) => goethe_core::platform_cli::token_lifetime(&l),
+                (Ok(()), Some(l)) if goethe_core::client::login::is_linked(&goethe_home()) => goethe_core::client::login::token_lifetime(&l),
                 (r, _) => r,
             }
         }
-        Commands::Logout => goethe_core::platform_cli::logout(),
+        Commands::Logout => goethe_core::client::login::logout(),
+        Commands::Remote { cmd } => do_remote(cmd),
         Commands::Setup { pkg_url, from, keep_file_url, platform_url, no_link } => goethe_core::setup::run(goethe_core::setup::Opts {
             pkg: pkg_url.or_else(|| std::env::var("GOETHE_PKG_URL").ok().filter(|v| !v.is_empty())).unwrap_or_else(|| goethe_core::setup::DEFAULT_PKG_URL.to_string()),
             from,
@@ -1230,41 +1254,33 @@ fn main() {
             });
             complete::run(action, shell.as_deref())
         }
-        Commands::Registry { cmd } => match cmd {
-            RegistryCommands::Validate {
-                source,
-                online,
-                allow_individuals,
-                check_sglang,
-            } => registry::run_validate(
-                &source,
-                &registry::ValidateOpts {
-                    online,
-                    allow_individuals,
-                    check_sglang,
-                },
-            ),
-            RegistryCommands::Entry {
-                repo_ids,
-                runtime,
-                revision,
-                ids_file,
-                strict,
-            } => do_registry_entry(repo_ids, runtime, revision, ids_file, strict),
-            RegistryCommands::Add {
-                repo_ids,
-                ids_file,
-                file,
-                overlay,
-                update,
-                dry_run,
-                strict,
-            } => do_registry_add(repo_ids, ids_file, file, overlay, update, dry_run, strict),
-        },
     };
     match result {
         Ok(()) => {}
-        Err(msg) => fail(msg),
+        Err(msg) => {
+            // A failure no site coded itself still gets a row; it names the command only, because the message can hold what the user typed.
+            if !goethe_core::errcode::recorded() && !goethe_core::host::needs_yes(&msg) {
+                let cmd = args.iter().skip(1).find(|a| !a.starts_with('-')).map_or("goethe", String::as_str);
+                goethe_core::errcode::record(goethe_core::errcode::Code::CmdFailed, cmd);
+            }
+            fail(msg)
+        }
+    }
+}
+
+fn do_remote(cmd: Option<RemoteCommands>) -> Result<(), String> {
+    // goethe remote allow|deny KIND and trust list|add|remove edit GOETHE_HOME/remote.json; nothing, or status, shows it.
+    use goethe_core::client::remote;
+    let home = goethe_home();
+    let kind = |k: &str| remote::Kind::parse(k).unwrap_or_else(|| usage(format!("{k} is not a kind of change")));
+    let now = goethe_core::sys::unix_ms();
+    match cmd {
+        Some(RemoteCommands::Allow { kind: k }) => remote::set_allowed(&home, kind(&k), true).map(|()| println!("This node now accepts {k} commands signed by a pinned passkey whose cap allows them.")),
+        Some(RemoteCommands::Deny { kind: k }) => remote::set_allowed(&home, kind(&k), false).map(|()| println!("This node refuses {k} commands from the console.")),
+        Some(RemoteCommands::Trust(TrustArgs { cmd: Some(TrustCommands::Add { pairing }) })) => remote::add_pairing(&home, &pairing, now).map(|t| println!("Pinned {}", remote::key_line(&t))),
+        Some(RemoteCommands::Trust(TrustArgs { cmd: Some(TrustCommands::Remove { key_id }) })) => remote::unpin(&home, &key_id, remote::LOCAL, now).map(|t| println!("Removed {}", remote::key_line(&t))),
+        Some(RemoteCommands::Trust(_)) => remote::load(&home).map(|s| print!("{}", remote::trust_text(&s.trust))),
+        Some(RemoteCommands::Status) | None => remote::status_text(&home).map(|t| print!("{t}")),
     }
 }
 
@@ -1348,6 +1364,7 @@ struct DoLoadArgs {
     max_conc: Option<u64>,
     tp: Option<u64>,
     ep: Option<u64>,
+    numerics: Option<String>,
     yes: bool,
     replica: bool,
     fallback: bool,
@@ -1359,14 +1376,11 @@ struct DoLoadArgs {
 fn do_load(args: DoLoadArgs) -> Result<(), String> {
     // Validate locally, warn about host RAM for offloading cards, then load with the foreign-process prompt.
     checked_id(&args.model_id);
-    if matches!(args.ep, Some(0)) {
-        usage("--ep must be at least 1");
-    }
     if let Err(e) = config::validate_limits(&goethe_home(), &args.model_id, args.ctx, args.max_conc) {
         usage(e);
     }
     if let (Some(ep), Some(tp)) = (args.ep, args.tp) {
-        if ep > 0 && tp % ep != 0 {
+        if tp % ep != 0 {
             usage(format!("--tp {tp} is not divisible by --ep {ep}"));
         }
     }
@@ -1389,6 +1403,7 @@ fn do_load(args: DoLoadArgs) -> Result<(), String> {
         "ctx": args.ctx,
         "max_conc": args.max_conc,
         "tp": args.tp,
+        "numerics": args.numerics,
         "force": args.yes,
         "yes": args.yes,
         "replica": args.replica,
@@ -1746,9 +1761,7 @@ fn print_ps_table(rows: &[Value]) {
         print!("{}", no_models_text());
         return;
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
+    let now = goethe_core::sys::unix_secs();
     let mut table = goethe_core::term::Table::new(&[
         "INSTANCE", "MODEL", "RUNTIME", "SLOT", "STATUS", "GPUS", "PORT", "VRAM_GB", "RESTARTS", "IN_FLIGHT", "TOK_PER_S", "PREFIX",
     ]);
@@ -1871,7 +1884,7 @@ fn do_gateway_status(json: bool) -> Result<(), String> {
     let bind_line = match (&interface, waiting) {
         (Some(n), true) => format!("127.0.0.1 (waiting for {n}: it has no IPv4 address, so only this host can connect)"),
         (Some(n), false) => format!("{bind} (follows {n})"),
-        (None, _) => bind.clone(),
+        (None, _) => bind,
     };
     print!("{}", gateway_status_text(&bind_line, port, &url, running, allowlist, &endpoints));
     Ok(())
@@ -1973,12 +1986,12 @@ fn do_share(
             }
             match share::active(&home) {
                 Some(s) => {
-                    let ip = goethe_core::platform::lookup_public_ip(&home).map(|i| i.to_string()).unwrap_or_else(|_| "<public IP>".into());
-                    println!("Public gateway: open until {} ({} left)", share::local_time(s.until), left(s.until - share::now()));
+                    let ip = goethe_core::client::link::lookup_public_ip(&home).map(|i| i.to_string()).unwrap_or_else(|_| "<public IP>".into());
+                    println!("Public gateway: open until {} ({} left)", share::local_time(s.until), left(s.until - goethe_core::sys::unix_secs()));
                     println!("URL:  https://{}/v1", host_port(&ip, s.port));
                     for (name, g) in share::shared(&home) {
                         let from = if g.allow.is_empty() { "no addresses (unreachable)".to_string() } else { g.allow.join(", ") };
-                        println!("Key:  {name} until {} ({} left), from {from}", share::local_time(g.until), left(g.until - share::now()));
+                        println!("Key:  {name} until {} ({} left), from {from}", share::local_time(g.until), left(g.until - goethe_core::sys::unix_secs()));
                     }
                     println!("\nStop one key with: goethe api share stop --key <name>; close it with: goethe api share stop");
                 }
@@ -2000,7 +2013,7 @@ fn do_share(
             )?;
             let ip = o.public_ip.map(|i| i.to_string()).unwrap_or_else(|| "<public IP>".into());
             let url = format!("https://{}/v1", host_port(&ip, o.share.port));
-            println!("Shared until {} ({}); the public gateway is open until {}\n", share::local_time(share::now() + secs), left(secs), share::local_time(o.share.until));
+            println!("Shared until {} ({}); the public gateway is open until {}\n", share::local_time(goethe_core::sys::unix_secs() + secs), left(secs), share::local_time(o.share.until));
             println!("URL:  {url}");
             for k in &o.keys {
                 let models = k.models.as_deref().filter(|m| !m.is_empty()).unwrap_or("every model");
@@ -2047,7 +2060,7 @@ fn left(secs: i64) -> String {
 
 fn print_platform_lines(home: &std::path::Path, running: bool) {
     // The platform link and the last heartbeat, after the rest of goethe status.
-    println!("{}", goethe_core::platform_cli::status_lines(home, running).join("\n"));
+    println!("{}", goethe_core::client::login::status_lines(home, running).join("\n"));
 }
 
 fn status_text(api: Option<&str>, keys: &[(String, String)]) -> String {
@@ -2074,12 +2087,11 @@ fn do_api(json: bool) -> Result<(), String> {
     let home = goethe_home();
     let api = format!("https://{}/v1", nginx::gateway_connect_addr(&home));
     let (ps, models) = served_models();
-    let state = |s: &[String]| if s.iter().any(|x| x == "RUNNING") { "RUNNING".to_string() } else { s[0].clone() };
     let keys = security::key_list_detailed()?;
     if json {
         let list: Vec<Value> = models
             .iter()
-            .map(|(id, st, g)| json!({"model": id, "status": state(st), "instances": st.len(), "gpus": g}))
+            .map(|(id, st, g)| json!({"model": id, "status": served_state(st), "instances": st.len(), "gpus": g}))
             .collect();
         println!("{}", json!({"api": api, "schemas": ["openai", "anthropic", "litellm"], "goethed_running": ps, "keys": keys, "models": list}));
         return Ok(());
@@ -2100,6 +2112,11 @@ fn do_api(json: bool) -> Result<(), String> {
 }
 
 type ServedModel = (String, Vec<String>, Vec<String>);
+
+fn served_state(statuses: &[String]) -> String {
+    // A served model's status: RUNNING when any instance runs, else its first instance's.
+    if statuses.iter().any(|x| x == "RUNNING") { "RUNNING".to_string() } else { statuses.first().cloned().unwrap_or_default() }
+}
 
 fn served_models() -> (bool, Vec<ServedModel>) {
     // Whether goethed answered, and each served model with the status and GPUs of its instances.
@@ -2130,10 +2147,9 @@ fn models_text(running: bool, models: &[ServedModel]) -> String {
     if models.is_empty() {
         return format!("{}\n", no_models_text());
     }
-    let state = |s: &[String]| if s.iter().any(|x| x == "RUNNING") { "RUNNING".to_string() } else { s[0].clone() };
     let mut table = Table::new(&["MODEL", "STATUS", "INSTANCES", "GPUS"]);
     for (id, st, g) in models {
-        table.row(vec![id.clone(), goethe_core::term::status(&state(st)), st.len().to_string(), g.join(" ")]);
+        table.row(vec![id.clone(), goethe_core::term::status(&served_state(st)), st.len().to_string(), g.join(" ")]);
     }
     table.render()
 }
@@ -2150,59 +2166,6 @@ fn curl_example(api: &str) -> String {
     )
 }
 
-fn do_registry_entry(
-    mut repo_ids: Vec<String>,
-    runtime: Option<String>,
-    revision: Option<String>,
-    ids_file: Option<String>,
-    strict: bool,
-) -> Result<(), String> {
-    if let Some(path) = ids_file {
-        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        for line in text.lines() {
-            let t = line.trim();
-            if !t.is_empty() && !t.starts_with('#') {
-                repo_ids.push(t.to_string());
-            }
-        }
-    }
-    registry::run_entries(
-        &repo_ids,
-        runtime.as_deref(),
-        revision.as_deref(),
-        &registry::EntryOpts { strict },
-    )
-}
-
-fn do_registry_add(
-    mut repo_ids: Vec<String>,
-    ids_file: Option<String>,
-    file: String,
-    overlay: Option<String>,
-    update: bool,
-    dry_run: bool,
-    strict: bool,
-) -> Result<(), String> {
-    if let Some(path) = ids_file {
-        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        for line in text.lines() {
-            let t = line.trim();
-            if !t.is_empty() && !t.starts_with('#') {
-                repo_ids.push(t.to_string());
-            }
-        }
-    }
-    registry::run_add(&registry::AddOpts {
-        repo_ids,
-        file,
-        overlay_path: overlay,
-        update,
-        dry_run,
-        strict,
-    })
-}
-
-
 fn image_refusal(cmd: &Commands, image: Option<&str>) -> Option<&'static str> {
     // In the container image these would replace or stop what the image provides; each says what to do instead.
     image?;
@@ -2217,8 +2180,9 @@ fn image_refusal(cmd: &Commands, image: Option<&str>) -> Option<&'static str> {
 }
 
 fn fail(msg: String) -> ! {
+    // Exit 3 when the only thing missing is --yes, else 1.
     eprintln!("{msg}");
-    std::process::exit(1);
+    std::process::exit(if goethe_core::host::needs_yes(&msg) { 3 } else { 1 });
 }
 
 #[cfg(test)]
@@ -2361,13 +2325,14 @@ mod tests {
     #[test]
     fn the_help_shows_every_command_with_an_example_that_parses() {
         use clap::CommandFactory;
-        let text = top_help("org/m");
+        let text = top_help("org/m", false);
         for c in Cli::command().get_subcommands().filter(|c| !c.is_hide_set()) {
             assert!(text.contains(&format!("goethe {}", c.get_name())), "{} is missing from goethe help", c.get_name());
         }
+        assert!(!text.contains("goethe ask") && top_help("org/m", true).contains("goethe ask REQUEST"), "Ask shows only with experimental features on");
         for (_, rows) in HELP_SECTIONS {
             for (cmd, _) in *rows {
-                if matches!(cmd.split_whitespace().nth(1), Some("ask" | "?")) {
+                if is_ask(cmd) {
                     continue;
                 }
                 let words: Vec<&str> = cmd.split_whitespace().skip(1).map(|w| match w { "MODEL" => "org/m", "FOLDER" => "f", "KEY_ID" => "a1", "DOMAIN" => "a.example.com", w => w }).collect();
@@ -2398,11 +2363,16 @@ mod tests {
         assert!(parse(&["load", "org/m", "--gpu", "gpu2", "gpu3"]).is_ok());
         assert!(parse(&["load", "org/m", "--gpu", "gpu2,gpu3", "--ctx", "4096"]).is_ok());
         assert!(parse(&["load", "org/m", "--ctx", "16777216", "--max-conc", "4096"]).is_ok(), "the maxima themselves are accepted");
+        assert!(parse(&["load", "org/m", "--numerics", "tolerance"]).is_ok() && parse(&["load", "org/m", "--numerics", "fast"]).is_err());
         for bad in [["--ctx", "0"], ["--ctx", "16777217"], ["--max-conc", "0"], ["--max-conc", "18446744073709551615"]] {
             assert!(parse(&["load", "org/m", bad[0], bad[1]]).is_err(), "{bad:?}");
             assert!(parse(&["install", "org/m", bad[0], bad[1]]).is_err(), "{bad:?}");
         }
         assert!(parse(&["load", "org/m", "--gpu", "gpux"]).is_err());
+        for zero in [&["load", "org/m", "--tp", "0"][..], &["load", "org/m", "--ep", "0"], &["api", "keys", "create", "a", "--rpm=-1"]] {
+            assert!(parse(zero).is_err(), "{zero:?} should be refused");
+        }
+        assert!(parse(&["load", "org/m", "--tp", "2", "--ep", "2"]).is_ok() && parse(&["api", "keys", "create", "a", "--rpm", "0"]).is_ok());
         assert!(parse(&["load", "org/m", "--gpu", "gpu2", "--tp", "2"]).is_err(), "the GPUs given are the split");
         let Commands::Load { model, extra, .. } = parse(&["load", "qwen", "27b", "--ctx", "4096", "--", "--chunked-prefill-size", "8"]).unwrap().command else { panic!() };
         assert_eq!((model.join(" "), extra), ("qwen 27b".to_string(), vec!["--chunked-prefill-size".to_string(), "8".to_string()]), "words are the model, -- starts engine flags");

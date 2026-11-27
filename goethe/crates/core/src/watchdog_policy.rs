@@ -1,7 +1,7 @@
 // Pure watchdog restart window and backoff decisions (injectable clock in tests).
 
-pub const RESTART_WINDOW_SECS: i64 = 600;
-pub const MAX_RESTARTS_IN_WINDOW: i64 = 3;
+const RESTART_WINDOW_SECS: i64 = 600;
+const MAX_RESTARTS_IN_WINDOW: i64 = 3;
 
 pub fn restart_backoff_secs(instance_restart_count: i64) -> u64 {
     match instance_restart_count {
@@ -11,7 +11,7 @@ pub fn restart_backoff_secs(instance_restart_count: i64) -> u64 {
     }
 }
 
-pub fn effective_window_count(now: i64, window_start: i64, count: i64) -> i64 {
+fn effective_window_count(now: i64, window_start: i64, count: i64) -> i64 {
     if now.saturating_sub(window_start) > RESTART_WINDOW_SECS {
         0
     } else {

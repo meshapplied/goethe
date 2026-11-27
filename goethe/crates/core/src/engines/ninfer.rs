@@ -6,30 +6,30 @@ use std::process::Command;
 
 pub const ENGINE: super::Engine = super::Engine {
     id: "ninfer",
-    overhead_gb: crate::calc::METAL_OVERHEAD_GB,
+    overhead_gb: crate::calc::LIGHT_OVERHEAD_GB,
     layer: None,
     params: None,
+    routes: super::TEXT_ROUTES,
+    numerics: false,
+    prebuilt: true,
     command: ninfer_command,
 };
 
-pub const NINFER_ID: &str = "meshapplied/Qwen3.8-27B-NVFP4-NInfer";
 pub const NINFER_FILE: &str = "qwen3_8_27b_nvfp4.ninfer";
 pub const NINFER_BYTES: u64 = 23_719_715_844;
-pub const NINFER_SHA256: &str = "74d2c57145e6ff11d1d2faa79594477f9bc903a611af1fb20218189fbbb77d82";
-pub const NINFER_PATCHED_SHA256: &str = "afcaac9cd6b684e4a2f0316100b3a9e5f888e6b3d8b84b6f76ee4fed29ef34ed";
-pub const NINFER_CTX: u64 = 100_000;
-pub const NINFER_MAX_CONC: u64 = 4;
-pub const NINFER_URL: &str = concat!(
+const NINFER_SHA256: &str = "74d2c57145e6ff11d1d2faa79594477f9bc903a611af1fb20218189fbbb77d82";
+const NINFER_PATCHED_SHA256: &str = "afcaac9cd6b684e4a2f0316100b3a9e5f888e6b3d8b84b6f76ee4fed29ef34ed";
+const NINFER_URL: &str = concat!(
     "https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer/resolve/",
     "a107ba1b5b0609d9ca90d5ed61439f5f5cc7d64d/qwen3_8_27b_nvfp4.ninfer"
 );
 
-pub enum NinferHead {
+enum NinferHead {
     Patch,
     Ready,
 }
 
-pub fn ninfer_head(digest: &str) -> Result<NinferHead, String> {
+fn ninfer_head(digest: &str) -> Result<NinferHead, String> {
     // Original digest still needs the draft-shortlist patch; the patched digest is ready to serve.
     if digest == NINFER_SHA256 {
         Ok(NinferHead::Patch)
@@ -46,7 +46,7 @@ pub fn ninfer_reject() -> String {
     )
 }
 
-pub fn accept_ninfer(len: u64, digest: &str) -> Result<(), String> {
+fn accept_ninfer(len: u64, digest: &str) -> Result<(), String> {
     // Size and one of the two pinned digests. The caller supplies the digest so tests never hash 23 GB.
     if len == NINFER_BYTES && (digest == NINFER_SHA256 || digest == NINFER_PATCHED_SHA256) {
         Ok(())
@@ -64,7 +64,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     crate::update::sha256_file(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-pub fn check_ninfer_with(path: &Path, mut hash: impl FnMut(&Path) -> Result<String, String>) -> Result<(), String> {
+fn check_ninfer_with(path: &Path, mut hash: impl FnMut(&Path) -> Result<String, String>) -> Result<(), String> {
     let len = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?.len();
     if len != NINFER_BYTES {
         return accept_ninfer(len, "");
@@ -129,35 +129,34 @@ fn finish_ninfer(path: PathBuf, digest: &str) -> Result<PathBuf, String> {
 }
 
 fn fetch_ninfer(dest: &Path) -> Result<PathBuf, String> {
+    // curl the pinned artifact, resuming a partial file first.
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    let status = Command::new("curl")
-        .arg("-fL")
-        .arg("-C")
-        .arg("-")
-        .arg("-o")
-        .arg(dest)
-        .arg(NINFER_URL)
-        .status()
-        .map_err(|e| format!("curl: {e}"))?;
-    if !status.success() {
-        let _ = std::fs::remove_file(dest);
-        return Err(ninfer_reject());
-    }
-    let len = std::fs::metadata(dest).map_err(|e| format!("{}: {e}", dest.display()))?.len();
-    let digest = match sha256_file(dest) {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = std::fs::remove_file(dest);
-            return Err(e);
+    fetch_ninfer_with(dest, |resume| {
+        let mut cmd = Command::new("curl");
+        cmd.arg("-fL");
+        if resume {
+            cmd.args(["-C", "-"]);
         }
-    };
-    if accept_ninfer(len, &digest).is_err() {
+        cmd.arg("-o").arg(dest).arg(NINFER_URL).status().map(|s| s.success()).map_err(|e| format!("curl: {e}"))
+    })
+}
+
+fn fetch_ninfer_with(dest: &Path, mut get: impl FnMut(bool) -> Result<bool, String>) -> Result<PathBuf, String> {
+    // A resumed download that fails or ends with the wrong bytes is deleted and fetched once more from scratch.
+    for resume in [true, false] {
+        if get(resume)? {
+            let len = std::fs::metadata(dest).map_or(0, |m| m.len());
+            if let Ok(digest) = sha256_file(dest) {
+                if accept_ninfer(len, &digest).is_ok() {
+                    return finish_ninfer(dest.to_path_buf(), &digest);
+                }
+            }
+        }
         let _ = std::fs::remove_file(dest);
-        return Err(ninfer_reject());
     }
-    finish_ninfer(dest.to_path_buf(), &digest)
+    Err(ninfer_reject())
 }
 
 fn write_patch_kit() -> Result<PathBuf, String> {
@@ -236,7 +235,7 @@ fn json_u64(v: &serde_json::Value, key: &str) -> Option<u64> {
     n.as_u64().or_else(|| n.as_f64().map(|f| f.round() as u64))
 }
 
-fn ninfer_bin() -> Result<PathBuf, String> {
+pub(crate) fn ninfer_bin() -> Result<PathBuf, String> {
     if let Some(p) = std::env::var_os("NINFER_SERVE") {
         let p = PathBuf::from(p);
         if p.is_file() {
@@ -275,7 +274,7 @@ fn ninfer_command(spec: &EngineSpec) -> Result<Command, String> {
         .arg("--max-context")
         .arg(spec.ctx.to_string())
         .arg("--kv-capacity")
-        .arg("auto")
+        .arg(spec.pool_tokens.to_string())
         .arg("--max-concurrency")
         .arg(spec.max_conc.to_string())
         .arg("--kv-dtype")
@@ -336,6 +335,22 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_download_with_wrong_bytes_is_fetched_once_more_from_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join(NINFER_FILE);
+        let mut calls = Vec::new();
+        let got = fetch_ninfer_with(&dest, |resume| {
+            calls.push(resume);
+            std::fs::write(&dest, b"not the artifact").map(|_| true).map_err(|e| e.to_string())
+        });
+        assert!(got.is_err() && !dest.exists(), "wrong bytes are refused and deleted");
+        assert_eq!(calls, vec![true, false], "resume first, then one download from scratch");
+        let mut tries = 0;
+        assert!(fetch_ninfer_with(&dest, |_| { tries += 1; Ok(false) }).is_err());
+        assert_eq!(tries, 2, "a failed resume is retried from scratch too");
+    }
+
+    #[test]
     fn ninfer_runtime_spawns_ninfer_serve_with_an_api_key() {
         let bin = tempfile::tempdir().unwrap();
         let exe = bin.path().join("ninfer-serve");
@@ -344,7 +359,7 @@ mod tests {
         std::fs::write(model.path().join(NINFER_FILE), b"x").unwrap();
         let card: toml::Value = toml::from_str("runtime = \"ninfer\"").unwrap();
         let home = tempfile::tempdir().unwrap();
-        let spec = EngineSpec { home: home.path(), served_name: NINFER_ID, ctx: 100_000, ..test_spec(model.path(), &card, &[0]) };
+        let spec = EngineSpec { home: home.path(), served_name: "org/n", ctx: 100_000, pool_tokens: 117_377, ..test_spec(model.path(), &card, &[0]) };
         let prev = std::env::var_os("NINFER_SERVE");
         std::env::set_var("NINFER_SERVE", &exe);
         let cmd = command(&spec).unwrap();
@@ -362,6 +377,7 @@ mod tests {
         assert!(a.windows(2).any(|w| w[0] == "--spec" && w[1] == "dflash2"));
         assert!(a.windows(2).any(|w| w[0] == "--draft-tokens" && w[1] == "7"));
         assert!(a.windows(2).any(|w| w[0] == "--max-context" && w[1] == "100000"));
+        assert!(a.windows(2).any(|w| w[0] == "--kv-capacity" && w[1] == "117377"), "the KV pool goethe budgeted: {a:?}");
         assert!(a.iter().any(|x| x == "--lm-head-draft"));
         let log = a.iter().position(|x| x == "--request-log-jsonl").unwrap();
         assert!(a[log + 1].ends_with("inst-x.requests.jsonl"), "{}", a[log + 1]);

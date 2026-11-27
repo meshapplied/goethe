@@ -28,6 +28,11 @@ pub fn run(json: bool, probe_public: bool) -> Result<(), String> {
     let home = goethe_home();
     let checks = collect_checks(&home);
     let fail = checks.iter().any(|c| c.status == "FAIL");
+    for c in checks.iter().filter(|c| c.status == "FAIL") {
+        if let Some(code) = crate::errcode::Code::for_check(&c.name) {
+            crate::errcode::record(code, &c.hint);
+        }
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&checks).map_err(|e| e.to_string())?);
     } else {
@@ -154,7 +159,7 @@ pub fn mac_hardware_note(chip: &str, arm64: bool, version: &str, limit_mb: u64, 
 pub fn mac_memory_warning(free_mb: u64, smallest: Option<(f64, &str)>) -> Option<String> {
     // RAM and GPU memory are one pool on a Mac, so the only memory warning is: even the smallest installed model does not fit now.
     let (weights_gb, id) = smallest?;
-    let need = weights_gb + crate::calc::METAL_OVERHEAD_GB;
+    let need = weights_gb + crate::calc::LIGHT_OVERHEAD_GB;
     let free = free_mb as f64 / 1024.0;
     (free < need).then(|| format!("{id} needs about {need:.1} GB and only {free:.1} GB is free; quit some apps before loading it"))
 }
@@ -238,9 +243,9 @@ fn check_driver(home: &Path) -> Check {
     }
 }
 
-fn platform_note(link: crate::platform_cli::Link) -> (&'static str, String) {
+fn platform_note(link: crate::client::login::Link) -> (&'static str, String) {
     // Whether this node is linked to the Goethe platform, which also decides whether optimised kernels install.
-    use crate::platform_cli::Link;
+    use crate::client::login::Link;
     match link {
         Link::NotLinked => ("INFO", "not logged in: optional; goethe login links this node and unlocks optimised kernels".to_string()),
         Link::Unreadable(e) => ("WARN", format!("login not usable ({e}); goethe login again")),
@@ -250,7 +255,7 @@ fn platform_note(link: crate::platform_cli::Link) -> (&'static str, String) {
 }
 
 fn check_platform(home: &Path) -> Check {
-    let (status, note) = platform_note(crate::platform_cli::link_state(home, crate::service::goethed_running()));
+    let (status, note) = platform_note(crate::client::login::link_state(home, crate::service::goethed_running()));
     check("console", status, note)
 }
 
@@ -294,7 +299,7 @@ fn check_compiler() -> Check {
     }
 }
 
-pub(crate) const AVDEVICE: std::ops::RangeInclusive<u32> = 58..=62;
+pub(crate) const AVDEVICE: std::ops::RangeInclusive<u32> = 58..=63;
 
 pub(crate) fn find_libavdevice() -> Option<u32> {
     // Probe the sonames torchcodec dlopens; a hit means SGLang models can start without a missing-lib traceback.
@@ -311,7 +316,7 @@ fn check_ffmpeg() -> Check {
         None => check(
             "ffmpeg",
             "WARN",
-            "FFmpeg 4 to 8 not found; SGLang models need it to start: sudo apt install ffmpeg (or sudo dnf install ffmpeg-free)",
+            "FFmpeg 4 to 9 not found; SGLang models need it to start: sudo apt install ffmpeg (or sudo dnf install ffmpeg-free)",
         ),
     }
 }
@@ -527,7 +532,7 @@ fn check_ask_model(home: &Path) -> Check {
 }
 
 fn check_goethe_home(home: &Path) -> Check {
-    if is_writable(home) {
+    if crate::paths::is_writable(home) {
         Check {
             name: "goethe_home".into(),
             status: "OK".into(),
@@ -619,6 +624,11 @@ fn check_environment(home: &Path) -> Check {
         ),
         (Some(c), true) => check("environment", "INFO", format!("container {c} with systemd: goethe up installs a unit")),
         (None, true) => check("environment", "OK", "systemd is PID 1: goethe up installs a unit"),
+        (None, false) if crate::host::is_wsl(&crate::host::sysroot()) => check(
+            "environment",
+            "INFO",
+            "WSL without systemd: goethe up uses crontab @reboot; set systemd=true under [boot] in /etc/wsl.conf and run wsl --shutdown so goethed starts with WSL",
+        ),
         (None, false) => check("environment", "INFO", "no systemd: goethe up uses crontab @reboot"),
     }
 }
@@ -879,22 +889,6 @@ fn read_port(home: &Path, rel: &str) -> Option<u16> {
         .and_then(|s| s.trim().parse().ok())
 }
 
-fn is_writable(path: &Path) -> bool {
-    let probe = path.join(format!(".goethe-probe-{}", std::process::id()));
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-    {
-        Ok(f) => {
-            drop(f);
-            let _ = fs::remove_file(probe);
-            true
-        }
-        Err(_) => false,
-    }
-}
-
 fn available_gb(path: &Path) -> Result<f64, String> {
     // Free space in GiB, the unit weights_gb uses, so the comparison with the largest model is like for like.
     let cpath = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|e| e.to_string())?;
@@ -909,6 +903,13 @@ fn available_gb(path: &Path) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_doctor_row_has_a_code() {
+        for (name, _) in CHECKS.iter().chain(MAC_CHECKS) {
+            assert!(crate::errcode::Code::for_check(name).is_some(), "doctor row {name} has no code");
+        }
+    }
 
     #[test]
     fn a_mac_needs_apple_silicon_and_macos_14() {
@@ -943,7 +944,7 @@ mod tests {
         assert_eq!(driver_note("570.1").0, "WARN");
         assert_eq!(driver_note("525.60").0, "FAIL");
         assert_eq!(driver_note("").0, "WARN");
-        use crate::platform_cli::Link;
+        use crate::client::login::Link;
         assert_eq!(platform_note(Link::NotLinked).0, "INFO");
         assert!(platform_note(Link::NotLinked).1.contains("goethe login"));
         assert_eq!(platform_note(Link::Linked { workspace: "w".into(), revoked: false, heartbeat: "OK".into(), ok: true }).0, "OK");
@@ -968,11 +969,11 @@ mod tests {
     fn ffmpeg_range_follows_the_pinned_torchcodec() {
         // Keep doctor + doctor --fix aligned with the torchcodec pin (Levente Orban, #140).
         let bumped = "torchcodec changed: set AVDEVICE to the FFmpeg it loads, then this pin";
-        assert!(include_str!("../../../pyenv/requirements.in").contains("\ntorchcodec==0.15.0\n"), "{bumped}");
-        assert!(include_str!("../../../pyenv/requirements.aarch64.in").contains("/torchcodec-0.15.0%2B"), "{bumped}");
+        assert!(include_str!("../../../pyenv/requirements.in").contains("\ntorchcodec==0.17.0\n"), "{bumped}");
+        assert!(include_str!("../../../pyenv/requirements.aarch64.in").contains("\ntorchcodec==0.17.0\n"), "{bumped}");
         assert!(CHECKS.iter().any(|(n, _)| *n == "ffmpeg"), "doctor must list ffmpeg");
         assert_eq!(*AVDEVICE.start(), 58);
-        assert_eq!(*AVDEVICE.end(), 62);
+        assert_eq!(*AVDEVICE.end(), 63);
     }
 
     #[test]

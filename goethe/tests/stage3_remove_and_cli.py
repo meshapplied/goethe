@@ -25,6 +25,7 @@ from lib.goethe_test import (
 )
 
 _CFG = {
+    "architectures": ["LlamaForCausalLM"],
     "model_type": "llama",
     "hidden_size": 64,
     "num_hidden_layers": 2,
@@ -71,8 +72,8 @@ def _check_remove(goethe: Path, home: Path, env: dict[str, str]) -> None:
     rr = run_goethe([str(goethe), "remove", "local/inplace", "--yes"], env=env)
     if not (inplace_src / "w.safetensors").is_file() or not (inplace_src / "config.json").is_file():
         raise RuntimeError("remove deleted an in-place model's files")
-    if f"rm -rf '{inplace_src.resolve()}'" not in rr.stdout:
-        raise RuntimeError(f"remove did not print the rm command: {rr.stdout!r}")
+    if f"your files in {inplace_src.resolve()} stay on disk" not in rr.stdout or "rm -rf" in rr.stdout:
+        raise RuntimeError(f"remove must name the kept folder and suggest no delete: {rr.stdout!r}")
     if (home / "models" / "local__inplace").exists():
         raise RuntimeError("remove left goethe's link directory")
     before = _listing(home)
@@ -82,6 +83,11 @@ def _check_remove(goethe: Path, home: Path, env: dict[str, str]) -> None:
             raise RuntimeError(f"remove {bad!r} exited {rr.returncode}, expected usage error 2")
     if _listing(home) != before:
         raise RuntimeError("rejected remove ids changed GOETHE_HOME")
+    run_goethe([str(goethe), "install", str(_tree(home / "src", "aliased")), "--name", "local/aliased"], env=env)
+    run_goethe([str(goethe), "models", "alias", "set", "my:fast", "local/aliased"], env=env)
+    rr = run([str(goethe), "remove", "my:fast", "--yes"], env=env)
+    if rr.returncode != 0 or (home / "models" / "local__aliased").exists():
+        raise RuntimeError(f"an alias that is not a model id must still remove its model: {rr.stdout}{rr.stderr}")
 
 
 def _check_key_and_profile(goethe: Path, home: Path, env: dict[str, str]) -> None:

@@ -72,7 +72,7 @@ pub fn probe() -> Probe {
         blackwell_or_newer: devices.iter().any(|(_, id)| *id >= BLACKWELL_FIRST_DEVICE_ID),
         pci_gpus: devices.into_iter().map(|(addr, _)| addr).collect(),
         assigned_gpus,
-        wsl: Path::new("/dev/dxg").exists() || Path::new("/usr/lib/wsl/lib").is_dir(),
+        wsl: crate::host::is_wsl(&crate::host::sysroot()),
         module_version: module_version(&version_text),
         open_module: version_text.contains("Open Kernel Module"),
         device_nodes: Path::new("/dev/nvidiactl").exists(),

@@ -2,7 +2,7 @@
 
 [package]
 name = "goethe"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 
 [[bin]]
@@ -13,6 +13,7 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive", "unstable-ext"] }
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
 goethe-core = { path = "../core" }
+goethe-proto = { path = "../proto" }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -22,3 +23,6 @@ test-release-key = ["goethe-core/test-release-key"]
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

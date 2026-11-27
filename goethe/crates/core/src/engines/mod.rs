@@ -1,4 +1,4 @@
-// Engines goethe launches: one descriptor per engine (py-env layer, request params, command), one file each; shared env and key helpers.
+// Engines goethe launches: one descriptor per engine (py-env layer, request params, the gateway routes it answers, command), one file each; shared env and key helpers.
 
 pub mod goethe_engine;
 pub mod llama_cpp;
@@ -14,10 +14,15 @@ pub struct Engine {
     pub overhead_gb: f64,
     pub layer: Option<crate::pyenv::Layer>,
     pub params: Option<&'static [&'static str]>,
+    pub routes: &'static [&'static str],
+    pub numerics: bool,
+    pub prebuilt: bool,
     pub command: fn(&EngineSpec) -> Result<Command, String>,
 }
 
-pub const ENGINES: &[&Engine] = &[&goethe_engine::ENGINE, &ninfer::ENGINE, &sglang::SGLANG, &llama_cpp::ENGINE];
+const ENGINES: &[&Engine] = &[&goethe_engine::ENGINE, &ninfer::ENGINE, &sglang::SGLANG, &llama_cpp::ENGINE];
+
+const TEXT_ROUTES: &[&str] = &["/chat/completions", "/completions", "/embeddings", "/responses", "/rerank", "/messages", "/messages/count_tokens"];
 
 const ENVELOPE: &[&str] = &["model", "messages", "prompt", "input", "stream", "stream_options", "user"];
 
@@ -47,7 +52,12 @@ fn placement_env(spec: &EngineSpec) -> [(&'static str, String); 3] {
 }
 
 pub fn command(spec: &EngineSpec) -> Result<Command, String> {
-    (of_card(spec.card)?.command)(spec)
+    // The engine's command line; a pinned --numerics on an engine without numerics contracts is refused, never dropped.
+    let e = of_card(spec.card)?;
+    if let (Some(n), false) = (spec.numerics, e.numerics) {
+        return Err(format!("--numerics {} needs a kernel pack; this model runs on {}", n.name(), e.id));
+    }
+    (e.command)(spec)
 }
 
 #[cfg(test)]
@@ -63,6 +73,8 @@ fn test_spec<'a>(dir: &'a Path, card: &'a toml::Value, gpus: &'a [u32]) -> Engin
         port: 30001,
         ctx: 4096,
         max_conc: 4,
+        pool_tokens: crate::chooser::kv_tokens(4096, 4, crate::chooser::floor(&[])),
+        numerics: None,
         tp: gpus.len() as u64,
         mem_frac: 0.5,
         gpus,
@@ -84,6 +96,8 @@ pub struct EngineSpec<'a> {
     pub port: u16,
     pub ctx: u64,
     pub max_conc: u64,
+    pub pool_tokens: u64,
+    pub numerics: Option<goethe_proto::Numerics>,
     pub tp: u64,
     pub mem_frac: f64,
     pub gpus: &'a [u32],
@@ -164,7 +178,7 @@ fn compiler_env() -> Vec<(String, String)> {
     crate::host_compiler::engine_env(crate::host_compiler::find().as_ref(), inherited.as_deref())
 }
 
-pub const ENGINE_KEY_ENV: &str = "GOETHE_ENGINE_API_KEY";
+const ENGINE_KEY_ENV: &str = "GOETHE_ENGINE_API_KEY";
 
 fn engine_key_env(cmd: &mut Command, key: &str) {
     // Owner-only in /proc/<pid>/environ; never put the secret on argv (world-readable cmdline).
@@ -343,6 +357,23 @@ mod tests {
     }
 
     #[test]
+    fn each_engine_answers_only_its_own_routes() {
+        // (engine, route, served): a route an engine lacks is refused at the gateway, whatever serves the model.
+        for (id, route, served) in [
+            ("goethe-engine", "/chat/completions", true),
+            ("goethe-engine", "/audio/transcriptions", true),
+            ("goethe-engine", "/messages", false),
+            ("goethe-engine", "/responses", false),
+            ("sglang", "/messages", true),
+            ("sglang", "/audio/transcriptions", false),
+            ("llama.cpp", "/rerank", true),
+            ("llama.cpp", "/audio/transcriptions", false),
+        ] {
+            assert_eq!(by_id(id).unwrap().routes.contains(&route), served, "{id} {route}");
+        }
+    }
+
+    #[test]
     fn engine_keys_are_random_hex() {
         let a = new_engine_key().unwrap();
         let b = new_engine_key().unwrap();
@@ -353,9 +384,9 @@ mod tests {
 
     #[test]
     fn light_engines_pay_half_a_gig_on_cuda_sglang_pays_base() {
-        assert!((by_id("llama.cpp").unwrap().overhead_gb - crate::calc::METAL_OVERHEAD_GB).abs() < 1e-9);
-        assert!((by_id("goethe-engine").unwrap().overhead_gb - crate::calc::METAL_OVERHEAD_GB).abs() < 1e-9);
-        assert!((by_id("ninfer").unwrap().overhead_gb - crate::calc::METAL_OVERHEAD_GB).abs() < 1e-9);
+        assert!((by_id("llama.cpp").unwrap().overhead_gb - crate::calc::LIGHT_OVERHEAD_GB).abs() < 1e-9);
+        assert!((by_id("goethe-engine").unwrap().overhead_gb - crate::calc::LIGHT_OVERHEAD_GB).abs() < 1e-9);
+        assert!((by_id("ninfer").unwrap().overhead_gb - crate::calc::LIGHT_OVERHEAD_GB).abs() < 1e-9);
         assert!((by_id("sglang").unwrap().overhead_gb - crate::calc::BASE_OVERHEAD_GB).abs() < 1e-9);
     }
 
@@ -370,7 +401,7 @@ mod tests {
         std::fs::write(dir.path().join("config.json"), cfg).unwrap();
         let card: toml::Value = toml::from_str("").unwrap();
         let m = crate::memory_spec::installed(dir.path(), &card, &[]).unwrap();
-        assert_eq!(crate::chooser::engine_args(&m, 4096, 8), vec!["--max-mamba-cache-size".to_string(), "40".to_string()]);
+        assert_eq!(crate::chooser::engine_args(&m, 8, crate::chooser::kv_tokens(4096, 8, crate::chooser::floor(&[]))), vec!["--max-mamba-cache-size".to_string(), "40".to_string()]);
         assert!(crate::memory_spec::installed(Path::new("/nonexistent"), &card, &[]).is_none());
         assert!(check_extra_args(&["--max-mamba-cache-size=4".to_string()]).is_err());
     }

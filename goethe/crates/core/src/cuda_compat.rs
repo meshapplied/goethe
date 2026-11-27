@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 pub const DIR: &str = "cuda-compat";
-pub const DRIVER_FLOOR: u32 = 535;
+const DRIVER_FLOOR: u32 = 535;
 
 pub fn usable_with(major: u32) -> bool {
     // NVIDIA supports forward compatibility from these branches; on 580+ the libraries are refused (error 803).
@@ -15,7 +15,7 @@ pub fn installed(home: &Path) -> bool {
     home.join(DIR).join("libcuda.so.1").exists()
 }
 
-pub fn driver_major() -> Option<u32> {
+fn driver_major() -> Option<u32> {
     let text = std::fs::read_to_string("/proc/driver/nvidia/version").ok()?;
     crate::nvidia_driver::module_version(&text)?.split('.').next()?.parse().ok()
 }

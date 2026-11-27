@@ -1,0 +1,5 @@
+{"type":"accepted","cmd_id":"0193a1b2-0000-7000-8000-000000000001"}
+{"type":"progress","cmd_id":"0193a1b2-0000-7000-8000-000000000001","phase":"load","pct":40}
+{"type":"done","cmd_id":"0193a1b2-0000-7000-8000-000000000001","ok":true,"result":{"instance_id":"i-3"}}
+{"type":"done","cmd_id":"0193a1b2-0000-7000-8000-000000000002","ok":false,"code":"MODEL_FIT","message":"qwen3-32b needs 66 GB, GPU 0 has 31 GB free"}
+{"type":"refused","cmd_id":"0193a1b2-0000-7000-8000-000000000003","code":"REMOTE_POLICY","message":"remote change is off on this node: goethe remote allow change"}

@@ -125,7 +125,7 @@ pub fn engine_installed(home: &Path) -> Option<String> {
     dist_version(&site_packages(home)?, "goethe_engine")
 }
 
-pub fn dev_python(home: &Path) -> bool {
+fn dev_python(home: &Path) -> bool {
     // A source or test setup runs engines with GOETHE_PYTHON and has no py-env: goethe installs nothing there.
     std::env::var_os("GOETHE_PYTHON").is_some() && !home.join("py-env/bin/python").exists()
 }
@@ -197,7 +197,7 @@ fn layer_label(layer: Layer) -> &'static str {
 
 fn check_disk(home: &Path, layer: Layer) -> Result<(), String> {
     // Stop before downloading when the disk at GOETHE_HOME cannot hold the layer.
-    let Some(free) = free_bytes(home) else {
+    let Some(free) = crate::paths::free_bytes(home) else {
         return Ok(());
     };
     let need = layer.need_gb();
@@ -210,12 +210,6 @@ fn check_disk(home: &Path, layer: Layer) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-fn free_bytes(path: &Path) -> Option<u64> {
-    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
-    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-    (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| st.f_bavail as u64 * st.f_frsize as u64)
 }
 
 pub struct Lock(#[allow(dead_code)] fs::File);
@@ -295,10 +289,13 @@ pub(crate) fn install_from(home: &Path, pkg: &str, sums: &Path, tmp: &Path, laye
     crate::progress::end_line();
     let done = done?;
     if !done.status.success() {
-        return Err(crate::step::failure(
-            &format!("installing the {} layer of the Python environment", layer.name()),
-            &done,
-            "what was installed before still works; run the command again to retry",
+        return Err(crate::errcode::coded(
+            crate::errcode::Code::EnvDeps,
+            crate::step::failure(
+                &format!("installing the {} layer of the Python environment", layer.name()),
+                &done,
+                "what was installed before still works; run the command again to retry",
+            ),
         ));
     }
     if let Some(w) = wheel {

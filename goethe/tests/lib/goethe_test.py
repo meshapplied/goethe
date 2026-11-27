@@ -316,8 +316,8 @@ def require_cli(name: str) -> Path:
 
 
 def test_gpus() -> list[int]:
-    """Physical GPU indices allowed for tests."""
-    raw = os.environ.get("GOETHE_TEST_GPUS", "2,3")
+    """Physical GPU indices allowed for tests: only those GOETHE_TEST_GPUS names, none by default on a shared host."""
+    raw = os.environ.get("GOETHE_TEST_GPUS", "")
     return [int(x.strip()) for x in raw.split(",") if x.strip()]
 
 
@@ -1166,6 +1166,13 @@ def make_release_key(dirpath: Path) -> tuple[Path, Path]:
     subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(key)], check=True)
     subprocess.run(["openssl", "ec", "-in", str(key), "-pubout", "-out", str(pub)], check=True, capture_output=True)
     return key, pub
+
+
+def signed_registry(path: Path) -> dict[str, str]:
+    """Sign the registry at path with a fresh test key beside it; the env a test-release-key goethe trusts it in."""
+    key, pub = make_release_key(path.parent / f"{path.stem}-key")
+    subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(key), "-out", f"{path}.sig", str(path)], check=True)
+    return {"GOETHE_REGISTRY_URL": f"file://{path}", "GOETHE_RELEASE_PUB": str(pub)}
 
 
 def sign_cdn_tree(cdn: Path, key: Path, version: str | None = None) -> None:

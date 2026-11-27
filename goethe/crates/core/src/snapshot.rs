@@ -1,6 +1,6 @@
 // StateSnapshot (goethe.snapshot.v1) for the platform heartbeat, built from local state only and free of secrets.
 
-use crate::platform::clean_text;
+use crate::client::link::clean_text;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -25,6 +25,10 @@ pub struct StateSnapshot {
     pub apis: Vec<Api>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::usage_log::Report>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<crate::errcode::Event>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<goethe_proto::Remote>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -168,7 +172,7 @@ impl Collector {
             sent_at: now_rfc3339(),
             reason: reason.to_string(),
             node: Node {
-                hostname: crate::platform::hostname(),
+                hostname: crate::client::link::hostname(),
                 goethe_version: env!("CARGO_PKG_VERSION").to_string(),
                 os: clean_text(&os_name(&read), 128),
                 kernel: clean_text(&kernel_release(&read), 128),
@@ -184,6 +188,8 @@ impl Collector {
             models,
             apis: con.as_ref().map(apis).unwrap_or_default(),
             usage: con.as_ref().and_then(crate::usage_log::report),
+            errors: con.as_ref().map(|c| crate::errcode::pending(home, &crate::errcode::sent_to(c))).unwrap_or_default(),
+            remote: crate::client::link::load_credentials(home).ok().flatten().map(|_| crate::client::remote::status(home)),
         }
     }
 
@@ -212,7 +218,7 @@ impl Collector {
     }
 }
 
-pub fn public_open(bind: &str, gateway_running: bool, sharing: bool, addresses: &[Address]) -> bool {
+fn public_open(bind: &str, gateway_running: bool, sharing: bool, addresses: &[Address]) -> bool {
     // The public address is reported only while clients can reach it: a public share, or the gateway on every interface or on a public address.
     sharing || (gateway_running && (matches!(bind, "0.0.0.0" | "::") || addresses.iter().any(|a| a.ip == bind && a.scope == "public")))
 }
@@ -308,7 +314,7 @@ fn gateway(home: &Path, addresses: &[Address], public_ip: Option<&str>) -> Gatew
     }
 }
 
-pub fn gateway_url(bind: &str, port: u16, addresses: &[Address]) -> String {
+fn gateway_url(bind: &str, port: u16, addresses: &[Address]) -> String {
     let rank = |s: &str| ["vpn", "private", "public"].iter().position(|x| *x == s);
     let ip = match bind.parse::<IpAddr>() {
         Ok(ip) if ip.is_unspecified() => addresses
@@ -344,7 +350,7 @@ fn form_factor() -> Option<String> {
     None
 }
 
-pub fn classify_environment(container: Option<&str>, cloud: &str, vendor: &str, product: &str, hypervisor: bool) -> Environment {
+fn classify_environment(container: Option<&str>, cloud: &str, vendor: &str, product: &str, hypervisor: bool) -> Environment {
     // kind from container, cloud and virtualization markers; container kubernetes is reported as k8s.
     let all = format!("{vendor} {product}").to_ascii_lowercase();
     let virt = if all.contains("kvm") || all.contains("qemu") || vendor == "Amazon EC2" || product == "Google Compute Engine" {
@@ -394,7 +400,7 @@ fn gpus(con: &rusqlite::Connection, home: &Path) -> Vec<Gpu> {
         .collect()
 }
 
-pub fn gpu_entry(r: &crate::gpu_policy::GpuListRow, state: Option<&crate::hw::GpuState>, pci: Option<String>, system_mb: u64) -> Gpu {
+fn gpu_entry(r: &crate::gpu_policy::GpuListRow, state: Option<&crate::hw::GpuState>, pci: Option<String>, system_mb: u64) -> Gpu {
     // One GPU as the platform shows it: what kind it is, and only the identifiers and numbers that kind has.
     use crate::gpu_kind::{Backend, arch_label, is_unified};
     let backend = Backend::of(&r.compute_capability);
@@ -444,19 +450,19 @@ fn uptime(read: &dyn Fn(&str) -> String) -> u64 {
     #[cfg(target_os = "macos")]
     {
         let _ = read;
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let now = crate::sys::unix_secs();
         crate::sys::boot_epoch().map_or(0, |boot| u64::try_from(now - boot).unwrap_or(0))
     }
     #[cfg(not(target_os = "macos"))]
     parse_uptime(&read("proc/uptime"))
 }
 
-pub fn platform_sm(cc: &str) -> String {
+fn platform_sm(cc: &str) -> String {
     // The platform takes NVIDIA capabilities like 12.0; a Mac's "metal" goes as empty, which it reads as none.
     if cc.chars().all(|c| c.is_ascii_digit() || c == '.') { clean_text(cc, 8) } else { String::new() }
 }
 
-pub fn short_bus_id(raw: &str) -> String {
+fn short_bus_id(raw: &str) -> String {
     // NVML's 00000000:01:00.0 in the usual 0000:01:00.0 form, lowercase.
     let s = clean_text(raw, 32).to_ascii_lowercase();
     match s.split_once(':') {
@@ -529,7 +535,7 @@ pub fn encode_sent(s: &StateSnapshot) -> Result<(Vec<u8>, Option<i64>), String> 
     let mut stripped = false;
     loop {
         let data = serde_json::to_vec(&s).map_err(|e| e.to_string())?;
-        if data.len() <= crate::platform_api::MAX_SNAPSHOT_BYTES {
+        if data.len() <= crate::client::api::MAX_SNAPSHOT_BYTES {
             return Ok((data, s.usage.as_ref().map(|u| u.to)));
         }
         if !s.models.installed.is_empty() {
@@ -731,7 +737,7 @@ mod tests {
         let (_dir, home) = seeded_home();
         let mut c = Collector::new(String::new());
         assert_eq!(c.build(&home, "interval", None).network.gateway.public, None);
-        let until = crate::public_share::now() + 3600;
+        let until = crate::sys::unix_secs() + 3600;
         std::fs::create_dir_all(home.join("nginx")).unwrap();
         let state = serde_json::json!({"open": true, "until": until, "port": 8444, "keys": ["k1"], "allow": []});
         std::fs::write(home.join("nginx/public_share.json"), state.to_string()).unwrap();
@@ -763,7 +769,7 @@ mod tests {
         let one = s.models.installed[0].clone();
         s.models.installed = vec![Installed { id: "x".repeat(200), ..one }; 2000];
         let data = encode(&s).unwrap();
-        assert!(data.len() <= crate::platform_api::MAX_SNAPSHOT_BYTES);
+        assert!(data.len() <= crate::client::api::MAX_SNAPSHOT_BYTES);
         let v: serde_json::Value = serde_json::from_slice(&data).unwrap();
         assert_eq!(v["models"]["installed"], serde_json::json!([]));
         assert_eq!(v["models"]["loaded"].as_array().unwrap().len(), 1);
@@ -777,9 +783,9 @@ mod tests {
         let models = (0..400)
             .map(|i| crate::usage_log::ModelRow { t: 60 * (i / 4), model: format!("{}{i}", "m".repeat(400)), stats: stats.clone() })
             .collect();
-        s.usage = Some(crate::usage_log::Report { from: 0, to: 6000, bounds_ms: vec![], models, gpus: vec![], host: vec![] });
+        s.usage = Some(crate::usage_log::Report { from: 0, to: 6000, bounds_ms: vec![], models, requests: vec![], gpus: vec![], host: vec![] });
         let (data, to) = encode_sent(&s).unwrap();
-        assert!(data.len() <= crate::platform_api::MAX_SNAPSHOT_BYTES);
+        assert!(data.len() <= crate::client::api::MAX_SNAPSHOT_BYTES);
         let v: serde_json::Value = serde_json::from_slice(&data).unwrap();
         let sent = v["usage"]["models"].as_array().unwrap();
         let to = to.expect("some usage rows still go");

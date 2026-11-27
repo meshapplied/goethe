@@ -43,6 +43,7 @@ pub enum Fact {
     Installed,
     Loaded,
     Key,
+    Gpu,
 }
 
 impl Fact {
@@ -53,6 +54,7 @@ impl Fact {
             Fact::Installed => "not installed yet",
             Fact::Loaded => "the API serves loaded models",
             Fact::Key => "no API key yet",
+            Fact::Gpu => "the GPU is denied",
         }
     }
 }
@@ -64,13 +66,19 @@ pub struct CmdMeta {
     pub gives: &'static [Fact],
     pub confirms: bool,
     pub terminal: bool,
+    #[serde(skip)]
+    pub says: &'static [&'static str],
+    #[serde(skip)]
+    pub undoes: &'static [Fact],
+    #[serde(skip)]
+    pub shows: &'static [Fact],
 }
 
 impl CommandExt for CmdMeta {}
 
 impl CmdMeta {
     const fn of(risk: Risk) -> Self {
-        CmdMeta { risk, needs: &[], gives: &[], confirms: false, terminal: false }
+        CmdMeta { risk, needs: &[], gives: &[], confirms: false, terminal: false, says: &[], undoes: &[], shows: &[] }
     }
 
     pub const fn read() -> Self {
@@ -101,6 +109,21 @@ impl CmdMeta {
         CmdMeta { gives, ..self }
     }
 
+    pub const fn undoes(self, undoes: &'static [Fact]) -> Self {
+        // What this command takes away again; one request may not give a fact and undo it on the same model.
+        CmdMeta { undoes, ..self }
+    }
+
+    pub const fn shows(self, shows: &'static [Fact]) -> Self {
+        // The state this command reports; Ask answers a question about that state with it ("what is loaded" runs goethe ps).
+        CmdMeta { shows, ..self }
+    }
+
+    pub const fn says(self, says: &'static [&'static str]) -> Self {
+        // Other words a person uses for this command; Ask needs one of them (or the name) before it plans a command that changes something.
+        CmdMeta { says, ..self }
+    }
+
     pub const fn confirms(self) -> Self {
         // The command asks before it deletes or replaces; Ask asks on its own screen and passes --yes.
         CmdMeta { confirms: true, ..self }
@@ -127,6 +150,7 @@ pub enum Value {
     KeyName,
     KeyId,
     Key,
+    TrustKey,
     Alias,
     NewAlias,
     Domain,
@@ -150,6 +174,7 @@ impl Value {
             Value::LogTarget => c::log_targets,
             Value::Gpu => c::gpus,
             Value::KeyId => c::key_ids,
+            Value::TrustKey => c::trust_keys,
             Value::Key => c::key_names,
             Value::Alias => c::aliases,
             Value::Interface => c::interfaces,
@@ -416,7 +441,7 @@ pub fn reference() -> Result<Node, String> {
     let mut doc = node(&root, "goethe");
     let mut lines = Vec::new();
     examples(&root, &mut lines);
-    lines.extend(crate::HELP_SECTIONS.iter().flat_map(|(_, rows)| rows.iter()).map(|(c, _)| c.to_string()).filter(|c| !matches!(c.split_whitespace().nth(1), Some("ask" | "?") | None)));
+    lines.extend(crate::HELP_SECTIONS.iter().flat_map(|(_, rows)| rows.iter()).map(|(c, _)| c.to_string()).filter(|c| c.split_whitespace().nth(1).is_some() && !crate::is_ask(c)));
     for ex in lines {
         let path = example_path(&root, &ex)?;
         let at = doc.find_mut(&path).ok_or_else(|| format!("{ex}: no command {path:?} in the reference"))?;
@@ -515,6 +540,35 @@ mod tests {
     }
 
     #[test]
+    fn cli_md_names_every_command_and_each_its_flags() {
+        // docs/cli.md is written by hand around examples; every command appears in it, and each flag, long and short, in its command's section (the closest `### goethe ...` heading; global flags anywhere). O(commands x sections).
+        let md = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/cli.md")).expect("docs/cli.md");
+        let sections: Vec<(String, &str)> = md
+            .split("\n### `")
+            .skip(1)
+            .map(|s| (s.split('`').next().unwrap_or("").split_whitespace().take_while(|w| !w.starts_with(['[', '<'])).collect::<Vec<_>>().join(" "), s))
+            .collect();
+        let section = |path: &str| sections.iter().filter(|(h, _)| path == h || path.starts_with(&format!("{h} "))).max_by_key(|(h, _)| h.len()).map_or("", |(_, s)| *s);
+        fn walk<'a>(n: &'a Node, out: &mut Vec<&'a Node>) {
+            out.push(n);
+            n.commands.iter().for_each(|c| walk(c, out));
+        }
+        let root = reference().expect("every example parses");
+        let mut all = Vec::new();
+        walk(&root, &mut all);
+        let mut missing = Vec::new();
+        for n in all {
+            if !md.contains(n.path.as_str()) {
+                missing.push(n.path.clone());
+            }
+            let text = if n.path == root.path { md.as_str() } else { section(&n.path) };
+            let flags = n.args.iter().flat_map(|a| a.long.iter().map(|l| format!("--{l}")).chain(a.short.map(|c| format!("`-{c}`"))));
+            missing.extend(flags.filter(|f| !text.contains(f.as_str())).map(|f| format!("{} {f}", n.path)));
+        }
+        assert!(missing.is_empty(), "docs/cli.md does not document: {missing:?}");
+    }
+
+    #[test]
     fn completers_follow_the_value_kind() {
         // The arguments that completed before still complete, from the same lists.
         let cli = with_completers(crate::Cli::command());
@@ -547,6 +601,7 @@ mod tests {
             (&["trace", "on"][..], "key"),
             (&["trace", "off"][..], "key"),
             (&["learn", "on"][..], "model"),
+            (&["remote", "trust", "remove"][..], "key_id"),
         ] {
             assert!(arg(path, id), "{path:?} {id} lost its completer");
         }

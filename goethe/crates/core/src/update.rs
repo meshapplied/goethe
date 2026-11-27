@@ -2,7 +2,6 @@
 
 use crate::paths::{ensure_layout, goethe_home};
 use crate::pyenv::{self, Layer};
-use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::fs;
 use std::io::Read;
@@ -62,10 +61,13 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
         println!("{note}");
     }
     let want_engines = (opts.engine || pyenv::engine_installed(home).is_some() || pyenv::has(home, Layer::Sglang)) && !cfg!(target_os = "macos");
-    let (sglang, engine) = if want_engines { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
+    let (mut sglang, engine) = if want_engines { pyenv_deltas(home, pkg, &sums, tmp)? } else { (None, None) };
     let buildinfo = fetch_verified(pkg, &sums, "BUILDINFO", tmp).ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
-    let nginx = nginx_delta(home, &sums, &arch, buildinfo_value(&buildinfo, "nginx_version"));
-    let ask_model = ask_model_delta(home, &sums);
+    let mut nginx = nginx_delta(home, &sums, &arch, buildinfo_value(&buildinfo, "nginx_version"));
+    let mut ask_model = ask_model_delta(home, &sums);
+    if older_package(order, opts) && hold_back(&mut [&mut nginx, &mut ask_model, &mut sglang]) {
+        println!("the published package is older than this goethe: its nginx, ask model and SGLang are not installed over yours (--allow-downgrade installs them)");
+    }
     let published = published_label(&remote_ver, bins && order == Ordering::Equal);
     let installed = if bins { local_ver.clone() } else { published.clone() };
     let parts = [
@@ -140,13 +142,28 @@ fn update_in(home: &Path, pkg: &str, tmp: &Path, opts: &UpdateOpts) -> Result<()
 }
 
 fn binaries_due(order: Ordering, opts: &UpdateOpts, local: &str, remote: &str, differ: impl FnOnce() -> Result<bool, String>) -> Result<(bool, Option<String>), String> {
-    // Whether goethe and goethed are replaced, and the note when they are kept. The version guard is theirs alone: a published goethe older than this build is kept, and only --allow-downgrade without engine installs it; engines and packs go on whatever the binaries do.
+    // Whether goethe and goethed are replaced, and the note when they are kept: a published goethe older than this build is kept, and only --allow-downgrade without engine installs it (older_package guards the other parts).
     match order {
         Ordering::Equal => Ok((differ()?, None)),
         Ordering::Greater => Ok((true, None)),
         Ordering::Less if opts.allow_downgrade && !opts.engine => Ok((true, None)),
         Ordering::Less => Ok((false, Some(format!("goethe {local} is newer than the published {remote}; keeping it")))),
     }
+}
+
+fn older_package(order: Ordering, opts: &UpdateOpts) -> bool {
+    // A package older than this goethe changes nothing it ships (nginx, the ask model, SGLang) unless --allow-downgrade; the engine layer follows this binary's own pin.
+    order == Ordering::Less && !opts.allow_downgrade
+}
+
+fn hold_back(parts: &mut [&mut Option<Delta>]) -> bool {
+    // Mark the parts as not to be installed; true when one of them would have changed.
+    let mut held = false;
+    for d in parts.iter_mut().filter_map(|d| d.as_mut()) {
+        held |= d.differs;
+        d.differs = false;
+    }
+    held
 }
 
 fn binaries_differ(home: &Path, sums: &Path, arch: &str) -> Result<bool, String> {
@@ -316,7 +333,7 @@ fn local_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-pub fn compare_versions(a: &str, b: &str) -> Ordering {
+fn compare_versions(a: &str, b: &str) -> Ordering {
     // Semver order: numeric major.minor.patch, then a release sorts after any prerelease of it.
     let parse = |v: &str| {
         let v = v.trim().trim_start_matches('v');
@@ -479,7 +496,7 @@ pub(crate) fn swap_all(staged: &[Staged]) -> Result<(), String> {
 
 pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
     let mut f = fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut h = Sha256::new();
+    let mut h = ring::digest::Context::new(&ring::digest::SHA256);
     let mut buf = [0u8; 65536];
     loop {
         let n = f.read(&mut buf).map_err(|e| e.to_string())?;
@@ -488,7 +505,7 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
         }
         h.update(&buf[..n]);
     }
-    Ok(format!("{:x}", h.finalize()))
+    Ok(crate::sha::hex(h.finish().as_ref()))
 }
 
 fn restart_goethed(home: &Path) -> Result<(), String> {
@@ -632,6 +649,17 @@ mod tests {
         assert_eq!(note, "goethe 0.3.3 is newer than the published 0.3.2; keeping it");
         assert_eq!(binaries_due(Ordering::Equal, &opts(true, false), "0.3.3", "0.3.3", || Ok(true)), Ok((true, None)), "another build at the same version");
         assert_eq!(binaries_due(Ordering::Equal, &opts(false, false), "0.3.3", "0.3.3", || Ok(false)), Ok((false, None)));
+    }
+
+    #[test]
+    fn an_older_package_installs_none_of_its_parts_without_allow_downgrade() {
+        assert!(older_package(Ordering::Less, &opts(false, false)) && older_package(Ordering::Less, &opts(true, false)));
+        assert!(!older_package(Ordering::Less, &opts(false, true)) && !older_package(Ordering::Equal, &opts(false, false)) && !older_package(Ordering::Greater, &opts(true, false)));
+        let due = |w| Some(Delta { installed: Some("a".into()), published: "b".into(), differs: w });
+        let (mut nginx, mut ask, mut none) = (due(true), due(false), None);
+        assert!(hold_back(&mut [&mut nginx, &mut ask, &mut none]));
+        assert!(nginx.as_ref().is_some_and(|d| !d.differs) && ask.is_some() && none.is_none());
+        assert!(!hold_back(&mut [&mut nginx, &mut ask]), "nothing left that would change");
     }
 
     #[test]

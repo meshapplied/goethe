@@ -68,7 +68,7 @@ pub fn decide(f: &Facts) -> Verdict {
     if let Some(pkgs) = &f.ffmpeg_packages {
         fixes.push((
             Fix::Compiler(pkgs.clone()),
-            "SGLang's torchcodec loads system FFmpeg (4 to 8) when a model starts".to_string(),
+            "SGLang's torchcodec loads system FFmpeg (4 to 9) when a model starts".to_string(),
         ));
     }
     if fixes.is_empty() {
@@ -94,7 +94,7 @@ pub fn question(fix: &Fix, distro: &str, sudo: bool) -> String {
     }
 }
 
-pub fn compiler_packages(distro: &str) -> Vec<String> {
+fn compiler_packages(distro: &str) -> Vec<String> {
     let words: Vec<&str> = distro.split_whitespace().collect();
     let has = |d: &str| words.contains(&d);
     if has("ubuntu") || has("debian") {
@@ -106,15 +106,15 @@ pub fn compiler_packages(distro: &str) -> Vec<String> {
     }
 }
 
-pub fn ffmpeg_packages(distro: &str) -> Vec<String> {
-    // Distro package that provides libavdevice.so.58 to 62 for the pinned torchcodec (Fedora/RHEL ship it as ffmpeg-free).
+fn ffmpeg_packages(distro: &str) -> Vec<String> {
+    // Distro package that provides libavdevice.so.58 to 63 for the pinned torchcodec (Fedora/RHEL ship it as ffmpeg-free).
     let words: Vec<&str> = distro.split_whitespace().collect();
     let has = |d: &str| words.contains(&d);
     let deb_or_suse = ["ubuntu", "debian", "suse", "opensuse", "sles"].iter().any(|d| has(d));
     vec![if deb_or_suse { "ffmpeg" } else { "ffmpeg-free" }.to_string()]
 }
 
-pub fn package_command(distro: &str, pkgs: &[String]) -> Vec<String> {
+fn package_command(distro: &str, pkgs: &[String]) -> Vec<String> {
     let words: Vec<&str> = distro.split_whitespace().collect();
     let mut cmd: Vec<String> = if words.contains(&"ubuntu") || words.contains(&"debian") {
         vec!["sh", "-c", "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \"$@\"", "sh"]
@@ -242,6 +242,7 @@ pub fn run(yes: bool) -> Result<(), String> {
                 }
                 if let Err(e) = apply(&home, &fix) {
                     eprintln!("{e}");
+                    crate::errcode::record(crate::errcode::Code::EnvFix, &e);
                     failed = Some(e);
                 }
             }
@@ -304,7 +305,7 @@ mod tests {
             decide(&f),
             Verdict::Fixes(vec![(
                 Fix::Compiler(vec!["ffmpeg".into()]),
-                "SGLang's torchcodec loads system FFmpeg (4 to 8) when a model starts".into()
+                "SGLang's torchcodec loads system FFmpeg (4 to 9) when a model starts".into()
             )])
         );
         assert_eq!(ffmpeg_packages("rocky rhel centos fedora"), vec!["ffmpeg-free"]);

@@ -76,7 +76,7 @@ impl Dirs {
     }
 }
 
-pub fn rc_block(shell: Shell, script: &Path) -> String {
+fn rc_block(shell: Shell, script: &Path) -> String {
     // The marked block that sources the script; the path is escaped for a double-quoted shell word.
     let mut path = String::new();
     for c in script.display().to_string().chars() {
@@ -92,7 +92,7 @@ pub fn rc_block(shell: Shell, script: &Path) -> String {
     format!("{BEGIN}\n{start}[ -f \"{path}\" ] && source \"{path}\"\n{END}\n")
 }
 
-pub fn without_block(text: &str) -> String {
+fn without_block(text: &str) -> String {
     // The rc text with Goethe's block taken out, and nothing else touched; a block whose end marker is gone is left in place, so the lines after it are never lost.
     let mut out = String::new();
     let mut held = String::new();
@@ -158,7 +158,11 @@ pub fn install(dirs: &Dirs, shell: Shell, script: &str) -> Result<Installed, Str
     match dirs.rc(shell) {
         None => Ok(Installed::Loaded(path)),
         Some(rc) => {
-            let text = std::fs::read_to_string(&rc).unwrap_or_default();
+            let text = match std::fs::read_to_string(&rc) {
+                Ok(t) => t,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(e) => return Err(format!("{} could not be read ({e}), so it was left as it is", rc.display())),
+            };
             write(&rc, &with_block(&text, &rc_block(shell, &path)))?;
             Ok(Installed::Sourced(path, rc))
         }
@@ -249,6 +253,16 @@ mod tests {
         assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
         let names: Vec<String> = std::fs::read_dir(real.parent().unwrap()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["zshrc"], "no temp file left behind");
+    }
+
+    #[test]
+    fn an_rc_file_that_is_not_utf8_is_left_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        let latin1 = b"# caf\xe9\nexport A=1\n";
+        std::fs::write(&rc, latin1).unwrap();
+        assert!(install(&dirs(tmp.path(), true), Shell::Zsh, "zsh script").is_err());
+        assert_eq!(std::fs::read(&rc).unwrap(), latin1);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use rusqlite::Connection;
 
-pub fn gpu_csv_sorted(gpus: &[u32]) -> String {
+fn gpu_csv_sorted(gpus: &[u32]) -> String {
     let mut g = gpus.to_vec();
     g.sort_unstable();
     g.iter()

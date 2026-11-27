@@ -3,7 +3,7 @@
 const SAFETY_MARGIN_GB: f64 = 1.5;
 const MAX_MEM_FRACTION: f64 = 1.0;
 pub const BASE_OVERHEAD_GB: f64 = 1.8;
-pub const METAL_OVERHEAD_GB: f64 = 0.5;
+pub const LIGHT_OVERHEAD_GB: f64 = 0.5;
 
 const LEARN_SLACK_GB: f64 = 0.25;
 
@@ -29,7 +29,7 @@ impl Need {
 }
 
 pub fn missing_gb(need: &Need, free_gb: f64) -> f64 {
-    // Weights+peak in free; total leaves SAFETY_MARGIN_GB. (ponytail: pool-cap == free is dead under the margin.)
+    // Weights+peak in free; total leaves SAFETY_MARGIN_GB. A pool cap equal to free never binds under the margin, so it is not checked.
     (need.weights + need.load_peak - free_gb)
         .max(need.total() - (free_gb - SAFETY_MARGIN_GB))
         .max(0.0)

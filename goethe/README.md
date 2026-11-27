@@ -6,9 +6,9 @@ This README is for building and releasing Goethe. To install and use it, see the
 
 ## Install
 
-    curl -fsSL https://pkg.goethe.sh/install.sh | bash
+    curl -fsSL https://goethe.sh/install | bash
 
-On Windows (elevated PowerShell), `irm https://pkg.goethe.sh/install.ps1 | iex` enables WSL2 if needed and runs that same `install.sh` inside Ubuntu.
+On Windows (elevated PowerShell), `irm https://goethe.sh/install | iex` enables WSL2 if needed and runs that same `install.sh` inside Ubuntu.
 
 The installer verifies a signed manifest, creates a Python environment with SGLang, installs `goethe` and `goethed` and links `goethe` into `/usr/local/bin` (or `~/.local/bin`), then ends with `goethe`. It does not start goethed or turn on start at boot; `goethe` or `goethe up` does. Re-running it over a running goethed applies the new binaries to it and keeps engines serving. No root needed. State lives in `$GOETHE_HOME`, else in the home whose `bin/` holds the running binary (links are followed, so the linked `goethe` finds a custom home), else `/workspace/.goethe`, else `/var/lib/goethe`, else `~/.goethe`.
 
@@ -119,17 +119,12 @@ Loaded models are restored after a daemon restart or reboot unless you unloaded 
 
 ## Registry
 
-Source file: `cdn/v1/registry.json`, served at `https://pkg.goethe.sh/v1/registry.json` (override with `GOETHE_REGISTRY_URL`, `file://` works). It describes models only; GPU count, TP, context and concurrency are computed per machine.
+Source of truth: `registry.src.json`. CI builds the registry from it (each entry measured from Hugging Face at its pinned revision, the source's fields over it) on every pull request and shows what changes against the registry served; on main, a change is signed after the release environment's approval and served at `https://pkg.goethe.sh/v1/registry.json` (override with `GOETHE_REGISTRY_URL`; `file://` works with a `.sig` beside it), without a goethe release. goethe fetches it signed, keeps the last one, and uses that copy offline. It describes models only; GPU count, TP, context and concurrency are computed per machine.
 
 Required per entry: `id` (Hugging Face repo, owned by an organization), `runtime` (`sglang` or `llama.cpp`), `architecture` (`dense` or `moe`), `supported_sm`, `static_vram_gb` (whole model), `kv_elems_per_token`, `max_ctx`, `num_attention_heads`, `num_kv_heads`.
-Optional: `memory` (the memory spec `registry add` measures from `config.json`; when present, `static_vram_gb` is the weights alone), `attention` (`gqa`, `mla`, `hybrid`), `extra_sglang_args`, `revision`, `gated`, `manual_download` (weights are published somewhere other than Hugging Face), `pack_only` (no plain runtime: on a GPU whose kernel pack variants do not run, install is refused before any download), `download_gb`, `description`, `family`, `license`, `released`, `modalities`. Entries may also set `env` and `pythonpath`.
+Optional: `memory` (the memory spec measured from `config.json`; when present, `static_vram_gb` is the weights alone), `attention` (`gqa`, `mla`, `hybrid`), `extra_sglang_args`, `revision`, `gated`, `manual_download` (weights are published somewhere other than Hugging Face), `pack_only` (no plain runtime: on a GPU whose kernel pack variants do not run, install is refused before any download), `download_gb`, `description`, `family`, `license`, `released`, `modalities`. Entries may also set `env` and `pythonpath`.
 
-Add models without writing numbers by hand:
-
-    goethe registry add --repo org/model-a --repo org/model-b --file cdn/v1/registry.json [--overlay hand-written.json] [--dry-run]
-    goethe registry validate --source cdn/v1/registry.json --online --check-sglang
-
-`add` measures size, KV elements, heads, context and the memory spec from Hugging Face, merges hand-written fields from the overlay, validates, and writes atomically. Gated repos cannot be measured without logging in, so their entries are written by hand with `"gated": true`. Entries with `"gated": true` or `"manual_download": true` are never recommended: `goethe models recommend` lists them as manual downloads with their fit, `goethe models` labels them, `goethe install` explains where to put the files for `goethe models scan`, and `validate --online` does not require weights on Hugging Face for `manual_download` entries.
+Add a model to `registry.src.json` with its `id`, the 40-hex `revision` it was checked at, and only the fields that are not measured (`supported_sm`, `extra_sglang_args`, `description`, ...). A stated measured value is a correction that wins; the build refuses the whole registry when any entry fails. Gated repos cannot be measured without logging in, so their entries, and `manual_download` and GGUF entries, are written whole in the source with `"gated": true`. To build or check one locally (never shipped): `cargo run -p goethe-core --example registry -- build registry.src.json /tmp/registry.json`, or `-- validate file:///tmp/registry.json --online --check-sglang` against an installed SGLang. Entries with `"gated": true` or `"manual_download": true` are never recommended: `goethe models recommend` lists them as manual downloads with their fit, `goethe models` labels them, and `goethe install` explains where to put the files for `goethe models scan`.
 
 `goethe models recommend` and `goethe models` judge fit with the plan `goethe load` would make on the live GPUs (shrinking context, then concurrency) plus the overhead learned from earlier loads, and say how much is missing when nothing fits.
 
@@ -159,13 +154,13 @@ Releases come from GitHub, never from a laptop:
 - Every pull request into `dev` or `main` runs `.github/workflows/ci.yml`: Rust build, tests and clippy, the style lint and the CPU gates (`gate.sh 0`, `stage6_integrity`). The unsigned x86_64 package build (`package-smoke`) runs on pushes to `main`, the nightly schedule and manual runs.
 - To release: `goethe/packaging/release.sh prepare X.Y.Z` opens the version bump PR from `main` (the three crates, `Cargo.lock`, and the `## Unreleased` changelog section dated); after it is merged, `goethe/packaging/release.sh tag X.Y.Z` tags that `main` commit and starts the release workflow. Approve the `merge` job when it waits (that is when the signing key is available). By hand: set the version in `crates/*/Cargo.toml` through a pull request, then push a tag `vX.Y.Z` on that `main` commit (or run the release workflow by hand on `main`).
 - `.github/workflows/release.yml` then checks the commit is on `main` and the tag matches the version, reruns CI, and builds both architectures with `--release` unsigned (`GOETHE_ALLOW_UNSIGNED=1`, fingerprint check only). After approval on the `release` environment, the `merge` job signs with the environment secret `GOETHE_SIGN_KEY`, verifies the checksums and embedded key fingerprint, and the workflow installs the package in a clean Ubuntu 22.04 container.
-- It then publishes the GitHub release and deploys the package tree to GitHub Pages, which serves it at `https://pkg.goethe.sh/` (DNS: `CNAME pkg -> meshapplied.github.io`). `https://goethe.sh/install.sh` redirects there from the website.
+- It then publishes the GitHub release and deploys the package tree to GitHub Pages, which serves it at `https://pkg.goethe.sh/` (DNS: `CNAME pkg -> meshapplied.github.io`). `https://goethe.sh/install` redirects there from the website.
 - The `image` job builds the container image from the same signed package (after checking its signature), for linux/amd64 and linux/arm64, pushes `ghcr.io/meshapplied/goethe:X.Y.Z`, `:X.Y` and `:latest` with an SBOM and provenance, signs the digest with cosign (keyless), and `image-smoke` runs `tests/image_smoke.sh` on both architectures. Pull requests that touch the image build it from their own binaries (`packaging/build_image_tree.sh`) and run the same smoke test.
 - Existing installs then pick the release up with `goethe update`.
 
 ## Tests
 
-    GOETHE_TEST_GPUS=2,3 bash tests/gate.sh <0..6|all> [--only <file>]
+    GOETHE_TEST_GPUS=<gpus> bash tests/gate.sh <0..6|all> [--only <file>]
 
 The gate first builds, runs `cargo test` and clippy, and uses those fresh binaries. Each test runs in its own session with a timeout and may only clean up processes it started. A pending test, a timeout, or zero collected tests fail the run; skipped opt-in tests are listed. Opt-in: `GOETHE_TEST_REAL=1` (real engines on the GPUs in `GOETHE_TEST_GPUS`). The installer is tested in VMs (`tests/vm/run.sh`) and the package by `package-smoke` in CI.
 

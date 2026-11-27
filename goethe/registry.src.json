@@ -1,0 +1,1026 @@
+{
+ "version": 1,
+ "models": [
+  {
+   "id": "meshapplied/Qwen3.8-27B-NVFP4-NInfer",
+   "architecture": "dense",
+   "static_vram_gb": 23.566,
+   "kv_bytes_per_token": null,
+   "kv_elems_per_token": 32768,
+   "min_total_vram_gb": null,
+   "supported_sm": [
+    "12.0",
+    "12.1"
+   ],
+   "default_ctx": 100000,
+   "max_ctx": 100000,
+   "default_max_conc": 4,
+   "default_tp": 1,
+   "num_attention_heads": 24,
+   "num_kv_heads": 4,
+   "attention": "hybrid",
+   "kv_cache_dtype": "fp8_e4m3",
+   "runtime": "ninfer",
+   "download_gb": 23.7,
+   "description": "Qwen3.8 27B NVFP4 served by NInfer. goethe install downloads neroued/Qwen3.8-27B-nvfp4-NInfer file qwen3_8_27b_nvfp4.ninfer."
+  },
+  {
+   "id": "meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest",
+   "architecture": "moe",
+   "static_vram_gb": 76.318,
+   "kv_bytes_per_token": null,
+   "kv_elems_per_token": 12288,
+   "min_total_vram_gb": null,
+   "supported_sm": [
+    "12.0",
+    "12.1"
+   ],
+   "default_ctx": null,
+   "max_ctx": 262144,
+   "default_max_conc": null,
+   "default_tp": null,
+   "num_attention_heads": 24,
+   "num_kv_heads": 2,
+   "attention": "hybrid",
+   "kv_cache_dtype": "fp8_e4m3",
+   "memory": {
+    "kv_bytes_per_token": 12288,
+    "kv_heads": 2,
+    "state_bytes_per_slot": 58834944,
+    "state_slots_per_request": 5,
+    "static_state_bytes": 461832192,
+    "spec_state_bytes_per_request": 235339776
+   },
+   "extra_sglang_args": [
+    "--trust-remote-code",
+    "--quantization",
+    "modelopt_fp4",
+    "--fp4-gemm-backend",
+    "flashinfer_cutlass",
+    "--ple-offload-embedding",
+    "--ple-offload-backend",
+    "pinned",
+    "--mamba-full-memory-ratio",
+    "0.95",
+    "--mamba-ssm-dtype",
+    "bfloat16",
+    "--chunked-prefill-size",
+    "2048",
+    "--page-size",
+    "64",
+    "--cuda-graph-backend-decode",
+    "full",
+    "--cuda-graph-backend-prefill",
+    "disabled",
+    "--reasoning-parser",
+    "qwen3",
+    "--tool-call-parser",
+    "qwen3_coder",
+    "--speculative-algorithm",
+    "NEXTN",
+    "--speculative-num-steps",
+    "3",
+    "--speculative-eagle-topk",
+    "1",
+    "--speculative-num-draft-tokens",
+    "4",
+    "--speculative-token-map",
+    "$MODEL_DIR/spec/hot_self_32k.pt"
+   ],
+   "runtime": "sglang",
+   "gated": true,
+   "download_gb": 132.735,
+   "description": "Qwen3.8 Flash-Next MoE, modelopt mixed NVFP4. Keeps the 48 GB n-gram embedding in pinned host RAM (--ple-offload-embedding); NEXTN speculation uses the shipped spec/hot_self_32k.pt."
+  },
+  {
+   "id": "orcarouter/Qwen3.8-Flash-Next-Uncensored-NVFP4",
+   "architecture": "moe",
+   "static_vram_gb": 75.939,
+   "kv_bytes_per_token": null,
+   "kv_elems_per_token": 12288,
+   "min_total_vram_gb": null,
+   "supported_sm": [
+    "12.0",
+    "12.1"
+   ],
+   "default_ctx": null,
+   "max_ctx": 262144,
+   "default_max_conc": null,
+   "default_tp": null,
+   "num_attention_heads": 24,
+   "num_kv_heads": 2,
+   "attention": "hybrid",
+   "kv_cache_dtype": "fp8_e4m3",
+   "extra_sglang_args": [
+    "--fp4-gemm-backend",
+    "flashinfer_cutlass",
+    "--ple-offload-embedding",
+    "--ple-offload-backend",
+    "pinned",
+    "--mamba-full-memory-ratio",
+    "0.95",
+    "--chunked-prefill-size",
+    "2048",
+    "--page-size",
+    "64",
+    "--cuda-graph-backend-decode",
+    "full",
+    "--cuda-graph-backend-prefill",
+    "disabled",
+    "--reasoning-parser",
+    "qwen3",
+    "--tool-call-parser",
+    "qwen3_coder"
+   ],
+   "runtime": "sglang",
+   "gated": true,
+   "download_gb": 183.536,
+   "description": "Qwen3.8 Flash-Next MoE, compressed-tensors NVFP4. Keeps the 95 GB bf16 n-gram embedding in pinned host RAM (--ple-offload-embedding)."
+  },
+  {
+   "id": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+   "revision": "fc694b54fb0174e0913e6adf86691ef85a4ead47",
+   "static_vram_gb": 123.998,
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--quantization",
+    "modelopt_fp4",
+    "--trust-remote-code"
+   ],
+   "description": "NVFP4 quantization of Qwen3.8-Flash-Next with FP8 PLE",
+   "family": "Qwen",
+   "released": "2026-09-05",
+   "modalities": [
+    "text",
+    "image",
+    "video"
+   ]
+  },
+  {
+   "id": "nvidia/GLM-5.2-NVFP4",
+   "revision": "53e0691e21895a3863a606dfd12910c69eba94ab",
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--quantization",
+    "modelopt_fp4",
+    "--trust-remote-code"
+   ],
+   "description": "NVFP4 GLM-5.2 753B Mixture-of-Experts",
+   "family": "GLM",
+   "released": "2026-06-25",
+   "modalities": [
+    "text"
+   ]
+  },
+  {
+   "id": "RedHatAI/GLM-5.3-Flash-NVFP4",
+   "revision": "18d55bfd5a2194887738da73753975c9d3842f46",
+   "static_vram_gb": 184.806,
+   "supported_sm": [
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
+   "description": "GLM-5.3-Flash LLM Compressor NVFP4 Export",
+   "family": "GLM",
+   "released": "2026-08-27",
+   "modalities": [
+    "text",
+    "image"
+   ]
+  },
+  {
+   "id": "LibertAIDAI/DeepSeek-V4.1-Flash-1017-NVFP4",
+   "revision": "5be99cd15675589fb6693d0a8651e413bcb9a396",
+   "supported_sm": [
+    "10.0",
+    "10.3",
+    "12.0",
+    "12.1"
+   ]
+  },
+  {
+   "id": "nvidia/Qwen3.8-27B-NVFP4",
+   "revision": "482ca0f3832238542f8f5295dde86b5f22711d80",
+   "static_vram_gb": 20.99,
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--quantization",
+    "modelopt_fp4"
+   ],
+   "pack_only": true,
+   "description": "NVFP4 quantization of Qwen3.8-27B",
+   "family": "Qwen",
+   "released": "2026-09-08",
+   "modalities": [
+    "text",
+    "image",
+    "video"
+   ]
+  },
+  {
+   "id": "nvidia/MiniMax-M3-NVFP4",
+   "revision": "901464083161bf8612a29ff7ad29914cd4ab4a85",
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--quantization",
+    "modelopt_fp4",
+    "--trust-remote-code",
+    "--reasoning-parser",
+    "minimax-m3",
+    "--tool-call-parser",
+    "minimax-m3"
+   ],
+   "description": "NVFP4 MiniMax-M3 428B MoE",
+   "family": "MiniMax",
+   "released": "2026-06-23",
+   "modalities": [
+    "text",
+    "image",
+    "video"
+   ]
+  },
+  {
+   "id": "nvidia/Kimi-K2.5-NVFP4",
+   "revision": "0fd0a5e6879298d3476e3b61852a79792a35ae3d",
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--quantization",
+    "modelopt_fp4",
+    "--trust-remote-code",
+    "--reasoning-parser",
+    "kimi_k2",
+    "--tool-call-parser",
+    "kimi_k2"
+   ],
+   "description": "NVFP4 Kimi-K2.5 1T MoE",
+   "family": "Kimi",
+   "released": "2026-02-02",
+   "modalities": [
+    "text",
+    "image",
+    "video"
+   ]
+  },
+  {
+   "id": "nvidia/DeepSeek-V3.2-NVFP4",
+   "revision": "7c0f62c6da1da0c81c6e097010cc55854d206812",
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "description": "NVIDIA DeepSeek-V3.2 NVFP4 checkpoint",
+   "family": "DeepSeek",
+   "released": "2026-01-20",
+   "modalities": [
+    "text"
+   ]
+  },
+  {
+   "id": "nvidia/DeepSeek-V3.1-NVFP4",
+   "revision": "68b4a17cce1482e94030ca00dacda3dec4c6359d",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "description": "NVIDIA DeepSeek-V3.1 NVFP4 checkpoint",
+   "family": "DeepSeek",
+   "released": "2025-11-25",
+   "modalities": [
+    "text"
+   ]
+  },
+  {
+   "id": "nvidia/DeepSeek-V3-0324-NVFP4",
+   "revision": "d03662cdc34b56eab1315d4557e395e6b4944782",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "description": "NVIDIA DeepSeek-V3-0324 NVFP4 checkpoint",
+   "family": "DeepSeek",
+   "released": "2025-06-06",
+   "modalities": [
+    "text"
+   ]
+  },
+  {
+   "id": "nvidia/Llama-3.1-8B-Instruct-NVFP4",
+   "revision": "bdb54e24298451af785c0ac63c1b485e9b7400a2",
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--quantization",
+    "modelopt_fp4"
+   ],
+   "description": "NVIDIA Llama 3.1 8B Instruct NVFP4 checkpoint",
+   "family": "Llama",
+   "released": "2025-09-15",
+   "modalities": [
+    "text"
+   ]
+  },
+  {
+   "id": "nvidia/Qwen2.5-VL-7B-Instruct-NVFP4",
+   "revision": "d13bb1f2d8fbbd9f16cbb7688c8d6b6932d797d7",
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--quantization",
+    "modelopt_fp4"
+   ],
+   "description": "NVIDIA Qwen2.5-VL-7B-Instruct NVFP4 checkpoint",
+   "family": "Qwen",
+   "released": "2025-08-22",
+   "modalities": [
+    "text",
+    "image"
+   ]
+  },
+  {
+   "id": "nvidia/DeepSeek-R1-NVFP4",
+   "revision": "4bedb8a695a119b1a38d16a675c4665e58708aea",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "description": "NVIDIA DeepSeek R1 FP4 checkpoint",
+   "family": "DeepSeek",
+   "modalities": [
+    "text"
+   ]
+  },
+  {
+   "id": "nvidia/Qwen3.5-397B-A17B-NVFP4",
+   "revision": "12b28061efd8145b11226e4fab2528ee4f39ef09",
+   "static_vram_gb": 234.65,
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--quantization",
+    "modelopt_fp4"
+   ],
+   "description": "NVFP4 quantization of Qwen3.5-397B-A17B",
+   "family": "Qwen",
+   "released": "2026-02-22",
+   "modalities": [
+    "text"
+   ]
+  },
+  {
+   "id": "nvidia/Gemma-4-31B-IT-NVFP4",
+   "revision": "4135a98a9b728a548947683219633b25682223ac",
+   "static_vram_gb": 33.517,
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--quantization",
+    "modelopt_fp4"
+   ],
+   "description": "NVFP4 quantization of Gemma-4-31B-IT",
+   "family": "Gemma",
+   "modalities": [
+    "text"
+   ]
+  },
+  {
+   "id": "Qwen/Qwen3.8-Flash-Next",
+   "revision": "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
+   "description": "Qwen3.8 Flash-Next, 180B MoE with Gated DeltaNet linear attention and one full-attention layer in four; BF16.",
+   "family": "Qwen",
+   "license": "other",
+   "released": "2026-08-24",
+   "modalities": [
+    "text",
+    "image"
+   ]
+  },
+  {
+   "id": "zai-org/GLM-5.2",
+   "revision": "cf457fa734ab149ffef225f80893eb38c6ff5cdc",
+   "supported_sm": [
+    "9.0",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
+   "description": "GLM-5.2, 753B MoE with MLA and DeepSeek sparse attention; BF16. Hopper and Blackwell only.",
+   "family": "GLM",
+   "license": "mit",
+   "released": "2026-06-16",
+   "modalities": [
+    "text"
+   ]
+  },
+  {
+   "id": "MiniMaxAI/MiniMax-M3",
+   "revision": "f0e1c1e04d40177e4673a22097036854f536e9c0",
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--trust-remote-code",
+    "--reasoning-parser",
+    "minimax-m3",
+    "--tool-call-parser",
+    "minimax-m3"
+   ],
+   "description": "MiniMax-M3, 427B MoE with block-sparse attention and an index cache; BF16.",
+   "family": "MiniMax",
+   "license": "other",
+   "released": "2026-06-02",
+   "modalities": [
+    "text",
+    "image"
+   ]
+  },
+  {
+   "id": "microsoft/Phi-4-multimodal-instruct",
+   "revision": "93f923e1a7727d1c4f446756212d9d3e8fcc5d81",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "description": "Phi-4 Multimodal Instruct",
+   "family": "Phi",
+   "modalities": [
+    "text",
+    "image",
+    "audio"
+   ]
+  },
+  {
+   "id": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+   "revision": "68faf511d618ef198fef186659617cfd2eb8e33a",
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "description": "Mistral Small 3.1 24B Instruct",
+   "family": "Mistral",
+   "released": "2025-03-01",
+   "modalities": [
+    "text",
+    "image"
+   ]
+  },
+  {
+   "id": "Qwen/Qwen3-VL-235B-A22B-Instruct",
+   "revision": "710c13861be6c466e66de3f484069440b8f31389",
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "description": "Qwen3-VL 235B Instruct MoE",
+   "family": "Qwen",
+   "modalities": [
+    "text",
+    "image",
+    "video"
+   ]
+  },
+  {
+   "id": "XiaomiMiMo/MiMo-V2.6-Pro-RL",
+   "revision": "b61f21852680ee02a29e946e18cf8697f4844061",
+   "supported_sm": [
+    "9.0",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--trust-remote-code",
+    "--moe-runner-backend",
+    "flashinfer_mxfp4"
+   ],
+   "description": "Xiaomi MiMo-V2.6 Pro (RL), 1.02T-parameter MoE with hybrid sliding-window attention; FP8 weights with MXFP4 experts. Its experts need the flashinfer_mxfp4 MoE runner, available on Hopper and Blackwell.",
+   "family": "MiMo",
+   "license": "mit",
+   "released": "2026-09-21",
+   "modalities": [
+    "text"
+   ]
+  },
+  {
+   "id": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+   "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+   "supported_sm": [
+    "9.0",
+    "12.0",
+    "12.1"
+   ],
+   "description": "DeepSeek-V4.1 Flash (1017), 763B MoE with compressed sparse attention and cross-layer KV sharing; FP8 weights with FP4 experts. Hopper and Blackwell only.",
+   "family": "DeepSeek",
+   "license": "mit",
+   "released": "2026-10-17",
+   "modalities": [
+    "text",
+    "image"
+   ]
+  },
+  {
+   "id": "zai-org/GLM-5.3-Flash",
+   "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+   "supported_sm": [
+    "10.0",
+    "10.3"
+   ],
+   "description": "GLM-5.3 Flash, 321B MoE mixing DeepSeek sparse attention with KDA linear attention; FP8. In this SGLang build only data-center Blackwell (B200, B300) runs its attention by default.",
+   "family": "GLM",
+   "license": "mit",
+   "released": "2026-08-25",
+   "modalities": [
+    "text",
+    "image"
+   ]
+  },
+  {
+   "id": "inclusionAI/Ling-3.1-flash",
+   "revision": "e5623f6e4c34e9f2ca40bec867b9210db42ac76c",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
+   "supported_sm": [
+    "8.9",
+    "9.0",
+    "12.0",
+    "12.1"
+   ],
+   "description": "Ling-3.1 flash, 572B MoE with one MLA layer in eight and KDA linear attention elsewhere; FP8 (Ada and newer).",
+   "family": "Ling",
+   "license": "mit",
+   "released": "2026-10-13",
+   "modalities": [
+    "text"
+   ]
+  },
+  {
+   "id": "XiaomiMiMo/MiMo-V2.6-Flash-RL",
+   "revision": "dcd3fd83fb181622fbc606fbb1709901982a62c2",
+   "supported_sm": [
+    "9.0",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--trust-remote-code",
+    "--moe-runner-backend",
+    "flashinfer_mxfp4"
+   ],
+   "description": "Xiaomi MiMo-V2.6 Flash (RL), 311B MoE with hybrid sliding-window attention; FP8 weights with MXFP4 experts. Its experts need the flashinfer_mxfp4 MoE runner, available on Hopper and Blackwell.",
+   "family": "MiMo",
+   "license": "mit",
+   "released": "2026-09-21",
+   "modalities": [
+    "text"
+   ]
+  },
+  {
+   "id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+   "revision": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+   "supported_sm": [
+    "9.0",
+    "12.0",
+    "12.1"
+   ],
+   "description": "DeepSeek-V4 Flash (0731), 304B MoE with compressed sparse attention; FP8 weights with FP4 experts. Hopper and Blackwell only.",
+   "family": "DeepSeek",
+   "license": "mit",
+   "released": "2026-07-31",
+   "modalities": [
+    "text"
+   ]
+  },
+  {
+   "id": "Qwen/Qwen3.8-27B",
+   "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "description": "Qwen3.8 27B, dense model with Gated DeltaNet linear attention and one full-attention layer in four; BF16.",
+   "family": "Qwen",
+   "license": "apache-2.0",
+   "released": "2026-08-05",
+   "modalities": [
+    "text",
+    "image"
+   ]
+  },
+  {
+   "id": "moonshotai/Kimi-K2.6",
+   "revision": "7eb5002f6aadc958aed6a9177b7ed26bb94011bb",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "description": "Kimi K2.6, 1.03T MoE with MLA; INT4 experts (compressed-tensors). Reasoning and non-reasoning modes are chosen per request.",
+   "family": "Kimi",
+   "license": "other",
+   "released": "2026-04-14",
+   "modalities": [
+    "text",
+    "image"
+   ]
+  },
+  {
+   "id": "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+   "revision": "fb0ee0bc6b3f70342afd8d84cb80dbadbaa8a1fe",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
+   "supported_sm": [
+    "8.9",
+    "9.0",
+    "12.0",
+    "12.1"
+   ],
+   "description": "NVIDIA Nemotron 3.5 Super VL, 124B hybrid Mamba-2 / attention MoE (A12B); BF16. Its default MoE runner needs Ada or newer.",
+   "family": "Nemotron",
+   "license": "other",
+   "released": "2026-10-12",
+   "modalities": [
+    "text",
+    "image",
+    "audio"
+   ]
+  },
+  {
+   "id": "moonshotai/Kimi-K2.7-Code",
+   "revision": "74797c9c62378b951a1f6fcf5c4631024e9b8bef",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "description": "Kimi K2.7 Code, 1.03T MoE with MLA tuned for coding; INT4 experts (compressed-tensors).",
+   "family": "Kimi",
+   "license": "other",
+   "released": "2026-06-11",
+   "modalities": [
+    "text",
+    "image"
+   ]
+  },
+  {
+   "id": "inclusionAI/Ling-3.0-flash",
+   "revision": "fcc60a52b34c69c6271d0ac8a8cb0815020b6a43",
+   "extra_sglang_args": [
+    "--trust-remote-code"
+   ],
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "description": "Ling-3.0 flash, 128B MoE with one MLA layer in six and KDA linear attention elsewhere; BF16.",
+   "family": "Ling",
+   "license": "mit",
+   "released": "2026-08-02",
+   "modalities": [
+    "text"
+   ]
+  },
+  {
+   "id": "meta-models/Muse-Glimmer-30B",
+   "revision": "cec94fcfd6512f2cfe708138c32533b346ea4f69",
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "description": "Muse Glimmer 30B, dense model with sliding-window attention on three layers in four; BF16.",
+   "family": "Muse",
+   "license": "apache-2.0",
+   "released": "2026-08-09",
+   "modalities": [
+    "text",
+    "image"
+   ]
+  },
+  {
+   "id": "google/gemma-4-26B-A4B-it",
+   "revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+   "supported_sm": [
+    "8.6",
+    "12.0",
+    "12.1"
+   ],
+   "description": "Gemma 4 26B-A4B instruct, MoE with sliding-window attention and wide global layers; BF16.",
+   "family": "Gemma",
+   "license": "apache-2.0",
+   "released": "2026-03-11",
+   "modalities": [
+    "text",
+    "image"
+   ]
+  },
+  {
+   "id": "thinkingmachines/Inkling-2-Mini",
+   "revision": "ed40e7da625f594fc9c4990f5f66be24873c22d7",
+   "max_ctx": 1048576,
+   "supported_sm": [
+    "8.0",
+    "8.9",
+    "9.0",
+    "10.0",
+    "10.3",
+    "12.0",
+    "12.1"
+   ],
+   "extra_sglang_args": [
+    "--reasoning-parser",
+    "inkling",
+    "--tool-call-parser",
+    "inkling2"
+   ],
+   "description": "Looped NVFP4 Mixture-of-Experts, 26B total and 5.4B active parameters.",
+   "family": "Inkling",
+   "license": "apache-2.0",
+   "released": "2026-11-17",
+   "modalities": [
+    "text",
+    "image"
+   ]
+  }
+ ],
+ "gguf_models": [
+  {
+   "id": "ggml-org/gemma-4-E2B-it-GGUF",
+   "architecture": "dense",
+   "static_vram_gb": 2.65,
+   "download_gb": 2.65,
+   "kv_bytes_per_token": 32768,
+   "supported_sm": [],
+   "default_ctx": 8192,
+   "max_ctx": 8192,
+   "default_max_conc": 4,
+   "attention": "gqa",
+   "runtime": "llama.cpp",
+   "family": "Gemma 4",
+   "license": "gemma",
+   "released": "2026",
+   "modalities": [
+    "text",
+    "image"
+   ],
+   "description": "Gemma 4 E2B, Q4_0: small and quick, for 8 GB Macs."
+  },
+  {
+   "id": "ggml-org/gemma-4-E4B-it-GGUF",
+   "architecture": "dense",
+   "static_vram_gb": 4.28,
+   "download_gb": 4.28,
+   "kv_bytes_per_token": 49152,
+   "supported_sm": [],
+   "default_ctx": 8192,
+   "max_ctx": 8192,
+   "default_max_conc": 4,
+   "attention": "gqa",
+   "runtime": "llama.cpp",
+   "family": "Gemma 4",
+   "license": "gemma",
+   "released": "2026",
+   "modalities": [
+    "text",
+    "image"
+   ],
+   "description": "Gemma 4 E4B, Q4_0."
+  },
+  {
+   "id": "Qwen/Qwen3-8B-GGUF",
+   "architecture": "dense",
+   "static_vram_gb": 4.68,
+   "download_gb": 4.68,
+   "kv_bytes_per_token": 147456,
+   "supported_sm": [],
+   "default_ctx": 8192,
+   "max_ctx": 8192,
+   "default_max_conc": 4,
+   "attention": "gqa",
+   "runtime": "llama.cpp",
+   "family": "Qwen3",
+   "license": "apache-2.0",
+   "released": "2025",
+   "modalities": [
+    "text"
+   ],
+   "description": "Qwen3 8B, Q4_K_M."
+  },
+  {
+   "id": "ggml-org/gpt-oss-20b-GGUF",
+   "architecture": "moe",
+   "static_vram_gb": 11.28,
+   "download_gb": 11.28,
+   "kv_bytes_per_token": 49152,
+   "supported_sm": [],
+   "default_ctx": 16384,
+   "max_ctx": 16384,
+   "default_max_conc": 4,
+   "attention": "gqa",
+   "runtime": "llama.cpp",
+   "family": "gpt-oss",
+   "license": "apache-2.0",
+   "released": "2025",
+   "modalities": [
+    "text"
+   ],
+   "description": "gpt-oss 20B, MXFP4."
+  },
+  {
+   "id": "ggml-org/gemma-4-26B-A4B-it-GGUF",
+   "architecture": "moe",
+   "static_vram_gb": 13.61,
+   "download_gb": 13.61,
+   "kv_bytes_per_token": 98304,
+   "supported_sm": [],
+   "default_ctx": 8192,
+   "max_ctx": 8192,
+   "default_max_conc": 4,
+   "attention": "gqa",
+   "runtime": "llama.cpp",
+   "family": "Gemma 4",
+   "license": "gemma",
+   "released": "2026",
+   "modalities": [
+    "text",
+    "image"
+   ],
+   "description": "Gemma 4 26B A4B, Q4_0."
+  },
+  {
+   "id": "ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF",
+   "architecture": "moe",
+   "static_vram_gb": 17.6,
+   "download_gb": 17.6,
+   "kv_bytes_per_token": 24576,
+   "supported_sm": [],
+   "default_ctx": 16384,
+   "max_ctx": 16384,
+   "default_max_conc": 4,
+   "attention": "gqa",
+   "runtime": "llama.cpp",
+   "family": "Nemotron 3.5",
+   "license": "nvidia-open-model-license",
+   "released": "2026",
+   "modalities": [
+    "text"
+   ],
+   "description": "Nemotron 3.5 Lightning 30B A3B, Q4_0."
+  },
+  {
+   "id": "ggml-org/Qwen3.8-27B-GGUF",
+   "architecture": "dense",
+   "static_vram_gb": 18.07,
+   "download_gb": 18.07,
+   "kv_bytes_per_token": 65536,
+   "supported_sm": [],
+   "default_ctx": 16384,
+   "max_ctx": 16384,
+   "default_max_conc": 4,
+   "attention": "gqa",
+   "runtime": "llama.cpp",
+   "family": "Qwen3.8",
+   "license": "apache-2.0",
+   "released": "2026",
+   "modalities": [
+    "text",
+    "image"
+   ],
+   "description": "Qwen3.8 27B, Q4_K_M."
+  },
+  {
+   "id": "ggml-org/Qwen3.6-35B-A3B-GGUF",
+   "architecture": "moe",
+   "static_vram_gb": 19.13,
+   "download_gb": 19.13,
+   "kv_bytes_per_token": 40960,
+   "supported_sm": [],
+   "default_ctx": 16384,
+   "max_ctx": 16384,
+   "default_max_conc": 4,
+   "attention": "gqa",
+   "runtime": "llama.cpp",
+   "family": "Qwen3.6",
+   "license": "apache-2.0",
+   "released": "2026",
+   "modalities": [
+    "text",
+    "image"
+   ],
+   "description": "Qwen3.6 35B A3B, Q4_K_M."
+  },
+  {
+   "id": "ggml-org/gpt-oss-120b-GGUF",
+   "architecture": "moe",
+   "static_vram_gb": 59.03,
+   "download_gb": 59.03,
+   "kv_bytes_per_token": 73728,
+   "supported_sm": [],
+   "default_ctx": 16384,
+   "max_ctx": 16384,
+   "default_max_conc": 4,
+   "attention": "gqa",
+   "runtime": "llama.cpp",
+   "family": "gpt-oss",
+   "license": "apache-2.0",
+   "released": "2025",
+   "modalities": [
+    "text"
+   ],
+   "description": "gpt-oss 120B, MXFP4, for Macs with 96 GB or more."
+  },
+  {
+   "id": "ggml-org/embeddinggemma-300M-GGUF",
+   "architecture": "dense",
+   "static_vram_gb": 0.31,
+   "download_gb": 0.31,
+   "kv_bytes_per_token": 8192,
+   "supported_sm": [],
+   "default_ctx": 2048,
+   "max_ctx": 2048,
+   "default_max_conc": 4,
+   "attention": "gqa",
+   "runtime": "llama.cpp",
+   "family": "EmbeddingGemma",
+   "license": "gemma",
+   "released": "2025",
+   "modalities": [
+    "embedding"
+   ],
+   "description": "EmbeddingGemma 300M, Q8_0: embeddings."
+  }
+ ]
+}

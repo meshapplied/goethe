@@ -1,8 +1,14 @@
 # MeshApplied inference engine workspace.
 
 [workspace]
-members = ["crates/core", "crates/goethe", "crates/goethed"]
+members = ["crates/core", "crates/goethe", "crates/goethed", "crates/proto"]
 resolver = "2"
+
+[workspace.lints.clippy]
+cast_ptr_alignment = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
 
 [profile.release]
 lto = "thin"

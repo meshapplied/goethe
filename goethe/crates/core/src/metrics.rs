@@ -74,13 +74,6 @@ fn inner() -> MutexGuard<'static, Inner> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 pub fn record_request(model: &str, code: u16, duration_secs: f64, prompt_tokens: i64, completion_tokens: i64) {
     // Count one finished request; model must already be a known id or UNKNOWN_MODEL.
     let mut g = inner();
@@ -99,7 +92,7 @@ pub fn record_request(model: &str, code: u16, duration_secs: f64, prompt_tokens:
         g.window
             .entry(model.to_string())
             .or_insert_with(TokenWindow::new)
-            .add(now_secs(), completion_tokens as u64);
+            .add(crate::sys::unix_secs() as u64, completion_tokens as u64);
     }
 }
 
@@ -109,7 +102,7 @@ pub fn record_ttft(model: &str, secs: f64) {
 
 pub fn model_tokens_per_s_1m(model_id: &str) -> f64 {
     let g = inner();
-    let sum = g.window.get(model_id).map(|w| w.sum(now_secs())).unwrap_or(0);
+    let sum = g.window.get(model_id).map(|w| w.sum(crate::sys::unix_secs() as u64)).unwrap_or(0);
     sum as f64 / WINDOW_SECS as f64
 }
 
@@ -225,7 +218,7 @@ fn write_gpu_memory(out: &mut String) {
         let Ok(dev) = nvml.device_by_index(idx) else {
             continue;
         };
-        let Ok((total_mb, used_mb, _, _)) = hw::memory_from_nvml_or_unified(dev.memory_info(), false) else {
+        let Ok((total_mb, used_mb, _, _)) = hw::memory_from_nvml_or_unified(dev.memory_info()) else {
             continue;
         };
         let _ = writeln!(out, "goethe_gpu_memory_used_bytes{{gpu=\"{idx}\"}} {}", used_mb * 1024 * 1024);

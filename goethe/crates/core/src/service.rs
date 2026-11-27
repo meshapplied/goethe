@@ -9,14 +9,7 @@ use std::process::{Command, Stdio};
 
 const CRON_MARKER: &str = "# goethe-goethed-reboot";
 
-pub fn run_enable() -> Result<(), String> {
-    for line in enable_boot(&goethe_home())? {
-        println!("{line}");
-    }
-    Ok(())
-}
-
-pub fn enable_boot(home: &Path) -> Result<Vec<String>, String> {
+fn enable_boot(home: &Path) -> Result<Vec<String>, String> {
     // Prefer systemd when it is PID 1 (with lingering for a user unit); containers without it get cron and a nohup start; macOS a LaunchAgent.
     let goethed = home.join("bin/goethed");
     if !goethed.is_file() {
@@ -106,36 +99,6 @@ pub fn disable_boot(home: &Path) -> Result<Vec<String>, String> {
 
 pub fn autostart_opted_out() -> bool {
     std::env::var("GOETHE_NO_AUTOSTART").is_ok_and(|v| v.trim() == "1")
-}
-
-pub fn run_status() -> Result<(), String> {
-    let home = goethe_home();
-    let env = crate::host::probe_environment(crate::nginx::public_port_u16(&home));
-    println!("boot method: {}", active_method(&home));
-    println!("goethed: {}", if goethed_running() { "running" } else { "stopped" });
-    println!(
-        "init: {}{}",
-        if env.systemd_pid1 { "systemd" } else { "no systemd" },
-        env.container.map(|c| format!(", container {c}")).unwrap_or_default()
-    );
-    Ok(())
-}
-
-fn active_method(home: &Path) -> String {
-    // This home's boot method, naming a unit that belongs to another home.
-    #[cfg(target_os = "macos")]
-    return launchd::method(home);
-    #[cfg_attr(target_os = "macos", allow(unreachable_code))]
-    let mut other = String::new();
-    for (path, label) in [(system_unit_path(), "systemd (system)"), (user_unit_path(), "systemd (--user)")] {
-        match unit_owner(&path, home) {
-            UnitOwner::Ours => return label.into(),
-            UnitOwner::Other(h) => other = format!(" ({label} unit starts {})", describe_home(h.as_deref())),
-            UnitOwner::Absent => {}
-        }
-    }
-    let method = if crontab_entry_for(&read_crontab(), home) { "crontab @reboot" } else { "none" };
-    format!("{method}{other}")
 }
 
 pub fn goethed_running() -> bool {
@@ -234,7 +197,7 @@ pub fn refresh_unit(home: &Path) {
     }
 }
 
-pub fn spawn_goethed(home: &Path) -> Result<(), String> {
+fn spawn_goethed(home: &Path) -> Result<(), String> {
     spawn(home, true)
 }
 
@@ -295,9 +258,9 @@ pub mod launchd {
     // macOS: a LaunchAgent starts goethed at login and after a crash; engines outlive it (AbandonProcessGroup).
     use super::*;
 
-    pub const LABEL: &str = "sh.goethe.goethed";
+    const LABEL: &str = "sh.goethe.goethed";
 
-    pub fn plist_path() -> PathBuf {
+    fn plist_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_default();
         PathBuf::from(home).join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
     }
@@ -306,7 +269,7 @@ pub mod launchd {
         s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
     }
 
-    pub fn plist_text(home: &Path) -> String {
+    fn plist_text(home: &Path) -> String {
         let h = xml(&home.display().to_string());
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -393,14 +356,6 @@ pub mod launchd {
     pub fn refresh(home: &Path) {
         if matches!(owner(home), UnitOwner::Ours) && fs::read_to_string(plist_path()).ok().as_deref() != Some(plist_text(home).as_str()) {
             let _ = fs::write(plist_path(), plist_text(home));
-        }
-    }
-
-    pub fn method(home: &Path) -> String {
-        match owner(home) {
-            UnitOwner::Ours => "launchd (LaunchAgent)".to_string(),
-            UnitOwner::Other(h) => format!("none (the LaunchAgent starts {})", describe_home(h.as_deref())),
-            UnitOwner::Absent => "none".to_string(),
         }
     }
 
@@ -620,7 +575,7 @@ pub fn cron_line(home: &Path) -> String {
 }
 
 fn install_crontab_reboot(home: &Path) -> Result<(), String> {
-    let mut existing = read_crontab();
+    let mut existing = read_crontab()?;
     if crontab_entry_for(&existing, home) {
         return Ok(());
     }
@@ -631,19 +586,27 @@ fn install_crontab_reboot(home: &Path) -> Result<(), String> {
     write_crontab(&existing)
 }
 
-fn read_crontab() -> String {
-    // The user's crontab via `crontab -l`, or GOETHE_CRONTAB_FILE when set (tests).
+fn read_crontab() -> Result<String, String> {
+    // The user's crontab via `crontab -l` (empty without crontab, which writing then reports), or GOETHE_CRONTAB_FILE when set (tests).
     if let Ok(path) = std::env::var("GOETHE_CRONTAB_FILE") {
-        return fs::read_to_string(path).unwrap_or_default();
+        return Ok(fs::read_to_string(path).unwrap_or_default());
     }
-    Command::new("crontab")
-        .arg("-l")
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default()
+    match Command::new("crontab").arg("-l").output() {
+        Ok(out) => crontab_listing(out.status.success(), &out.stdout, &out.stderr),
+        Err(_) => Ok(String::new()),
+    }
+}
+
+fn crontab_listing(ok: bool, stdout: &[u8], stderr: &[u8]) -> Result<String, String> {
+    // What `crontab -l` printed; "no crontab" is an empty one, any other failure an error, so a crontab that could not be read is never replaced.
+    let err = String::from_utf8_lossy(stderr);
+    if ok {
+        Ok(String::from_utf8_lossy(stdout).into_owned())
+    } else if err.contains("no crontab") || err.contains("No such file") {
+        Ok(String::new())
+    } else {
+        Err(format!("crontab -l failed ({}); the crontab was left as it is", err.trim()))
+    }
 }
 
 fn write_crontab(text: &str) -> Result<(), String> {
@@ -709,7 +672,7 @@ pub fn strip_cron_entry(text: &str, home: &Path) -> Option<String> {
 }
 
 fn remove_crontab_reboot(home: &Path) -> Result<bool, String> {
-    match strip_cron_entry(&read_crontab(), home) {
+    match strip_cron_entry(&read_crontab()?, home) {
         Some(body) => write_crontab(&body).map(|_| true),
         None => Ok(false),
     }
@@ -789,6 +752,15 @@ mod tests {
         );
         assert_eq!(strip_cron_entry(&legacy, a).as_deref(), Some(""));
         assert!(strip_cron_entry(&legacy, Path::new("/a/.goethe2")).is_none());
+    }
+
+    #[test]
+    fn a_crontab_that_could_not_be_read_is_never_rewritten() {
+        assert_eq!(crontab_listing(true, b"0 1 * * * backup\n", b""), Ok("0 1 * * * backup\n".to_string()));
+        assert_eq!(crontab_listing(false, b"", b"no crontab for me\n"), Ok(String::new()));
+        assert_eq!(crontab_listing(false, b"", b"crontab: can't open 'me': No such file or directory\n"), Ok(String::new()));
+        let err = crontab_listing(false, b"", b"crontab: cannot connect to the cron daemon\n").unwrap_err();
+        assert!(err.contains("left as it is") && err.contains("cron daemon"), "{err}");
     }
 
     #[test]

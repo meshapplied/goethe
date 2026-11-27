@@ -3,7 +3,7 @@
 use chrono::Utc;
 use rusqlite::Connection;
 
-pub fn today_utc() -> String {
+fn today_utc() -> String {
     Utc::now().format("%Y-%m-%d").to_string()
 }
 

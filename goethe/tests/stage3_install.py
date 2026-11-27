@@ -13,6 +13,7 @@ from lib.goethe_test import (
     require_cli,
     resolve_python,
     run_goethe,
+    signed_registry,
     spec_ddl_tables,
     sqlite_query,
     temp_home,
@@ -83,7 +84,7 @@ def main() -> None:
             [str(goethe), "install", model, "--ctx", "512", "--max-conc", "2"],
             env={
                 "GOETHE_HOME": str(home),
-                "GOETHE_REGISTRY_URL": f"file://{reg_hit}",
+                **signed_registry(reg_hit),
             },
             timeout=600,
         )
@@ -117,7 +118,7 @@ def main() -> None:
         miss_model = "hf-internal-testing/tiny-random-gpt2"
         run_goethe(
             [str(goethe), "install", miss_model],
-            env={"GOETHE_HOME": str(home), "GOETHE_REGISTRY_URL": f"file://{reg_miss}"},
+            env={"GOETHE_HOME": str(home), **signed_registry(reg_miss)},
             timeout=600,
         )
         n = sqlite_query(db, "SELECT COUNT(*) FROM installed_models")[0][0]

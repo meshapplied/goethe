@@ -2,19 +2,27 @@
 
 [package]
 name = "goethe-core"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 build = "build.rs"
 
 [dependencies]
+goethe-proto = { path = "../proto" }
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 libc = "0.2"
 nvml-wrapper = { version = "0.10", default-features = false }
+ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 flate2 = "1"
-sha2 = "0.10"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "http2", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "0.26"
 toml = "0.8"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 
@@ -22,4 +30,10 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 test-release-key = []
 
 [dev-dependencies]
+goethe-proto = { path = "../proto", features = ["testkit"] }
+hyper = { version = "1", features = ["client"] }
 tempfile = "3"
+tokio = { version = "1", features = ["io-util", "rt-multi-thread"] }
+
+[lints]
+workspace = true

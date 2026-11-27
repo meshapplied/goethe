@@ -63,7 +63,12 @@ fn dispatch(req: Request) -> (bool, i32, String, String, Value) {
                 .get("force")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            match supervisor::handle_unload(model_id, all, force) {
+            let instance = req.params.get("instance_id").and_then(|v| v.as_str());
+            let done = match instance {
+                Some(id) => supervisor::handle_unload_instance(id, force),
+                None => supervisor::handle_unload(model_id, all, force),
+            };
+            match done {
                 Ok(v) => (true, 0, String::new(), String::new(), v),
                 Err((code, msg)) => (false, code, String::new(), msg, Value::Null),
             }
@@ -73,7 +78,7 @@ fn dispatch(req: Request) -> (bool, i32, String, String, Value) {
             Err((code, msg)) => (false, code, String::new(), msg, Value::Null),
         },
         "platform_changed" => {
-            goethe_core::platform::notify(goethe_core::platform::CHANGE_LINK);
+            goethe_core::client::link::notify(goethe_core::client::link::CHANGE_LINK);
             (true, 0, String::new(), String::new(), Value::Null)
         }
         "shutdown" => {
@@ -124,23 +129,22 @@ fn handle_client(stream: UnixStream) {
 }
 
 fn bind_socket(sock: &std::path::Path) -> TokioUnixListener {
-    // Bind goethe.sock owner-only from the first instant (umask during bind, then chmod; failing that, refuse to serve); the instance lock already cleared any stale file.
+    // Bind goethe.sock owner-only from the first instant: inside a fresh 0700 folder, chmod 600, then renamed into place (a process-wide umask would race other threads' files); failing that, refuse to serve. The instance lock already cleared any stale file.
     use std::os::unix::fs::PermissionsExt;
-    if let Some(parent) = sock.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let old = unsafe { libc::umask(0o177) };
-    let bound = UnixListener::bind(sock);
-    unsafe { libc::umask(old) };
-    let std_listener = bound.unwrap_or_else(|e| {
+    let parent = sock.parent().unwrap_or(std::path::Path::new("."));
+    let _ = std::fs::create_dir_all(parent);
+    let die = |e: String| -> ! {
         eprintln!("bind {}: {e}", sock.display());
-        std::process::exit(1);
+        std::process::exit(1)
+    };
+    let dir = goethe_core::paths::private_dir_in(parent, ".sock").unwrap_or_else(|e| die(e));
+    let tmp = dir.join("s");
+    let bound = UnixListener::bind(&tmp).and_then(|l| {
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::rename(&tmp, sock).map(|()| l)
     });
-    if let Err(e) = std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600)) {
-        eprintln!("chmod 600 {}: {e}", sock.display());
-        let _ = std::fs::remove_file(sock);
-        std::process::exit(1);
-    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let std_listener = bound.unwrap_or_else(|e| die(e.to_string()));
     std_listener
         .set_nonblocking(true)
         .expect("nonblocking goethe.sock");
@@ -180,7 +184,10 @@ async fn main() {
     }
     eprintln!("goethed listening on {}", sock.display());
     goethe_core::autostart::spawn_restore_background();
-    heartbeat::spawn(home.clone());
+    let stream = heartbeat::spawn(home.clone());
+    if let Some(m) = mux::running() {
+        tokio::spawn(goethe_core::client::connect::run(home.clone(), mux::gateway(m), stream));
+    }
     goethe_core::usage_log::spawn(home.clone());
     let _ = goethe_core::log_rotation::run_rotation_pass(&home);
     let home_rot = home.clone();
@@ -276,11 +283,23 @@ mod tests {
 
     #[tokio::test]
     async fn the_socket_is_owner_only() {
+        // A folder made by another thread while goethed binds keeps its owner bits: no process-wide umask.
         use std::os::unix::fs::PermissionsExt;
-        let path = std::env::temp_dir().join(format!("goethed-perm-{}.sock", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let _listener = bind_socket(&path);
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let (tmp, pid) = (std::env::temp_dir(), std::process::id());
+        let (path, probe) = (tmp.join(format!("goethed-perm-{pid}.sock")), tmp.join(format!("goethed-umask-{pid}")));
+        let _ = std::fs::remove_dir(&probe);
+        let racer = std::thread::spawn({
+            let probe = probe.clone();
+            move || (0..2000).all(|_| std::fs::create_dir(&probe).and_then(|()| std::fs::metadata(&probe)).is_ok_and(|m| m.permissions().mode() & 0o700 == 0o700) && std::fs::remove_dir(&probe).is_ok())
+        });
+        for _ in 0..200 {
+            let _ = std::fs::remove_file(&path);
+            let _listener = bind_socket(&path);
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        assert!(racer.join().unwrap());
+        let ours = format!(".sock-{pid}-");
+        assert!(std::fs::read_dir(&tmp).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(&ours)), "the bind folder is gone");
         let _ = std::fs::remove_file(&path);
     }
 

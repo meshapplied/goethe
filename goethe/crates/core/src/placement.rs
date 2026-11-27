@@ -44,8 +44,9 @@ pub fn ensure_eligible_for_tp(
             inputs.len()
         ));
     }
-    let mut ids: Vec<String> = denied.iter().map(|i| i.to_string()).collect();
-    ids.sort();
+    let mut sorted: Vec<u32> = denied.iter().copied().collect();
+    sorted.sort_unstable();
+    let ids: Vec<String> = sorted.iter().map(u32::to_string).collect();
     Err(format!(
         "need {tp} eligible GPUs but only {} available; denied GPUs: {}; run `goethe gpu allow gpu<index>`",
         inputs.len(),
@@ -240,7 +241,7 @@ mod tests {
         assert!(!profile_since(td.path(), 0), "a missing profile is stale");
         let path = td.path().join("hardware_state.json");
         std::fs::write(&path, "{}").unwrap();
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = crate::sys::unix_secs() as u64;
         assert!(profile_since(td.path(), now - 60));
         let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1000);
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();

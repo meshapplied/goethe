@@ -54,7 +54,7 @@ pub fn run(opts: UninstallOpts) -> Result<(), String> {
     if keep_traces {
         plan.push(format!("keep {} (training traces; delete the folder yourself if you do not want them)", traces.display()));
     }
-    let linked = crate::platform_cli::is_linked(&home);
+    let linked = crate::client::login::is_linked(&home);
     if linked {
         plan.push("log this node out of the console and delete its credentials".to_string());
     }
@@ -71,7 +71,7 @@ pub fn run(opts: UninstallOpts) -> Result<(), String> {
     shutdown::run_down().map_err(|e| format!("could not stop goethed ({e}); stop it, then run goethe uninstall again"))?;
     crate::service::run_disable()?;
     if linked {
-        crate::platform_cli::uninstall_logout(&home);
+        crate::client::login::uninstall_logout(&home);
     }
     remove_installer_symlinks(&home);
     if default_home {
@@ -82,7 +82,7 @@ pub fn run(opts: UninstallOpts) -> Result<(), String> {
         Some(m) => {
             for p in &m.delete {
                 if fs::symlink_metadata(p).is_ok() {
-                    left.extend(crate::models::delete_owned(&home, p).err());
+                    left.extend(crate::models::remove_owned(&home, p).err());
                 }
             }
             for (p, _) in &m.keep {

@@ -172,7 +172,7 @@ fn install_from_catalog() -> Result<Option<String>, String> {
     let hw = crate::placement::load_hw(&home).ok_or("no hardware profile; run goethe doctor --hardware")?;
     let view = crate::recommend::View::capacity(&home, hw);
     let reg = crate::registry::fetch(&crate::registry::registry_url())?;
-    let mut fits = crate::recommend::recommend(&view, &reg).recommended;
+    let mut fits = crate::recommend::recommend(&view, &reg, &|m| crate::recommend::cannot_run(&home, m)).recommended;
     fits.sort_by(|a, b| (a.vram_per_gpu_gb * a.tp as f64).total_cmp(&(b.vram_per_gpu_gb * b.tp as f64)));
     let width = fits.iter().map(|f| f.model_id.len()).max().unwrap_or(0);
     let mut rows: Vec<String> = fits
@@ -287,7 +287,7 @@ fn step_access(model: &str) -> Result<(), String> {
         dangerously_allow_all_inbound: false,
     })?;
     let token = choose_key(model)?;
-    READY.lock().unwrap_or_else(|e| e.into_inner()).replace((api.clone(), model.to_string(), token.clone()));
+    READY.lock().unwrap_or_else(|e| e.into_inner()).replace((api, model.to_string(), token));
     Ok(())
 }
 
@@ -446,11 +446,11 @@ fn later_text(model: Option<&str>) -> String {
 }
 
 pub fn suggested(offline: bool) -> String {
-    // The model examples name: the top of goethe models recommend for this machine (the bundled catalog when offline or unreachable).
-    let reg = if offline { crate::registry::bundled() } else { crate::registry::fetch(&crate::registry::registry_url()).or_else(|_| crate::registry::bundled()) };
-    match reg {
-        Ok(r) => crate::recommend::suggested_model(&goethe_home(), &r),
-        Err(_) => "nvidia/Llama-3.1-8B-Instruct-NVFP4".to_string(),
+    // The model examples name: the top of goethe models recommend for this machine (the last registry fetched when offline or unreachable).
+    let reg = if offline { None } else { crate::registry::fetch(&crate::registry::registry_url()).ok() };
+    match reg.or_else(crate::registry::cached) {
+        Some(r) => crate::recommend::suggested_model(&goethe_home(), &r),
+        None => "nvidia/Llama-3.1-8B-Instruct-NVFP4".to_string(),
     }
 }
 

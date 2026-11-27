@@ -117,7 +117,7 @@ class Matrix(unittest.TestCase):
         cls.world.stop()
 
     def setUp(self) -> None:
-        self.world.serial, self.world.bad_sig, self.world.pack_401 = 7, False, False
+        self.world.serial, self.world.bad_sig, self.world.pack_401, self.world.store_down = 7, False, False, False
         self.mark = len(self.world.requests)
 
     def fetched(self, repo: str) -> bool:
@@ -222,6 +222,32 @@ class Matrix(unittest.TestCase):
             self.assertIn("using its plain runtime", r.out + r.err)
             self.assertEqual(self.runtime_of(c, "e2e/packed-gguf"), "llama.cpp")
 
+    def test_a_pack_store_that_does_not_answer_serves_the_plain_runtime_unless_fallback_is_off(self) -> None:
+        with self.cell(login=True, extra={"GOETHE_ALLOW_FALLBACK": "0"}) as c:
+            self.world.store_down = True
+            r = c.run("install", "e2e/packed-gguf", "--yes")
+            clean(self, r, ok=False)
+            self.assertIn("could not be reached", r.out + r.err)
+            self.assertIn("--fallback", r.out + r.err)
+        with self.cell(login=True) as c:
+            self.world.store_down = True
+            r = c.run("install", "e2e/packed-gguf", "--yes", "--load")
+            clean(self, r)
+            self.assertIn("kernel packs could not be reached", r.out + r.err)
+            self.assertEqual(self.runtime_of(c, "e2e/packed-gguf"), "llama.cpp")
+
+    def test_an_engine_pin_is_kept_or_the_install_refused_before_any_download(self) -> None:
+        with self.cell(login=True) as c:
+            r = c.run("install", "e2e/packed", "--yes", "--engine", "sglang")
+            clean(self, r)
+            self.assertRegex(r.out, r"e2e/packed\s+sglang", "--engine sglang skips the pack")
+        self.mark = len(self.world.requests)
+        with self.cell() as c:
+            r = c.run("install", "e2e/packed", "--yes", "--engine", "goethe-engine")
+            clean(self, r, ok=False)
+            self.assertIn("needs its kernel pack: run goethe login first (--engine goethe-engine)", r.out + r.err)
+        self.assertFalse(self.fetched("e2e/packed"))
+
     def test_a_pack_index_with_a_bad_signature_is_refused_and_nothing_is_downloaded(self) -> None:
         with self.cell(login=True) as c:
             self.world.bad_sig = True
@@ -254,14 +280,14 @@ class Matrix(unittest.TestCase):
             self.assertIn("goethe update", r.out + r.err)
             self.assertEqual(self.runtime_of(c, "e2e/newer-engine"), "llama.cpp")
 
-    def test_a_pack_download_the_platform_refuses_with_401_says_to_log_in_again(self) -> None:
+    def test_a_pack_store_that_refuses_the_login_serves_plain_and_says_to_log_in_again(self) -> None:
         with self.cell(login=True) as c:
             self.world.pack_401 = True
             r = c.run("install", "e2e/packed", "--yes")
-            clean(self, r, ok=False)
+            clean(self, r)
             self.assertIn("goethe login", r.out + r.err)
-            self.assertLessEqual(r.lines, 4, r.out + r.err)
-
+            self.assertEqual((r.out + r.err).count("goethe login"), 1, "the reason is said once")
+            self.assertRegex(r.out, r"e2e/packed\s+sglang", "installed with its plain runtime")
     def test_update_on_a_build_newer_than_the_published_one_keeps_it_without_an_error(self) -> None:
         old = World(pkg_version="0.0.1").start()
         try:

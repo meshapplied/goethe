@@ -6,15 +6,15 @@ use crate::run::{embed_line, Loaded, Target};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
-const OPEN: &str = "<think>";
-const CLOSE: &str = "</think>";
+pub(crate) const OPEN: &str = "<think>";
+pub(crate) const CLOSE: &str = "</think>";
 const TYPING: &str = "[Esc] commands  [Enter] send";
 const COMMANDS: &str = "[m] model  [q] quit  [i] type";
 const SURE: &str = "exit? Enter = exit, q = back";
 const PICKING: &str = "[Up] [Down] move  [Enter] choose  [Esc] back";
 const LOADING: &str = "loading into VRAM  [Esc] cancel";
 
-pub fn split_think(raw: &str, last: bool) -> (String, String) {
+fn split_think(raw: &str, last: bool) -> (String, String) {
     // The model's reasoning and its answer: complete think blocks, an unclosed one, and everything before a closing tag that has no opening one are reasoning; while streaming, a tag cut in half stays out of the answer.
     let mut thinking: Vec<String> = Vec::new();
     let mut answer = raw.to_string();
@@ -50,6 +50,11 @@ pub fn plain_text(raw: &str, thinking: bool, color: bool) -> String {
         (true, true) => format!("\x1b[2mthinking\n{think}\x1b[0m\n\n{answer}"),
         (true, false) => format!("thinking\n{think}\n\n{answer}"),
     }
+}
+
+pub(crate) fn assistant_turn(reply: &str) -> Value {
+    // A reply as the next request carries it: the answer only, its reasoning left out, whichever engine sent it.
+    json!({"role": "assistant", "content": split_think(reply, true).1})
 }
 
 pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -474,7 +479,7 @@ impl State {
         match result {
             Ok((reply, tokens)) => {
                 self.ui.count(tokens, first.map_or(0.0, |f| (end - f).as_secs_f64()));
-                self.msgs.push(json!({"role": "assistant", "content": reply}));
+                self.msgs.push(assistant_turn(&reply));
             }
             Err(e) => {
                 self.ui.entries.pop();
@@ -510,9 +515,8 @@ impl State {
             self.ui.mode = Mode::Typing;
             return;
         }
-        let ctx = crate::run::run_ctx(&crate::paths::goethe_home(), &id);
         self.ui.loading = Some((id.clone(), 0));
-        self.job = Some(crate::menu::LoadJob::new(id, ctx));
+        self.job = Some(crate::menu::LoadJob::new(id));
     }
 
     fn load_step(&mut self, loaded: &mut Loaded) {
@@ -608,6 +612,13 @@ mod tests {
     fn typed(ui: &mut Ui, s: &str) {
         for c in s.chars() {
             ui.key(if c == ' ' { Input::Space } else { Input::Char(c) });
+        }
+    }
+
+    #[test]
+    fn the_next_turn_carries_the_answer_without_its_reasoning() {
+        for reply in ["<think>hm</think>Hi", "Hi"] {
+            assert_eq!(assistant_turn(reply), json!({"role": "assistant", "content": "Hi"}), "{reply}");
         }
     }
 

@@ -21,7 +21,7 @@ fn sidecars() -> [String; 3] {
     [PACK_FILE.to_string(), format!("{PACK_FILE}.sig"), PACK_VERIFY.to_string()]
 }
 
-pub fn installed_manifest(dir: &Path) -> Option<String> {
+fn installed_manifest(dir: &Path) -> Option<String> {
     // The manifest sha256 the installed pack was verified under.
     let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(PACK_VERIFY)).ok()?).ok()?;
     v["manifest_sha256"].as_str().map(String::from)
@@ -173,7 +173,6 @@ pub fn installed_overlays(dir: &Path) -> Vec<String> {
 
 fn overlay_only(dir: &Path, entry: &Entry, installed: &str, broker: &impl Broker, run: Runner) -> Result<u64, String> {
     // The entry lists overlays for the installed base: fetch only those (small), check each against its hash and the engine, then stack them.
-    use sha2::{Digest, Sha256};
     let have = installed_overlays(dir);
     let mut files = have.clone();
     let mut fetched = 0;
@@ -181,7 +180,7 @@ fn overlay_only(dir: &Path, entry: &Entry, installed: &str, broker: &impl Broker
     std::fs::create_dir_all(&odir).map_err(|e| e.to_string())?;
     for o in entry.overlays.iter().filter(|o| o.base == installed && !have.contains(&o.file)) {
         let bytes = broker.range(&o.file, 0, o.size)?;
-        if format!("{:x}", Sha256::digest(&bytes)) != o.sha256 {
+        if crate::sha::digest_hex(&bytes) != o.sha256 {
             return Err(format!("overlay {}: does not hash to the signed index's figure; the installed pack is kept", o.file));
         }
         let (path, sig) = (odir.join(&o.file), odir.join(format!("{}.sig", o.file)));
@@ -245,7 +244,7 @@ pub fn run_all(check_only: bool) -> Result<(), String> {
     if packs.is_empty() {
         return Ok(());
     }
-    let Some(creds) = crate::platform::load_credentials(&home).ok().flatten() else {
+    let Some(creds) = crate::client::link::load_credentials(&home).ok().flatten() else {
         println!("kernel packs: not checked, this node is not logged in (goethe login)");
         return Ok(());
     };
@@ -298,7 +297,7 @@ pub fn note_if_newer(home: &Path, model_id: &str) {
     // At goethe load: at most once a day, say when the index has a newer pack for this model; the check reads the cached index and never delays a load otherwise.
     let Some((_, dir, arch)) = installed_packs(home).into_iter().find(|(id, ..)| id == model_id) else { return };
     let marker = home.join("packs").join("update-check");
-    let today = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86400);
+    let today = crate::sys::unix_secs() as u64 / 86400;
     if std::fs::read_to_string(&marker).ok().and_then(|t| t.trim().parse::<u64>().ok()) == Some(today) {
         return;
     }
@@ -313,12 +312,11 @@ pub fn note_if_newer(home: &Path, model_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
     use std::cell::Cell;
     use std::collections::HashMap;
 
     fn sha(b: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(b))
+        crate::sha::digest_hex(b)
     }
 
     struct PackV {
@@ -397,12 +395,13 @@ mod tests {
     }
 
     fn engine<'a>(w: &'a World, installed: &'a PackV, bad_sig: bool) -> impl Fn(&[String]) -> Result<(i32, String), String> + 'a {
-        // A fake goethe-engine: blocks by manifest hash for `pack need`, a refusal for `pack verify` when asked.
+        // A fake goethe-engine: the one variant for `pack plan`, blocks by manifest hash for `pack need`, a refusal for `pack verify` when asked.
         move |a| {
             let key = format!("{} {}", a[0], a[1]);
             match key.as_str() {
                 "index verify" => Ok((0, r#"{"serial": 9}"#.into())),
                 "pack match" => Ok((0, r#"{"file": "m.gcpack", "variant": "q8"}"#.into())),
+                "pack plan" => Ok((0, r#"{"variants": [{"id": "q8", "role": "target", "files": [{"name": "m-Q8_0.gguf"}], "max_ctx": 4096, "runs": true}]}"#.into())),
                 "pack need" => {
                     let prefix = std::fs::read(&a[2]).unwrap();
                     let n = u64::from_le_bytes(prefix[8..16].try_into().unwrap()) as usize;
