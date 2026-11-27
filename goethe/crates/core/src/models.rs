@@ -86,18 +86,15 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
     let disk = disk_gb_by_model(&con);
     let reg = fetch(&registry_url()).map_err(|e| (!installed_only).then(|| crate::step::note(&format!("note: {e}")))).ok();
     let view = crate::placement::load_hw(&home).map(|hw| View::capacity(&home, hw));
-    let packs = if installed_only {
-        Vec::new()
-    } else {
-        let archs = crate::packs::local_archs(&home);
-        crate::packs::catalog(&home).map(|ix| crate::packs::offers_any(&ix, &archs)).unwrap_or_default()
-    };
+    let archs = crate::packs::local_archs(&home);
+    let index = (!installed_only).then(|| crate::packs::catalog(&home)).flatten();
+    let packs = index.as_deref().map(|ix| crate::packs::offers_any(ix, &archs)).unwrap_or_default();
     let linked = crate::client::link::load_credentials(&home).ok().flatten().is_some();
     let mut rows = Vec::new();
     if !available_only {
         for m in &installed {
             let pinned = (m.default_tp > 0).then_some(m.default_tp as usize);
-            let verdict = verdict(view.as_ref(), &m.id, &m.input, pinned);
+            let verdict = verdict(view.as_ref(), &m.id, &m.input, pinned, None);
             let (status, fit) = match loaded.get(&m.id) {
                 Some(live) => loaded_state(live),
                 None if !m.present => ("files missing".to_string(), "does not fit: its files are gone; goethe install brings them back".to_string()),
@@ -122,7 +119,8 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
                 continue;
             }
             let pinned = m.default_tp.filter(|t| *t > 0).map(|t| t as usize);
-            let verdict = verdict(view.as_ref(), &m.id, &registry_input(m), pinned);
+            let (input, runtime) = catalog_input(m, index.as_deref().filter(|_| linked), &archs);
+            let verdict = verdict(view.as_ref(), &m.id, &input, pinned, runtime);
             let gated = if m.gated.unwrap_or(false) { GATED_FIT } else { "" };
             rows.push(ModelRow {
                 id: m.id.clone(),
@@ -232,15 +230,15 @@ fn fit_colored(fit: &str) -> String {
     fit.to_string()
 }
 
-fn verdict(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<usize>) -> Verdict {
-    // Fits (with its VRAM per GPU and in total), or whether the architecture or the free VRAM stops it.
+fn verdict(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<usize>, runtime: Option<&str>) -> Verdict {
+    // Fits (with its VRAM per GPU and in total), or whether the architecture or the free VRAM stops it; runtime: the learned figures of a model not installed yet (None: its card's).
     let Some(view) = view else {
         return Verdict::Unknown;
     };
     if !view.hw.gpus.iter().any(|g| crate::gpu_arch::model_runs_on(&input.supported_sm, &g.compute_capability, input.prebuilt)) {
         return Verdict::Unsupported;
     }
-    match view.fit(id, input, pinned) {
+    match runtime.map_or_else(|| view.fit(id, input, pinned), |r| view.fit_as(id, input, pinned, r)) {
         Ok(f) => Verdict::Fits {
             per_gpu: f.need.total(),
             total: f.need.total() * f.tp as f64,
@@ -283,6 +281,14 @@ pub fn engine_label(runtime: Option<&str>) -> String {
         None => "-",
     }
     .to_string()
+}
+
+fn catalog_input(m: &crate::registry::RegistryModel, index: Option<&[u8]>, archs: &[String]) -> (ChooserInput, Option<&'static str>) {
+    // A catalog model's budget input and runtime as install would size it: its kernel pack's when the signed index gives the pack's numbers (a linked node), else the catalog's estimate.
+    match index.and_then(|ix| crate::packs::sized(ix, &m.id, archs)) {
+        Some(e) => (crate::recommend::pack_registry_input(m, &e), Some(crate::engine_overhead::PACK_RUNTIME)),
+        None => (registry_input(m), None),
+    }
 }
 
 fn is_featured(id: &str, reg: Option<&Registry>) -> bool {
@@ -381,15 +387,18 @@ pub fn picker_data(home: &Path) -> Result<PickData, String> {
     let (gpu_count, unified) = (hw.gpus.len(), hw.gpus.iter().any(crate::gpu_kind::is_unified));
     let whole = View::whole(home, hw);
     let reg = fetch(&registry_url()).ok();
-    let packs = crate::packs::catalog(home).map(|ix| crate::packs::offers_any(&ix, &crate::packs::local_archs(home))).unwrap_or_default();
-    let need = |id: &str, input: &ChooserInput, pinned: Option<usize>| match verdict(Some(&whole), id, input, pinned) {
-        Verdict::Fits { total, .. } => whole.fit(id, input, pinned).ok().map(|f| (total, f.tp)),
+    let archs = crate::packs::local_archs(home);
+    let index = crate::packs::catalog(home);
+    let linked = crate::client::link::load_credentials(home).ok().flatten().is_some();
+    let packs = index.as_deref().map(|ix| crate::packs::offers_any(ix, &archs)).unwrap_or_default();
+    let need = |id: &str, input: &ChooserInput, pinned: Option<usize>, runtime: Option<&str>| match verdict(Some(&whole), id, input, pinned, runtime) {
+        Verdict::Fits { total, per_gpu, .. } => Some((total, (total / per_gpu).round().max(1.0) as usize)),
         _ => None,
     };
     let mut rows = Vec::new();
     for m in &installed {
         let pinned = (m.default_tp > 0).then_some(m.default_tp as usize);
-        let (vram, gpus) = need(&m.id, &m.input, pinned).unwrap_or((m.input.static_vram_gb, pinned.unwrap_or(1)));
+        let (vram, gpus) = need(&m.id, &m.input, pinned, None).unwrap_or((m.input.static_vram_gb, pinned.unwrap_or(1)));
         rows.push(PickRow {
             id: m.id.clone(),
             size_gb: disk.get(&m.id).copied().unwrap_or(m.input.static_vram_gb),
@@ -407,7 +416,8 @@ pub fn picker_data(home: &Path) -> Result<PickData, String> {
         }
         let pinned = m.default_tp.filter(|t| *t > 0).map(|t| t as usize);
         let optimised = packs.iter().any(|o| o.hf_repo.eq_ignore_ascii_case(&m.id));
-        if let Some((vram, gpus)) = need(&m.id, &registry_input(m), pinned).or_else(|| optimised.then_some((m.static_vram_gb, 1))) {
+        let (input, runtime) = catalog_input(m, index.as_deref().filter(|_| linked), &archs);
+        if let Some((vram, gpus)) = need(&m.id, &input, pinned, runtime).or_else(|| optimised.then_some((m.static_vram_gb, 1))) {
             rows.push(PickRow {
                 id: m.id.clone(),
                 size_gb: m.download_gb.unwrap_or(m.static_vram_gb),

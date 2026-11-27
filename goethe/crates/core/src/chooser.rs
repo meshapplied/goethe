@@ -30,6 +30,11 @@ pub struct ChooserInput {
     pub min_conc: u64,
 }
 
+pub fn pack_shape(ctx: u64, pinned_conc: Option<u64>, ctx_cap: Option<u64>, lanes: Option<u64>) -> (u64, u64) {
+    // A kernel-pack load's context (capped by its kernels) and concurrency (a pin, else the lanes the variant's fastest path serves): install and the model list alike.
+    (ctx.min(ctx_cap.unwrap_or(u64::MAX)), pinned_conc.or(lanes).unwrap_or(DEFAULT_CONC))
+}
+
 pub struct CardFacts {
     pub static_vram_gb: f64,
     pub kv_bytes_per_token: u64,

@@ -44,7 +44,7 @@ pub(super) fn pack_input(cfg: &Value, entry: Option<&RegistryModel>, opts: &Inst
     let facts = model_facts::facts_from_config(cfg, w.bytes as f64 / GIB, entry.map(|e| e.architecture.as_str()), &opts.model_id)?;
     let vram = vram_estimate(dir, cfg, &facts, &[], "auto");
     let max_ctx = super::ctx_limit(&facts, entry, opts.ctx)?;
-    let ctx = opts.ctx.unwrap_or_else(|| entry.and_then(|e| e.effective_max_ctx()).unwrap_or(max_ctx)).min(max_ctx).min(w.ctx_cap.unwrap_or(u64::MAX));
+    let (ctx, max_conc) = crate::chooser::pack_shape(opts.ctx.unwrap_or_else(|| entry.and_then(|e| e.effective_max_ctx()).unwrap_or(max_ctx)).min(max_ctx), opts.max_conc, w.ctx_cap, w.lanes);
     let mut card = toml::Table::new();
     card.insert("runtime".into(), toml::Value::String(crate::engines::goethe_engine::ENGINE.id.into()));
     card.insert("kv_cache_dtype".into(), toml::Value::String("auto".into()));
@@ -65,7 +65,6 @@ pub(super) fn pack_input(cfg: &Value, entry: Option<&RegistryModel>, opts: &Inst
         attention: facts.attention.clone(),
         max_ctx,
     };
-    let max_conc = opts.max_conc.or(w.lanes).unwrap_or(crate::chooser::DEFAULT_CONC);
     let input = crate::chooser::ChooserInput::from_card(installed, &card, crate::memory_spec::installed_from_config(cfg, &card, &[]), ctx, max_conc);
     Ok((input, opts.tp.or(entry.and_then(|e| e.default_tp)).filter(|t| *t > 0).map(|t| t as usize)))
 }
