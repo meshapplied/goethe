@@ -9,6 +9,7 @@ pub const ENGINE: super::Engine = super::Engine {
     overhead_gb: crate::calc::LIGHT_OVERHEAD_GB,
     layer: None,
     params: None,
+    routes: super::TEXT_ROUTES,
     numerics: false,
     command: ninfer_command,
 };

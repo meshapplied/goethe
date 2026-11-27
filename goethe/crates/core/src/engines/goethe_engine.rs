@@ -9,6 +9,7 @@ pub const ENGINE: super::Engine = super::Engine {
     overhead_gb: crate::calc::LIGHT_OVERHEAD_GB,
     layer: Some(crate::pyenv::Layer::Engine),
     params: None,
+    routes: &["/chat/completions", "/completions", "/embeddings", "/audio/transcriptions"],
     numerics: true,
     command: goethe_engine_command,
 };
