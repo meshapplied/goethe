@@ -199,11 +199,12 @@ pub fn private_temp_dir(prefix: &str) -> Result<PathBuf, String> {
 }
 
 pub fn private_dir_in(base: &Path, prefix: &str) -> Result<PathBuf, String> {
-    // A new directory (mode 0700) under `base` with a name nobody can predict; one that already exists is never reused, a planted link is never followed.
+    // A new directory (mode 0700) under `base` named `prefix-pid-` and 8 hex digits nobody can predict (short: a socket path inside must fit 104 bytes on macOS); one that already exists is never reused, a planted link is never followed.
     use std::os::unix::fs::DirBuilderExt;
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    for i in 0..64 {
-        let dir = base.join(format!("{prefix}-{}-{nanos:x}-{i}", std::process::id()));
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()) as u64;
+    for i in 0..64u64 {
+        let tag = (nanos ^ u64::from(std::process::id()) << 40).wrapping_add(i).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32;
+        let dir = base.join(format!("{prefix}-{}-{tag:08x}", std::process::id()));
         match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
             Ok(()) => return Ok(dir),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -250,6 +251,17 @@ pub fn shell_quote(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_private_dir_is_owner_only_short_and_never_reused() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let (a, b) = (super::private_dir_in(base.path(), ".s").unwrap(), super::private_dir_in(base.path(), ".s").unwrap());
+        let name = a.file_name().unwrap().to_string_lossy().into_owned();
+        let tag = name.strip_prefix(&format!(".s-{}-", std::process::id())).unwrap_or_default();
+        assert!(tag.len() == 8 && tag.chars().all(|c| c.is_ascii_hexdigit()), "{name}: the pid for sweeps, then 8 hex digits, short for a socket path");
+        assert!(a != b && std::fs::metadata(&a).unwrap().permissions().mode() & 0o777 == 0o700);
+    }
+
     #[test]
     fn parallel_probes_of_one_folder_all_see_it_writable() {
         let d = tempfile::tempdir().unwrap();
