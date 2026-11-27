@@ -125,6 +125,11 @@ pub fn engine_installed(home: &Path) -> Option<String> {
     dist_version(&site_packages(home)?, "goethe_engine")
 }
 
+pub fn ready(home: &Path, layer: Layer) -> bool {
+    // The layer is there, or a source or test setup that installs nothing (GOETHE_PYTHON) runs it.
+    has(home, layer) || dev_python(home)
+}
+
 fn dev_python(home: &Path) -> bool {
     // A source or test setup runs engines with GOETHE_PYTHON and has no py-env: goethe installs nothing there.
     std::env::var_os("GOETHE_PYTHON").is_some() && !home.join("py-env/bin/python").exists()

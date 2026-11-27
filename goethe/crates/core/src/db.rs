@@ -138,17 +138,6 @@ pub fn setting_json<T: Default + serde::de::DeserializeOwned>(con: &Connection, 
     setting(con, key).and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
 }
 
-const EXPERIMENTAL: &str = "experimental";
-
-pub fn experimental(home: &Path) -> bool {
-    // Whether experimental features (Ask) show on the menu and in goethe help; off until ticked on the menu, and reading it creates no state.db.
-    home.join("state.db").is_file() && open(home).ok().and_then(|c| setting(&c, EXPERIMENTAL)).is_some_and(|v| v == "1")
-}
-
-pub fn set_experimental(home: &Path, on: bool) -> Result<(), String> {
-    open(home).and_then(|c| set_setting(&c, EXPERIMENTAL, if on { "1" } else { "0" })).map_err(|e| format!("experimental features: {e}"))
-}
-
 pub fn set_setting(con: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
     con.execute("INSERT OR REPLACE INTO goethe_settings (key, value) VALUES (?1, ?2)", [key, value]).map(|_| ())
 }
@@ -279,16 +268,6 @@ mod tests {
             .unwrap()
             .filter_map(|r| r.ok())
             .collect()
-    }
-
-    #[test]
-    fn experimental_features_are_off_until_ticked_and_reading_writes_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(!experimental(dir.path()) && !dir.path().join("state.db").exists(), "a fresh home: off, and no state.db");
-        set_experimental(dir.path(), true).unwrap();
-        assert!(experimental(dir.path()));
-        set_experimental(dir.path(), false).unwrap();
-        assert!(!experimental(dir.path()));
     }
 
     #[test]

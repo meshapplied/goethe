@@ -45,15 +45,19 @@ enum Verdict {
 
 impl Verdict {
     fn label(&self) -> String {
+        // What one copy takes on each GPU of this cluster's allowed GPUs, "26 GB / GPU, ctx 131072"; "-" when it does not fit or the GPUs are unknown.
         match self {
-            Verdict::Unknown => "unknown (run goethe doctor --hardware)".to_string(),
-            Verdict::Fits { per_gpu, ctx, max_conc, .. } => {
-                format!("fits: {per_gpu:.1} GB per GPU (ctx {ctx}, {max_conc} concurrent)")
-            }
-            Verdict::TooLarge => "does not fit: not enough GPU memory".to_string(),
-            Verdict::Unsupported => "does not fit: unsupported architecture".to_string(),
+            Verdict::Fits { per_gpu, ctx, .. } => format!("{} / GPU, ctx {ctx}", gb_text(*per_gpu)),
+            Verdict::Unknown | Verdict::TooLarge | Verdict::Unsupported => NO_FIT.to_string(),
         }
     }
+}
+
+const NO_FIT: &str = "-";
+
+fn gb_text(gb: f64) -> String {
+    // Whole gigabytes, one decimal under 10 GB so a small model does not read 0 GB.
+    if gb < 9.95 { format!("{gb:.1} GB") } else { format!("{gb:.0} GB") }
 }
 
 struct Installed {
@@ -97,7 +101,7 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
             let verdict = verdict(view.as_ref(), &m.id, &m.input, pinned, None);
             let (status, fit) = match loaded.get(&m.id) {
                 Some(live) => loaded_state(live),
-                None if !m.present => ("files missing".to_string(), "does not fit: its files are gone; goethe install brings them back".to_string()),
+                None if !m.present => ("files missing".to_string(), NO_FIT.to_string()),
                 None => ("installed".to_string(), verdict.label()),
             };
             rows.push(ModelRow {
@@ -219,17 +223,6 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-fn fit_colored(fit: &str) -> String {
-    // The verdict word of a fit label in color: fits green, does not fit red; the details stay plain.
-    use crate::term::{paint, Color};
-    for (word, color) in [("does not fit", Color::Red), ("fits", Color::Green)] {
-        if let Some(rest) = fit.strip_prefix(word) {
-            return format!("{}{rest}", paint(word, color));
-        }
-    }
-    fit.to_string()
-}
-
 fn verdict(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<usize>, runtime: Option<&str>) -> Verdict {
     // Fits (with its VRAM per GPU and in total), or whether the architecture or the free VRAM stops it; runtime: the learned figures of a model not installed yet (None: its card's).
     let Some(view) = view else {
@@ -297,49 +290,35 @@ fn is_featured(id: &str, reg: Option<&Registry>) -> bool {
 }
 
 fn list_text(rows: &[ModelRow], free_gb: Option<String>) -> String {
-    // Featured models first, then installed models, available ones grouped by the VRAM they take, then those that do not fit and why.
+    // Featured models first, then installed ones, then the rest of the catalog: those that fit by the memory they take, then those that do not ("-").
     use crate::term::{paint, Color, Table};
     let mut out = String::new();
     if let Some(free) = free_gb {
         out.push_str(&format!("{free}\n\n"));
     }
-    let (featured, rest): (Vec<&ModelRow>, Vec<&ModelRow>) = rows.iter().partition(|r| r.featured);
-    let rows: Vec<&ModelRow> = rest;
     let row = |r: &ModelRow| {
         let tag = if r.optimised.is_some() && r.runtime.as_deref() != Some("goethe-engine") { OPTIMISED } else { "" };
-        vec![format!("{}{tag}", r.id), crate::term::status(&r.status), engine_label(r.runtime.as_deref()), format!("{:.1} GB", r.gb), fit_colored(&r.fit)]
+        vec![format!("{}{tag}", r.id), crate::term::status(&r.status), engine_label(r.runtime.as_deref()), format!("{:.1} GB", r.gb), r.fit.clone()]
     };
-    let header = ["MODEL", "STATUS", "ENGINE", "DISK", "FIT ON THIS MACHINE"];
-    if !featured.is_empty() {
-        let mut table = Table::new(&header);
-        featured.iter().for_each(|r| table.row(row(r)));
-        out.push_str(&format!("{}\n{}\n\n", paint("Featured models", Color::Bold), table.render()));
-    }
-    let (installed, available): (Vec<&ModelRow>, Vec<&ModelRow>) = rows.iter().copied().partition(|r| r.status != "available");
-    if !installed.is_empty() {
-        let mut table = Table::new(&header);
-        installed.iter().for_each(|r| table.row(row(r)));
-        out.push_str(&format!("{}\n{}\n", paint("Installed", Color::Bold), table.render()));
-    }
-    let fits: Vec<(f64, Vec<String>)> = available
-        .iter()
-        .filter_map(|r| match r.verdict {
-            Verdict::Fits { total, .. } => Some((total, row(r))),
-            _ => None,
-        })
-        .collect();
-    out.push_str(&crate::recommend::banded(&header, fits));
-    for (title, kind) in [("Too large for the allowed GPUs", Verdict::TooLarge), ("Unsupported architecture", Verdict::Unsupported), ("Unknown", Verdict::Unknown)] {
-        let mut table = Table::new(&header);
-        let mut group: Vec<&&ModelRow> = available.iter().filter(|r| r.verdict == kind).collect();
-        group.sort_by(|a, b| a.gb.total_cmp(&b.gb));
-        group.iter().for_each(|r| table.row(row(r)));
-        if !table.is_empty() {
-            out.push_str(&format!("{}\n{}\n", paint(title, Color::Bold), table.render()));
+    let header = ["MODEL", "STATUS", "ENGINE", "DISK", "ON THIS CLUSTER"];
+    let (featured, rest): (Vec<&ModelRow>, Vec<&ModelRow>) = rows.iter().partition(|r| r.featured);
+    let (installed, mut available): (Vec<&ModelRow>, Vec<&ModelRow>) = rest.into_iter().partition(|r| r.status != "available");
+    let need = |r: &ModelRow| match r.verdict {
+        Verdict::Fits { total, .. } => total,
+        _ => f64::INFINITY,
+    };
+    available.sort_by(|a, b| need(a).total_cmp(&need(b)).then_with(|| a.gb.total_cmp(&b.gb)));
+    let featured_title = crate::theme::paint(&format!("1;{}", crate::theme::secondary()), "Featured models");
+    for (title, group) in [(featured_title, featured), (paint("Installed", Color::Bold), installed), (paint("Available", Color::Bold), available)] {
+        if group.is_empty() {
+            continue;
         }
+        let mut table = Table::new(&header);
+        group.iter().for_each(|r| table.row(row(r)));
+        out.push_str(&format!("{title}\n{}\n", table.render()));
     }
     if rows.iter().any(|r| r.fit.contains(GATED_FIT)) {
-        out.push_str(&format!("\ngated models: {}\n", crate::hf::GATED_WAYS));
+        out.push_str(&format!("gated models: {}\n", crate::hf::GATED_WAYS));
     }
     out.trim_end().to_string() + "\n"
 }
@@ -905,10 +884,12 @@ mod tests {
     }
 
     #[test]
-    fn fit_label_names_ctx_and_concurrency() {
-        let v = Verdict::Fits { per_gpu: 23.3, total: 23.3, ctx: 8192, max_conc: 4 };
-        let label = v.label();
-        assert!(label.contains("23.3 GB per GPU") && label.contains("ctx 8192") && label.contains("4 concurrent"), "{label}");
+    fn the_fit_says_what_one_copy_takes_per_gpu_and_its_context_or_a_dash() {
+        assert_eq!(Verdict::Fits { per_gpu: 26.2, total: 52.4, ctx: 131072, max_conc: 4 }.label(), "26 GB / GPU, ctx 131072");
+        assert_eq!(Verdict::Fits { per_gpu: 1.24, total: 1.24, ctx: 8192, max_conc: 4 }.label(), "1.2 GB / GPU, ctx 8192");
+        for v in [Verdict::TooLarge, Verdict::Unsupported, Verdict::Unknown] {
+            assert_eq!(v.label(), "-");
+        }
     }
 
     #[test]

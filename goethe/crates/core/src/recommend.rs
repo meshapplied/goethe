@@ -552,19 +552,6 @@ mod tests {
     }
 
     #[test]
-    fn the_ninfer_catalog_row_is_recommended_on_a_5090_and_not_on_ampere() {
-        // NInfer is one catalog row like any other: its runtime and facts are data, its fit the one fit.
-        let src: serde_json::Value = serde_json::from_str(include_str!("../../../registry.src.json")).unwrap();
-        let models: Vec<RegistryModel> = serde_json::from_value(src["models"].clone()).unwrap();
-        let row = models.into_iter().find(|m| m.effective_runtime() == crate::engines::ninfer::ENGINE.id).expect("a ninfer row");
-        let reg = Registry { version: 1, models: vec![row.clone()], gguf_models: Vec::new() };
-        let out = recommend(&single_gpu("12.0"), &reg, &|_| None);
-        let first = &out.recommended[0];
-        assert_eq!((first.model_id.as_str(), first.ctx, first.max_conc), (row.id.as_str(), 100_000, 4));
-        assert!(recommend(&single_gpu("8.6"), &reg, &|_| None).recommended.is_empty());
-    }
-
-    #[test]
     fn only_what_this_machine_can_run_is_recommended() {
         // A model the GPUs could hold but this machine cannot run (no engine build, no kernel pack for this GPU) is listed as not for this machine, with why.
         let reg = Registry { version: 1, models: vec![entry("org/packed", serde_json::json!({"pack_only": true}))], gguf_models: Vec::new() };

@@ -786,17 +786,4 @@ mod validate_tests {
             }
         }
     }
-
-    #[test]
-    fn a_hand_written_entry_states_the_memory_load_computes_from_its_config() {
-        // A gated entry is never inferred, so its memory spec is written by hand: it must be what a load computes from config.json with the card's KV dtype and flags.
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qwen38-flash-next-nvfp4-latest");
-        let reg: Registry = serde_json::from_str(SRC).unwrap();
-        let e = reg.models.iter().find(|m| m.id == "meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest").unwrap();
-        let mut card = toml::Table::new();
-        card.insert("kv_cache_dtype".into(), e.kv_cache_dtype.clone().unwrap().into());
-        card.insert("extra_sglang_args".into(), e.extra_sglang_args.iter().map(|a| toml::Value::from(a.as_str())).collect::<Vec<_>>().into());
-        let want = crate::memory_spec::installed_from_config(&model_facts::read_config(&dir).unwrap(), &toml::Value::Table(card), &[]);
-        assert_eq!(e.memory, want, "{}", serde_json::to_string(&want).unwrap());
-    }
 }

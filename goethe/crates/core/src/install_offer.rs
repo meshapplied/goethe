@@ -83,6 +83,7 @@ pub(super) fn offer_for(opts: &InstallOpts, deps: OfferDeps) -> Result<Option<Pa
     } else if !crate::term::ask(&format!("{what}; install them? [Y/n]"), "y").is_ok_and(|a| a.to_ascii_lowercase().starts_with('y')) {
         return Ok(None);
     }
+    super::pulling(super::GOETHE_KERNELS);
     Ok(Some(PackChoice { offer: plan.entry.offer.clone(), creds, plan: Some(plan) }))
 }
 
