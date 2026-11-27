@@ -35,7 +35,7 @@ pub struct LayerPlan {
     pub linear: u64,
 }
 
-const CTX_KEYS: &[&str] = &["max_position_embeddings", "n_positions"];
+const CTX_KEYS: &[&str] = &["max_position_embeddings", "n_positions", "max_sequence_length", "seq_length", "max_seq_len", "model_max_length"];
 
 const LM_KEYS: &[&str] = &[
     "text_config",
@@ -457,6 +457,8 @@ mod tests {
     fn a_config_without_a_context_length_states_none() {
         let no_ctx = json!({"num_hidden_layers": 2, "num_attention_heads": 4, "head_dim": 64});
         assert_eq!(facts_from_config(&no_ctx, 0.0, None, "m").unwrap().max_ctx, None);
+        let sglang_keys = json!({"text_config": {"num_hidden_layers": 2, "num_attention_heads": 4, "head_dim": 64, "model_max_length": 1048576}});
+        assert_eq!(facts_from_config(&sglang_keys, 0.0, None, "m").unwrap().max_ctx, Some(1048576), "the keys SGLang reads, after goethe's own");
     }
 
     #[test]
