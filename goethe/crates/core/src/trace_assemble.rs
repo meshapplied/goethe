@@ -145,7 +145,7 @@ fn chat(events: &[Value]) -> Value {
         .into_values()
         .map(|mut ch| {
             if let Some(Value::Object(msg)) = ch.get_mut("message") {
-                msg.entry("content").or_insert(Value::Null);
+                msg.entry("content").or_insert_with(|| json!(""));
                 if let Some(Value::Array(calls)) = msg.get_mut("tool_calls") {
                     for call in calls.iter_mut().filter_map(Value::as_object_mut) {
                         call.remove("index");
@@ -514,7 +514,7 @@ mod tests {
         let c = &body["choices"][0];
         assert_eq!(c["message"]["reasoning"], "ab");
         assert_eq!(c["message"]["citations"], json!([1]));
-        assert_eq!(c["message"]["content"], Value::Null);
+        assert_eq!(c["message"]["content"], "", "an engine's null content (reasoning only) is a string like every other engine's");
         assert_eq!(c["logprobs"]["content"], json!([{"token": "x"}, {"token": "y"}]));
         assert_eq!(c["stop_reason"], 7);
     }

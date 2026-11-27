@@ -989,11 +989,30 @@ impl UsageFilter {
                 self.skip_blank = true;
                 continue;
             }
-            out.extend_from_slice(line);
+            match text.strip_prefix(b"data:").and_then(null_content) {
+                Some(chunk) => out.extend_from_slice(&[format!("data: {chunk}").as_bytes(), &line[line.trim_ascii_end().len()..]].concat()),
+                None => out.extend_from_slice(line),
+            }
         }
         self.held.drain(..end);
         Bytes::from(out)
     }
+}
+
+fn null_content(data: &[u8]) -> Option<Value> {
+    // A delta whose content is null (llama.cpp while it reasons) gets "", so every engine streams one shape; other chunks pass untouched. O(chunk) scan, parsed only when it holds a null.
+    if !data.windows(4).any(|w| w == b"null") {
+        return None;
+    }
+    let mut c = serde_json::from_slice::<Value>(data.trim_ascii()).ok()?;
+    let mut changed = false;
+    for d in c.get_mut("choices").and_then(Value::as_array_mut).into_iter().flatten().filter_map(|ch| ch.get_mut("delta")) {
+        if d.get("content").is_some_and(Value::is_null) {
+            d["content"] = json!("");
+            changed = true;
+        }
+    }
+    changed.then_some(c)
 }
 
 fn usage_only(data: &[u8]) -> bool {
@@ -1849,6 +1868,9 @@ mod tests {
         let mut f = UsageFilter::default();
         let keep = b"data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"completion_tokens\":2}}\n\n";
         assert_eq!(f.pass(keep, true).as_ref(), &keep[..], "a chunk with choices is the client's, usage or not");
+        let thinking = f.pass(b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"a\",\"content\":null}}]}\r\n\r\n", true);
+        let chunk: Value = serde_json::from_slice(thinking.strip_prefix(b"data: ").and_then(|t| t.strip_suffix(b"\r\n\r\n")).expect("one event, its line ending kept")).unwrap();
+        assert_eq!(chunk["choices"][0]["delta"], json!({"reasoning_content": "a", "content": ""}), "an engine's null content streams as a string");
     }
 
     #[test]
