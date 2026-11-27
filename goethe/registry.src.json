@@ -49,6 +49,14 @@
    "num_kv_heads": 2,
    "attention": "hybrid",
    "kv_cache_dtype": "fp8_e4m3",
+   "memory": {
+    "kv_bytes_per_token": 12288,
+    "kv_heads": 2,
+    "state_bytes_per_slot": 58834944,
+    "state_slots_per_request": 5,
+    "static_state_bytes": 461832192,
+    "spec_state_bytes_per_request": 235339776
+   },
    "extra_sglang_args": [
     "--trust-remote-code",
     "--quantization",
