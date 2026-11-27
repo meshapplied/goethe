@@ -175,6 +175,11 @@ fn read_exact(r: impl Read, len: u64) -> Result<Vec<u8>, String> {
 
 pub type Runner<'a> = &'a dyn Fn(&[String]) -> Result<(i32, String), String>;
 
+pub fn turn_reasons(dir: &Path, run: Runner) -> bool {
+    // Whether goethe-engine reads this model's turn with a reasoning part (goethe-engine turn): its turn table is the one place a family's markers live.
+    run(&["turn".to_string(), dir.display().to_string()]).ok().filter(|(c, _)| *c == 0).and_then(|(_, o)| serde_json::from_str::<Value>(&o).ok()).is_some_and(|v| v["reasoning"] == true)
+}
+
 #[cfg(test)]
 pub(crate) fn wait_until_runnable(script: &Path) {
     // A process another test forks while this script is still open for writing holds it busy (ETXTBSY) until it execs; wait that out.
