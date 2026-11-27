@@ -97,6 +97,16 @@ pub fn card_supported_sm(card: &toml::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+pub fn card_kv_bytes(card: &toml::Value, elems: u64, installed_bytes: u64) -> u64 {
+    // KV bytes per token for the card's kv_cache_dtype (goethe models and load alike); auto keeps the installed figure (model dtype).
+    match card.get("kv_cache_dtype").and_then(|v| v.as_str()).map(str::to_ascii_lowercase) {
+        Some(d) if d.contains("fp8") => elems,
+        Some(d) if d.contains("fp4") => elems.div_ceil(2),
+        Some(d) if d.contains("16") => elems * 2,
+        _ => installed_bytes,
+    }
+}
+
 pub fn card_marlin_extra_gb(card: &toml::Value) -> f64 {
     // The card's Marlin weight copy, or 0 when GOETHE_MARLIN=0 in goethed's or the card's environment.
     let off = |v: Option<&str>| v.is_some_and(|v| v.trim() == "0");

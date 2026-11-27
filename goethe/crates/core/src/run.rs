@@ -25,7 +25,7 @@ impl Loaded {
         if !keep {
             watch_signals();
         }
-        Loaded { models: Vec::new(), keep, unload: Box::new(unload_model) }
+        Loaded { models: Vec::new(), keep, unload: Box::new(unload_quietly) }
     }
 
     pub(crate) fn add(&mut self, model: &str) {
@@ -77,7 +77,7 @@ fn watch_signals() {
             unsafe { libc::signal(sig, handler) };
         }
         let read_end = fds[0];
-        std::thread::spawn(move || signal_worker(read_end, &BY_THIS_RUN, &unload_model, &|code| std::process::exit(code)));
+        std::thread::spawn(move || signal_worker(read_end, &BY_THIS_RUN, &unload_quietly, &|code| std::process::exit(code)));
     });
 }
 
@@ -91,10 +91,6 @@ fn signal_worker(read_end: i32, models: &Mutex<Vec<String>>, unload: &dyn Fn(&st
     let list = std::mem::take(&mut *lock(models));
     list.iter().for_each(|m| unload(m));
     leave(128 + byte as i32);
-}
-
-fn unload_model(model: &str) {
-    unload_quietly(model);
 }
 
 pub(crate) fn unload_quietly(model: &str) {

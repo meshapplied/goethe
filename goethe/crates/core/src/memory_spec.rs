@@ -112,21 +112,9 @@ pub fn installed_from_config(cfg: &Value, card: &toml::Value, load_extra: &[Stri
     Some(spec)
 }
 
-fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    // The last value given for flag, as `--flag value` or `--flag=value`.
-    let mut found = None;
-    for (i, a) in args.iter().enumerate() {
-        if a == flag {
-            found = args.get(i + 1).map(String::as_str);
-        } else if let Some(v) = a.strip_prefix(flag).and_then(|r| r.strip_prefix('=')) {
-            found = Some(v);
-        }
-    }
-    found
-}
-
 pub fn apply_engine_args(spec: &mut MemorySpec, cfg: Option<&Value>, args: &[String]) {
     // Engine-allocated linear state: --mamba-ssm-dtype sets its dtype, speculative decoding adds one per draft token.
+    let flag_value = crate::sglang_infer::flag_value;
     if spec.state_bytes_per_slot == 0 {
         return;
     }
@@ -139,7 +127,7 @@ pub fn apply_engine_args(spec: &mut MemorySpec, cfg: Option<&Value>, args: &[Str
             spec.state_bytes_per_slot = state;
         }
     }
-    let algo = flag_value(args, "--speculative-algorithm").unwrap_or("");
+    let algo = flag_value(args, "--speculative-algorithm").unwrap_or_default();
     if algo.is_empty() || algo.eq_ignore_ascii_case("none") {
         return;
     }
