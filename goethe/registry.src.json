@@ -15,19 +15,13 @@
    "default_ctx": 100000,
    "max_ctx": 100000,
    "default_max_conc": 4,
-   "default_tp": null,
+   "default_tp": 1,
    "num_attention_heads": 24,
    "num_kv_heads": 4,
    "attention": "hybrid",
    "kv_cache_dtype": "fp8_e4m3",
-   "extra_sglang_args": [
-    "--reasoning-parser",
-    "qwen3",
-    "--tool-call-parser",
-    "qwen3_coder"
-   ],
-   "runtime": "sglang",
-   "manual_download": true,
+   "runtime": "ninfer",
+   "download_gb": 23.7,
    "description": "Qwen3.8 27B NVFP4 served by NInfer. goethe install downloads neroued/Qwen3.8-27B-nvfp4-NInfer file qwen3_8_27b_nvfp4.ninfer."
   },
   {

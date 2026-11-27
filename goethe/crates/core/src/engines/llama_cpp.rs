@@ -34,6 +34,7 @@ pub const ENGINE: super::Engine = super::Engine {
     ]),
     routes: super::TEXT_ROUTES,
     numerics: false,
+    prebuilt: false,
     command: llama_command,
 };
 

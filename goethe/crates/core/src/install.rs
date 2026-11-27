@@ -248,7 +248,7 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
     let entry = find_model(&fetch(&registry_url())?, &opts.model_id).cloned();
     let card_dir = model_dir(home, &opts.model_id);
     dir_owner_is(&card_dir, &opts.model_id)?;
-    if opts.model_id == crate::engines::ninfer::NINFER_ID {
+    if entry.as_ref().is_some_and(|e| e.effective_runtime() == crate::engines::ninfer::ENGINE.id) {
         let file = crate::engines::ninfer::acquire_ninfer(&card_dir)?;
         fs::create_dir_all(&card_dir).map_err(|e| e.to_string())?;
         let dest = card_dir.join(crate::engines::ninfer::NINFER_FILE);
@@ -258,16 +258,10 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
             }
             std::os::unix::fs::symlink(&file, &dest).map_err(|e| format!("link {}: {e}", dest.display()))?;
         }
-        let mut profile = crate::recommend::ninfer_profile();
-        if let Some(e) = entry {
-            profile.description = e.description;
-            profile.license = e.license;
-            profile.family = e.family;
-        }
         return Ok(Target {
             model_id: opts.model_id.clone(),
             card_dir,
-            entry: Some(profile),
+            entry,
             managed: false,
             source_dir: file.parent().map(|p| p.to_path_buf()),
             pack: None,
@@ -1136,29 +1130,27 @@ pub fn plan_in_place(home: &Path, model_id: &str, dir: &Path, entry: Option<Regi
 }
 
 fn plan_ninfer(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> {
-    // The pinned artifact is the model. The card says runtime ninfer so load does not start SGLang.
+    // The pinned artifact is the model and its catalog entry the facts (the artifact has no config.json). The card says runtime ninfer so load does not start SGLang.
     let dir = &t.card_dir;
     let path = crate::engines::ninfer::ninfer_in(dir).ok_or_else(crate::engines::ninfer::ninfer_reject)?;
     if fs::metadata(&path).map_err(|e| e.to_string())?.len() != crate::engines::ninfer::NINFER_BYTES {
         return Err(crate::engines::ninfer::ninfer_reject());
     }
-    let entry = t.entry.as_ref();
+    let e = t.entry.as_ref().filter(|e| e.effective_runtime() == crate::engines::ninfer::ENGINE.id).ok_or_else(|| {
+        format!("{}: {} has no config.json, so its facts come from its catalog entry; install it by that entry's id", t.model_id, crate::engines::ninfer::NINFER_FILE)
+    })?;
     let facts = model_facts::ModelFacts {
-        architecture: entry.map(|e| e.architecture.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "dense".into()),
-        static_vram_gb: entry.map(|e| e.static_vram_gb).filter(|v| *v > 0.0).unwrap_or(23.566),
-        kv_elems_per_token: entry.and_then(|e| e.effective_kv_elems()).unwrap_or(32_768),
-        max_ctx: Some(entry.and_then(|e| e.effective_max_ctx()).unwrap_or(262_144)),
-        num_attention_heads: entry.and_then(|e| e.num_attention_heads).unwrap_or(24),
-        num_kv_heads: entry.and_then(|e| e.num_kv_heads).unwrap_or(4),
-        attention: entry.and_then(|e| e.attention.clone()).unwrap_or_else(|| "hybrid".into()),
+        architecture: e.architecture.clone(),
+        static_vram_gb: e.static_vram_gb,
+        kv_elems_per_token: e.effective_kv_elems().unwrap_or(0),
+        max_ctx: e.effective_max_ctx(),
+        num_attention_heads: e.num_attention_heads.unwrap_or(0),
+        num_kv_heads: e.num_kv_heads.unwrap_or(0),
+        attention: e.attention.clone().unwrap_or_default(),
         swa_kv_elems_per_request: 0,
         linear_state_bytes_per_request: 0,
     };
-    let mut p = plan_engine(home, opts, t, facts, crate::engines::ninfer::ENGINE.id, ("fp8_e4m3", 1), Some("nvfp4".into()))?;
-    if entry.is_some_and(|e| sgl::has_flag(&e.extra_sglang_args, "--reasoning-parser")) {
-        p.table.insert("reasoning".into(), toml::Value::Boolean(true));
-    }
-    Ok(p)
+    plan_engine(home, opts, t, facts, crate::engines::ninfer::ENGINE.id, ("fp8_e4m3", 1), Some("nvfp4".into()))
 }
 
 fn plan_gguf(home: &Path, opts: &InstallOpts, t: &Target) -> Result<Planned, String> {
@@ -2204,6 +2196,7 @@ mod tests {
             max_conc: 8,
             marlin_extra_gb: 0.0,
             supported_sm: vec!["12.0".into()],
+            prebuilt: false,
             memory: None,
             overhead_gb: crate::calc::LIGHT_OVERHEAD_GB,
             floor: crate::chooser::floor(&[]),
@@ -2334,7 +2327,10 @@ mod tests {
         let nin = home.path().join("models/n");
         fs::create_dir_all(&nin).unwrap();
         fs::File::create(nin.join(crate::engines::ninfer::NINFER_FILE)).unwrap().set_len(crate::engines::ninfer::NINFER_BYTES).unwrap();
-        commit(home.path(), &plan_in_place(home.path(), "org/n", &nin, None).unwrap(), "installed", &mut Vec::new()).unwrap();
+        assert!(plan_in_place(home.path(), "org/n", &nin, None).err().unwrap_or_default().contains("catalog entry"), "no config.json and no entry: no guessed facts");
+        let entry: RegistryModel = serde_json::from_value(serde_json::json!({"id": "org/n", "static_vram_gb": 23.5, "kv_elems_per_token": 32768, "max_ctx": 100000,
+            "num_attention_heads": 24, "num_kv_heads": 4, "attention": "hybrid", "runtime": "ninfer"})).unwrap();
+        commit(home.path(), &plan_in_place(home.path(), "org/n", &nin, Some(entry)).unwrap(), "installed", &mut Vec::new()).unwrap();
         let con = db::open(home.path()).unwrap();
         let row = |id: &str| {
             con.query_row(

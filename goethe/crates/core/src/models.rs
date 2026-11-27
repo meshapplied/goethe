@@ -132,32 +132,6 @@ pub fn run_list(json: bool, installed_only: bool, available_only: bool, all: boo
                 verdict,
             });
         }
-        let missing = !installed.iter().any(|i| i.id == crate::engines::ninfer::NINFER_ID);
-        if let Some(view) = view.as_ref().filter(|_| missing) {
-            if let Some(row) = crate::recommend::ninfer_row(view) {
-                rows.push(ModelRow {
-                    id: row.model_id,
-                    status: "available".to_string(),
-                    gb: row.vram_per_gpu_gb * row.tp as f64,
-                    fit: Verdict::Fits {
-                        per_gpu: row.vram_per_gpu_gb,
-                        total: row.vram_per_gpu_gb * row.tp as f64,
-                        ctx: row.ctx,
-                        max_conc: row.max_conc,
-                    }
-                    .label(),
-                    custom: None,
-                    optimised: None,
-                    runtime: Some(crate::engines::ninfer::ENGINE.id.to_string()),
-                    verdict: Verdict::Fits {
-                        per_gpu: row.vram_per_gpu_gb,
-                        total: row.vram_per_gpu_gb * row.tp as f64,
-                        ctx: row.ctx,
-                        max_conc: row.max_conc,
-                    },
-                });
-            }
-        }
     }
     let pack_only: Vec<&crate::packs::Offer> = packs
         .iter()
@@ -258,7 +232,7 @@ fn verdict(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<u
     let Some(view) = view else {
         return Verdict::Unknown;
     };
-    if !view.hw.gpus.iter().any(|g| crate::gpu_arch::model_runs_on(&input.supported_sm, &g.compute_capability)) {
+    if !view.hw.gpus.iter().any(|g| crate::gpu_arch::model_runs_on(&input.supported_sm, &g.compute_capability, input.prebuilt)) {
         return Verdict::Unsupported;
     }
     match view.fit(id, input, pinned) {

@@ -21,6 +21,7 @@ pub struct ChooserInput {
     pub max_conc: u64,
     pub marlin_extra_gb: f64,
     pub supported_sm: Vec<String>,
+    pub prebuilt: bool,
     pub memory: Option<MemorySpec>,
     pub window_gb_per_request: f64,
     pub overhead_gb: f64,
@@ -53,6 +54,7 @@ impl ChooserInput {
             max_conc,
             marlin_extra_gb: crate::install::card_marlin_extra_gb(card),
             supported_sm: crate::install::card_supported_sm(card),
+            prebuilt: crate::engines::of_card(card).is_ok_and(|e| e.prebuilt),
             memory,
             overhead_gb: crate::engines::of_card(card).map_or(crate::calc::BASE_OVERHEAD_GB, |e| e.overhead_gb),
             floor: card_floor(card),
@@ -293,7 +295,7 @@ fn plan_once(
         return Err(err);
     }
     let eligible: Vec<GpuPlacementInput> =
-        gpus.iter().filter(|g| gpu_arch::model_runs_on(&input.supported_sm, &g.cc)).cloned().collect();
+        gpus.iter().filter(|g| gpu_arch::model_runs_on(&input.supported_sm, &g.cc, input.prebuilt)).cloned().collect();
     if eligible.is_empty() && !gpus.is_empty() {
         return Err(PlanError { message: no_arch_message(input, gpus), gpus: Vec::new() });
     }
@@ -332,7 +334,7 @@ fn or_list(v: &[usize]) -> String {
 fn split_hint(input: &ChooserInput, gpus: &[GpuPlacementInput], hw: Option<&HardwareState>, tp: usize, learned: LearnedAt) -> Option<String> {
     // When the named GPUs are too few, the smallest larger split that fits, as a --gpu list to copy.
     let eligible: Vec<GpuPlacementInput> =
-        gpus.iter().filter(|g| gpu_arch::model_runs_on(&input.supported_sm, &g.cc)).cloned().collect();
+        gpus.iter().filter(|g| gpu_arch::model_runs_on(&input.supported_sm, &g.cc, input.prebuilt)).cloned().collect();
     valid_tp_values(input, MAX_TP).into_iter().filter(|t| *t > tp).find_map(|t| {
         let set = best_fit(input, &eligible, hw, t, learned)?;
         let names: Vec<String> = set.gpus.iter().map(|g| format!("gpu{g}")).collect();
@@ -437,7 +439,7 @@ fn fixed_plan(
     let mut picked = Vec::new();
     for g in pinned {
         match gpus.iter().find(|x| x.index == *g) {
-            Some(x) if !gpu_arch::model_runs_on(&input.supported_sm, &x.cc) => {
+            Some(x) if !gpu_arch::model_runs_on(&input.supported_sm, &x.cc, input.prebuilt) => {
                 let why = gpu_arch::unsupported_reason(&x.cc).unwrap_or_else(|| no_arch_message(input, gpus));
                 return fail(format!("GPU {g} ({}) cannot run this model; {why}", arch(&x.cc)));
             }
@@ -545,6 +547,7 @@ mod tests {
             max_conc: 4,
             marlin_extra_gb: 0.0,
             supported_sm: Vec::new(),
+            prebuilt: false,
             memory: None,
             overhead_gb: crate::calc::BASE_OVERHEAD_GB,
             floor: floor(&[]),

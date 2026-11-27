@@ -163,6 +163,7 @@ pub fn run_pick_gpus(args: PickArgs) -> Result<(), String> {
                 max_conc: 1,
                 marlin_extra_gb: 0.0,
                 supported_sm: Vec::new(),
+                prebuilt: false,
                 memory: None,
                 overhead_gb: crate::calc::BASE_OVERHEAD_GB,
                 floor: 1,
