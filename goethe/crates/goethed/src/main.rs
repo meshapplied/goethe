@@ -137,7 +137,7 @@ fn bind_socket(sock: &std::path::Path) -> TokioUnixListener {
         eprintln!("bind {}: {e}", sock.display());
         std::process::exit(1)
     };
-    let dir = goethe_core::paths::private_dir_in(parent, ".goethe-sock").unwrap_or_else(|e| die(e));
+    let dir = goethe_core::paths::private_dir_in(parent, ".sock").unwrap_or_else(|e| die(e));
     let tmp = dir.join("s");
     let bound = UnixListener::bind(&tmp).and_then(|l| {
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
@@ -285,8 +285,9 @@ mod tests {
     async fn the_socket_is_owner_only() {
         // A folder made by another thread while goethed binds keeps its owner bits: no process-wide umask.
         use std::os::unix::fs::PermissionsExt;
-        let home = goethe_core::paths::private_temp_dir("goethed-perm").unwrap();
-        let (path, probe) = (home.join("goethe.sock"), home.join("probe"));
+        let (tmp, pid) = (std::env::temp_dir(), std::process::id());
+        let (path, probe) = (tmp.join(format!("goethed-perm-{pid}.sock")), tmp.join(format!("goethed-umask-{pid}")));
+        let _ = std::fs::remove_dir(&probe);
         let racer = std::thread::spawn({
             let probe = probe.clone();
             move || (0..2000).all(|_| std::fs::create_dir(&probe).and_then(|()| std::fs::metadata(&probe)).is_ok_and(|m| m.permissions().mode() & 0o700 == 0o700) && std::fs::remove_dir(&probe).is_ok())
@@ -297,9 +298,9 @@ mod tests {
             assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         }
         assert!(racer.join().unwrap());
-        let left: Vec<_> = std::fs::read_dir(&home).unwrap().flatten().map(|e| e.file_name()).collect();
-        assert_eq!(left, ["goethe.sock"], "the bind folder is gone");
-        let _ = std::fs::remove_dir_all(&home);
+        let ours = format!(".sock-{pid}-");
+        assert!(std::fs::read_dir(&tmp).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(&ours)), "the bind folder is gone");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
