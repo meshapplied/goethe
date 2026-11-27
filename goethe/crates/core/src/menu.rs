@@ -822,22 +822,19 @@ impl Page for SchemaPage {
     }
 }
 
-const ASK: &str = "Ask";
-const EXPERIMENTAL: &str = "Experimental";
+const ASK: &str = "Ask (experimental)";
 
-fn main_menu(experimental: bool) -> Menu {
-    // The top menu; Ask is there only while experimental features are ticked.
-    let mut items = vec![
-        Choice { title: ASK, detail: "(experimental) describe what you want in plain English", side: None },
+fn main_menu() -> Menu {
+    // The top menu; Ask, experimental, comes last.
+    let items = vec![
         Choice { title: "Quick setup", detail: "install a model, serve it and open the API", side: None },
         Choice { title: "Load/Unload", detail: "load an installed model, unload loaded ones", side: Some(Side::Models) },
         Choice { title: "Install models", detail: "pick models that fit your GPUs", side: None },
         Choice { title: "API keys and gateway", detail: "keys, who can reach the API, a public address", side: None },
         Choice { title: "Status", detail: "Goethe, the API and the models it serves", side: None },
         Choice { title: "Metrics", detail: "requests, tokens and GPU use over time", side: None },
-        Choice { title: EXPERIMENTAL, detail: if experimental { "[x] experimental features (Ask)" } else { "[ ] experimental features (Ask)" }, side: None },
+        Choice { title: ASK, detail: "describe what you want in natural language", side: None },
     ];
-    items.retain(|c| experimental || c.title != ASK);
     Menu {
         heading: Vec::new(),
         gap_before: items.iter().position(|c| c.title == "Status"),
@@ -1519,25 +1516,13 @@ pub fn run(mut hooks: MenuHooks) -> Result<(), String> {
         return Err("goethe alone needs a terminal; goethe help lists the commands".to_string());
     }
     let mut tty = Tty::open()?;
-    let home = goethe_home();
-    let mut menu = main_menu(crate::db::experimental(&home));
+    let mut menu = main_menu();
     loop {
         menu.refresh_off();
         let picked = tty.run(&mut menu)?.map(|i| menu.items[i].title);
         match picked {
             None if menu.ask_run.is_some() => menu.note = Some("Ask is still running commands; open Ask to follow them, or press Ctrl-C there to stop them.".into()),
             None => return Ok(()),
-            Some(EXPERIMENTAL) => {
-                let on = !crate::db::experimental(&home);
-                if let Err(e) = crate::db::set_experimental(&home, on) {
-                    menu.note = Some(e);
-                    continue;
-                }
-                let (run, line) = (menu.ask_run.take(), menu.ask_line.take());
-                menu = main_menu(on);
-                (menu.ask_run, menu.ask_line) = (run, line);
-                menu.at = menu.items.iter().position(|c| c.title == EXPERIMENTAL).unwrap_or(0);
-            }
             Some(ASK) => {
                 menu.ask_run = None;
                 menu.ask_line = None;
@@ -1941,7 +1926,7 @@ impl Picker {
         let start = window(self.data.rows.len(), at, rows);
         for (i, r) in self.data.rows.iter().enumerate().skip(start).take(rows) {
             if i == 0 && featured > 0 {
-                out.push(format!("    {}", paint("Featured models", Color::Bold)));
+                out.push(format!("    {}", sgr(&mark(), "Featured models")));
             }
             if i == featured && featured > 0 && start < featured {
                 out.push(String::new());
@@ -2492,19 +2477,21 @@ mod tests {
 
     #[test]
     fn the_menu_lists_the_choices_together_with_the_keys_right_under_them() {
-        let t = text(main_menu(true).render(100, 40));
+        let t = text(main_menu().render(100, 40));
         assert_eq!(t[1].trim_end(), format!("  {}", LOGO[0]).trim_end());
         assert_eq!(t[5].trim(), format!("Website: {SITE}"));
-        let first = t.iter().position(|l| l.contains("Ask") && l.contains("plain English")).unwrap();
-        for (i, title) in ["Ask", "Quick setup", "Load/Unload", "Install models", "API keys and gateway"].iter().enumerate() {
+        let first = t.iter().position(|l| l.contains("Quick setup")).unwrap();
+        for (i, title) in ["Quick setup", "Load/Unload", "Install models", "API keys and gateway"].iter().enumerate() {
             assert!(t[first + i].contains(title), "no gap between choices: {t:?}");
         }
-        assert!(t[first + 5].is_empty() && t[first + 6].contains("Status") && t[first + 7].contains("Metrics") && t[first + 8].contains("Experimental"), "an empty line before Status: {t:?}");
+        assert!(t[first + 4].is_empty() && t[first + 5].contains("Status") && t[first + 6].contains("Metrics"), "an empty line before Status: {t:?}");
+        assert!(t[first + 7].contains("Ask (experimental)") && t[first + 7].contains("describe what you want in natural language"), "Ask comes last: {t:?}");
         assert!(t[first].starts_with('\u{27a4}'));
-        assert!(t[first + 9].is_empty() && t[first + 10].contains("Enter open"), "the keys line follows the menu: {t:?}");
-        assert!(t[first + 10].contains("theme  ") && t[first + 10].contains("2 sea") && t[first + 10].contains("3 earth"), "{}", t[first + 10]);
+        let keys = first + 9;
+        assert!(t[keys - 1].is_empty() && t[keys].contains("Enter open"), "the keys line follows the menu: {t:?}");
+        assert!(t[keys].contains("theme  ") && t[keys].contains("2 sea") && t[keys].contains("3 earth"), "{}", t[keys]);
         let active = crate::theme::current().name();
-        assert!(t[first + 10].contains(&format!("{active}|")), "a bar marks the active theme: {}", t[first + 10]);
+        assert!(t[keys].contains(&format!("{active}|")), "a bar marks the active theme: {}", t[keys]);
         assert!(!text(access_menu().render(100, 40)).iter().any(|l| l.contains("theme  ")), "themes only on the main menu");
         assert_eq!(t.len(), 40);
     }
@@ -2540,8 +2527,8 @@ mod tests {
     }
 
     fn models_menu() -> Menu {
-        let mut m = main_menu(true);
-        m.at = 2;
+        let mut m = main_menu();
+        m.at = 1;
         m.side = Some(SideState {
             kind: Side::Models,
             at: 0,
@@ -2560,7 +2547,7 @@ mod tests {
         let row = |t: &[String], id: &str| t.iter().find(|l| l.contains(id)).cloned().unwrap();
         assert!(row(&t, "org/a").ends_with("loaded") && !row(&t, "org/b").contains("loaded"), "{t:?}");
         assert!(!t.iter().any(|l| l.contains("Not loaded")), "no headings");
-        assert_eq!(t.iter().position(|l| l.contains("org/a")), t.iter().position(|l| l.split_whitespace().any(|w| w == "Ask")), "the list starts level with the first choice");
+        assert_eq!(t.iter().position(|l| l.contains("org/a")), t.iter().position(|l| l.contains("Quick setup")), "the list starts level with the first choice");
         m.key(Input::Down);
         m.key(Input::Down);
         assert!(matches!(m.key(Input::Enter), Flow::Stay), "loading keeps the menu on screen");
@@ -2632,15 +2619,15 @@ mod tests {
 
     #[test]
     fn load_unload_is_gray_and_skipped_until_a_model_is_installed() {
-        let mut m = main_menu(true);
-        m.at = 1;
-        m.off = vec![false, false, true, false, false, false, false, false];
+        let mut m = main_menu();
+        m.at = 0;
+        m.off = vec![false, true, false, false, false, false, false];
         let t = text(m.render(160, 40));
         assert!(t.iter().any(|l| l.contains("Load/Unload") && l.contains("(install a model first)")), "{t:?}");
         m.key(Input::Down);
-        assert_eq!(m.at, 3, "the arrow keys skip it");
+        assert_eq!(m.at, 2, "the arrow keys skip it");
         m.key(Input::Up);
-        assert_eq!(m.at, 1);
+        assert_eq!(m.at, 0);
     }
 
     #[test]
@@ -2701,20 +2688,17 @@ mod tests {
     }
 
     #[test]
-    fn ask_shows_only_while_experimental_features_are_ticked() {
-        let titles = |m: &Menu| m.items.iter().map(|c| c.title).collect::<Vec<_>>();
-        let (off, on) = (main_menu(false), main_menu(true));
-        assert!(!titles(&off).contains(&ASK) && titles(&on)[0] == ASK, "{:?}", titles(&off));
-        assert_eq!((off.items.last().unwrap().title, on.items.last().unwrap().title), (EXPERIMENTAL, EXPERIMENTAL));
-        assert!(off.items.last().unwrap().detail.starts_with("[ ]") && on.items.last().unwrap().detail.starts_with("[x]"));
-        assert_eq!((off.gap_before, on.gap_before), (Some(4), Some(5)), "the gap stays before Status");
+    fn ask_is_always_on_the_menu_last_and_marked_experimental() {
+        let m = main_menu();
+        assert_eq!(m.items.last().map(|c| c.title), Some("Ask (experimental)"));
+        assert_eq!(m.gap_before, Some(4), "the gap stays before Status");
     }
 
     #[test]
     fn digits_and_enter_pick_and_q_leaves() {
-        let mut m = main_menu(true);
+        let mut m = main_menu();
         m.key(Input::Up);
-        assert!(matches!(m.key(Input::Enter), Flow::Pick(7)), "up from the first wraps to the last");
+        assert!(matches!(m.key(Input::Enter), Flow::Pick(6)), "up from the first wraps to the last");
         assert!(matches!(m.key(Input::Right), Flow::Stay), "only Enter opens a choice without a submenu");
         assert!(matches!(m.key(Input::Left), Flow::Stay), "the left arrow on the top menu does not quit goethe");
         assert!(matches!(m.key(Input::Char('q')), Flow::Quit), "q quits goethe");
@@ -2916,7 +2900,7 @@ mod tests {
         p.data.rows.push(row("some-organisation/a-very-long-model-name-that-goes-on-and-on-NVFP4", false));
         p.chosen.push(false);
         for w in [60, 80, 100, 160] {
-            for l in p.render(w, 24).iter().chain(main_menu(true).render(w, 30).iter()) {
+            for l in p.render(w, 24).iter().chain(main_menu().render(w, 30).iter()) {
                 assert!(crate::term::visible_width(l) <= w, "{w}: {l}");
             }
         }

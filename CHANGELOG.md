@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- The menu's last entry is Ask (experimental), "describe what you want in natural language", always shown; the Experimental tick box is gone. `goethe help` lists `goethe ask`.
+- A GPU denied while a model runs on it keeps serving that model, also after goethed or the watchdog restarts it; new models, automatic or with `--gpu`, stay off it until `goethe gpu allow`.
+- `goethe models`: featured models (heading in the theme's secondary color), installed, then the rest of the catalog, without the VRAM tiers. The ON THIS CLUSTER column says what one copy takes per GPU and its context (`26 GB / GPU, ctx 131072`), or `-` when it does not fit. The Install models page's Featured heading uses the same color.
+- The two meshapplied Qwen3.8 entries left the catalog.
+- An install names the runtime it fetches: `Pulling goethe-kernels`, `Pulling sglang` or `Pulling llama.cpp`, or `kernels recognised` when SGLang or llama.cpp is already there.
+
 ## 0.3.7 (2026-11-27)
 
 - Inkling-2-Mini (`thinkingmachines/Inkling-2-Mini`) runs on its goethe-engine kernel pack, with speculative decoding on by default. Measured on an RTX 5090, one request, 192 to 200 tokens:

@@ -900,23 +900,24 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("goethe logout", "unlink it and remove its local credentials"),
         ("goethe remote allow change", "accept signed console commands of a kind (deny refuses them)"),
         ("goethe completion install", "tab completion for your shell"),
-        ("goethe ask REQUEST", "(experimental) turn a request in plain English into Goethe commands (also Ask on the main menu)"),
+        ("goethe ask REQUEST", "(experimental) turn a request in natural language into Goethe commands (also Ask on the main menu)"),
         ("goethe ?", "same as goethe ask"),
     ]),
 ];
 
+#[cfg(test)]
 fn is_ask(cmd: &str) -> bool {
     matches!(cmd.split_whitespace().nth(1), Some("ask" | "?"))
 }
 
-fn top_help(model: &str, experimental: bool) -> String {
-    // goethe help: one example line per command, grouped, with what it does; goethe help COMMAND has the details. Ask, experimental, only when ticked on the menu.
+fn top_help(model: &str) -> String {
+    // goethe help: one example line per command, grouped, with what it does; goethe help COMMAND has the details.
     use goethe_core::term::{paint, Color};
     let width = HELP_SECTIONS.iter().flat_map(|(_, rows)| rows.iter()).map(|(c, _)| c.chars().count()).max().unwrap_or(0) + 2;
     let mut out = String::from("Goethe: serve models through OpenAI and Anthropic compatible gateways\n");
     for (title, rows) in HELP_SECTIONS {
         out.push_str(&format!("\n{}\n", paint(title, Color::Bold)));
-        for (cmd, what) in rows.iter().filter(|(c, _)| experimental || !is_ask(c)) {
+        for (cmd, what) in rows.iter() {
             out.push_str(&format!("  {cmd:<width$}{}\n", paint(what, Color::Gray)));
         }
     }
@@ -966,7 +967,7 @@ fn main() {
         return;
     }
     if args.len() == 1 || (args.len() == 2 && matches!(args[1].as_str(), "-h" | "--help" | "help")) {
-        print!("{}", top_help(&goethe_core::onboard::suggested(true), goethe_core::db::experimental(&goethe_home())));
+        print!("{}", top_help(&goethe_core::onboard::suggested(true)));
         return;
     }
     if args.len() >= 2 && matches!(args[1].as_str(), "ask" | "?") {
@@ -2325,11 +2326,11 @@ mod tests {
     #[test]
     fn the_help_shows_every_command_with_an_example_that_parses() {
         use clap::CommandFactory;
-        let text = top_help("org/m", false);
+        let text = top_help("org/m");
         for c in Cli::command().get_subcommands().filter(|c| !c.is_hide_set()) {
             assert!(text.contains(&format!("goethe {}", c.get_name())), "{} is missing from goethe help", c.get_name());
         }
-        assert!(!text.contains("goethe ask") && top_help("org/m", true).contains("goethe ask REQUEST"), "Ask shows only with experimental features on");
+        assert!(text.contains("goethe ask REQUEST  ") && text.contains("(experimental)"), "Ask is listed, marked experimental");
         for (_, rows) in HELP_SECTIONS {
             for (cmd, _) in *rows {
                 if is_ask(cmd) {
