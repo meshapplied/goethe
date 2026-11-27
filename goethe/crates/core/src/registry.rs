@@ -350,9 +350,8 @@ fn validate_entry(m: &RegistryModel, errors: &mut Vec<String>) {
     if m.architecture != "dense" && m.architecture != "moe" {
         errors.push(format!("{}: architecture must be dense or moe", m.id));
     }
-    let rt = m.effective_runtime();
-    if rt != "sglang" && rt != "llama.cpp" {
-        errors.push(format!("{}: runtime must be sglang or llama.cpp", m.id));
+    if let Err(e) = crate::engines::by_id(m.effective_runtime()) {
+        errors.push(format!("{}: {e}", m.id));
     }
     if let Some(msg) = sglang_infer::reserved_flag_error(&m.extra_sglang_args) {
         errors.push(format!("{}: {msg}", m.id));
@@ -488,12 +487,12 @@ fn load_registry_source(source: &str) -> Result<String, String> {
 }
 
 pub fn build(src: &Value, infer: &dyn Fn(&str, &str) -> Result<RegistryModel, String>) -> Result<Registry, String> {
-    // registry.json from registry.src.json: each entry inferred from Hugging Face at its pinned revision with every field the source states laid over it; a gated or manual_download entry, and every GGUF entry, is its source entry as is. O(entries) infers.
+    // registry.json from registry.src.json: each entry inferred from Hugging Face at its pinned revision with every field the source states laid over it; a gated or manual_download entry, one that names an engine other than SGLang (inference reads an SGLang checkpoint), and every GGUF entry, is its source entry as is. O(entries) infers.
     let list = |k: &str| src[k].as_array().cloned().unwrap_or_default();
     let mut models = Vec::new();
     for s in list("models") {
         let id = s["id"].as_str().ok_or("registry.src.json: an entry has no id")?;
-        let full = if s["gated"] == true || s["manual_download"] == true {
+        let full = if s["gated"] == true || s["manual_download"] == true || s["runtime"].as_str().is_some_and(|r| r != "sglang") {
             s.clone()
         } else {
             let rev = s["revision"].as_str().filter(|r| r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit()));
@@ -644,6 +643,10 @@ mod validate_tests {
         assert_eq!((m.description.as_deref(), m.static_vram_gb), (Some("curated"), base.static_vram_gb));
         let hand = RegistryModel { id: "org/gated".into(), gated: Some(true), revision: None, ..base.clone() };
         assert_eq!(one(serde_json::to_value(&hand).unwrap()).unwrap().id, "org/gated", "a gated entry is kept as written, never inferred");
+        let own = RegistryModel { id: "org/own".into(), runtime: Some("ninfer".into()), revision: None, ..base.clone() };
+        assert_eq!(one(serde_json::to_value(&own).unwrap()).unwrap().id, "org/own", "an entry for an engine that reads no SGLang checkpoint is kept as written");
+        let unknown = RegistryModel { runtime: Some("nope".into()), ..own };
+        assert!(one(serde_json::to_value(&unknown).unwrap()).unwrap_err().contains("engine nope is not one goethe runs"));
         assert!(one(serde_json::json!({"id": "org/m", "revision": "main"})).unwrap_err().contains("40-hex"));
         assert!(one(serde_json::json!({"id": "org/gone", "revision": rev})).unwrap_err().contains("org/gone: 404"));
         let two = |a: Value, b: Value| build(&serde_json::json!({"models": [a, b]}), &infer).map(|_| ());

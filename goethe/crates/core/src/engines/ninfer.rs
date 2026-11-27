@@ -14,13 +14,10 @@ pub const ENGINE: super::Engine = super::Engine {
     command: ninfer_command,
 };
 
-pub const NINFER_ID: &str = "meshapplied/Qwen3.8-27B-NVFP4-NInfer";
 pub const NINFER_FILE: &str = "qwen3_8_27b_nvfp4.ninfer";
 pub const NINFER_BYTES: u64 = 23_719_715_844;
 const NINFER_SHA256: &str = "74d2c57145e6ff11d1d2faa79594477f9bc903a611af1fb20218189fbbb77d82";
 const NINFER_PATCHED_SHA256: &str = "afcaac9cd6b684e4a2f0316100b3a9e5f888e6b3d8b84b6f76ee4fed29ef34ed";
-pub const NINFER_CTX: u64 = 100_000;
-pub const NINFER_MAX_CONC: u64 = 4;
 const NINFER_URL: &str = concat!(
     "https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer/resolve/",
     "a107ba1b5b0609d9ca90d5ed61439f5f5cc7d64d/qwen3_8_27b_nvfp4.ninfer"
@@ -361,7 +358,7 @@ mod tests {
         std::fs::write(model.path().join(NINFER_FILE), b"x").unwrap();
         let card: toml::Value = toml::from_str("runtime = \"ninfer\"").unwrap();
         let home = tempfile::tempdir().unwrap();
-        let spec = EngineSpec { home: home.path(), served_name: NINFER_ID, ctx: 100_000, pool_tokens: 117_377, ..test_spec(model.path(), &card, &[0]) };
+        let spec = EngineSpec { home: home.path(), served_name: "org/n", ctx: 100_000, pool_tokens: 117_377, ..test_spec(model.path(), &card, &[0]) };
         let prev = std::env::var_os("NINFER_SERVE");
         std::env::set_var("NINFER_SERVE", &exe);
         let cmd = command(&spec).unwrap();

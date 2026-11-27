@@ -221,10 +221,6 @@ pub fn run(json_out: bool) -> Result<(), String> {
         return Ok(());
     }
     println!("{}\n", view.free_text());
-    if let Some(item) = out.recommended.iter().find(|m| m.model_id == crate::engines::ninfer::NINFER_ID) {
-        println!("{}  ctx {}  concurrency {}", item.model_id, item.ctx, item.max_conc);
-        println!();
-    }
     if out.recommended.is_empty() {
         print!("{}", crate::term::commands("No catalog model fits these GPUs. See why with:", &["goethe models"]));
         return Ok(());
@@ -275,7 +271,7 @@ pub fn preview(home: &Path, model: &RegistryModel) -> Result<Option<String>, Str
 
 pub fn cannot_run(home: &Path, model: &RegistryModel) -> Option<String> {
     // Why a model the GPUs could hold still cannot run on this machine: NInfer without a ninfer-serve build, or a pack-only model no kernel pack of which runs here (install's own checks).
-    if model.id == crate::engines::ninfer::NINFER_ID {
+    if model.effective_runtime() == crate::engines::ninfer::ENGINE.id {
         return crate::engines::ninfer::ninfer_bin().err().map(|_| "needs a ninfer-serve build (NINFER_SERVE, or ~/.cache/goethe/nvfp4/ninfer)".to_string());
     }
     if model.pack_only == Some(true) {
@@ -311,14 +307,6 @@ pub fn recommend(view: &View, reg: &Registry, cannot_run: &dyn Fn(&RegistryModel
             Err(why) => out.excluded.push(excluded(format!("does not fit the allowed GPUs: {why}"))),
         }
     }
-    if !out.recommended.iter().any(|m| m.model_id == crate::engines::ninfer::NINFER_ID) {
-        if let Some(row) = ninfer_row(view) {
-            match cannot_run(&ninfer_profile()) {
-                Some(reason) => out.excluded.push(ExcludedModel { model_id: row.model_id, reason }),
-                None => out.recommended.insert(0, row),
-            }
-        }
-    }
     out
 }
 
@@ -334,49 +322,6 @@ pub fn suggested_model(home: &Path, reg: &Registry) -> String {
         smallest.map(|m| m.id.clone())
     })
     .unwrap_or_else(|| "nvidia/Llama-3.1-8B-Instruct-NVFP4".to_string())
-}
-
-pub fn ninfer_profile() -> RegistryModel {
-    serde_json::from_value(serde_json::json!({
-        "id": crate::engines::ninfer::NINFER_ID,
-        "static_vram_gb": 23.566,
-        "kv_elems_per_token": 32768,
-        "supported_sm": ["12.0", "12.1"],
-        "default_ctx": crate::engines::ninfer::NINFER_CTX,
-        "max_ctx": crate::engines::ninfer::NINFER_CTX,
-        "default_max_conc": crate::engines::ninfer::NINFER_MAX_CONC,
-        "default_tp": 1,
-        "num_attention_heads": 24,
-        "num_kv_heads": 4,
-        "attention": "hybrid",
-        "kv_cache_dtype": "fp8_e4m3",
-        "runtime": "ninfer",
-        "manual_download": true,
-        "download_gb": 23.7
-    }))
-    .expect("ninfer profile")
-}
-
-pub fn ninfer_row(view: &View) -> Option<RecommendedModel> {
-    // Only sm 12.0 and 12.1. model_runs_on would also offer this row to data-center Blackwell.
-    let blackwell = view.hw.gpus.iter().any(|g| {
-        let cc = g.compute_capability.as_str();
-        cc == "12.0" || cc == "12.1"
-    });
-    if !blackwell {
-        return None;
-    }
-    let model = ninfer_profile();
-    let input = registry_input(&model);
-    let f = view.fit(&model.id, &input, Some(1)).ok()?;
-    Some(RecommendedModel {
-        model_id: model.id,
-        tp: f.tp as u64,
-        gpus: f.gpus,
-        ctx: f.ctx,
-        max_conc: f.max_conc,
-        vram_per_gpu_gb: f.need.total(),
-    })
 }
 
 fn exclusion_reason(model: &RegistryModel, sm_set: &[String], total_gb: f64) -> Option<String> {
@@ -519,7 +464,7 @@ mod tests {
         };
         let out = recommend(&v, &reg, &|_| None);
         let ids: Vec<&str> = out.recommended.iter().map(|r| r.model_id.as_str()).collect();
-        assert_eq!(ids, vec![crate::engines::ninfer::NINFER_ID, "meshapplied/open"]);
+        assert_eq!(ids, vec!["meshapplied/open"]);
         assert!(out.excluded.iter().all(|e| !e.model_id.ends_with("manual") && !e.model_id.ends_with("gated")));
         assert!(out.excluded.iter().any(|e| e.model_id == "meshapplied/huge" && e.reason.contains("missing")));
     }
@@ -591,25 +536,26 @@ mod tests {
     }
 
     #[test]
-    fn a_5090_lists_the_ninfer_profile_first_and_ampere_does_not() {
-        let reg = Registry { version: 1, models: vec![entry("org/llama", serde_json::json!({}))], gguf_models: Vec::new() };
-        let first = &recommend(&single_gpu("12.0"), &reg, &|_| None).recommended[0];
-        assert_eq!(first.model_id, crate::engines::ninfer::NINFER_ID);
-        assert_eq!((first.ctx, first.max_conc), (100_000, 4));
-        let out = recommend(&single_gpu("8.6"), &reg, &|_| None);
-        assert!(out.recommended.iter().all(|m| m.model_id != crate::engines::ninfer::NINFER_ID));
+    fn the_ninfer_catalog_row_is_recommended_on_a_5090_and_not_on_ampere() {
+        // NInfer is one catalog row like any other: its runtime and facts are data, its fit the one fit.
+        let src: serde_json::Value = serde_json::from_str(include_str!("../../../registry.src.json")).unwrap();
+        let models: Vec<RegistryModel> = serde_json::from_value(src["models"].clone()).unwrap();
+        let row = models.into_iter().find(|m| m.effective_runtime() == crate::engines::ninfer::ENGINE.id).expect("a ninfer row");
+        let reg = Registry { version: 1, models: vec![row.clone()], gguf_models: Vec::new() };
+        let out = recommend(&single_gpu("12.0"), &reg, &|_| None);
+        let first = &out.recommended[0];
+        assert_eq!((first.model_id.as_str(), first.ctx, first.max_conc), (row.id.as_str(), 100_000, 4));
+        assert!(recommend(&single_gpu("8.6"), &reg, &|_| None).recommended.is_empty());
     }
 
     #[test]
     fn only_what_this_machine_can_run_is_recommended() {
         // A model the GPUs could hold but this machine cannot run (no engine build, no kernel pack for this GPU) is listed as not for this machine, with why.
         let reg = Registry { version: 1, models: vec![entry("org/packed", serde_json::json!({"pack_only": true}))], gguf_models: Vec::new() };
-        let cannot = |m: &RegistryModel| (m.id == "org/packed" || m.id == crate::engines::ninfer::NINFER_ID).then(|| format!("{} cannot run here", m.id));
+        let cannot = |m: &RegistryModel| (m.id == "org/packed").then(|| format!("{} cannot run here", m.id));
         let out = recommend(&single_gpu("12.0"), &reg, &cannot);
         assert!(out.recommended.is_empty(), "{:?}", out.recommended.iter().map(|m| &m.model_id).collect::<Vec<_>>());
-        for id in ["org/packed", crate::engines::ninfer::NINFER_ID] {
-            assert!(out.excluded.iter().any(|e| e.model_id == id && e.reason == format!("{id} cannot run here")), "{id}: {:?}", out.excluded.iter().map(|e| (&e.model_id, &e.reason)).collect::<Vec<_>>());
-        }
+        assert!(out.excluded.iter().any(|e| e.model_id == "org/packed" && e.reason == "org/packed cannot run here"), "{:?}", out.excluded.iter().map(|e| (&e.model_id, &e.reason)).collect::<Vec<_>>());
         let runs = recommend(&single_gpu("12.0"), &reg, &|_| None);
         assert!(runs.recommended.iter().any(|m| m.model_id == "org/packed"));
     }
