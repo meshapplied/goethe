@@ -1,4 +1,4 @@
-// What a node reports on its goethe-server connection (hello, live instance load) and the remote block its console snapshot carries.
+// What a node reports on its platform connection (hello, live instance load) and the remote block its console snapshot carries.
 
 use crate::command::{Policy, TrustEntry};
 use serde::{Deserialize, Serialize};

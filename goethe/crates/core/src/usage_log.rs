@@ -217,7 +217,7 @@ fn hit(h: &mut Vec<i64>, ms: f64) {
 
 impl Requests {
     pub fn add(&mut self, s: &Sample) {
-        // One finished request; decode speed and generation time are the tokens and time after the first token (the gateway streams every generation request from the engine); the router hop counts only for requests goethe-server routed.
+        // One finished request; decode speed and generation time are the tokens and time after the first token (the gateway streams every generation request from the engine); the router hop counts only for requests the platform routed.
         let Sample { code, cancelled, duration_s, ttft_s, prompt, completion, reasoning, cached, router_ms } = *s;
         self.requests += 1;
         match code {

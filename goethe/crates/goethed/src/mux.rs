@@ -473,7 +473,7 @@ pub struct Routed {
 
 impl Routed {
     fn from_headers(h: &HeaderMap) -> Routed {
-        // The ids goethe-server puts on a forwarded request; read only on the node connection, never on a local listener.
+        // The ids the platform puts on a forwarded request; read only on the node connection, never on a local listener.
         let get = |name: &str| h.get(name).and_then(|v| v.to_str().ok()).map(str::trim).filter(|v| !v.is_empty() && v.len() <= 128).map(str::to_string);
         Routed {
             request_id: get(goethe_proto::REQUEST_ID_HEADER).unwrap_or_default(),
@@ -485,7 +485,7 @@ impl Routed {
     }
 
     fn router_ms(&self, now_ms: u64) -> Option<f64> {
-        // goethe-server's dispatch to our receipt, 0 to 10 minutes; a clock ahead of ours gives 0.
+        // The platform's dispatch to our receipt, 0 to 10 minutes; a clock ahead of ours gives 0.
         self.dispatch_ms.map(|d| now_ms.saturating_sub(d).min(ROUTER_MS_CAP) as f64)
     }
 }
@@ -520,7 +520,7 @@ pub fn gateway(m: MuxRef) -> goethe_core::client::Gateway {
 }
 
 async fn routed(m: MuxRef, req: Request<Incoming>, r: Routed) -> Response<MuxBody> {
-    // A request goethe-server forwarded: no node-local key, address or rate check (CONTRACTS 7.2), otherwise the local path; a proxied answer ends with the goethe-usage trailer.
+    // A request the platform forwarded: no node-local key, address or rate check, otherwise the local path; a proxied answer ends with the goethe-usage trailer.
     let path = req.uri().path().to_string();
     let rid = if r.request_id.is_empty() { request_id(&HeaderMap::new()) } else { r.request_id.clone() };
     let (tx, rx) = oneshot::channel();

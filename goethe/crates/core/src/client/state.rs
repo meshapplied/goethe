@@ -1,4 +1,4 @@
-// What the node reports on GET /state: hello, then the live load of its instances, which goethe-server routes on (CONTRACTS 4.3). Telemetry goes to the console on the heartbeat, not here.
+// What the node reports on GET /state: hello, then the live load of its instances, which the platform routes on. Telemetry goes to the console on the heartbeat, not here.
 
 use super::serve::line;
 use goethe_proto::{Instance, StateEvent, STATE_SCHEMA};

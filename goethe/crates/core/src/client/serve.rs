@@ -1,4 +1,4 @@
-// The node side of the reverse HTTP/2 connection (D9): goethe-server asks, the node answers live state, commands and routed requests.
+// The node side of the reverse HTTP/2 connection: the platform asks, the node answers live state, commands and routed requests.
 
 use super::state::{self, Node};
 use goethe_proto::SignedCommand;
@@ -46,7 +46,7 @@ where
 }
 
 async fn route(node: Arc<Node>, gateway: Gateway, req: Request<Incoming>) -> Response<Body> {
-    // The routes of CONTRACTS 4.2; every other path, the local admin routes included, is 404.
+    // The node routes; every other path, the local admin routes included, is 404.
     let path = req.uri().path().to_string();
     match (req.method().clone(), path.as_str()) {
         (Method::GET, "/state") => ndjson(state::open(node)),
@@ -73,7 +73,7 @@ async fn command(node: Arc<Node>, req: Request<Incoming>) -> Response<Body> {
 }
 
 async fn outcome(node: Arc<Node>, cmd_id: String) -> Response<Body> {
-    // The stored events of a command, for goethe-server after a reconnect.
+    // The stored events of a command, for the platform after a reconnect.
     match tokio::task::spawn_blocking(move || super::exec::outcome(&node.home, &cmd_id)).await {
         Ok(Some(events)) => {
             let body: Vec<u8> = events.iter().flat_map(|e| line(e).to_vec()).collect();
@@ -131,7 +131,7 @@ mod tests {
     type Client = SendRequest<Full<Bytes>>;
 
     async fn connect(home: &Path, gateway: Gateway) -> (Client, Arc<Node>) {
-        // goethe-server's side of the connection: an HTTP/2 client on the other end of an in-memory socket pair.
+        // The platform's side of the connection: an HTTP/2 client on the other end of an in-memory socket pair.
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let node = Arc::new(Node::new(home.to_path_buf(), "n1", "h1"));
         tokio::spawn(serve(ours, node.clone(), gateway));

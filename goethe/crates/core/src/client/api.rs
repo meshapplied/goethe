@@ -569,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn the_heartbeat_reply_may_name_the_goethe_server_to_dial() {
+    fn the_heartbeat_reply_may_name_the_platform_to_dial() {
         let r = |v: Value| parse_heartbeat(&v).unwrap().stream_url;
         assert_eq!(r(json!({"ok": true})), None, "no stream: the workspace is not on a paid plan, nothing dials");
         assert_eq!(r(json!({"ok": true, "stream": {"url": "https://server.goethe.sh"}})).as_deref(), Some("https://server.goethe.sh"));

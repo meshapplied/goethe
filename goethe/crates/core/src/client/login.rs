@@ -178,7 +178,7 @@ fn replace_old_link(home: &Path, old: Option<Credentials>, same_node: Option<&st
 }
 
 fn pin_root(home: &Path, root: &TrustRoot, device_code: &Secret, node: &InstallKey) -> Result<String, String> {
-    // The approver's passkey, pinned only when it signed this device code for this install key at the console's origin (CONTRACTS 11.3).
+    // The approver's passkey, pinned only when it signed this device code for this install key at the console's origin.
     let challenge = goethe_proto::link_challenge(&crate::security::token_hash(device_code.expose()), &node.hash());
     if root.assertion.key_id != root.key_id || !goethe_proto::verify_assertion(&root.assertion, &root.public_key, &challenge, goethe_proto::RP_ID, goethe_proto::CONSOLE_ORIGIN) {
         return Err("the console's approval signature does not verify, so no passkey was pinned".into());
