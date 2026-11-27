@@ -17,7 +17,7 @@ pub const PACK_FILE: &str = "pack.gcpack";
 pub const PACK_VERIFY: &str = "pack.verify.json";
 
 fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
-    // The pack and the weights its verification listed (in order), both next to the tokenizer in the model dir (one drafter file as itself, such as an MTP file beside the checkpoint, drafter shards as their folder); GOETHE_ENGINE_ALLOW_UNSIGNED (it disables signature checks) is never passed on.
+    // The pack and the weights its verification listed (in order), both next to the tokenizer in the model dir (one drafter file as itself, such as an MTP file beside the checkpoint, drafter shards as their folder); the engine key only in the environment (argv is world-readable); GOETHE_ENGINE_ALLOW_UNSIGNED (it disables signature checks) is never passed on.
     let dir = spec.model_path;
     let text = std::fs::read_to_string(dir.join(PACK_VERIFY)).map_err(|e| format!("{}: {e}; run goethe install again", dir.join(PACK_VERIFY).display()))?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{PACK_VERIFY}: {e}"))?;
@@ -43,8 +43,6 @@ fn goethe_engine_command(spec: &EngineSpec) -> Result<Command, String> {
         .arg(spec.max_conc.to_string())
         .arg("--served-model-name")
         .arg(spec.served_name)
-        .arg("--api-key")
-        .arg(spec.engine_key)
         .arg("--pack")
         .arg(dir.join(PACK_FILE))
         .arg("--weights")
@@ -132,6 +130,8 @@ mod tests {
         assert_eq!(a[at("--weights") + 1..at("--tokenizer")], [format!("{dir}/t.gguf"), format!("{dir}/d.gguf")]);
         assert_eq!(a[at("--tokenizer") + 1], dir);
         assert_eq!(a[at("--max-running-requests") + 1], "4");
+        assert!(!a.iter().any(|x| x == "--api-key" || x.contains("kkkk")), "the engine key never goes on argv: {a:?}");
+        assert!(c.get_envs().any(|(k, v)| k == "GOETHE_ENGINE_API_KEY" && v.is_some_and(|v| v.len() == 32)));
     }
 
     #[test]
