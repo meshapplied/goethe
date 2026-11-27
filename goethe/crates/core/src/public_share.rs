@@ -639,6 +639,7 @@ pub fn nginx_block(home: &Path, modern_http2: bool, max_body_mb: u64) -> String 
         .replace("{{BURST_PER_IP}}", &(2 * share_rate(home)).to_string())
         .replace("{{CONN_PER_IP}}", &share_conn(home).to_string())
         .replace("{{MAX_BODY_MB}}", &max_body_mb.to_string())
+        .replace("{{READ_TIMEOUT}}", &nginx::read_timeout_s().to_string())
         .replace("{{PUBLIC_MUX}}", &nginx::quote(Path::new(&format!("unix:{}", public_mux_socket(home).display()))))
 }
 

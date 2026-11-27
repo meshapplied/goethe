@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use std::{fs, io, thread};
 
 const DEFAULT_MAX_BODY_MB: u64 = 10;
+pub const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(3600);
 const RESPAWN_BACKOFF_MIN: Duration = Duration::from_secs(30);
 const RESPAWN_BACKOFF_MAX: Duration = Duration::from_secs(600);
 
@@ -459,7 +460,13 @@ fn render_gateway_on(home: &Path, bin: &Path, bind: IpAddr) -> Result<String, St
         .replace("{{BURST_PER_IP}}", &(2 * gateway_limit(home, "rate_per_ip", DEFAULT_RATE_PER_IP)).to_string())
         .replace("{{CONN_PER_IP}}", &gateway_limit(home, "conn_per_ip", DEFAULT_CONN_PER_IP).to_string())
         .replace("{{MUX_PORT}}", &mux_port.to_string())
+        .replace("{{READ_TIMEOUT}}", &read_timeout_s().to_string())
         + &public)
+}
+
+pub(crate) fn read_timeout_s() -> u64 {
+    // The mux waits UPSTREAM_TIMEOUT for an engine's first byte (a non-streamed 32768-token reply at 10 tokens/s fits); nginx a little longer, so the mux's own logged 504 answers.
+    UPSTREAM_TIMEOUT.as_secs() + 10
 }
 
 fn write_configs(home: &Path, bin: &Path) -> Result<(), String> {
@@ -1072,6 +1079,10 @@ mod tests {
         assert!(conf.contains("deny all;") && conf.contains("goethe api allow add <address>"), "a denied address is told how to allow it");
         assert!(!conf.contains("{{"), "unfilled placeholder");
         assert!(!conf.contains(":30000"));
+        let wait = |conf: &str| conf.split("proxy_read_timeout ").nth(1).and_then(|t| t.split('s').next()).and_then(|t| t.parse::<u64>().ok());
+        assert!(wait(&conf).is_some_and(|w| w > UPSTREAM_TIMEOUT.as_secs()), "nginx outwaits the mux, so the mux answers a silent engine");
+        let public = include_str!("../../../nginx/goethe_public.conf.tmpl").replace("{{READ_TIMEOUT}}", &read_timeout_s().to_string());
+        assert_eq!(wait(&public), wait(&conf), "the public gateway waits as long");
     }
 
     #[test]
