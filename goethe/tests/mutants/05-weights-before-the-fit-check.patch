@@ -1,12 +1,13 @@
 diff --git a/goethe/crates/core/src/install.rs b/goethe/crates/core/src/install.rs
+index 2c55d2d..0e5102b 100644
 --- a/goethe/crates/core/src/install.rs
 +++ b/goethe/crates/core/src/install.rs
-@@ -362,7 +362,9 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
+@@ -339,7 +339,9 @@ fn install_hub(home: &Path, opts: &InstallOpts) -> Result<Target, String> {
+                 (Ok(cfg), Ok(hw)) => {
                      let marlin = pack_marlin_gb(&cfg, &choice.offer.hf_repo, &rev, &files);
-                     let cap = plan.variants.iter().position(|v| *v == files).and_then(|i| plan.variant_ids.get(i)).and_then(|id| crate::packs::variant_max_ctx(&plan.prefix, id));
                      let view = if opts.load { crate::recommend::View::new(home, hw) } else { crate::recommend::View::capacity(home, hw) };
--                    crate::step::say(&pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: cap }, &card_dir)?);
-+                    if let Ok(line) = pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: cap }, &card_dir) {
+-                    crate::step::say(&pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: chosen.max_ctx, lanes: chosen.lanes }, &card_dir)?);
++                    if let Ok(line) = pack_fit(&view, &cfg, entry.as_ref(), opts, &choice.offer.arch, PackWeights { bytes: bytes(&files), marlin_gb: marlin, ctx_cap: chosen.max_ctx, lanes: chosen.lanes }, &card_dir) {
 +                        crate::step::say(&line);
 +                    }
                  }
