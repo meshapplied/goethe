@@ -42,6 +42,17 @@ pub fn next_ordinal(con: &Connection, model_id: &str, gpus: &[u32]) -> rusqlite:
     Ok((max_ord + 1) as u64)
 }
 
+pub fn drop_stale_slots(con: &Connection, model_id: &str) -> rusqlite::Result<()> {
+    // A load of a model with no live copy supersedes its desired slots no live instance holds and their tombstones (a restore that failed): it takes the slot again, ps drops the tombstone and a restart starts one copy, not two.
+    con.execute(
+        "DELETE FROM desired_loads WHERE model_id = ?1
+           AND slot_key NOT IN (SELECT slot_key FROM loaded_instances WHERE slot_key IS NOT NULL AND status NOT IN ('FAILED', 'CANCELLED'))",
+        [model_id],
+    )?;
+    con.execute("DELETE FROM loaded_instances WHERE model_id = ?1 AND status IN ('FAILED', 'CANCELLED')", [model_id])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +75,25 @@ mod tests {
         .unwrap();
         assert_eq!(next_ordinal(&con, "m", &[3, 2]).unwrap(), 2);
         assert_eq!(next_ordinal(&con, "m", &[3]).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_load_after_a_failed_restore_takes_its_slot_and_clears_the_tombstone() {
+        let con = Connection::open_in_memory().unwrap();
+        con.execute_batch(
+            "CREATE TABLE loaded_instances (model_id TEXT, slot_key TEXT, status TEXT);
+             CREATE TABLE desired_loads (model_id TEXT, slot_key TEXT);
+             INSERT INTO loaded_instances VALUES ('m', 'm|0|0', 'FAILED'), ('o', 'o|0|0', 'FAILED'), ('o', 'o|0|1', 'RUNNING');
+             INSERT INTO desired_loads VALUES ('m', 'm|0|0'), ('o', 'o|0|0'), ('o', 'o|0|1');",
+        )
+        .unwrap();
+        assert_eq!(next_ordinal(&con, "m", &[0]).unwrap(), 1, "the failed restore's desired slot holds ordinal 0");
+        drop_stale_slots(&con, "m").unwrap();
+        assert_eq!(next_ordinal(&con, "m", &[0]).unwrap(), 0);
+        let left = |sql: &str| con.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(left("SELECT COUNT(*) FROM loaded_instances WHERE model_id = 'm'"), 0, "the tombstone leaves ps");
+        assert_eq!(left("SELECT COUNT(*) FROM desired_loads WHERE model_id = 'm'"), 0, "no stale slot for a restart to start beside the new one");
+        assert_eq!(left("SELECT COUNT(*) FROM desired_loads WHERE model_id = 'o'"), 2, "another model is untouched");
     }
 
     #[test]
