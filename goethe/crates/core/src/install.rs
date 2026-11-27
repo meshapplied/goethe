@@ -788,10 +788,11 @@ pub struct VramEstimate {
 }
 
 pub(crate) fn ctx_limit(facts: &model_facts::ModelFacts, entry: Option<&RegistryModel>, pin: Option<u64>) -> Result<u64, String> {
-    // The context ceiling: config.json's, else the registry's, else a --ctx pin; refused under MODEL_FILES rather than a guessed default.
-    facts.max_ctx.or(entry.and_then(|e| e.effective_max_ctx())).or(pin).ok_or_else(|| {
+    // The context ceiling: config.json's, else the registry's, else a --ctx pin; refused under MODEL_FILES rather than a guessed default, and a pin above it under MODEL_FIT.
+    let max = facts.max_ctx.or(entry.and_then(|e| e.effective_max_ctx())).or(pin).ok_or_else(|| {
         crate::errcode::coded(crate::errcode::Code::ModelFiles, "config.json states no context length (max_position_embeddings); pass --ctx N to set one".into())
-    })
+    })?;
+    crate::config::ctx_above_max(pin, max).map_or(Ok(max), |why| Err(crate::errcode::coded(crate::errcode::Code::ModelFit, why)))
 }
 
 pub fn vram_estimate(dir: &Path, cfg: &Value, facts: &model_facts::ModelFacts, extra: &[String], kv_dtype: &str) -> VramEstimate {
@@ -1080,8 +1081,8 @@ fn pack_card(home: &Path, p: &mut Planned, arch: &str, variant: &str, (cli_ctx, 
         return Ok(Some(why));
     }
     let max = crate::packs::max_ctx(&p.dir, variant, &run)?;
-    if cli_ctx.is_some_and(|x| x > max) {
-        p.notes.push(format!("ctx {} is longer than the kernels support; using {max}", cli_ctx.unwrap_or(max)));
+    if let Some(why) = crate::config::ctx_above_max(cli_ctx, max) {
+        return Err(crate::errcode::coded(crate::errcode::Code::ModelFit, why));
     }
     p.ctx = p.ctx.min(max);
     p.extra.clear();
@@ -2257,6 +2258,7 @@ mod tests {
             assert_eq!(ctx_limit(&facts(config), registry, pin), want, "{config:?} {pin:?}");
         }
         assert!(ctx_limit(&facts(None), None, None).unwrap_err().contains("pass --ctx"), "never a guessed default");
+        assert!(ctx_limit(&facts(Some(131072)), None, Some(200_000)).unwrap_err().contains("pass --ctx 131072 or less"), "a pin above the ceiling is refused, never lowered");
     }
 
     #[test]
