@@ -45,7 +45,6 @@ pub type MuxRef = &'static Mux;
 
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_IDLE: Duration = Duration::from_secs(4);
-const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(600);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const READY_TTL: Duration = Duration::from_secs(1);
 const JSON_USAGE_CAP: usize = 8 << 20;
@@ -827,7 +826,7 @@ async fn proxy(
         if let Some(k) = &route.engine_key {
             builder = builder.header(AUTHORIZATION, format!("Bearer {k}"));
         }
-        builder.body(Full::new(payload)).map(|req| tokio::time::timeout(UPSTREAM_TIMEOUT, m.client.request(req)))
+        builder.body(Full::new(payload)).map(|req| tokio::time::timeout(goethe_core::nginx::UPSTREAM_TIMEOUT, m.client.request(req)))
     };
     let Ok(call) = send(body) else {
         return finish.now(error(StatusCode::BAD_GATEWAY, "invalid upstream request", "upstream_error", "bad_gateway"));

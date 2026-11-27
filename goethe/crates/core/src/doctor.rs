@@ -202,11 +202,6 @@ fn check_llama_cpp(home: &Path) -> Check {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn check_names() -> impl Iterator<Item = &'static str> {
-    CHECKS.iter().chain(MAC_CHECKS).map(|(n, _)| *n)
-}
-
 fn collect_checks(home: &Path) -> Vec<Check> {
     // Run every check in parallel; each result carries the check's fixed name even on timeout.
     let list = if cfg!(target_os = "macos") { MAC_CHECKS } else { CHECKS };
@@ -908,6 +903,13 @@ fn available_gb(path: &Path) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_doctor_row_has_a_code() {
+        for (name, _) in CHECKS.iter().chain(MAC_CHECKS) {
+            assert!(crate::errcode::Code::for_check(name).is_some(), "doctor row {name} has no code");
+        }
+    }
 
     #[test]
     fn a_mac_needs_apple_silicon_and_macos_14() {

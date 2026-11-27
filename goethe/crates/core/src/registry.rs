@@ -487,9 +487,10 @@ fn load_registry_source(source: &str) -> Result<String, String> {
 }
 
 pub fn build(src: &Value, infer: &dyn Fn(&str, &str) -> Result<RegistryModel, String>) -> Result<Registry, String> {
-    // registry.json from registry.src.json: each entry inferred from Hugging Face at its pinned revision with every field the source states laid over it; a gated or manual_download entry, one that names an engine other than SGLang (inference reads an SGLang checkpoint), and every GGUF entry, is its source entry as is. O(entries) infers.
+    // registry.json from registry.src.json: each entry inferred from Hugging Face at its pinned revision with every field the source states laid over it; a gated or manual_download entry, one that names an engine other than SGLang (inference reads an SGLang checkpoint), and every GGUF entry, is its source entry as is. Custom code runs only where the source says so. O(entries) infers.
     let list = |k: &str| src[k].as_array().cloned().unwrap_or_default();
     let mut models = Vec::new();
+    let mut errors = Vec::new();
     for s in list("models") {
         let id = s["id"].as_str().ok_or("registry.src.json: an entry has no id")?;
         let full = if s["gated"] == true || s["manual_download"] == true || s["runtime"].as_str().is_some_and(|r| r != "sglang") {
@@ -497,7 +498,12 @@ pub fn build(src: &Value, infer: &dyn Fn(&str, &str) -> Result<RegistryModel, St
         } else {
             let rev = s["revision"].as_str().filter(|r| r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit()));
             let rev = rev.ok_or_else(|| format!("{id}: revision must be the 40-hex commit the entry was checked at"))?;
-            let mut v = serde_json::to_value(infer(id, rev).map_err(|e| format!("{id}: {e}"))?).map_err(|e| e.to_string())?;
+            let inferred = infer(id, rev).map_err(|e| format!("{id}: {e}"))?;
+            let stated = s["extra_sglang_args"].as_array().is_some_and(|a| a.iter().any(|f| f == "--trust-remote-code"));
+            if sglang_infer::has_flag(&inferred.extra_sglang_args, "--trust-remote-code") && !stated {
+                errors.push(format!("{id}: config.json ships custom code (auto_map); review it, then add --trust-remote-code to its extra_sglang_args in registry.src.json"));
+            }
+            let mut v = serde_json::to_value(inferred).map_err(|e| e.to_string())?;
             for (k, x) in s.as_object().into_iter().flatten() {
                 v[k] = x.clone();
             }
@@ -507,7 +513,6 @@ pub fn build(src: &Value, infer: &dyn Fn(&str, &str) -> Result<RegistryModel, St
     }
     let gguf_models = list("gguf_models").into_iter().map(serde_json::from_value).collect::<Result<Vec<RegistryModel>, _>>().map_err(|e| format!("gguf_models: {e}"))?;
     let reg = Registry { version: 1, models, gguf_models };
-    let mut errors = Vec::new();
     let mut seen = std::collections::HashMap::new();
     for m in reg.models.iter().chain(&reg.gguf_models) {
         if seen.insert(m.id.clone(), ()).is_some() {
@@ -582,7 +587,6 @@ fn infer_one_entry(
     let mut extra = Vec::new();
     if sglang_infer::wants_remote_code(&cfg) {
         extra.push("--trust-remote-code".to_string());
-        warnings.push(format!("{repo_id}: config.json ships custom code (auto_map); added --trust-remote-code, review it"));
     }
     let entry = RegistryModel {
         id: repo_id.to_string(),
@@ -648,6 +652,10 @@ mod validate_tests {
         let unknown = RegistryModel { runtime: Some("nope".into()), ..own };
         assert!(one(serde_json::to_value(&unknown).unwrap()).unwrap_err().contains("engine nope is not one goethe runs"));
         assert!(one(serde_json::json!({"id": "org/m", "revision": "main"})).unwrap_err().contains("40-hex"));
+        let custom = |id: &str, r: &str| infer(id, r).map(|m| RegistryModel { extra_sglang_args: vec!["--trust-remote-code".into()], ..m });
+        let code = |e: Value| build(&serde_json::json!({"models": [e]}), &custom).map(|r| r.models[0].extra_sglang_args.clone());
+        assert!(code(serde_json::json!({"id": "org/code", "revision": rev})).unwrap_err().contains("org/code: config.json ships custom code"), "never trusted by itself");
+        assert_eq!(code(serde_json::json!({"id": "org/code", "revision": rev, "extra_sglang_args": ["--trust-remote-code"]})).unwrap(), ["--trust-remote-code"]);
         assert!(one(serde_json::json!({"id": "org/gone", "revision": rev})).unwrap_err().contains("org/gone: 404"));
         let two = |a: Value, b: Value| build(&serde_json::json!({"models": [a, b]}), &infer).map(|_| ());
         let e = |id: &str, fam: &str| serde_json::json!({"id": id, "revision": rev, "family": fam});
@@ -773,5 +781,18 @@ mod validate_tests {
                 assert!(ids.iter().any(|m| m == id), "{id} is not in registry.src.json");
             }
         }
+    }
+
+    #[test]
+    fn a_hand_written_entry_states_the_memory_load_computes_from_its_config() {
+        // A gated entry is never inferred, so its memory spec is written by hand: it must be what a load computes from config.json with the card's KV dtype and flags.
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qwen38-flash-next-nvfp4-latest");
+        let reg: Registry = serde_json::from_str(SRC).unwrap();
+        let e = reg.models.iter().find(|m| m.id == "meshapplied/Qwen3.8-Flash-Next-NVFP4-Latest").unwrap();
+        let mut card = toml::Table::new();
+        card.insert("kv_cache_dtype".into(), e.kv_cache_dtype.clone().unwrap().into());
+        card.insert("extra_sglang_args".into(), e.extra_sglang_args.iter().map(|a| toml::Value::from(a.as_str())).collect::<Vec<_>>().into());
+        let want = crate::memory_spec::installed_from_config(&model_facts::read_config(&dir).unwrap(), &toml::Value::Table(card), &[]);
+        assert_eq!(e.memory, want, "{}", serde_json::to_string(&want).unwrap());
     }
 }
