@@ -372,15 +372,27 @@ pub(crate) fn normalize_arch() -> String {
 const MAX_PKG_FILE: u64 = 32 << 30;
 const MAX_PKG_TEXT: u64 = 16 << 20;
 
-fn fetch_pkg_file(base: &str, rel: &str, dest: &Path) -> Result<(), String> {
+fn pkg_cap(rel: &str) -> u64 {
     // Package lists, versions and lock files are small text; only binaries, wheels and archives may be large.
     let text = matches!(rel, "SHA256SUMS" | "SHA256SUMS.sig" | "VERSION" | "BUILDINFO" | "wheels/LATEST") || rel.ends_with(".lock") || rel.ends_with(".sh");
-    fetch_pkg_file_max(base, rel, dest, if text { MAX_PKG_TEXT } else { MAX_PKG_FILE }, Duration::from_secs(60))
+    if text { MAX_PKG_TEXT } else { MAX_PKG_FILE }
 }
 
-fn fetch_pkg_file_max(base: &str, rel: &str, dest: &Path, max: u64, idle: Duration) -> Result<(), String> {
+fn fetch_pkg_file(base: &str, rel: &str, dest: &Path) -> Result<(), String> {
+    fetch_url(&format!("{base}/{rel}"), rel, dest, pkg_cap(rel), Duration::from_secs(60))
+}
+
+fn fetch_pkg_fresh(base: &str, rel: &str, dest: &Path) -> Result<(), String> {
+    // The same file past the package host's cache: a query it has never seen makes the cache ask the origin. A file:// package has no cache.
+    if base.starts_with("file://") {
+        return fetch_pkg_file(base, rel, dest);
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    fetch_url(&format!("{base}/{rel}?fresh={nanos}"), rel, dest, pkg_cap(rel), Duration::from_secs(60))
+}
+
+fn fetch_url(url: &str, rel: &str, dest: &Path, max: u64, idle: Duration) -> Result<(), String> {
     // GET one CDN file into dest, streamed (never held in memory) and refused past `max` bytes; it fails when the host goes quiet for `idle`, never for being slow. GOETHE_PKG_TOKEN goes as a bearer token when set; a file:// package is read from disk.
-    let url = format!("{base}/{rel}");
     if let Some(path) = url.strip_prefix("file://") {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -391,10 +403,10 @@ fn fetch_pkg_file_max(base: &str, rel: &str, dest: &Path, max: u64, idle: Durati
         }
         return fs::copy(path, dest).map(|_| ()).map_err(|e| format!("fetch {rel}: {path}: {e}"));
     }
-    if let Some(why) = plain_http_refusal(&url) {
+    if let Some(why) = plain_http_refusal(url) {
         return Err(format!("fetch {rel}: {why}"));
     }
-    let mut req = crate::net::agent_builder().timeout_read(idle).build().get(&url);
+    let mut req = crate::net::agent_builder().timeout_read(idle).build().get(url);
     if let Some(tok) = crate::paths::setting("GOETHE_PKG_TOKEN") {
         req = req.set("Authorization", &format!("Bearer {}", tok.trim()));
     }
@@ -414,11 +426,18 @@ fn fetch_pkg_file_max(base: &str, rel: &str, dest: &Path, max: u64, idle: Durati
 const PROPAGATING: &str = "a new release may still be propagating through the package host's cache (up to 10 minutes): run goethe update again in a few minutes, nothing was changed";
 
 pub(crate) fn fetch_signed_sums(pkg: &str, tmp: &Path) -> Result<PathBuf, String> {
-    // SHA256SUMS and its signature into tmp, checked against the release key compiled into this goethe.
-    fetch_pkg_file(pkg, "SHA256SUMS", &tmp.join("SHA256SUMS"))?;
-    fetch_pkg_file(pkg, "SHA256SUMS.sig", &tmp.join("SHA256SUMS.sig"))?;
-    let (sums, sig) = (fs::read(tmp.join("SHA256SUMS")).map_err(|e| e.to_string())?, fs::read(tmp.join("SHA256SUMS.sig")).map_err(|e| e.to_string())?);
-    crate::release_key::verify("the package list", &sums, &sig).map_err(|e| {
+    // SHA256SUMS and its signature into tmp, checked against the release key compiled into this goethe; a mismatch fetches both once more past the host's cache (the two may be cached from different releases) before it refuses.
+    let (list, sig) = (tmp.join("SHA256SUMS"), tmp.join("SHA256SUMS.sig"));
+    let get = |fetch: fn(&str, &str, &Path) -> Result<(), String>| -> Result<Result<(), String>, String> {
+        fetch(pkg, "SHA256SUMS", &list)?;
+        fetch(pkg, "SHA256SUMS.sig", &sig)?;
+        Ok(crate::release_key::verify("the package list", &fs::read(&list).map_err(|e| e.to_string())?, &fs::read(&sig).map_err(|e| e.to_string())?))
+    };
+    let verified = match get(fetch_pkg_file)? {
+        Err(e) if e.ends_with(crate::release_key::MISMATCH) => get(fetch_pkg_fresh)?,
+        other => other,
+    };
+    verified.map_err(|e| {
         let fresh = " If a release was published minutes ago, its files may still be reaching the package host's cache (up to 10 minutes): run the command again in a few minutes; nothing was changed.";
         if e.ends_with(crate::release_key::MISMATCH) { format!("{e}.{fresh}") } else { e }
     })?;
@@ -441,6 +460,9 @@ pub(crate) fn fetch_verified(base: &str, sums: &Path, rel: &str, tmp: &Path) -> 
     let expected = lookup_sum(sums, rel)?;
     let part = tmp.join(rel.replace('/', "__"));
     fetch_pkg_file(base, rel, &part)?;
+    if sha256_file(&part)? != expected {
+        fetch_pkg_fresh(base, rel, &part)?;
+    }
     if sha256_file(&part)? != expected {
         return Err(format!("checksum mismatch for {rel}; {PROPAGATING}"));
     }
@@ -613,10 +635,10 @@ mod tests {
         });
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("f");
-        let err = fetch_pkg_file_max(&url, "f", &dest, 1 << 20, Duration::from_secs(5)).unwrap_err();
+        let err = fetch_url(&format!("{url}/f"), "f", &dest, 1 << 20, Duration::from_secs(5)).unwrap_err();
         assert!(err.contains("longer than"), "{err}");
         assert!(!dest.exists());
-        fetch_pkg_file_max(&url, "f", &dest, 4 << 20, Duration::from_secs(5)).unwrap();
+        fetch_url(&format!("{url}/f"), "f", &dest, 4 << 20, Duration::from_secs(5)).unwrap();
         assert_eq!(fs::metadata(&dest).unwrap().len(), 3_000_000);
     }
 
@@ -639,9 +661,41 @@ mod tests {
         });
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("f");
-        fetch_pkg_file_max(&url, "f", &dest, 1 << 20, Duration::from_secs(1)).unwrap();
+        fetch_url(&format!("{url}/f"), "f", &dest, 1 << 20, Duration::from_secs(1)).unwrap();
         assert_eq!(fs::metadata(&dest).unwrap().len(), 40, "1.8 s in total with a 1 s idle limit");
-        assert!(fetch_pkg_file_max(&url, "f", &dest, 1 << 20, Duration::from_secs(1)).is_err(), "3 s of silence");
+        assert!(fetch_url(&format!("{url}/f"), "f", &dest, 1 << 20, Duration::from_secs(1)).is_err(), "3 s of silence");
+    }
+
+    #[test]
+    fn a_package_list_whose_cached_signature_is_stale_is_fetched_again_past_the_cache() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("k.pem");
+        let ssl = |args: &[&str]| std::process::Command::new("openssl").args(args).stderr(std::process::Stdio::null()).output().unwrap().stdout;
+        ssl(&["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key.to_str().unwrap()]);
+        let pem = String::from_utf8(ssl(&["ec", "-in", key.to_str().unwrap(), "-pubout"])).unwrap();
+        let sign = |body: &[u8]| {
+            let f = dir.path().join("body");
+            fs::write(&f, body).unwrap();
+            ssl(&["dgst", "-sha256", "-sign", key.to_str().unwrap(), f.to_str().unwrap()])
+        };
+        let (list, fresh, stale) = (b"new list\n".to_vec(), sign(b"new list\n"), sign(b"old list\n"));
+        let _held = crate::release_key::test_key::set(&pem);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let mut s = stream.unwrap();
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let line = String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or_default().to_string();
+                let body = if !line.contains(".sig") { &list } else if line.contains("?fresh=") { &fresh } else { &stale };
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes());
+                let _ = s.write_all(body);
+            }
+        });
+        let sums = fetch_signed_sums(&url, dir.path()).unwrap();
+        assert_eq!(fs::read(sums).unwrap(), b"new list\n", "the cached signature of the old list is replaced by the origin's");
     }
 
     fn opts(engine: bool, allow_downgrade: bool) -> UpdateOpts {
