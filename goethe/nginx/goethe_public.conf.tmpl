@@ -44,7 +44,7 @@ server {
     proxy_set_header X-Real-IP $remote_addr;
     proxy_buffering off;
     proxy_cache off;
-    proxy_read_timeout 600s;
+    proxy_read_timeout {{READ_TIMEOUT}}s;
     proxy_send_timeout 600s;
 
     location = /metrics {
