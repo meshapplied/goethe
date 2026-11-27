@@ -22,6 +22,7 @@
 - A chat reply's `content` is a string from every engine (llama.cpp sent `null` for a reply that only reasons).
 - A load after a failed restore takes the model's slot again and clears the old failure, so a restart starts one copy, not two.
 - `goethe update --check` names the nginx goethe actually runs, as `goethe doctor` does.
+- Right after a release, when the package host's cache still holds the previous release's signature, `goethe update`, engine installs and the installer fetch the package list again past the cache instead of refusing with a signature mismatch.
 - `goethe remove` of a model in a folder of your own names the kept folder; a malformed model id is a usage error.
 - Pins: SGLang upstream 4817721 (Inkling 2) with the Marlin patch ported; goethe-engine 0.3.11.
 
