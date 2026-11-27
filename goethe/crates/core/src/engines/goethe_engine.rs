@@ -11,6 +11,7 @@ pub const ENGINE: super::Engine = super::Engine {
     params: None,
     routes: &["/chat/completions", "/completions", "/embeddings", "/audio/transcriptions"],
     numerics: true,
+    prebuilt: true,
     command: goethe_engine_command,
 };
 

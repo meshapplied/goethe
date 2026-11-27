@@ -325,7 +325,7 @@ pub fn suggested_model(home: &Path, reg: &Registry) -> String {
 }
 
 fn exclusion_reason(model: &RegistryModel, sm_set: &[String], total_gb: f64) -> Option<String> {
-    if !sm_set.iter().any(|g| crate::gpu_arch::model_runs_on(&model.supported_sm, g)) {
+    if !sm_set.iter().any(|g| crate::gpu_arch::model_runs_on(&model.supported_sm, g, crate::engines::by_id(model.effective_runtime()).is_ok_and(|e| e.prebuilt))) {
         return Some(format!(
             "unsupported SM; model needs {:?}, GPUs have {:?}",
             model.supported_sm, sm_set
@@ -359,6 +359,7 @@ pub fn registry_input(m: &RegistryModel) -> ChooserInput {
         max_conc: m.default_max_conc.unwrap_or(chooser::DEFAULT_CONC),
         marlin_extra_gb: 0.0,
         supported_sm: m.supported_sm.clone(),
+        prebuilt: crate::engines::by_id(m.effective_runtime()).is_ok_and(|e| e.prebuilt),
         memory: m.memory.clone().map(|mut spec| {
             crate::memory_spec::apply_engine_args(&mut spec, None, &m.extra_sglang_args);
             spec

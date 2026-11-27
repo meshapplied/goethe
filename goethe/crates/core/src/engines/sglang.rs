@@ -14,6 +14,7 @@ pub const SGLANG: super::Engine = super::Engine {
     params: None,
     routes: super::TEXT_ROUTES,
     numerics: false,
+    prebuilt: false,
     command: |spec| Ok(sglang_command(spec)),
 };
 

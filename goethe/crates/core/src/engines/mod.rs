@@ -16,6 +16,7 @@ pub struct Engine {
     pub params: Option<&'static [&'static str]>,
     pub routes: &'static [&'static str],
     pub numerics: bool,
+    pub prebuilt: bool,
     pub command: fn(&EngineSpec) -> Result<Command, String>,
 }
 

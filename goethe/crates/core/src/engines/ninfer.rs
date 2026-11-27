@@ -11,6 +11,7 @@ pub const ENGINE: super::Engine = super::Engine {
     params: None,
     routes: super::TEXT_ROUTES,
     numerics: false,
+    prebuilt: true,
     command: ninfer_command,
 };
 

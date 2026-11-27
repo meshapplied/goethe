@@ -2196,6 +2196,7 @@ mod tests {
             max_conc: 8,
             marlin_extra_gb: 0.0,
             supported_sm: vec!["12.0".into()],
+            prebuilt: false,
             memory: None,
             overhead_gb: crate::calc::LIGHT_OVERHEAD_GB,
             floor: crate::chooser::floor(&[]),

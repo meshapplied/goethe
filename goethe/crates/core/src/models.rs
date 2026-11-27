@@ -232,7 +232,7 @@ fn verdict(view: Option<&View>, id: &str, input: &ChooserInput, pinned: Option<u
     let Some(view) = view else {
         return Verdict::Unknown;
     };
-    if !view.hw.gpus.iter().any(|g| crate::gpu_arch::model_runs_on(&input.supported_sm, &g.compute_capability)) {
+    if !view.hw.gpus.iter().any(|g| crate::gpu_arch::model_runs_on(&input.supported_sm, &g.compute_capability, input.prebuilt)) {
         return Verdict::Unsupported;
     }
     match view.fit(id, input, pinned) {
