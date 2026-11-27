@@ -49,6 +49,7 @@ On a terminal, plain `goethe` opens the menu on its own screen:
 | API keys and gateway | API keys (create, scope, new secret or delete), network exposure (local, VPN or private network, public) and the public address ([`goethe api share`](#goethe-api-share-duration)) |
 | Status | Whether Goethe runs, the environment, then live tables of the GPUs (VRAM, processes, allowed or denied, memory bandwidth), CPU and memory |
 | Metrics | From the [usage log](#usage-log), over the last hour, 24 hours, 7 days, this month (from the 1st), 30 or 90 days (↑ the next, longer range, ↓ back): per model the requests, errors (client and server errors, rate limits, cancelled), prompt and generated tokens, average time to first token, average decode speed and the 95th-percentile latency, with a total row; per GPU the average and peak utilisation, memory bandwidth, average VRAM, average power against its limit, peak temperature and any throttling, with the host's CPU, RAM and free disk; and per API key the requests and tokens, by whole days. Requests for a model Goethe does not serve and requests refused by a key's rate limit have their own rows |
+| Experimental | A tick box for experimental features. Ticked, Ask (describe what you want in plain English; also `goethe ask REQUEST`) shows at the top of the menu and in `goethe help`; it is off by default |
 
 ↑↓ move, Enter opens, ← goes back, `q` quits. On the main menu 1, 2 and 3 pick a color theme (default, sea, earth); the choice is remembered. Without a terminal, `goethe` prints the commands.
 
