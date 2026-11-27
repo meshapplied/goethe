@@ -6,8 +6,8 @@ use crate::run::{embed_line, Loaded, Target};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
-const OPEN: &str = "<think>";
-const CLOSE: &str = "</think>";
+pub(crate) const OPEN: &str = "<think>";
+pub(crate) const CLOSE: &str = "</think>";
 const TYPING: &str = "[Esc] commands  [Enter] send";
 const COMMANDS: &str = "[m] model  [q] quit  [i] type";
 const SURE: &str = "exit? Enter = exit, q = back";

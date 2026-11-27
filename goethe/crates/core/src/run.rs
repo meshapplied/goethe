@@ -352,7 +352,7 @@ impl Api {
         // Streams the reply piece by piece into the sink (which says false to stop); returns it whole with its completion tokens (the usage chunk, else the content chunks).
         let body = json!({"model": model, "messages": msgs, "stream": true, "stream_options": {"include_usage": true}}).to_string();
         let r = self.req("POST", "/chat/completions").set("Content-Type", "application/json").send_string(&body).map_err(fail)?;
-        let (mut out, mut chunks, mut usage) = (String::new(), 0, None);
+        let (mut out, mut chunks, mut usage, mut thinking) = (String::new(), 0, None, false);
         for line in BufReader::new(r.into_reader()).lines() {
             let line = line.map_err(|e| e.to_string())?;
             let Some(data) = line.strip_prefix("data:").map(str::trim).filter(|d| *d != "[DONE]") else { continue };
@@ -361,15 +361,24 @@ impl Api {
                 return Err(err["message"].as_str().map_or_else(|| err.to_string(), str::to_string));
             }
             usage = v["usage"]["completion_tokens"].as_u64().or(usage);
-            let piece = v["choices"][0]["delta"]["content"].as_str().unwrap_or_default();
+            let piece;
+            (piece, thinking) = reply_piece(&v["choices"][0]["delta"], thinking);
             chunks += u64::from(!piece.is_empty());
-            out.push_str(piece);
-            if !sink(piece) {
+            out.push_str(&piece);
+            if !sink(&piece) {
                 break;
             }
         }
         Ok((out, usage.unwrap_or(chunks)))
     }
+}
+
+fn reply_piece(delta: &Value, thinking: bool) -> (String, bool) {
+    // A streamed delta in the one reply shape chat reads, and whether reasoning is open after it: reasoning an engine sends apart (reasoning_content) goes in think tags, as models that inline it write it.
+    let (think, text) = (delta["reasoning_content"].as_str().unwrap_or_default(), delta["content"].as_str().unwrap_or_default());
+    let open = if think.is_empty() || thinking { "" } else { crate::chat::OPEN };
+    let close = if text.is_empty() || !(thinking || !think.is_empty()) { "" } else { crate::chat::CLOSE };
+    (format!("{open}{think}{close}{text}"), if text.is_empty() { thinking || !think.is_empty() } else { false })
 }
 
 fn form_filename(path: &std::path::Path) -> String {
@@ -409,6 +418,14 @@ fn fail(e: ureq::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_sent_apart_reads_like_inline_think_tags() {
+        let fold = |ds: &[Value]| ds.iter().fold((String::new(), false), |(s, t), d| { let (p, t) = reply_piece(d, t); (s + &p, t) }).0;
+        let (r, c) = (|s: &str| json!({"reasoning_content": s}), |s: &str| json!({"content": s}));
+        assert_eq!(fold(&[r("a"), r("b"), c("x"), json!({}), c("y")]), "<think>ab</think>xy");
+        assert_eq!(fold(&[c("<think>a</think>"), c("x")]), "<think>a</think>x", "inline reasoning passes unchanged");
+    }
 
     #[test]
     fn an_audio_file_name_cannot_break_the_form() {
