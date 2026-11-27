@@ -34,10 +34,12 @@ pub fn validate_limits(home: &Path, model_id: &str, ctx: Option<u64>, max_conc: 
         .optional()
         .map_err(|e| format!("state.db: {e}"))?
         .flatten();
-    match max.filter(|m| *m > 0) {
-        Some(m) if ctx > m as u64 => Err(format!("--ctx {ctx} is above the maximum context of {model_id} ({m} tokens)")),
-        _ => Ok(()),
-    }
+    max.filter(|m| *m > 0).and_then(|m| ctx_above_max(Some(ctx), m as u64)).map_or(Ok(()), Err)
+}
+
+pub fn ctx_above_max(pin: Option<u64>, max: u64) -> Option<String> {
+    // A --ctx pin longer than the model's maximum is refused, never lowered: goethe load and goethe install alike.
+    pin.filter(|p| *p > max).map(|p| format!("--ctx {p} is above this model's maximum context ({max} tokens); pass --ctx {max} or less"))
 }
 
 pub fn run(opts: ConfigOpts) -> Result<(), String> {
@@ -205,7 +207,7 @@ mod tests {
         .unwrap();
         assert!(validate_limits(home, "org/m", Some(1024), Some(4)).is_ok());
         let err = validate_limits(home, "org/m", Some(999_999_999), None).unwrap_err();
-        assert!(err.contains("above the maximum context of org/m (1024 tokens)"), "{err}");
+        assert_eq!(err, "--ctx 999999999 is above this model's maximum context (1024 tokens); pass --ctx 1024 or less");
         assert!(validate_limits(home, "org/other", Some(1 << 30), None).is_ok());
     }
 
