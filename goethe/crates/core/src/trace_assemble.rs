@@ -79,15 +79,17 @@ fn copy_head(out: &mut Map<String, Value>, e: &Value) {
 }
 
 fn merge_logprobs(choice: &mut Map<String, Value>, v: &Value) {
-    // Each stream event carries the log probabilities of its own tokens; the non-streaming shape has one list.
-    let Some(new) = v.get("content").and_then(Value::as_array) else {
+    // Each stream event carries the log probabilities of its own tokens; the non-streaming shape has one list per field (chat: content; completions: tokens, token_logprobs, top_logprobs, text_offset).
+    let (Some(all), Some(new)) = (choice.get_mut("logprobs").and_then(Value::as_object_mut), v.as_object()) else {
         choice.insert("logprobs".into(), v.clone());
         return;
     };
-    match choice.get_mut("logprobs").and_then(|l| l.get_mut("content")).and_then(Value::as_array_mut) {
-        Some(all) => all.extend(new.iter().cloned()),
-        None => {
-            choice.insert("logprobs".into(), v.clone());
+    for (k, x) in new.iter().filter(|(_, x)| !x.is_null()) {
+        match (all.get_mut(k).and_then(Value::as_array_mut), x.as_array()) {
+            (Some(a), Some(b)) => a.extend(b.iter().cloned()),
+            _ => {
+                all.insert(k.clone(), x.clone());
+            }
         }
     }
 }
@@ -211,6 +213,9 @@ fn completions(events: &[Value]) -> Value {
             }
             if let Some(v) = c.get("finish_reason").filter(|v| !v.is_null()) {
                 ch.insert("finish_reason".into(), v.clone());
+            }
+            if let Some(v) = c.get("logprobs").filter(|v| !v.is_null()) {
+                merge_logprobs(ch, v);
             }
         }
     }
@@ -512,6 +517,16 @@ mod tests {
         assert_eq!(c["message"]["content"], Value::Null);
         assert_eq!(c["logprobs"]["content"], json!([{"token": "x"}, {"token": "y"}]));
         assert_eq!(c["stop_reason"], 7);
+    }
+
+    #[test]
+    fn a_completions_stream_keeps_every_token_logprob() {
+        let raw = sse(&[
+            json!({"id": "t", "choices": [{"index": 0, "text": "a", "logprobs": {"tokens": ["a"], "token_logprobs": [-0.1]}}]}),
+            json!({"id": "t", "choices": [{"index": 0, "text": "b", "logprobs": {"tokens": ["b"], "token_logprobs": [-0.2]}, "finish_reason": "stop"}]}),
+        ]);
+        let c = &assemble(Api::Completions, true, &raw)["choices"][0];
+        assert_eq!((c["text"].clone(), c["logprobs"].clone()), (json!("ab"), json!({"tokens": ["a", "b"], "token_logprobs": [-0.1, -0.2]})));
     }
 
     #[test]

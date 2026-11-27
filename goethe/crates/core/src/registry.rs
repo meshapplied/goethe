@@ -226,25 +226,29 @@ fn fetch_http_uncached(home: &Path, url: &str) -> Result<Registry, String> {
         std::io::Read::read_to_end(&mut resp.into_reader(), &mut buf).ok()?;
         Some(buf)
     };
-    match req.call() {
-        Ok(resp) if resp.status() == 304 => finish_registry(&cached_body()?, sig_bytes(url).as_deref()),
-        Ok(resp) => {
-            let etag = resp.header("etag").map(String::from);
-            let body = resp.into_string().map_err(|e| format!("registry body: {e}"))?;
-            let sig = sig_bytes(url);
-            let reg = finish_registry(&body, sig.as_deref())?;
-            let cache = RegistryCache { etag, body };
-            let _ = std::fs::write(&cache_path, serde_json::to_string(&cache).unwrap_or_default());
-            Ok(reg)
-        }
-        Err(e) => match cached_in(home) {
-            Some(reg) => {
-                eprintln!("warning: registry fetch failed ({e}); using the last one fetched");
+    let fresh = || -> Result<Registry, (bool, String)> {
+        let checked = |body: &str| finish_registry(body, sig_bytes(url).as_deref()).map_err(|e| (false, e));
+        match req.call() {
+            Ok(resp) if resp.status() == 304 => checked(&cached_body().map_err(|e| (false, e))?),
+            Ok(resp) => {
+                let etag = resp.header("etag").map(String::from);
+                let body = resp.into_string().map_err(|e| (true, format!("registry body: {e}")))?;
+                let reg = checked(&body)?;
+                let cache = RegistryCache { etag, body };
+                let _ = std::fs::write(&cache_path, serde_json::to_string(&cache).unwrap_or_default());
                 Ok(reg)
             }
-            None => Err(format!("the model catalog at {url} is unreachable ({e}); connect to the internet once, goethe keeps a copy")),
-        },
-    }
+            Err(e) => Err((true, e.to_string())),
+        }
+    };
+    fresh().or_else(|(unreachable, why)| match cached_in(home) {
+        Some(reg) => {
+            eprintln!("warning: registry fetch failed ({why}); using the last one fetched");
+            Ok(reg)
+        }
+        None if unreachable => Err(format!("the model catalog at {url} is unreachable ({why}); connect to the internet once, goethe keeps a copy")),
+        None => Err(why),
+    })
 }
 
 pub fn known_ids() -> Vec<String> {
@@ -729,6 +733,25 @@ mod validate_tests {
         drop(held);
         let _held = crate::release_key::test_key::set(&std::fs::read_to_string(&pubk).unwrap());
         assert!(fetch(&url).is_ok(), "matching key");
+    }
+
+    #[test]
+    fn a_fresh_registry_that_does_not_verify_falls_back_to_the_last_verified_one() {
+        // A body and a signature out of step (a publish half way through a cache): the copy that verified before is used, with a warning.
+        let home = tempfile::tempdir().unwrap();
+        let srv = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/registry.json", srv.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for (mut s, body) in srv.incoming().flatten().zip([r#"{"version": 1, "models": []}"#, "not a signature"]) {
+                let mut buf = [0u8; 4096];
+                let _ = std::io::Read::read(&mut s, &mut buf);
+                let _ = std::io::Write::write_all(&mut s, format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+            }
+        });
+        let _held = crate::release_key::test_key::hold();
+        let cached = r#"{"version": 1, "models": [{"id": "org/m", "static_vram_gb": 1.0, "kv_elems_per_token": 2, "max_ctx": 8}]}"#;
+        std::fs::write(home.path().join("registry.cache.json"), serde_json::to_string(&RegistryCache { etag: None, body: cached.into() }).unwrap()).unwrap();
+        assert_eq!(fetch_http_uncached(home.path(), &url).unwrap().models[0].id, "org/m");
     }
 
     #[test]

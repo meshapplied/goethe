@@ -540,19 +540,31 @@ mod tests {
     }
 
     #[test]
-    fn cli_md_names_every_command() {
-        // docs/cli.md is written by hand around examples; every command of the CLI must at least appear in it.
-        fn paths(n: &Node, out: &mut Vec<String>) {
-            for c in &n.commands {
-                out.push(c.path.clone());
-                paths(c, out);
-            }
-        }
+    fn cli_md_names_every_command_and_each_its_flags() {
+        // docs/cli.md is written by hand around examples; every command appears in it, and each flag in its command's section (the closest `### goethe ...` heading; global flags anywhere). O(commands x sections).
         let md = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/cli.md")).expect("docs/cli.md");
+        let sections: Vec<(String, &str)> = md
+            .split("\n### `")
+            .skip(1)
+            .map(|s| (s.split('`').next().unwrap_or("").split_whitespace().take_while(|w| !w.starts_with(['[', '<'])).collect::<Vec<_>>().join(" "), s))
+            .collect();
+        let section = |path: &str| sections.iter().filter(|(h, _)| path == h || path.starts_with(&format!("{h} "))).max_by_key(|(h, _)| h.len()).map_or("", |(_, s)| *s);
+        fn walk<'a>(n: &'a Node, out: &mut Vec<&'a Node>) {
+            out.push(n);
+            n.commands.iter().for_each(|c| walk(c, out));
+        }
+        let root = reference().expect("every example parses");
         let mut all = Vec::new();
-        paths(&reference().expect("every example parses"), &mut all);
-        let missing: Vec<String> = all.into_iter().filter(|p| !md.contains(p.as_str())).collect();
-        assert!(missing.is_empty(), "docs/cli.md does not mention: {missing:?}");
+        walk(&root, &mut all);
+        let mut missing = Vec::new();
+        for n in all {
+            if !md.contains(n.path.as_str()) {
+                missing.push(n.path.clone());
+            }
+            let text = if n.path == root.path { md.as_str() } else { section(&n.path) };
+            missing.extend(n.args.iter().filter_map(|a| a.long.as_ref()).filter(|l| !text.contains(&format!("--{l}"))).map(|l| format!("{} --{l}", n.path)));
+        }
+        assert!(missing.is_empty(), "docs/cli.md does not document: {missing:?}");
     }
 
     #[test]
