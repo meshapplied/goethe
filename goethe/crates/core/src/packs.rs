@@ -245,6 +245,7 @@ pub struct Entry {
     pub drafter: Value,
     pub min_engine: (u64, u64, u64),
     pub overlays: Vec<Overlay>,
+    pub untested: bool,
 }
 
 fn platform_base(home: &Path) -> Result<String, String> {
@@ -444,6 +445,7 @@ pub fn entries(index: &[u8], archs: &[String], model: impl Fn(&str) -> bool) -> 
                 drafter: drafter_of(e),
                 min_engine,
                 overlays: overlays_of(e),
+                untested: e["tier"] == "untested",
             });
         }
     }
@@ -935,6 +937,15 @@ mod tests {
             "drafter": {"name": "DFlash2", "repo": "org/D", "revision": "r", "files": [{"name": "d.gguf", "bytes": 3, "sha256": sha(b"abc")}]}}]})
         .to_string()
         .into_bytes()
+    }
+
+    #[test]
+    fn an_entry_at_tier_untested_says_so_and_a_base_one_does_not() {
+        let p = container();
+        let base = index_of(&p, &"a".repeat(64));
+        let untested = String::from_utf8(base.clone()).unwrap().replace(r#""tier":"base""#, r#""tier":"untested""#).into_bytes();
+        let got = |ix: &[u8]| entries(ix, &["sm_120a".to_string()], |_| true).iter().map(|e| e.untested).collect::<Vec<_>>();
+        assert_eq!((got(&base), got(&untested)), (vec![false], vec![true]));
     }
 
     struct Fake {
