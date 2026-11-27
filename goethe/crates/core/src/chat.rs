@@ -510,9 +510,8 @@ impl State {
             self.ui.mode = Mode::Typing;
             return;
         }
-        let ctx = crate::run::run_ctx(&crate::paths::goethe_home(), &id);
         self.ui.loading = Some((id.clone(), 0));
-        self.job = Some(crate::menu::LoadJob::new(id, ctx));
+        self.job = Some(crate::menu::LoadJob::new(id));
     }
 
     fn load_step(&mut self, loaded: &mut Loaded) {
