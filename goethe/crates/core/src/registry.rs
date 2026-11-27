@@ -149,8 +149,9 @@ pub fn fetch(url: &str) -> Result<Registry, String> {
 }
 
 fn finish_registry(body: &str, sig: Option<&[u8]>) -> Result<Registry, String> {
+    // The package list's release-key check, then the parse: a bad signature never becomes engine flags.
     let sig = sig.ok_or("registry signature missing")?;
-    verify_registry(body.as_bytes(), sig)?;
+    crate::release_key::verify("the registry", body.as_bytes(), sig)?;
     parse_registry(body)
 }
 
@@ -162,11 +163,6 @@ pub fn cached() -> Option<Registry> {
 fn cached_in(home: &Path) -> Option<Registry> {
     let text = std::fs::read_to_string(home.join("registry.cache.json")).ok()?;
     parse_registry(&serde_json::from_str::<RegistryCache>(&text).ok()?.body).ok()
-}
-
-fn verify_registry(body: &[u8], sig: &[u8]) -> Result<(), String> {
-    // The same release-key check as the package list. A bad signature never becomes engine flags.
-    crate::release_key::verify("the registry", body, sig)
 }
 
 const MISS_TTL_SECS: u64 = 300;

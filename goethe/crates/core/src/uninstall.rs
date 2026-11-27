@@ -82,7 +82,7 @@ pub fn run(opts: UninstallOpts) -> Result<(), String> {
         Some(m) => {
             for p in &m.delete {
                 if fs::symlink_metadata(p).is_ok() {
-                    left.extend(crate::models::delete_owned(&home, p).err());
+                    left.extend(crate::models::remove_owned(&home, p).err());
                 }
             }
             for (p, _) in &m.keep {

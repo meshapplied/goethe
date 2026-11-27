@@ -464,29 +464,22 @@ fn installed_rows(home: &Path, con: &Connection) -> Result<Vec<Installed>, Strin
             let path = home.join(r.get::<_, String>(11)?);
             let card = card_value(&path);
             let elems = r.get::<_, Option<i64>>(10)?.unwrap_or(kv_bytes).max(0) as u64;
+            let facts = crate::chooser::CardFacts {
+                static_vram_gb: r.get(1)?,
+                kv_bytes_per_token: install::card_kv_bytes(&card, elems, kv_bytes.max(0) as u64).max(1),
+                num_attention_heads: r.get::<_, Option<i64>>(7)?.unwrap_or(1) as u64,
+                num_kv_heads: r.get::<_, Option<i64>>(8)?.unwrap_or(1) as u64,
+                attention: r.get::<_, Option<String>>(9)?.unwrap_or_else(|| "gqa".to_string()),
+                max_ctx,
+            };
+            let memory = crate::memory_spec::installed(&path, &card, &[]);
+            let input = ChooserInput::from_card(facts, &card, memory, (default_ctx.max(1) as u64).min(max_ctx), r.get::<_, i64>(4)?.max(1) as u64);
             Ok(Installed {
                 id: r.get(0)?,
                 present: path.exists(),
                 default_tp: r.get(5)?,
                 runtime: card.get("runtime").and_then(|v| v.as_str()).unwrap_or("sglang").to_string(),
-                input: crate::engines::llama_cpp::with_header_kv(ChooserInput {
-                    window_gb_per_request: 0.0,
-                    static_vram_gb: r.get(1)?,
-                    kv_bytes_per_token: card_kv_bytes(&card, elems, kv_bytes.max(0) as u64).max(1),
-                    num_attention_heads: r.get::<_, Option<i64>>(7)?.unwrap_or(1) as u64,
-                    num_kv_heads: r.get::<_, Option<i64>>(8)?.unwrap_or(1) as u64,
-                    attention: r.get::<_, Option<String>>(9)?.unwrap_or_else(|| "gqa".to_string()),
-                    max_ctx,
-                    ctx: (default_ctx.max(1) as u64).min(max_ctx),
-                    max_conc: r.get::<_, i64>(4)?.max(1) as u64,
-                    marlin_extra_gb: install::card_marlin_extra_gb(&card),
-                    supported_sm: install::card_supported_sm(&card),
-                    memory: crate::memory_spec::installed(&home.join(r.get::<_, String>(11)?), &card, &[]),
-                    overhead_gb: crate::engines::of_card(&card).map_or(crate::calc::BASE_OVERHEAD_GB, |e| e.overhead_gb),
-                    floor: crate::chooser::card_floor(&card),
-                    min_ctx: 0,
-                    min_conc: 0,
-                }, &home.join(r.get::<_, String>(11)?), &card),
+                input: crate::engines::llama_cpp::with_header_kv(input, &path, &card),
             })
         })
         .map_err(|e| e.to_string())?;
@@ -516,16 +509,6 @@ fn card_value(dir: &Path) -> toml::Value {
         .ok()
         .and_then(|t| toml::from_str(&t).ok())
         .unwrap_or_else(|| toml::Value::Table(Default::default()))
-}
-
-fn card_kv_bytes(card: &toml::Value, elems: u64, installed_bytes: u64) -> u64 {
-    // KV bytes per token for the card's kv_cache_dtype, as goethed computes them; auto keeps the installed figure.
-    match card.get("kv_cache_dtype").and_then(|v| v.as_str()).map(str::to_ascii_lowercase) {
-        Some(d) if d.contains("fp8") => elems,
-        Some(d) if d.contains("fp4") => elems.div_ceil(2),
-        Some(d) if d.contains("16") => elems * 2,
-        _ => installed_bytes,
-    }
 }
 
 fn loaded_instances(con: &Connection) -> HashMap<String, Vec<(String, String)>> {
@@ -750,10 +733,6 @@ pub fn uninstall_plan(home: &Path) -> Result<UninstallModels, String> {
     Ok(out)
 }
 
-pub fn delete_owned(home: &Path, p: &Path) -> Result<(), String> {
-    remove_owned(home, p)
-}
-
 fn source_of(dir: &Path) -> Option<String> {
     // Where an in-place install's files live: the card's source_dir, a legacy link, or a farm link.
     if let Ok(card) = install::read_card(dir) {
@@ -772,7 +751,7 @@ fn is_link_or_farm(dir: &Path) -> bool {
     fs::symlink_metadata(dir).map(|m| m.file_type().is_symlink()).unwrap_or(false) || install::is_farm(dir)
 }
 
-fn remove_owned(home: &Path, p: &Path) -> Result<(), String> {
+pub fn remove_owned(home: &Path, p: &Path) -> Result<(), String> {
     // Delete a path inside models/; a symlink is removed itself, never followed.
     let p = contained_in_models(home, p)?;
     let meta = fs::symlink_metadata(&p).map_err(|e| format!("{}: {e}", p.display()))?;

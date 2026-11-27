@@ -1549,11 +1549,11 @@ async fn health_admin(m: MuxRef, headers: &HeaderMap) -> Response<MuxBody> {
     // Admin keys only (anything else gets a plain 404); DB and NVML work runs on the blocking pool.
     let key = client_token(headers).and_then(|t| m.cache.resolve_token(t));
     if !key.is_some_and(|k| k.is_admin && !security::key_expired(&k.expires_at)) {
-        return admin_not_found();
+        return not_found();
     }
     match tokio::task::spawn_blocking(admin_report).await {
         Ok(Some(v)) => json_response(StatusCode::OK, v),
-        _ => admin_not_found(),
+        _ => not_found(),
     }
 }
 
@@ -1700,10 +1700,6 @@ fn wrong_task(task: Option<&str>, tail: &str, model: &str) -> Option<String> {
 
 fn model_not_found() -> Response<MuxBody> {
     error(StatusCode::NOT_FOUND, "Model Not Found", "invalid_request_error", "model_not_found")
-}
-
-fn admin_not_found() -> Response<MuxBody> {
-    not_found()
 }
 
 fn bad_request(message: &str) -> Response<MuxBody> {

@@ -596,14 +596,8 @@ fn default_ctx(row: &InstRow) -> u64 {
 }
 
 fn kv_bytes_per_token(row: &InstRow, card: &toml::Value) -> u64 {
-    // KV bytes per token for the card's kv_cache_dtype; auto keeps the installed figure (model dtype).
     let elems = row.kv_elems_per_token.unwrap_or(row.kv_bytes_per_token).max(0) as u64;
-    match card.get("kv_cache_dtype").and_then(|v| v.as_str()).map(str::to_ascii_lowercase) {
-        Some(d) if d.contains("fp8") => elems,
-        Some(d) if d.contains("fp4") => elems.div_ceil(2),
-        Some(d) if d.contains("16") => elems * 2,
-        _ => row.kv_bytes_per_token.max(0) as u64,
-    }
+    crate::install::card_kv_bytes(card, elems, row.kv_bytes_per_token.max(0) as u64)
 }
 
 fn chooser_input(req: &LoadReq, ctx: u64, max_conc: u64) -> ChooserInput {
